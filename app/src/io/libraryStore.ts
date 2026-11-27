@@ -47,6 +47,9 @@ export interface LibraryStore {
    * Open as Document flow's non-pristine-window case needs a real path to
    * hand `open_in_new_window` (see `App.tsx`'s `onOpenAsDocument`). */
   itemPath(fileName: string): Promise<string | null>
+  /** Desktop: the library-relative name of `path` when it is an item inside
+   * the Library folder, else null (the web store never has one). */
+  nameForPath(path: string): Promise<string | null>
   /** What the current backend can do, for UI gating. `canDownload` is the
    * web's escape hatch — items live in browser storage there, so the
    * detail pane offers a plain file download instead of Reveal. */
@@ -60,6 +63,27 @@ export interface LibraryStore {
   reconnect?(): Promise<boolean>
   /** Web-only: switch back from a bound folder to browser storage. */
   useBrowserStorage?(): Promise<void>
+  /** The sources file (design 6.5, 7.3): the raw `.sources.json` bytes, or
+   * null when absent. */
+  readSources(): Promise<Uint8Array | null>
+  /** Merge ONE source's entry into `.sources.json` (null removes it),
+   * re-reading the file first. Raises the sources notice, never the item
+   * notice. */
+  writeSources(source: string, entry: Record<string, unknown> | null): Promise<void>
+  /** `.sources/<key>` cache bytes (key charset: `valid_source_cache_key` in
+   * crates/library), or null when absent. Never raises a notice. */
+  readSourceCache(key: string): Promise<Uint8Array | null>
+  writeSourceCache(key: string, bytes: Uint8Array): Promise<void>
+  /** Delete one `.sources/<key>` cache entry (absent is fine). Never raises a
+   * notice. */
+  removeSourceCache(key: string): Promise<void>
+  /** Subscribe to sources-file changes (own notice). Returns an unsubscribe. */
+  subscribeSources(listener: () => void): () => void
+  /** Item names currently open for editing in any window/tab. */
+  editingNames(): Promise<string[]>
+  /** Desktop only: register / drop this window's open-for-editing item. */
+  registerEdit?(name: string): Promise<void>
+  unregisterEdit?(name: string): Promise<void>
   /** Subscribe to library-folder location changes (Settings, other
    * windows). Returns an unsubscribe. */
   subscribe(listener: () => void): () => void
@@ -82,7 +106,15 @@ export function unavailableLibraryStore(reason: string): LibraryStore {
     writeThumbnail: fail,
     reveal: fail,
     itemPath: () => Promise.resolve(null),
+    nameForPath: () => Promise.resolve(null),
     capabilities: () => ({ canReveal: false, canChooseFolder: false, canDownload: false }),
+    readSources: () => Promise.resolve(null),
+    writeSources: fail,
+    readSourceCache: () => Promise.resolve(null),
+    writeSourceCache: fail,
+    removeSourceCache: fail,
+    subscribeSources: () => () => {},
+    editingNames: () => Promise.resolve([]),
     subscribe: () => () => {},
   }
 }
@@ -110,7 +142,12 @@ function makeWebFacade(): LibraryStore {
   }
   const listeners = new Set<() => void>()
   const notify = (): void => listeners.forEach((l) => l())
-  void load().then((b) => b.subscribe(notify))
+  const sourceListeners = new Set<() => void>()
+  const notifySources = (): void => sourceListeners.forEach((l) => l())
+  void load().then((b) => {
+    b.subscribe(notify)
+    b.subscribeSources(notifySources)
+  })
   return {
     available: () => true,
     folderInfo: () => load().then((b) => b.folderInfo()),
@@ -123,11 +160,22 @@ function makeWebFacade(): LibraryStore {
     writeThumbnail: (k, png) => load().then((b) => b.writeThumbnail(k, png)),
     reveal: (f) => load().then((b) => b.reveal(f)),
     itemPath: (f) => load().then((b) => b.itemPath(f)),
+    nameForPath: (p) => load().then((b) => b.nameForPath(p)),
     capabilities: () => ({
       canReveal: false,
       canChooseFolder: typeof showDirectoryPicker === 'function',
       canDownload: true,
     }),
+    readSources: () => load().then((b) => b.readSources()),
+    writeSources: (s, e) => load().then((b) => b.writeSources(s, e)),
+    readSourceCache: (k) => load().then((b) => b.readSourceCache(k)),
+    writeSourceCache: (k, bytes) => load().then((b) => b.writeSourceCache(k, bytes)),
+    removeSourceCache: (k) => load().then((b) => b.removeSourceCache(k)),
+    subscribeSources: (l) => {
+      sourceListeners.add(l)
+      return () => sourceListeners.delete(l)
+    },
+    editingNames: () => load().then((b) => b.editingNames()),
     webStorage: () => load().then((b) => b.webStorage!()),
     reconnect: () => load().then((b) => b.reconnect!()),
     useBrowserStorage: () => load().then((b) => b.useBrowserStorage!()),
@@ -159,7 +207,12 @@ export function libraryStore(): LibraryStore {
   }
   const listeners = new Set<() => void>()
   const notify = (): void => listeners.forEach((l) => l())
-  void load().then((b) => b.subscribe(notify))
+  const sourceListeners = new Set<() => void>()
+  const notifySources = (): void => sourceListeners.forEach((l) => l())
+  void load().then((b) => {
+    b.subscribe(notify)
+    b.subscribeSources(notifySources)
+  })
   // Content-change notification rides the SHELL's app-wide
   // 'library-changed' event (emitted by library_write/library_delete and
   // consumed by the backend's subscribe), which reaches this window AND
@@ -177,6 +230,19 @@ export function libraryStore(): LibraryStore {
     writeThumbnail: (k, png) => load().then((b) => b.writeThumbnail(k, png)),
     reveal: (f) => load().then((b) => b.reveal(f)),
     itemPath: (f) => load().then((b) => b.itemPath(f)),
+    nameForPath: (p) => load().then((b) => b.nameForPath(p)),
+    readSources: () => load().then((b) => b.readSources()),
+    writeSources: (s, e) => load().then((b) => b.writeSources(s, e)),
+    readSourceCache: (k) => load().then((b) => b.readSourceCache(k)),
+    writeSourceCache: (k, bytes) => load().then((b) => b.writeSourceCache(k, bytes)),
+    removeSourceCache: (k) => load().then((b) => b.removeSourceCache(k)),
+    subscribeSources: (l) => {
+      sourceListeners.add(l)
+      return () => sourceListeners.delete(l)
+    },
+    editingNames: () => load().then((b) => b.editingNames()),
+    registerEdit: (n) => load().then((b) => b.registerEdit!(n)),
+    unregisterEdit: (n) => load().then((b) => b.unregisterEdit!(n)),
     capabilities: () => ({ canReveal: true, canChooseFolder: true, canDownload: false }),
     subscribe: (l) => {
       listeners.add(l)

@@ -15,11 +15,12 @@ pub enum Category {
     Component,
     Material,
     Model,
+    Profile,
 }
 
 impl Category {
     /// Parses the wire/JSON spelling (`"component"` | `"material"` |
-    /// `"model"`); `None` for anything else. Named `parse` rather than
+    /// `"model"` | `"profile"`); `None` for anything else. Named `parse` rather than
     /// `from_str` to avoid the inherent-method/`FromStr`-trait-method
     /// name clash clippy flags (`should_implement_trait`).
     pub fn parse(s: &str) -> Option<Category> {
@@ -27,6 +28,7 @@ impl Category {
             "component" => Category::Component,
             "material" => Category::Material,
             "model" => Category::Model,
+            "profile" => Category::Profile,
             _ => return None,
         })
     }
@@ -36,6 +38,7 @@ impl Category {
             Category::Component => "component",
             Category::Material => "material",
             Category::Model => "model",
+            Category::Profile => "profile",
         }
     }
 }
@@ -61,6 +64,18 @@ pub struct ItemMeta {
     pub saved_at: Option<String>,
     /// The document the item was saved out of (display only).
     pub source_doc: Option<String>,
+    /// The content print of each definition the item holds, by its stable
+    /// id in the item file (`prints`, written by every save since Library
+    /// updates, OW-2): what a model using the item compares its own
+    /// definitions against. `None` for an item saved before prints existed
+    /// (or a malformed map): its prints are computed from the file.
+    pub prints: Option<std::collections::BTreeMap<u64, String>>,
+    /// The remote note (`hew.library` / `remote`, shared-library-sources
+    /// design 6.5): the source an item was fetched from, carried whole as
+    /// the JSON object it was stored as. `None` for an item with no note,
+    /// or whose `remote` is not an object with string `source` and
+    /// `sha256` fields.
+    pub remote: Option<serde_json::Value>,
 }
 
 /// Parses a `hew.library` attribute-dictionary value (as JSON — e.g.
@@ -107,6 +122,24 @@ pub fn parse_item_meta(raw: &serde_json::Value) -> ItemMeta {
     if let Some(source_doc) = obj.get("sourceDoc").and_then(|v| v.as_str()) {
         meta.source_doc = Some(source_doc.to_string());
     }
+    // All-or-nothing, like keywords: one malformed entry and the item
+    // reads as having no prints (they are then computed from the file).
+    if let Some(prints) = obj.get("prints").and_then(|v| v.as_object()) {
+        meta.prints = prints
+            .iter()
+            .map(|(sid, p)| Some((sid.parse::<u64>().ok()?, p.as_str()?.to_string())))
+            .collect();
+    }
+    // The note is kept only when it is shaped like one (an object carrying
+    // string `source` and `sha256`); anything else reads as no note.
+    if let Some(remote) = obj.get("remote").filter(|v| {
+        v.as_object().is_some_and(|note| {
+            note.get("source").is_some_and(serde_json::Value::is_string)
+                && note.get("sha256").is_some_and(serde_json::Value::is_string)
+        })
+    }) {
+        meta.remote = Some(remote.clone());
+    }
     meta
 }
 
@@ -118,6 +151,14 @@ pub fn parse_item_meta(raw: &serde_json::Value) -> ItemMeta {
 /// file holding exactly one component definition and no top-level groups
 /// is a component; everything else is a model.
 pub fn derive_category(summary: &ItemSummary) -> Category {
+    // A profile file: one open drawn chain and nothing else.
+    if summary.objects == 0
+        && summary.components == 0
+        && summary.materials == 0
+        && summary.profile_chain_only
+    {
+        return Category::Profile;
+    }
     let material_only = summary.objects == 0 && summary.components == 0 && summary.materials > 0;
     if material_only {
         return Category::Material;
@@ -168,6 +209,26 @@ pub fn display_name(meta: &ItemMeta, summary: &ItemSummary, rel_path: &str) -> S
 mod tests {
     use super::*;
 
+    /// A profile item's bytes: one bundled shape as an open drawn chain.
+    fn profile_summary() -> ItemSummary {
+        let (_, _, make) = kernel::bundled_profiles()[0];
+        let doc = kernel::Document::profile_document_from_shape(&make(), 0.05).unwrap();
+        kernel::read_item_summary(&doc.save()).unwrap()
+    }
+
+    #[test]
+    fn profile_is_a_category_and_derives_from_one_open_chain() {
+        assert_eq!(Category::parse("profile"), Some(Category::Profile));
+        assert_eq!(Category::Profile.as_str(), "profile");
+        let mut summary = profile_summary();
+        assert!(summary.profile_chain_only);
+        assert_eq!(derive_category(&summary), Category::Profile);
+        // What an old reader computes: ignoring the new flag, a file with
+        // no objects, components or materials is a plain model.
+        summary.profile_chain_only = false;
+        assert_eq!(derive_category(&summary), Category::Model);
+    }
+
     #[test]
     fn parse_item_meta_reads_every_field_of_a_well_formed_dict() {
         let raw = serde_json::json!({
@@ -187,6 +248,45 @@ mod tests {
         assert_eq!(meta.collection.as_deref(), Some("Furniture/Seating"));
         assert_eq!(meta.saved_at.as_deref(), Some("2026-01-01T00:00:00.000Z"));
         assert_eq!(meta.source_doc.as_deref(), Some("house.hew"));
+        // Saved before Library updates: no prints.
+        assert_eq!(meta.prints, None);
+    }
+
+    /// 7.2 (B3): `remote` is surfaced on `ItemMeta` as the note object
+    /// (6.5), carried whole; a non-object `remote` reads as none, and an
+    /// item with no note has none (Option<serde_json::Value>).
+    #[test]
+    fn parse_item_meta_surfaces_the_remote_note() {
+        let note = serde_json::json!({
+            "source": "github:hew3d/example",
+            "name": "Example",
+            "path": "Components/chair.hew",
+            "sha256": "ab".repeat(32),
+            "commit": "c0ffee",
+            "license": "CC0-1.0",
+            "fetchedAt": "2026-11-01T00:00:00.000Z",
+            "edited": false,
+        });
+        let raw = serde_json::json!({ "id": "abc", "remote": note });
+        assert_eq!(parse_item_meta(&raw).remote, Some(note));
+        let none = serde_json::json!({ "id": "abc" });
+        assert_eq!(parse_item_meta(&none).remote, None);
+        let bad = serde_json::json!({ "id": "abc", "remote": "not an object" });
+        assert_eq!(parse_item_meta(&bad).remote, None);
+    }
+
+    #[test]
+    fn parse_item_meta_reads_the_prints_map_whole_or_not_at_all() {
+        let raw = serde_json::json!({ "prints": { "3": "p1:aa", "9": "p1:bb" } });
+        let prints = parse_item_meta(&raw).prints.expect("well formed");
+        assert_eq!(prints.get(&3).map(String::as_str), Some("p1:aa"));
+        assert_eq!(prints.get(&9).map(String::as_str), Some("p1:bb"));
+        let bad_key = serde_json::json!({ "prints": { "x": "p1:aa" } });
+        assert_eq!(parse_item_meta(&bad_key).prints, None);
+        let bad_value = serde_json::json!({ "prints": { "3": 5 } });
+        assert_eq!(parse_item_meta(&bad_value).prints, None);
+        let empty = serde_json::json!({ "prints": {} });
+        assert_eq!(parse_item_meta(&empty).prints, Some(Default::default()));
     }
 
     #[test]
@@ -235,6 +335,7 @@ mod tests {
             first_root_name: None,
             doc_attrs: serde_json::json!({}),
             material_entries: Vec::new(),
+            profile_chain_only: false,
         }
     }
 

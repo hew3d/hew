@@ -21,9 +21,12 @@ import {
   dropRidingDrafts,
   planSketchTransforms,
   buildNodePreview,
+  buildSelectionPreview,
 } from './transformSelection'
+import { isSessionGhost } from './transformPreview'
+import { setDraftSolidSelector, surfaceSketchTransformReports } from './draftCommit'
 import { affineToFloat64, applyAffineToPoint, rotateAboutPivotAxis, translationAffine } from './transformMath'
-import { ctxGround, ctxOfPlane, draftRef } from './planeUnits'
+import { ctxGround, ctxOfPlane, ctxOfSketchOnly, draftRef } from './planeUnits'
 import type { Scene as WasmScene } from '../wasm/loader'
 import type { NodeRef } from '../panels/treeModel'
 
@@ -49,7 +52,7 @@ const dc = (key: bigint, ctx: string = CTX): NodeRef => draftRef('draft-curve', 
 type FakeStore =
   | { kind: 'topology'; object: number }
   | { kind: 'owned'; object: number; sketch: number }
-  | { kind: 'free'; sketch: number }
+  | { kind: 'free'; sketch: number; detached?: true }
 interface FakeEdge {
   key: bigint
   a: V3
@@ -124,7 +127,19 @@ function chain(unit: bigint, edgeKeys: bigint[], at: V3 = [0, 0, 0], store: Fake
   }
 }
 
+interface FakeDimension {
+  id: bigint
+  a: V3
+  b: V3
+  offset: V3
+  /** annotation_anchor_node_kind answer; default -1 (free) */
+  aNode?: number
+  bNode?: number
+}
+
 interface FakeOpts {
+  /** linear dimensions in the document */
+  dimensions?: FakeDimension[]
   /** plane context -> its units. MUTABLE: tests re-assign entries (usually in
    *  `onDraftEnd` / `onTransformIslands`) to simulate what a commit lands. */
   listing?: Record<string, FakeUnit[]>
@@ -275,6 +290,27 @@ function makeScene(opts: FakeOpts = {}) {
     instance_pose: vi.fn(() => new Float64Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0])),
     // Selected groups expand to their leaves (empty here) when drawing is selected.
     group_members: vi.fn(() => []),
+    annotation_ids: vi.fn(() => (opts.dimensions ?? []).map((d) => d.id)),
+    annotation_kind: vi.fn(() => 'linear'),
+    annotation_anchor_node_kind: vi.fn((id: bigint, which: number) => {
+      const d = (opts.dimensions ?? []).find((x) => x.id === id)
+      return d === undefined ? undefined : (which === 0 ? d.aNode : d.bNode) ?? -1
+    }),
+    annotation_detached: vi.fn(() => false),
+    annotation_anchor_point: vi.fn((id: bigint, which: number) => {
+      const d = (opts.dimensions ?? []).find((x) => x.id === id)
+      return d === undefined ? undefined : new Float64Array(which === 0 ? d.a : d.b)
+    }),
+    annotation_offset: vi.fn((id: bigint) => {
+      const d = (opts.dimensions ?? []).find((x) => x.id === id)
+      return d === undefined ? undefined : new Float64Array(d.offset)
+    }),
+    annotation_plane: vi.fn(() => new Float64Array([0, 0, 0, 0, 0, 1])),
+    annotation_text_override: vi.fn(() => undefined),
+    update_linear_dimension: vi.fn((...args: unknown[]) => {
+      order.push('update_dimension')
+      calls.push({ name: 'update_linear_dimension', args })
+    }),
     sketch_island_ids: vi.fn((sketch: bigint) => opts.islands?.[String(sketch)] ?? []),
     // The island handle of the shape at these edge positions: the fake treats
     // a unit's key as its island handle.
@@ -290,9 +326,28 @@ function makeScene(opts: FakeOpts = {}) {
       }
       return undefined
     }),
+    // Every edge in the listing is one segment of the (single) free sketch;
+    // an island handle is its unit's key, an edge handle its edge key.
+    sketch_lines: vi.fn(() =>
+      Float32Array.from(
+        Object.values(listing).flatMap((us) => us.flatMap((u) => u.edges.flatMap((e) => [...e.a, ...e.b]))),
+      ),
+    ),
+    sketch_island_edges: vi.fn((_s: bigint, island: bigint) =>
+      Object.values(listing).flatMap((us) => us.filter((u) => u.key === island).flatMap((u) => u.edges.map((e) => e.key))),
+    ),
+    sketch_edge_endpoints: vi.fn((_s: bigint, edge: bigint) => {
+      for (const us of Object.values(listing)) {
+        for (const u of us) {
+          for (const e of u.edges) if (e.key === edge) return new Float64Array([...e.a, ...e.b])
+        }
+      }
+      return undefined
+    }),
     transform_sketch_islands: vi.fn((...args: unknown[]) => {
       calls.push({ name: 'transform_sketch_islands', args })
       opts.onTransformIslands?.()
+      return '{"objects":[],"sketches":[],"kept_as_sketch":[],"faces_closed":[],"cells":[]}'
     }),
     scene_undo: vi.fn(() => ({ free: () => undefined })),
     transform_selection: vi.fn((...args: unknown[]) => {
@@ -540,6 +595,33 @@ describe('commitSelectionTransform', () => {
     })
     const after = commitSelectionTransform(scene, [di(40n), di(50n, CTX_UP)], AFFINE)
     expect(after).toEqual([di(40n)])
+  })
+
+  it('surfaces a move that closed faces and formed a solid: one toast, the solid selected (R20)', () => {
+    const listing: Record<string, FakeUnit[]> = {
+      [CTX]: [chain(40n, [7n]), chain(41n, [8n], [0, 5, 0])],
+    }
+    const { scene, raw } = makeScene({
+      listing,
+      islands: { '3': [40n, 41n] },
+      onTransformIslands: () => {
+        listing[CTX] = [chain(41n, [8n], [0, 5, 0])]
+        listing[CTX_UP] = [chain(60n, [70n], [0, 0, 1])]
+      },
+    })
+    raw.transform_sketch_islands.mockImplementation(() => {
+      listing[CTX] = [chain(41n, [8n], [0, 5, 0])]
+      listing[CTX_UP] = [chain(60n, [70n], [0, 0, 1])]
+      return JSON.stringify({ objects: [], sketches: [3], kept_as_sketch: [], faces_closed: [3], cells: [{ grew: { from: 1, to: 9 } }] })
+    })
+    const selected: bigint[] = []
+    setDraftSolidSelector((o) => selected.push(o))
+    commitSelectionTransform(scene, [di(40n)], AFFINE_UP)
+    const toasts: string[] = []
+    surfaceSketchTransformReports((m) => toasts.push(m))
+    setDraftSolidSelector(null)
+    expect(toasts).toEqual(['The closed shape joined the solid it was drawn on.'])
+    expect(selected).toEqual([9n])
   })
 
   it('an out-of-plane move of a shape drawn entirely over the void DETACHES it and re-points at the moved unit', () => {
@@ -1045,6 +1127,7 @@ function makeReplayScene(opts: { failAfterAdds?: number; failDraftCopyAt?: numbe
         for (const [k, v] of draft.before) live.set(k, v)
       }
     }),
+    annotation_ids: vi.fn(() => []),
     sketch_island_ids: vi.fn((s: bigint) =>
       copyIslands.get(s) ?? (s === 3n ? [40n, 41n] : s === 4n ? [50n] : []),
     ),
@@ -1132,7 +1215,7 @@ function makeReplayScene(opts: { failAfterAdds?: number; failDraftCopyAt?: numbe
       copyIslands.set(copySketch, copyIslandIds)
       undoStack.push({ sketch: copySketch, before }) // hide-the-copy undo
       generation += 1n
-      return copySketch
+      return JSON.stringify({ objects: [], sketches: [Number(copySketch)], kept_as_sketch: [], faces_closed: [], cells: [] })
     }),
   }
   return {
@@ -1264,7 +1347,7 @@ describe('duplicateSketchSelection', () => {
       s: bigint,
       islands: BigUint64Array,
       affine: Float64Array,
-    ) => bigint
+    ) => string
     let calls = 0
     raw.copy_sketch_islands.mockImplementation((s: bigint, islands: BigUint64Array, a: Float64Array) => {
       calls += 1
@@ -1470,6 +1553,7 @@ describe('duplicateSketchSelectionByAffine — data-driven plane routing', () =>
           regions: [],
         }),
       ),
+      annotation_ids: vi.fn(() => []),
       sketch_island_ids: vi.fn((s: bigint) => (s === 1n ? [10n] : s === 900n ? [77n] : [])),
       sketch_edge_island: vi.fn((_s: bigint, e: bigint) => (e >= 200n ? 99n : e === 100n ? 10n : undefined)),
       sketch_plane: vi.fn((s: bigint) =>
@@ -1508,7 +1592,7 @@ describe('duplicateSketchSelectionByAffine — data-driven plane routing', () =>
         const b = applyAffineToPoint(affine, [1, 0, 0])
         copied.set(nextEdge++, [...a, ...b])
         gen += 1n
-        return 900n
+        return '{"objects":[],"sketches":[900],"kept_as_sketch":[],"faces_closed":[],"cells":[]}'
       }),
       draft_begin_ctx: vi.fn((_ctx: string, _label: string) => 1n),
       draft_copy_edges: vi.fn((_d: bigint, keys: BigUint64Array, affine: Float64Array) => {
@@ -1879,6 +1963,51 @@ describe('buildNodePreview — drawn-shape ghost', () => {
   })
 })
 
+describe('buildNodePreview / buildSelectionPreview — the ghost root the tool drives is marked as session geometry', () => {
+  function sceneWithListing(units: FakeUnit[]): WasmScene {
+    return { plane_units_json: () => listingJson(units) } as unknown as WasmScene
+  }
+  function objectsGroupWith(id: bigint): THREE.Group {
+    const objectsGroup = new THREE.Group()
+    const sub = new THREE.Group()
+    sub.name = `Object_${id}`
+    sub.add(new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), new THREE.MeshBasicMaterial()))
+    objectsGroup.add(sub)
+    return objectsGroup
+  }
+
+  it('a single drawn shape: the LineSegments ghost itself', () => {
+    const preview = buildNodePreview(sceneWithListing([chain(40n, [7n, 8n])]), null, null, di(40n))
+    expect(preview).not.toBeNull()
+    expect(isSessionGhost(preview!)).toBe(true)
+  })
+
+  it('a single world object: the faded clone', () => {
+    const preview = buildNodePreview({} as WasmScene, objectsGroupWith(5n), null, { kind: 'object', id: 5n })
+    expect(preview).not.toBeNull()
+    expect(isSessionGhost(preview!)).toBe(true)
+  })
+
+  it('a multi-node selection: the shared container the tool drives, not just its children', () => {
+    const scene = sceneWithListing([chain(40n, [7n, 8n])])
+    const preview = buildSelectionPreview(scene, objectsGroupWith(5n), null, [{ kind: 'object', id: 5n }, di(40n)])
+    expect(preview).not.toBeNull()
+    expect(preview!.children).toHaveLength(2)
+    expect(isSessionGhost(preview!)).toBe(true)
+  })
+
+  it('a definition sketch through an active instance: the posed wrapper the tool drives', () => {
+    const scene = {
+      sketch_lines: () => new Float32Array([0, 0, 0, 1, 0, 0]),
+      instance_pose: () => new Float64Array([1, 0, 0, 2, 0, 1, 0, 0, 0, 0, 1, 0]),
+    } as unknown as WasmScene
+    const preview = buildNodePreview(scene, null, null, { kind: 'sketch', id: 3n }, 77n)
+    expect(preview).not.toBeNull()
+    expect(preview).toBeInstanceOf(THREE.Group)
+    expect(isSessionGhost(preview!)).toBe(true)
+  })
+})
+
 describe('drawn shapes ride with their own selected object', () => {
   const TOPO_UNIT = (): FakeUnit => chain(60n, [30n, 31n], [0, 0, 1], TOPO1)
   const listing = () => ({ [CTX_UP]: [TOPO_UNIT()], [CTX]: [chain(40n, [7n])] })
@@ -2211,5 +2340,201 @@ describe('draftEdgesToErase (Delete)', () => {
     expect([...withBox.huskCandidates]).toEqual([3n])
     const withSketch = draftEdgesToErase(scene, [{ kind: 'sketch', id: 3n }, di(60n, CTX_UP)], new Set([3n]))
     expect([...withSketch.draftEdgeKeys.get(CTX_UP)!]).toEqual([hex(30n)])
+  })
+})
+
+// Detached shapes (docs/design/separate-shapes.md §6.6, D5, D7): a detached
+// unit's refs carry its own sketch context; moves run in that scope, a move
+// out of the sketch's plane is seen as one, and copies are NEW sketches.
+describe('detached shapes', () => {
+  const SEP: FakeStore = { kind: 'free', sketch: 5, detached: true }
+  const SCTX = ctxOfSketchOnly(5)
+  const disk = (unit: bigint, keys: bigint[]): FakeUnit => chain(unit, keys, [0, 0, 0], SEP)
+
+  function sepScene(opts: FakeOpts = {}) {
+    const m = makeScene({ listing: { [SCTX]: [disk(40n, [7n, 8n])] }, islands: { '5': [40n] }, ...opts })
+    const extra = {
+      sketch_plane: vi.fn(() => new Float64Array([0, 0, 0, 0, 0, 1])),
+      sketch_unit_keys: vi.fn(() => JSON.stringify({ edges: [], islands: [[40, hex(40n)], [41, hex(41n)]], curves: [], regions: [] })),
+      copy_sketch_islands: vi.fn(() => '{"objects":[],"sketches":[6],"kept_as_sketch":[],"faces_closed":[],"cells":[]}'),
+    }
+    Object.assign(m.raw, extra)
+    return { ...m, extra }
+  }
+
+  it('groups a detached unit by its own sketch context and knows its plane', () => {
+    const { scene } = sepScene()
+    const [g] = planDraftTransforms(scene, [di(40n, SCTX)])
+    expect(g.ctx).toBe(SCTX)
+    expect(g.sketchPlane).toEqual({ point: [0, 0, 0], normal: [0, 0, 1] })
+  })
+
+  it('an in-plane move drafts inside the sketch-only context', () => {
+    const { scene, raw } = sepScene()
+    commitSelectionTransform(scene, [di(40n, SCTX)], AFFINE)
+    expect(raw.draft_begin_ctx).toHaveBeenCalledWith(SCTX, expect.any(String))
+    expect(raw.draft_transform_edges).toHaveBeenCalledTimes(1)
+    expect(raw.transform_selection).not.toHaveBeenCalled()
+  })
+
+  it('a move OFF the sketch plane is out-of-plane (detaches through the sketch machinery), never a draft', () => {
+    const { scene, raw, calls } = sepScene()
+    commitSelectionTransform(scene, [di(40n, SCTX)], AFFINE_UP)
+    expect(raw.draft_transform_edges).not.toHaveBeenCalled()
+    // The whole sketch (its one island) moves as a handle-stable bake.
+    expect(calls.map((c) => c.name)).toEqual(['transform_selection'])
+  })
+
+  it('copy: a detached unit becomes a NEW sketch through copy_sketch_islands, in plane or not', () => {
+    for (const affine of [AFFINE, AFFINE_UP]) {
+      const { scene, raw, extra } = sepScene()
+      raw.plane_units_json.mockImplementation(() => listingJson([disk(40n, [7n, 8n])]))
+      const out = duplicateSketchSelectionByAffineArray(scene, [di(40n, SCTX)], [affine])
+      expect(raw.draft_copy_edges).not.toHaveBeenCalled()
+      expect(extra.copy_sketch_islands).toHaveBeenCalledTimes(1)
+      const [sketch, islands, a] = extra.copy_sketch_islands.mock.calls[0] as unknown as [bigint, BigUint64Array, Float64Array]
+      expect(sketch).toBe(5n)
+      expect([...islands]).toEqual([40n]) // unit key -> island handle through sketch_unit_keys
+      expect(a).toBe(affine)
+      expect(out.map((r) => r.ctx)).toEqual([ctxOfSketchOnly(6n)])
+    }
+  })
+
+  it('an array of N copies is N new sketches', () => {
+    const { scene, raw, extra } = sepScene()
+    raw.plane_units_json.mockImplementation(() => listingJson([disk(40n, [7n, 8n])]))
+    duplicateSketchSelectionByAffineArray(scene, [di(40n, SCTX)], [AFFINE, AFFINE_UP, AFFINE])
+    expect(extra.copy_sketch_islands).toHaveBeenCalledTimes(3)
+  })
+
+  // Wireframe faces R20: a copy that closes a solid reports like a draw.
+  it('surfaces a copy that formed a solid: one toast, the solid selected', () => {
+    const { scene, extra } = sepScene()
+    ;(scene as unknown as { plane_units_json: unknown }).plane_units_json = vi.fn(() => listingJson([disk(40n, [7n, 8n])]))
+    extra.copy_sketch_islands.mockImplementation(() =>
+      JSON.stringify({ objects: [], sketches: [6], kept_as_sketch: [], faces_closed: [6], cells: [{ created: 77 }] }),
+    )
+    const selected: bigint[] = []
+    setDraftSolidSelector((o) => selected.push(o))
+    duplicateSketchSelectionByAffineArray(scene, [di(40n, SCTX)], [AFFINE_UP])
+    const toasts: string[] = []
+    surfaceSketchTransformReports((m) => toasts.push(m))
+    setDraftSolidSelector(null)
+    expect(toasts).toEqual(['The closed shape is now a solid.'])
+    expect(selected).toEqual([77n])
+  })
+
+  it('a copy that fails after a solid formed leaves no held report behind', () => {
+    const { scene, extra } = sepScene()
+    ;(scene as unknown as { plane_units_json: unknown }).plane_units_json = vi.fn(() => listingJson([disk(40n, [7n, 8n])]))
+    extra.copy_sketch_islands
+      .mockImplementationOnce(() =>
+        JSON.stringify({ objects: [], sketches: [6], kept_as_sketch: [], faces_closed: [6], cells: [{ created: 77 }] }),
+      )
+      .mockImplementationOnce(() => {
+        throw new Error('StaleReference: the second copy failed')
+      })
+    const selected: bigint[] = []
+    setDraftSolidSelector((o) => selected.push(o))
+    expect(() => duplicateSketchSelectionByAffineArray(scene, [di(40n, SCTX)], [AFFINE_UP, AFFINE_UP])).toThrow()
+    const toasts: string[] = []
+    surfaceSketchTransformReports((m) => toasts.push(m))
+    setDraftSolidSelector(null)
+    expect(toasts).toEqual([])
+    expect(selected).toEqual([])
+  })
+
+  it('a move that fails after a solid formed leaves no held report behind', () => {
+    const listing: Record<string, FakeUnit[]> = {
+      [CTX]: [chain(40n, [7n]), chain(41n, [8n], [0, 5, 0])],
+    }
+    const { scene, raw } = makeScene({ listing, islands: { '3': [40n, 41n] } })
+    raw.transform_sketch_islands.mockImplementation(() =>
+      JSON.stringify({ objects: [], sketches: [3], kept_as_sketch: [], faces_closed: [3], cells: [{ created: 9 }] }),
+    )
+    ;(raw as unknown as { transform_selection: () => void }).transform_selection = () => {
+      throw new Error('StaleReference: the move failed')
+    }
+    const selected: bigint[] = []
+    setDraftSolidSelector((o) => selected.push(o))
+    try {
+      commitSelectionTransform(scene, [di(40n), { kind: 'object', id: 9n }], AFFINE_UP)
+    } catch {
+      /* the failure is the point */
+    }
+    const toasts: string[] = []
+    surfaceSketchTransformReports((m) => toasts.push(m))
+    setDraftSolidSelector(null)
+    expect(toasts).toEqual([])
+    expect(selected).toEqual([])
+  })
+})
+
+describe('dimensions follow a moved drawing (#98)', () => {
+  // A 2 x 1 rectangle's bottom edge is chain 40 (edges 7, 8) along +X at y = 0.
+  const listing = () => ({ [CTX]: [chain(40n, [7n, 8n]), chain(41n, [10n], [0, 5, 0])] })
+  const dim = (over: Partial<FakeDimension> = {}): FakeDimension => ({
+    id: 77n, a: [0, 0, 0], b: [2, 0, 0], offset: [0, -1, 0], ...over,
+  })
+  const updates = (calls: { name: string; args: unknown[] }[]) => calls.filter((c) => c.name === 'update_linear_dimension')
+
+  it('carries a free dimension whose ends both lie on the moved shape, in the same history step', () => {
+    const { scene, calls, order } = makeScene({ listing: listing(), dimensions: [dim()] })
+    commitSelectionTransform(scene, [di(40n)], AFFINE)
+    const [u] = updates(calls)
+    expect(u.args[0]).toBe(77n)
+    expect([...(u.args[3] as Float64Array)]).toEqual([5, 0, 0])
+    expect([...(u.args[6] as Float64Array)]).toEqual([7, 0, 0])
+    expect([...(u.args[7] as Float64Array)]).toEqual([0, -1, 0]) // the offset is a vector: unmoved
+    expect([...(u.args[8] as Float64Array)]).toEqual([5, 0, 0, 0, 0, 1]) // the plane's point moves
+    // Bracketed, so ONE undo reverts shape and dimension together.
+    expect(order).toContain('bracket_open')
+    expect(order.indexOf('update_dimension')).toBeGreaterThan(order.indexOf('bracket_open'))
+    expect(order.indexOf('update_dimension')).toBeGreaterThan(order.indexOf('transform_edges'))
+    expect(order.at(-1)).toBe('bracket_commit')
+  })
+
+  it('leaves a dimension alone when it measures a shape that did not move', () => {
+    const { scene, calls } = makeScene({ listing: listing(), dimensions: [dim({ a: [0, 5, 0], b: [1, 5, 0] })] })
+    commitSelectionTransform(scene, [di(40n)], AFFINE)
+    expect(updates(calls)).toHaveLength(0)
+  })
+
+  it('a detached island does not carry a dimension measuring a stationary island of the same sketch', () => {
+    const lst: Record<string, FakeUnit[]> = { [CTX]: [chain(40n, [7n]), chain(41n, [8n], [0, 5, 0])] }
+    const { scene, calls } = makeScene({
+      listing: lst,
+      islands: { '3': [40n, 41n] },
+      dimensions: [dim({ id: 78n, a: [0, 5, 0], b: [1, 5, 0] }), dim({ id: 77n, a: [0, 0, 0], b: [1, 0, 0] })],
+    })
+    commitSelectionTransform(scene, [di(40n)], AFFINE_UP)
+    expect(updates(calls).map((c) => c.args[0])).toEqual([77n])
+  })
+
+  it('leaves a dimension alone when only one end is on the moved shape', () => {
+    const { scene, calls } = makeScene({ listing: listing(), dimensions: [dim({ b: [0, 5, 0] })] })
+    commitSelectionTransform(scene, [di(40n)], AFFINE)
+    expect(updates(calls)).toHaveLength(0)
+  })
+
+  it('leaves node-anchored dimensions to the kernel', () => {
+    const { scene, calls } = makeScene({ listing: listing(), dimensions: [dim({ aNode: 0 })] })
+    commitSelectionTransform(scene, [di(40n)], AFFINE)
+    expect(updates(calls)).toHaveLength(0)
+  })
+
+  it('does not follow a scale (the measured length would change)', () => {
+    const { scene, calls } = makeScene({ listing: listing(), dimensions: [dim()] })
+    commitSelectionTransform(scene, [di(40n)], new Float64Array([2, 0, 0, 0, 0, 2, 0, 0, 0, 0, 2, 0]))
+    expect(updates(calls)).toHaveLength(0)
+  })
+
+  it('rotates the offset and plane normal with a rotation', () => {
+    const { scene, calls } = makeScene({ listing: listing(), dimensions: [dim()] })
+    // 90 degrees about +Z: x -> y, y -> -x
+    commitSelectionTransform(scene, [di(40n)], new Float64Array([0, -1, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0]))
+    const [u] = updates(calls)
+    expect([...(u.args[6] as Float64Array)].map((x) => Math.abs(x) < 1e-12 ? 0 : x)).toEqual([0, 2, 0])
+    expect([...(u.args[7] as Float64Array)].map((x) => Math.abs(x) < 1e-12 ? 0 : x)).toEqual([1, 0, 0])
   })
 })

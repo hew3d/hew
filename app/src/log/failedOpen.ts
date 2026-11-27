@@ -39,10 +39,14 @@ export interface FailedOpen {
 }
 
 let current: FailedOpen | null = null
+/** Bumped by every change of which attempt is current (a begin, a clear), so
+ *  an asynchronous note can tell it was overtaken while it waited. */
+let attemptSeq = 0
 
 /** Note an open or import about to start, replacing any earlier one. Call it
  *  before the kernel sees the file, so a trap mid-open leaves it noted. */
 export function beginOpenAttempt(file: { name: string; label: string; bytes: Uint8Array }): void {
+  attemptSeq += 1
   current = { name: file.name, label: file.label, bytes: file.bytes, error: null }
 }
 
@@ -54,6 +58,7 @@ export function openAttemptFailed(error: string): void {
 /** The attempt landed, or stopped for a reason that is not the file's (the
  *  user cancelled, the app could not reset the document): nothing to report. */
 export function clearOpenAttempt(): void {
+  attemptSeq += 1
   current = null
 }
 
@@ -61,7 +66,32 @@ export function clearOpenAttempt(): void {
  *  failure. An attempt still under way is kept, since an open loads a blank
  *  document of its own partway through. */
 export function forgetSettledFailure(): void {
-  if (current !== null && current.error !== null) current = null
+  if (current !== null && current.error !== null) {
+    attemptSeq += 1
+    current = null
+  }
+}
+
+/** An open another window refused and handed back (KB-9: a new window made
+ *  for the open closes itself and its opener shows the error): the bytes
+ *  went with that window, so read them again here, from the path the person
+ *  picked, and keep them as if this window had tried the open itself. A file
+ *  that can no longer be read leaves nothing to report. */
+export async function noteHandedBackOpen(
+  file: { name: string; label: string; error: string },
+  readBytes: () => Promise<Uint8Array>,
+): Promise<void> {
+  const seq = attemptSeq
+  try {
+    const bytes = await readBytes()
+    // The read is asynchronous: an attempt that began, landed or was cleared
+    // meanwhile is newer than this hand-back and must not be overwritten.
+    if (seq !== attemptSeq) return
+    beginOpenAttempt({ name: file.name, label: file.label, bytes })
+    openAttemptFailed(file.error)
+  } catch {
+    /* the file went away: the toast is all there is to show */
+  }
 }
 
 /** The file behind the latest attempt that did not land, or null. */

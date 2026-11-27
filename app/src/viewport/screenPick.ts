@@ -99,3 +99,96 @@ export function guideLinePickPx(
     clickX, clickY,
   )
 }
+
+/** One candidate spot on a picked segment: its pixel distance from the click
+ *  and the world point there. */
+export interface PickSample {
+  px: number
+  point: V3
+}
+
+/** Screen offsets (pixels along the segment, from the foot of the
+ *  perpendicular) at which a pick also samples the segment. */
+const SAMPLE_OFFSETS_PX = [3, -3, 6, -6]
+
+/**
+ * Points on the world segment `a -> b` within `radiusPx` of the click,
+ * nearest first: the foot of the perpendicular (its `px` is exactly
+ * `segmentPickPx`), then +-3 px and +-6 px along the screen segment, clamped
+ * to the near-clipped segment with duplicates dropped. The world point of a
+ * screen position uses the endpoints' clip-space `w` (perspective-correct); a
+ * parallel camera has `w = 1`, so it is a plain lerp. Empty when the segment
+ * is entirely behind the near plane or no spot is within the radius.
+ */
+export function segmentPickSamples(
+  camera: THREE.PerspectiveCamera | THREE.OrthographicCamera,
+  width: number, height: number,
+  a: V3, b: V3,
+  clickX: number, clickY: number,
+  radiusPx: number,
+): PickSample[] {
+  const va = new THREE.Vector3(a[0], a[1], a[2]).applyMatrix4(camera.matrixWorldInverse)
+  const vb = new THREE.Vector3(b[0], b[1], b[2]).applyMatrix4(camera.matrixWorldInverse)
+  const near = -camera.near
+  const aFront = va.z <= near
+  const bFront = vb.z <= near
+  if (!aFront && !bFront) return []
+  if (!aFront || !bFront) {
+    const cut = va.clone().lerp(vb, (near - va.z) / (vb.z - va.z))
+    cut.z = near
+    if (aFront) vb.copy(cut)
+    else va.copy(cut)
+  }
+  const ca = new THREE.Vector4(va.x, va.y, va.z, 1).applyMatrix4(camera.projectionMatrix)
+  const cb = new THREE.Vector4(vb.x, vb.y, vb.z, 1).applyMatrix4(camera.projectionMatrix)
+  const wa = ca.w, wb = cb.w
+  const ax = (ca.x / wa * 0.5 + 0.5) * width, ay = (0.5 - ca.y / wa * 0.5) * height
+  const bx = (cb.x / wb * 0.5 + 0.5) * width, by = (0.5 - cb.y / wb * 0.5) * height
+  const dx = bx - ax, dy = by - ay
+  const len = Math.hypot(dx, dy)
+
+  const at = (t: number): PickSample => {
+    const s = t * wa / (t * wa + (1 - t) * wb)
+    const v = va.clone().lerp(vb, s).applyMatrix4(camera.matrixWorld)
+    const sx = ax + t * dx, sy = ay + t * dy
+    return { px: Math.hypot(sx - clickX, sy - clickY), point: [v.x, v.y, v.z] }
+  }
+
+  if (len < 1e-6) {
+    const only = at(0)
+    return only.px <= radiusPx ? [only] : []
+  }
+  const foot = Math.max(0, Math.min(1, ((clickX - ax) * dx + (clickY - ay) * dy) / (len * len)))
+  const ts = [foot]
+  for (const off of SAMPLE_OFFSETS_PX) {
+    const t = Math.max(0, Math.min(1, foot + off / len))
+    if (!ts.some((u) => Math.abs(u - t) * len < 0.5)) ts.push(t)
+  }
+  return ts.map(at).filter((s) => s.px <= radiusPx).sort((p, q) => p.px - q.px)
+}
+
+/** `segmentPickSamples` over a line guide's tested stretch (see
+ *  `guideLinePickPx`). */
+export function guideLinePickSamples(
+  camera: THREE.PerspectiveCamera | THREE.OrthographicCamera,
+  width: number, height: number,
+  geometry: ArrayLike<number>,
+  clickX: number, clickY: number,
+  radiusPx: number,
+): PickSample[] {
+  const ox = geometry[0], oy = geometry[1], oz = geometry[2]
+  const dx = geometry[3], dy = geometry[4], dz = geometry[5]
+  const len = Math.hypot(dx, dy, dz)
+  if (len < 1e-9) return []
+  const ux = dx / len, uy = dy / len, uz = dz / len
+  const { lo, hi } = guideSpanOf(geometry)
+  const stretch = stretchToUse(-GUIDE_LINE_PICK_HALF, GUIDE_LINE_PICK_HALF, lo, hi)
+  if (stretch === null) return []
+  const [t0, t1] = stretch
+  return segmentPickSamples(
+    camera, width, height,
+    [ox + ux * t0, oy + uy * t0, oz + uz * t0],
+    [ox + ux * t1, oy + uy * t1, oz + uz * t1],
+    clickX, clickY, radiusPx,
+  )
+}

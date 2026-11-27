@@ -23,6 +23,7 @@ import {
   SCENE_PROPS,
   hasProp,
   nextSceneName,
+  parseSecondsInput,
   sceneIndex,
   type SceneEntry,
 } from '../scenes/scenesModel'
@@ -239,6 +240,8 @@ export function ScenesPanel({ scenes, rename }: ScenesPanelProps) {
             onCommitRename={rename.commit}
             onCancelRename={rename.cancel}
             onCommitDescription={() => scenes.setDescription(entry.sid, descDraft)}
+            onCommitTransition={(seconds) => scenes.setTransition(entry.sid, seconds)}
+            onCommitDelay={(seconds) => scenes.setDelay(entry.sid, seconds)}
             onToggleProp={(prop) => {
               const bit = PROP_BIT[prop]
               const next = hasProp(entry, prop) ? entry.props & ~bit : entry.props | bit
@@ -295,6 +298,8 @@ interface SceneRowProps {
   onCommitRename: () => void
   onCancelRename: () => void
   onCommitDescription: () => void
+  onCommitTransition: (seconds: number | null) => void
+  onCommitDelay: (seconds: number | null) => void
   onToggleProp: (prop: (typeof SCENE_PROPS)[number]) => void
   onMoveUp: () => void
   onMoveDown: () => void
@@ -325,6 +330,8 @@ function SceneRow({
   onCommitRename,
   onCancelRename,
   onCommitDescription,
+  onCommitTransition,
+  onCommitDelay,
   onToggleProp,
   onMoveUp,
   onMoveDown,
@@ -566,6 +573,8 @@ function SceneRow({
           descDraft={descDraft}
           onSetDescDraft={onSetDescDraft}
           onCommitDescription={onCommitDescription}
+          onCommitTransition={onCommitTransition}
+          onCommitDelay={onCommitDelay}
           onToggleProp={onToggleProp}
           staleRefs={isActive ? drift?.staleRefs ?? 0 : 0}
           onMoveUp={onMoveUp}
@@ -589,6 +598,8 @@ function SceneDetails({
   descDraft,
   onSetDescDraft,
   onCommitDescription,
+  onCommitTransition,
+  onCommitDelay,
   onToggleProp,
   staleRefs,
   onMoveUp,
@@ -602,6 +613,8 @@ function SceneDetails({
   descDraft: string
   onSetDescDraft: (text: string) => void
   onCommitDescription: () => void
+  onCommitTransition: (seconds: number | null) => void
+  onCommitDelay: (seconds: number | null) => void
   onToggleProp: (prop: (typeof SCENE_PROPS)[number]) => void
   staleRefs: number
   onMoveUp: () => void
@@ -639,6 +652,11 @@ function SceneDetails({
           outline: 'none',
         }}
       />
+
+      <div style={{ display: 'flex', gap: 10 }}>
+        <SecondsField label={t`Transition (s)`} value={entry.transitionS ?? null} onCommit={onCommitTransition} />
+        <SecondsField label={t`Delay (s)`} value={entry.delayS ?? null} onCommit={onCommitDelay} />
+      </div>
 
       <div>
         <div
@@ -691,6 +709,77 @@ function SceneDetails({
         </DetailButton>
       </div>
     </div>
+  )
+}
+
+/**
+ * One Scene timing, in seconds. Blank = the document's own; commits on blur
+ * or Enter, Escape (or text that is not a non-negative number) reverts.
+ */
+function SecondsField({
+  label,
+  value,
+  onCommit,
+}: {
+  label: string
+  value: number | null
+  onCommit: (seconds: number | null) => void
+}) {
+  const { t } = useLingui()
+  const shown = value === null ? '' : String(value)
+  const [draft, setDraft] = useState(shown)
+  // Follow the Scene when it changes underneath (another field commit, a
+  // document load) without stomping a draft being typed.
+  const [focused, setFocused] = useState(false)
+  useEffect(() => {
+    if (!focused) setDraft(shown)
+  }, [shown, focused])
+
+  const commit = () => {
+    const parsed = parseSecondsInput(draft)
+    if (parsed === undefined) setDraft(shown)
+    else onCommit(parsed)
+  }
+
+  return (
+    <label style={{ display: 'flex', flexDirection: 'column', gap: 3, flex: 1, fontSize: 11.5, color: 'var(--text-secondary)' }}>
+      {label}
+      <input
+        type="text"
+        inputMode="decimal"
+        value={draft}
+        placeholder={t`Default`}
+        onChange={(e) => setDraft(e.target.value)}
+        onFocus={() => setFocused(true)}
+        onBlur={() => {
+          setFocused(false)
+          commit()
+        }}
+        onKeyDown={(e) => {
+          if (isComposingKey(e)) return
+          if (e.key === 'Enter') {
+            e.preventDefault()
+            commit()
+          } else if (e.key === 'Escape') {
+            e.preventDefault()
+            e.stopPropagation()
+            setDraft(shown)
+          }
+        }}
+        style={{
+          minWidth: 0,
+          height: 24,
+          boxSizing: 'border-box',
+          fontSize: 12,
+          fontFamily: 'var(--font-family-ui)',
+          color: 'var(--text-primary)',
+          background: 'var(--surface-input)',
+          border: '1px solid var(--border-panel)',
+          borderRadius: 5,
+          padding: '1px 6px',
+        }}
+      />
+    </label>
   )
 }
 

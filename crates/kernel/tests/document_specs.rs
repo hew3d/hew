@@ -10,6 +10,7 @@
 //! document undo log is an identity on visible state and keeps `ObjectId`s
 //! stable across undo/redo.
 
+use kernel::trig;
 use kernel::{
     Anchor, Annotation, AxesFrame, AxesFrameError, BooleanError, BooleanOp, CapturedCurve,
     Document, DocumentError, FaceId, GroupId, Guide, ImageFormat, ImportNode, ImportScene,
@@ -323,6 +324,59 @@ fn boolean_with_self_is_refused() {
     );
 }
 
+/// A Subtract whose cutter does not reach the target refuses as
+/// `NothingRemoved`, and the refusal is a true no-op on the document: both
+/// operands stay visible, no result object appears, and nothing was
+/// recorded for undo. This is the "cutter drawn beside the bin"
+/// case, through the node-level entry point the app calls.
+#[test]
+fn subtract_that_removes_nothing_leaves_the_document_untouched() {
+    let mut doc = Document::new();
+    let a = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    // Disjoint: a whole unit away along x.
+    let b = extrude_box(&mut doc, 2.0, 0.0, 3.0, 1.0, 0.0, 1.0);
+    // Touching: shares the x=1 wall of `a` with no volume in common.
+    let c = extrude_box(&mut doc, 1.0, 0.0, 2.0, 1.0, 0.0, 1.0);
+    let before = doc.state_hash();
+    let visible = doc.visible_object_ids();
+    assert_eq!(visible.len(), 3);
+    let undo_depth = doc.undo_depth();
+
+    for cutter in [b, c] {
+        assert_eq!(
+            doc.boolean_nodes(
+                BooleanOp::Subtract,
+                NodeId::Object(a),
+                NodeId::Object(cutter)
+            )
+            .map(|_| ()),
+            Err(DocumentError::Boolean(BooleanError::NothingRemoved))
+        );
+        assert_eq!(
+            doc.boolean(BooleanOp::Subtract, a, cutter).map(|_| ()),
+            Err(DocumentError::Boolean(BooleanError::NothingRemoved))
+        );
+    }
+    assert_eq!(
+        doc.visible_object_ids(),
+        visible,
+        "both operands still visible"
+    );
+    assert_eq!(doc.state_hash(), before, "document untouched");
+    assert_eq!(
+        doc.undo_depth(),
+        undo_depth,
+        "a refusal records no undo entry"
+    );
+
+    // The same cutter moved INTO the target cuts, so the refusal is about
+    // this placement, not about the operands.
+    doc.transform_object(b, &Transform::translation(Vec3::new(-1.5, 0.0, 0.0)))
+        .expect("move the cutter into the target");
+    doc.boolean_nodes(BooleanOp::Subtract, NodeId::Object(a), NodeId::Object(b))
+        .expect("overlapping subtract succeeds");
+}
+
 #[test]
 fn boolean_with_hidden_operand_errors() {
     let mut doc = Document::new();
@@ -472,25 +526,39 @@ fn non_uniform_scale_refits_oblique_face_through_transform_object() {
     );
 }
 
-/// Orientation-flipping (negative scale) and singular transforms are refused
-/// without mutating the object.
+/// Singular transforms are refused without mutating the object; an
+/// orientation-flipping (negative scale) transform is baked: the mirrored
+/// solid stays valid, watertight, and outward-facing.
 #[test]
-fn reflection_and_singular_transforms_are_refused() {
+fn reflection_is_baked_and_singular_transforms_are_refused() {
     let mut doc = Document::new();
     let id = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
     let c0 = centroid(doc.object(id).unwrap());
 
-    assert_eq!(
-        doc.transform_object(id, &Transform::uniform_scale(-1.0)),
-        Err(DocumentError::Transform(TransformError::Reflection))
-    );
     assert_eq!(
         doc.transform_object(id, &Transform::uniform_scale(0.0)),
         Err(DocumentError::Transform(TransformError::Singular))
     );
     assert!(
         approx_pt(centroid(doc.object(id).unwrap()), c0),
-        "object untouched after refused transforms"
+        "object untouched after the refused singular transform"
+    );
+
+    let vol0 = doc.object(id).unwrap().signed_volume();
+    let mirror = Transform::uniform_scale(-1.0);
+    doc.transform_object(id, &mirror)
+        .expect("a reflection is baked, not refused");
+    let obj = doc.object(id).unwrap();
+    assert!(obj.validate().is_ok(), "mirrored object validates");
+    assert_eq!(obj.watertight(), WatertightState::Watertight);
+    assert!(obj.signed_volume() > 0.0, "faces turned over: outward");
+    assert!(
+        (obj.signed_volume() - vol0).abs() < 1e-9,
+        "mirroring preserves volume"
+    );
+    assert!(
+        approx_pt(centroid(obj), mirror.apply_point(c0)),
+        "positions are the mirror image"
     );
 }
 
@@ -605,26 +673,35 @@ fn transform_sketch_scales_extent() {
     ));
 }
 
-/// Orientation-flipping (negative scale) and singular transforms are refused
-/// without mutating the sketch — the same transactional guarantee as objects.
+/// A singular transform is refused without mutating the sketch (the same
+/// transactional guarantee as objects); a reflection is baked.
 #[test]
-fn transform_sketch_reflection_and_singular_refused() {
+fn transform_sketch_reflection_baked_and_singular_refused() {
     let mut doc = Document::new();
     let s = doc.add_sketch(ground());
     draw_rect(&mut doc, s, 0.0, 0.0, 1.0, 1.0);
     let c0 = sketch_centroid(&doc, s);
 
     assert_eq!(
-        doc.transform_sketch(s, &Transform::uniform_scale(-1.0)),
-        Err(DocumentError::Transform(TransformError::Reflection))
-    );
-    assert_eq!(
         doc.transform_sketch(s, &Transform::uniform_scale(0.0)),
         Err(DocumentError::Transform(TransformError::Singular))
     );
     assert!(
         approx_pt(sketch_centroid(&doc, s), c0),
-        "sketch untouched after refused transforms"
+        "sketch untouched after the refused singular transform"
+    );
+
+    let mirror = Transform::uniform_scale(-1.0);
+    doc.transform_sketch(s, &mirror)
+        .expect("a reflection is baked, not refused");
+    assert!(
+        approx_pt(sketch_centroid(&doc, s), mirror.apply_point(c0)),
+        "sketch vertices are the mirror image"
+    );
+    assert_eq!(
+        doc.sketch(s).unwrap().regions().len(),
+        1,
+        "the mirrored rectangle still bounds exactly one region"
     );
 }
 
@@ -1293,20 +1370,24 @@ fn transform_selection_refuses_empty_stale_and_degenerate() {
         doc.transform_selection(&[], &[SketchId::default()], &t),
         Err(DocumentError::UnknownSketch)
     );
-    // Reflection is refused for a selection with baked targets; the object is
-    // untouched afterwards.
-    assert_eq!(
-        doc.transform_selection(&[NodeId::Object(a)], &[], &Transform::uniform_scale(-1.0)),
-        Err(DocumentError::Transform(TransformError::Reflection))
-    );
+    // A singular transform is refused; the object is untouched afterwards.
     assert_eq!(
         doc.transform_selection(&[NodeId::Object(a)], &[], &Transform::uniform_scale(0.0)),
         Err(DocumentError::Transform(TransformError::Singular))
     );
     assert!(
         approx_pt(centroid(doc.object(a).unwrap()), ca),
-        "object untouched after refused transforms"
+        "object untouched after the refused transform"
     );
+    // A reflection of a baked selection is applied.
+    let mirror = Transform::uniform_scale(-1.0);
+    doc.transform_selection(&[NodeId::Object(a)], &[], &mirror)
+        .expect("a reflection is baked, not refused");
+    let obj = doc.object(a).unwrap();
+    assert!(obj.validate().is_ok());
+    assert_eq!(obj.watertight(), WatertightState::Watertight);
+    assert!(obj.signed_volume() > 0.0);
+    assert!(approx_pt(centroid(obj), mirror.apply_point(ca)));
 }
 
 // ------------------------------------------------------- rescale_document
@@ -2095,7 +2176,7 @@ fn delete_selection_batches_multiple_nodes_into_one_undo_step() {
     let before = top_set(&doc);
 
     let change = doc
-        .delete_selection(&[NodeId::Object(a), NodeId::Object(b)])
+        .delete_selection(&[NodeId::Object(a), NodeId::Object(b)], &[], &[])
         .expect("delete a and b");
     assert_eq!(top_set(&doc), HashSet::from([NodeId::Object(c)]));
     assert!(change.objects_touched.contains(&a) && change.objects_touched.contains(&b));
@@ -2127,7 +2208,7 @@ fn delete_selection_labels_a_single_node_by_name_or_falls_back() {
     doc.set_node_name(NodeId::Object(a), Some("Roof".to_string()))
         .expect("name the object");
 
-    doc.delete_selection(&[NodeId::Object(a)])
+    doc.delete_selection(&[NodeId::Object(a)], &[], &[])
         .expect("delete the named object");
     assert_eq!(
         doc.peek_undo_meta().map(|m| m.label.as_str()),
@@ -2137,7 +2218,7 @@ fn delete_selection_labels_a_single_node_by_name_or_falls_back() {
     doc.undo().expect("undo");
 
     let b = extrude_box(&mut doc, 2.0, 0.0, 3.0, 1.0, 0.0, 1.0);
-    doc.delete_selection(&[NodeId::Object(b)])
+    doc.delete_selection(&[NodeId::Object(b)], &[], &[])
         .expect("delete the unnamed object");
     assert_eq!(
         doc.peek_undo_meta().map(|m| m.label.as_str()),
@@ -2162,7 +2243,7 @@ fn delete_selection_skips_a_member_its_own_batch_already_removed() {
         .group_nodes(&[NodeId::Object(a), NodeId::Object(b)])
         .expect("group");
     let depth = doc.undo_depth();
-    doc.delete_selection(&[NodeId::Group(g), NodeId::Object(a)])
+    doc.delete_selection(&[NodeId::Group(g), NodeId::Object(a)], &[], &[])
         .expect("group first, then its already-gone member");
     assert_eq!(doc.undo_depth(), depth + 1, "one entry");
     assert!(top_set(&doc).is_empty());
@@ -2170,7 +2251,7 @@ fn delete_selection_skips_a_member_its_own_batch_already_removed() {
     assert_eq!(top_set(&doc), HashSet::from([NodeId::Group(g)]));
     assert!(doc.visible_object_ids().contains(&a));
     // Member listed FIRST: it is deleted on its own, then the group.
-    doc.delete_selection(&[NodeId::Object(a), NodeId::Group(g)])
+    doc.delete_selection(&[NodeId::Object(a), NodeId::Group(g)], &[], &[])
         .expect("member first, then the group");
     assert!(top_set(&doc).is_empty());
     doc.undo().expect("undo again");
@@ -2185,7 +2266,7 @@ fn delete_selection_aborts_the_whole_batch_on_a_stale_node() {
 
     let stale = NodeId::Object(ObjectId::default());
     assert_eq!(
-        doc.delete_selection(&[NodeId::Object(a), stale]),
+        doc.delete_selection(&[NodeId::Object(a), stale], &[], &[]),
         Err(DocumentError::UnknownObject)
     );
     assert_eq!(
@@ -2193,6 +2274,422 @@ fn delete_selection_aborts_the_whole_batch_on_a_stale_node() {
         before,
         "a refused batch leaves the document byte-identical to before the call"
     );
+}
+
+/// A selection mixing nodes, guides, and annotations deletes as ONE undo
+/// step: one undo brings every item back, an annotation anchored to a
+/// deleted node comes back attached, and one redo deletes them all again.
+#[test]
+fn delete_selection_takes_guides_and_annotations_in_the_same_step() {
+    let mut doc = Document::new();
+    let a = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let b = extrude_box(&mut doc, 2.0, 0.0, 3.0, 1.0, 0.0, 1.0);
+    let line = doc
+        .add_guide_line(Point3::ORIGIN, Vec3::new(1.0, 0.0, 0.0))
+        .unwrap();
+    let point = doc.add_guide_point(Point3::new(0.0, 5.0, 0.0)).unwrap();
+    let kept_guide = doc.add_guide_point(Point3::new(9.0, 9.0, 0.0)).unwrap();
+    let on_a = doc
+        .add_leader_text(
+            point_anchor(Some(NodeId::Object(a)), Point3::ORIGIN),
+            Vec3::ZERO,
+            "on a".to_string(),
+        )
+        .unwrap();
+    let on_b = doc
+        .add_leader_text(
+            point_anchor(Some(NodeId::Object(b)), Point3::new(2.0, 0.0, 0.0)),
+            Vec3::ZERO,
+            "on b".to_string(),
+        )
+        .unwrap();
+    let depth = doc.undo_depth();
+    let before = doc.state_hash();
+
+    let change = doc
+        .delete_selection(&[NodeId::Object(a)], &[line, point], &[on_a])
+        .expect("mixed delete");
+    let after = doc.state_hash();
+    assert_eq!(doc.undo_depth(), depth + 1, "one undo entry");
+    assert_eq!(
+        doc.peek_undo_meta().map(|m| m.label.as_str()),
+        Some("Delete 4 items"),
+        "the count takes in guides and annotations"
+    );
+    assert_eq!(top_set(&doc), HashSet::from([NodeId::Object(b)]));
+    assert_eq!(doc.guide_ids(), vec![kept_guide]);
+    assert_eq!(doc.annotation_ids(), vec![on_b]);
+    assert!(change.objects_touched.contains(&a));
+    assert!(change.guides_touched.contains(&line) && change.guides_touched.contains(&point));
+
+    doc.undo().expect("undo");
+    assert_eq!(doc.state_hash(), before, "one undo restores everything");
+    assert_eq!(
+        top_set(&doc),
+        HashSet::from([NodeId::Object(a), NodeId::Object(b)])
+    );
+    assert_eq!(
+        doc.guide_ids().into_iter().collect::<HashSet<_>>(),
+        HashSet::from([line, point, kept_guide])
+    );
+    assert_eq!(
+        doc.annotation_ids().into_iter().collect::<HashSet<_>>(),
+        HashSet::from([on_a, on_b])
+    );
+    assert_eq!(
+        doc.annotation_detached(on_a),
+        Some(false),
+        "the annotation comes back attached to its restored node"
+    );
+
+    doc.redo().expect("redo");
+    assert_eq!(doc.state_hash(), after, "one redo deletes everything again");
+    assert_eq!(top_set(&doc), HashSet::from([NodeId::Object(b)]));
+    assert_eq!(doc.guide_ids(), vec![kept_guide]);
+    assert_eq!(doc.annotation_ids(), vec![on_b]);
+}
+
+/// Deleting an annotation's anchor node without the annotation leaves it
+/// detached, and one undo reattaches it: the step carries the detach.
+#[test]
+fn delete_selection_detaches_an_annotation_it_leaves_behind() {
+    let mut doc = Document::new();
+    let a = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let guide = doc.add_guide_point(Point3::new(0.0, 5.0, 0.0)).unwrap();
+    let on_a = doc
+        .add_leader_text(
+            point_anchor(Some(NodeId::Object(a)), Point3::ORIGIN),
+            Vec3::ZERO,
+            "on a".to_string(),
+        )
+        .unwrap();
+
+    doc.delete_selection(&[NodeId::Object(a)], &[guide], &[])
+        .expect("delete");
+    assert_eq!(doc.annotation_detached(on_a), Some(true));
+    assert!(doc.guide_ids().is_empty());
+    doc.undo().expect("undo");
+    assert_eq!(doc.annotation_detached(on_a), Some(false));
+    assert_eq!(doc.guide_ids(), vec![guide]);
+}
+
+/// A lone guide or annotation names the step by its kind, as its own
+/// delete does; several items of any kinds are labeled by their count.
+#[test]
+fn delete_selection_labels_guide_and_annotation_selections() {
+    let mut doc = Document::new();
+    let obj = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let g1 = doc.add_guide_point(Point3::ORIGIN).unwrap();
+    let g2 = doc.add_guide_point(Point3::new(1.0, 0.0, 0.0)).unwrap();
+    let g3 = doc.add_guide_point(Point3::new(2.0, 0.0, 0.0)).unwrap();
+    let note = doc
+        .add_leader_text(
+            point_anchor(None, Point3::ORIGIN),
+            Vec3::ZERO,
+            "n".to_string(),
+        )
+        .unwrap();
+    let dim = doc
+        .add_linear_dimension(
+            point_anchor(Some(NodeId::Object(obj)), Point3::new(0.0, 0.0, 0.0)),
+            point_anchor(Some(NodeId::Object(obj)), Point3::new(1.0, 0.0, 0.0)),
+            Vec3::new(0.0, -0.5, 0.0),
+            xy_plane(),
+            None,
+        )
+        .unwrap();
+    let label = |doc: &Document| doc.peek_undo_meta().map(|m| m.label.clone());
+
+    doc.delete_selection(&[], &[g1], &[]).expect("one guide");
+    assert_eq!(label(&doc).as_deref(), Some("Delete guide"));
+    doc.delete_selection(&[], &[g2, g3], &[])
+        .expect("two guides");
+    assert_eq!(label(&doc).as_deref(), Some("Delete 2 items"));
+    assert!(doc.guide_ids().is_empty());
+    doc.delete_selection(&[], &[], &[note]).expect("one text");
+    assert_eq!(label(&doc).as_deref(), Some("Delete text"));
+    doc.delete_selection(&[], &[], &[dim])
+        .expect("one dimension");
+    assert_eq!(label(&doc).as_deref(), Some("Delete dimension"));
+    assert!(doc.annotation_ids().is_empty());
+
+    doc.undo().expect("undo the dimension");
+    doc.undo().expect("undo the text");
+    doc.undo().expect("undo the two guides");
+    doc.delete_selection(&[NodeId::Object(obj)], &[g2], &[note])
+        .expect("a node, a guide and an annotation");
+    assert_eq!(label(&doc).as_deref(), Some("Delete 3 items"));
+}
+
+/// A guide or annotation listed twice is deleted once, as a node listed
+/// twice is: the second listing was live when the batch began, so it is
+/// skipped rather than refused.
+#[test]
+fn delete_selection_skips_a_guide_or_annotation_listed_twice() {
+    let mut doc = Document::new();
+    let g = doc.add_guide_point(Point3::ORIGIN).unwrap();
+    let note = doc
+        .add_leader_text(
+            point_anchor(None, Point3::ORIGIN),
+            Vec3::ZERO,
+            "n".to_string(),
+        )
+        .unwrap();
+    let depth = doc.undo_depth();
+
+    doc.delete_selection(&[], &[g, g], &[note, note])
+        .expect("duplicates are skipped");
+    assert_eq!(doc.undo_depth(), depth + 1);
+    // Two distinct items, however often each is listed.
+    assert_eq!(
+        doc.peek_undo_meta().map(|m| m.label.clone()).as_deref(),
+        Some("Delete 2 items")
+    );
+    assert!(doc.guide_ids().is_empty());
+    assert!(doc.annotation_ids().is_empty());
+    doc.undo().expect("undo");
+    assert_eq!(doc.guide_ids(), vec![g]);
+    assert_eq!(doc.annotation_ids(), vec![note]);
+}
+
+/// A guide or annotation that is stale or already deleted refuses the
+/// whole batch typed, wherever it sits in its list and whatever else the
+/// batch holds: the document is byte-identical afterwards and no undo
+/// entry is added.
+#[test]
+fn delete_selection_aborts_the_whole_batch_on_a_stale_guide_or_annotation() {
+    let mut doc = Document::new();
+    let a = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    let live_guide = doc.add_guide_point(Point3::ORIGIN).unwrap();
+    let gone_guide = doc.add_guide_point(Point3::new(1.0, 0.0, 0.0)).unwrap();
+    doc.delete_guide(gone_guide).unwrap();
+    let note = doc
+        .add_leader_text(
+            point_anchor(None, Point3::ORIGIN),
+            Vec3::ZERO,
+            "n".to_string(),
+        )
+        .unwrap();
+    let gone_note = doc
+        .add_leader_text(
+            point_anchor(None, Point3::ORIGIN),
+            Vec3::ZERO,
+            "x".to_string(),
+        )
+        .unwrap();
+    doc.delete_annotation(gone_note).unwrap();
+    let before = doc.save();
+    let depth = doc.undo_depth();
+    let stale_guide: kernel::GuideId = Default::default();
+    let stale_note: kernel::AnnotationId = Default::default();
+
+    let refusals = [
+        (
+            doc.delete_selection(&[NodeId::Object(a)], &[live_guide, gone_guide], &[note]),
+            DocumentError::UnknownGuide,
+        ),
+        (
+            doc.delete_selection(&[NodeId::Object(a)], &[stale_guide, live_guide], &[]),
+            DocumentError::UnknownGuide,
+        ),
+        (
+            doc.delete_selection(&[NodeId::Object(a)], &[live_guide], &[note, gone_note]),
+            DocumentError::UnknownAnnotation,
+        ),
+        (
+            doc.delete_selection(&[], &[], &[stale_note]),
+            DocumentError::UnknownAnnotation,
+        ),
+        (
+            doc.delete_selection(
+                &[NodeId::Object(a), NodeId::Object(ObjectId::default())],
+                &[live_guide],
+                &[note],
+            ),
+            DocumentError::UnknownObject,
+        ),
+    ];
+    for (i, (got, want)) in refusals.into_iter().enumerate() {
+        assert_eq!(got, Err(want), "refusal {i}");
+    }
+    assert_eq!(
+        doc.save(),
+        before,
+        "a refused batch leaves the document byte-identical to before the call"
+    );
+    assert_eq!(doc.undo_depth(), depth, "no undo entry for a refused batch");
+    assert_eq!(doc.guide_ids(), vec![live_guide]);
+    assert_eq!(doc.annotation_ids(), vec![note]);
+}
+
+/// Nothing listed is a no-op: no undo entry, nothing changed.
+#[test]
+fn delete_selection_of_nothing_adds_no_undo_entry() {
+    let mut doc = Document::new();
+    extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
+    doc.add_guide_point(Point3::ORIGIN).unwrap();
+    let depth = doc.undo_depth();
+    let before = doc.state_hash();
+    let change = doc.delete_selection(&[], &[], &[]).expect("empty");
+    assert_eq!(change, kernel::DocChange::default());
+    assert_eq!(doc.undo_depth(), depth);
+    assert_eq!(doc.state_hash(), before);
+}
+
+/// A random mixed selection, picked from what is live (and maybe salted
+/// with one handle the document no longer holds).
+#[derive(Debug, Clone)]
+struct MixedPick {
+    nodes: Vec<usize>,
+    guides: Vec<usize>,
+    annotations: Vec<usize>,
+    /// 0: no stale handle; 1: a deleted node; 2: a deleted guide; 3: a
+    /// deleted annotation.
+    stale: u8,
+    /// Where in its list the stale handle goes.
+    stale_at: usize,
+}
+
+fn arb_mixed_pick() -> impl Strategy<Value = MixedPick> {
+    (
+        proptest::collection::vec(0usize..6, 0..5),
+        proptest::collection::vec(0usize..6, 0..5),
+        proptest::collection::vec(0usize..6, 0..5),
+        prop_oneof![3 => Just(0u8), 1 => 1u8..4],
+        any::<usize>(),
+    )
+        .prop_map(|(nodes, guides, annotations, stale, stale_at)| MixedPick {
+            nodes,
+            guides,
+            annotations,
+            stale,
+            stale_at,
+        })
+}
+
+fn insert_at<T>(v: &mut Vec<T>, at: usize, item: T) {
+    let i = at % (v.len() + 1);
+    v.insert(i, item);
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(96))]
+
+    /// Over random mixes of boxes (some grouped), guides, and annotations
+    /// (some anchored to the boxes, some free), `delete_selection` either
+    /// deletes exactly what it was given as ONE undo step, which undo then
+    /// redo reproduce bit for bit, or — when the batch holds a stale
+    /// handle — refuses typed with the document and its history untouched.
+    #[test]
+    fn delete_selection_of_a_mixed_selection_is_one_exact_step(pick in arb_mixed_pick()) {
+        let mut doc = Document::new();
+        let boxes: Vec<ObjectId> = (0..4)
+            .map(|i| {
+                let x = 2.0 * i as f64;
+                extrude_box(&mut doc, x, 0.0, x + 1.0, 1.0, 0.0, 1.0)
+            })
+            .collect();
+        let (group, _) = doc
+            .group_nodes(&[NodeId::Object(boxes[2]), NodeId::Object(boxes[3])])
+            .expect("group");
+        let mut guides = Vec::new();
+        for i in 0..4 {
+            let y = 3.0 + i as f64;
+            guides.push(if i % 2 == 0 {
+                doc.add_guide_point(Point3::new(0.0, y, 0.0)).unwrap()
+            } else {
+                doc.add_guide_line(Point3::new(0.0, y, 0.0), Vec3::new(1.0, 0.0, 0.0))
+                    .unwrap()
+            });
+        }
+        let mut annotations = Vec::new();
+        for (i, anchor) in [Some(0usize), Some(2), None, Some(1)].into_iter().enumerate() {
+            let node = anchor.map(|k| NodeId::Object(boxes[k]));
+            let at = anchor.map_or(Point3::new(0.0, -2.0, 0.0), |k| {
+                Point3::new(2.0 * k as f64, 0.0, 0.0)
+            });
+            annotations.push(
+                doc.add_leader_text(point_anchor(node, at), Vec3::ZERO, format!("n{i}"))
+                    .unwrap(),
+            );
+        }
+        // One of each kind, deleted: stale handles to salt a batch with.
+        let gone_box = extrude_box(&mut doc, 20.0, 0.0, 21.0, 1.0, 0.0, 1.0);
+        doc.delete_node(NodeId::Object(gone_box)).unwrap();
+        let gone_guide = doc.add_guide_point(Point3::new(9.0, 9.0, 9.0)).unwrap();
+        doc.delete_guide(gone_guide).unwrap();
+        let gone_note = doc
+            .add_leader_text(point_anchor(None, Point3::ORIGIN), Vec3::ZERO, "x".into())
+            .unwrap();
+        doc.delete_annotation(gone_note).unwrap();
+
+        let all_nodes = [
+            NodeId::Object(boxes[0]),
+            NodeId::Object(boxes[1]),
+            NodeId::Group(group),
+            NodeId::Object(boxes[2]),
+            NodeId::Object(boxes[3]),
+            NodeId::Object(boxes[0]),
+        ];
+        let mut nodes: Vec<NodeId> = pick.nodes.iter().map(|&i| all_nodes[i]).collect();
+        let mut sel_guides: Vec<_> = pick.guides.iter().map(|&i| guides[i % 4]).collect();
+        let mut sel_notes: Vec<_> =
+            pick.annotations.iter().map(|&i| annotations[i % 4]).collect();
+        let want_err = match pick.stale {
+            1 => {
+                insert_at(&mut nodes, pick.stale_at, NodeId::Object(gone_box));
+                Some(DocumentError::UnknownObject)
+            }
+            2 => {
+                insert_at(&mut sel_guides, pick.stale_at, gone_guide);
+                Some(DocumentError::UnknownGuide)
+            }
+            3 => {
+                insert_at(&mut sel_notes, pick.stale_at, gone_note);
+                Some(DocumentError::UnknownAnnotation)
+            }
+            _ => None,
+        };
+
+        let before = doc.state_hash();
+        let saved = doc.save();
+        let depth = doc.undo_depth();
+        let result = doc.delete_selection(&nodes, &sel_guides, &sel_notes);
+
+        if let Some(want) = want_err {
+            prop_assert_eq!(result, Err(want));
+            prop_assert_eq!(doc.save(), saved, "a refused batch changes nothing");
+            prop_assert_eq!(doc.undo_depth(), depth, "a refused batch records nothing");
+            return Ok(());
+        }
+        result.expect("a batch of live handles deletes");
+        let empty = nodes.is_empty() && sel_guides.is_empty() && sel_notes.is_empty();
+        prop_assert_eq!(doc.undo_depth(), depth + usize::from(!empty));
+        for &n in &nodes {
+            prop_assert!(!doc.node_is_live(n), "{:?} is still live", n);
+        }
+        for &g in &sel_guides {
+            prop_assert!(doc.guide(g).is_none());
+        }
+        for &a in &sel_notes {
+            prop_assert!(doc.annotation(a).is_none());
+        }
+        for &g in guides.iter().filter(|g| !sel_guides.contains(g)) {
+            prop_assert!(doc.guide(g).is_some(), "an unlisted guide was deleted");
+        }
+        for &a in annotations.iter().filter(|a| !sel_notes.contains(a)) {
+            prop_assert!(doc.annotation(a).is_some(), "an unlisted annotation was deleted");
+        }
+        if empty {
+            prop_assert_eq!(doc.state_hash(), before);
+            return Ok(());
+        }
+        let after = doc.state_hash();
+        doc.undo().expect("undo");
+        prop_assert_eq!(doc.state_hash(), before, "one undo restores the document");
+        doc.redo().expect("redo");
+        prop_assert_eq!(doc.state_hash(), after, "one redo reproduces the delete");
+    }
 }
 
 // ----------------------------------------------------------------- helper
@@ -2343,9 +2840,10 @@ fn transform_instance_composes_pose_and_undo_is_exact() {
 
 /// Explode bakes an orientation-preserving pose into independent world objects
 /// (equal to the posed instance), leaving the definition intact; a mirrored
-/// instance refuses (baking a reflection would invert winding).
+/// instance explodes too (the reflection is baked and the faces turned over,
+/// so the result stays watertight and outward-facing).
 #[test]
-fn explode_bakes_pose_into_world_objects_and_refuses_mirror() {
+fn explode_bakes_pose_into_world_objects_including_mirrors() {
     let mut doc = Document::new();
     let o = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
     let (comp, inst, _) = doc.make_component(&[NodeId::Object(o)]).unwrap();
@@ -2376,15 +2874,28 @@ fn explode_bakes_pose_into_world_objects_and_refuses_mirror() {
         "the definition (and its member) is untouched by explode"
     );
 
-    // A mirrored instance refuses to explode.
+    // A mirrored instance explodes too: the pose (reflection included) is
+    // baked into a watertight, outward-facing world object.
     let m = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
     let (_c2, inst2, _) = doc.make_component(&[NodeId::Object(m)]).unwrap();
-    doc.transform_instance(inst2, &Transform::scale(Vec3::new(-1.0, 1.0, 1.0)))
-        .unwrap();
-    assert_eq!(
-        doc.explode_instance(inst2),
-        Err(DocumentError::CannotExplodeReflected)
-    );
+    let mirror = Transform::scale(Vec3::new(-1.0, 1.0, 1.0));
+    doc.transform_instance(inst2, &mirror).unwrap();
+    let (created2, _) = doc
+        .explode_instance(inst2)
+        .expect("a mirrored pose explodes");
+    assert_eq!(created2.len(), 1);
+    let mo = doc.object(created2[0]).expect("exploded mirror live");
+    assert!(mo.validate().is_ok());
+    assert_eq!(mo.watertight(), WatertightState::Watertight);
+    assert!(mo.signed_volume() > 0.0, "mirrored explode is outward");
+    for v in mo.vertices().values() {
+        assert!(
+            v.position.x <= 1e-9 && v.position.x >= -1.0 - 1e-9,
+            "box [0,1] mirrored in x lands in [-1,0], got x={}",
+            v.position.x
+        );
+    }
+    assert!(doc.instance_pose(inst2).is_none(), "the instance is gone");
 }
 
 /// Non-uniformly scaling ONE component instance leaves its siblings and the
@@ -2659,8 +3170,8 @@ fn explode_bakes_the_displayed_name_after_a_definition_rename() {
 
 /// Make Unique names the new definition: a set instance name is promoted to
 /// the definition name (and cleared off the instance); an unnamed instance
-/// derives `"<def> Copy"`, disambiguated `"<def> Copy 2"`, … against live
-/// definitions. Undo restores the promoted instance name exactly.
+/// keeps the old definition's name (a copy is the same part until the user
+/// renames it). Undo restores the promoted instance name exactly.
 #[test]
 fn make_unique_names_the_new_definition() {
     let mut doc = Document::new();
@@ -2675,13 +3186,13 @@ fn make_unique_names_the_new_definition() {
         .place_instance(comp, Transform::translation(Vec3::new(6.0, 0.0, 0.0)))
         .unwrap();
 
-    // Unnamed instance → "<def> Copy".
+    // Unnamed instance → the definition's own name.
     let (u2, _) = doc.make_unique(i2).unwrap();
-    assert_eq!(doc.component_name(u2), Some("The Box Copy"));
+    assert_eq!(doc.component_name(u2), Some("The Box"));
 
-    // The next unnamed unique of the same def disambiguates.
+    // And again for the next unnamed unique of the same def.
     let (u3, _) = doc.make_unique(i3).unwrap();
-    assert_eq!(doc.component_name(u3), Some("The Box Copy 2"));
+    assert_eq!(doc.component_name(u3), Some("The Box"));
 
     // A named instance promotes its name to the new definition and clears
     // its own — the row now reads as the new component, not "Name (Name)".
@@ -4158,8 +4669,8 @@ fn draw_circle_curve(
     let pt = |i: usize| {
         let a = (i % n) as f64 / n as f64 * std::f64::consts::TAU;
         Point3::new(
-            center.x + radius * a.cos(),
-            center.y + radius * a.sin(),
+            center.x + radius * trig::cos(a),
+            center.y + radius * trig::sin(a),
             0.0,
         )
     };
@@ -4366,8 +4877,8 @@ fn copy_island_out_of_plane_keeps_curve_identity() {
 }
 
 /// [`Document::copy_sketch_islands`] keeps the strong exception guarantee: a
-/// reflection (determinant < 0) is refused typed with nothing created and
-/// the source untouched, and a stale island id likewise touches nothing.
+/// stale island id is refused typed with nothing created and the source
+/// untouched (a reflection is baked into the copy, not refused).
 #[test]
 fn copy_island_refusal_leaves_document_untouched() {
     let mut doc = Document::new();
@@ -4381,17 +4892,17 @@ fn copy_island_refusal_leaves_document_untouched() {
         .next()
         .unwrap();
 
-    // A reflection is refused; no sketch is minted.
+    // A reflection is baked into the copy: a mirrored sketch is minted.
     let reflect = Transform::from_affine(&[
         -1.0, 0.0, 0.0, 0.0, //
         0.0, 1.0, 0.0, 0.0, //
         0.0, 0.0, 1.0, 0.2, //
     ]);
-    assert!(matches!(
-        doc.copy_sketch_islands(s, &[island], &reflect),
-        Err(DocumentError::Transform(TransformError::Reflection))
-    ));
-    assert_eq!(doc.sketch_ids(), vec![s], "no copy sketch created");
+    doc.copy_sketch_islands(s, &[island], &reflect)
+        .expect("a mirrored island copy is legal");
+    assert_eq!(doc.sketch_ids().len(), 2, "the mirrored copy sketch exists");
+    doc.undo().expect("undo the mirrored copy");
+    assert_eq!(doc.sketch_ids(), vec![s], "undo removes the copy sketch");
 
     // A stale island id anywhere in the set is refused typed, touching nothing.
     let bogus = kernel::SketchIslandId::default();
@@ -4712,6 +5223,7 @@ fn boolean_union_keeps_seams_between_differently_painted_faces() {
         name: "red".to_string(),
         color: Rgba8::rgb(200, 30, 30),
         texture: None,
+        pbr: None,
     });
     let a_top = {
         let obj = doc.object(a).expect("a live");
@@ -5272,6 +5784,322 @@ fn delete_all_guides_on_empty_document_is_a_no_op() {
     assert!(!doc.can_undo(), "an empty delete-all pushes NO undo entry");
 }
 
+/// A document holding one guide line over the stretch `[-1, 2]` m along X
+/// through (0, 1, 0), tagged "Rig" — the shape a `.skp` import brings in,
+/// the only way to get a tagged, finite guide.
+fn doc_with_tagged_segment_guide() -> (Document, kernel::GuideId) {
+    use kernel::{GuideSpan, ImportGuide, ImportScene, ImportTag};
+    let mut doc = Document::new();
+    let scene = ImportScene {
+        materials: Vec::new(),
+        defs: Vec::new(),
+        roots: Vec::new(),
+        guides: vec![ImportGuide::Line {
+            dash: kernel::GuideDash::default(),
+            origin: Point3::new(0.0, 1.0, 0.0),
+            direction: Vec3::new(1.0, 0.0, 0.0),
+            span: GuideSpan {
+                from: Some(-1.0),
+                to: Some(2.0),
+            },
+            tags: vec![vec!["Rig".to_string()]],
+        }],
+        tags: vec![ImportTag {
+            path: vec!["Rig".to_string()],
+            hidden: false,
+        }],
+        camera: None,
+        scenes: Vec::new(),
+        section: None,
+        view_style: None,
+        extra: Default::default(),
+        geo: None,
+    };
+    doc.ingest(scene, Vec::new()).unwrap();
+    let id = doc.guide_ids()[0];
+    (doc, id)
+}
+
+#[test]
+fn transform_guide_translates_a_line_keeping_direction_and_span_exact() {
+    let mut doc = Document::new();
+    let id = doc
+        .add_guide_line(Point3::new(1.0, 2.0, 3.0), Vec3::new(0.3, 0.4, 0.0))
+        .unwrap();
+    let Guide::Line {
+        direction: dir0,
+        span: span0,
+        ..
+    } = *doc.guide(id).unwrap()
+    else {
+        panic!("expected a Line guide")
+    };
+
+    let change = doc
+        .transform_guide(id, &Transform::translation(Vec3::new(0.5, -1.0, 2.0)))
+        .expect("move");
+    assert_eq!(change.guides_touched, vec![id]);
+    assert_eq!(doc.guide_ids(), vec![id], "the guide keeps its id");
+    match *doc.guide(id).unwrap() {
+        Guide::Line {
+            origin,
+            direction,
+            span,
+        } => {
+            assert!(origin.approx_eq(Point3::new(1.5, 1.0, 5.0), 1e-12));
+            // A translation leaves the direction bit-for-bit as it was:
+            // repeated moves never drift it.
+            assert_eq!(direction, dir0);
+            assert_eq!(span, span0);
+        }
+        Guide::Point { .. } => panic!("expected a Line guide"),
+    }
+}
+
+#[test]
+fn transform_guide_moves_a_point() {
+    let mut doc = Document::new();
+    let id = doc.add_guide_point(Point3::new(1.0, 1.0, 1.0)).unwrap();
+    doc.transform_guide(id, &Transform::translation(Vec3::new(0.0, 0.0, -3.0)))
+        .expect("move");
+    match *doc.guide(id).unwrap() {
+        Guide::Point { position } => {
+            assert!(position.approx_eq(Point3::new(1.0, 1.0, -2.0), 1e-12));
+        }
+        Guide::Line { .. } => panic!("expected a Point guide"),
+    }
+}
+
+#[test]
+fn transform_guide_rotates_a_line_and_its_stretch_with_it() {
+    let (mut doc, id) = doc_with_tagged_segment_guide();
+    // A quarter turn about Z: X turns to Y, (0, 1, 0) to (-1, 0, 0).
+    let quarter =
+        Transform::rotation(Vec3::new(0.0, 0.0, 1.0), std::f64::consts::FRAC_PI_2).unwrap();
+    doc.transform_guide(id, &quarter).expect("rotate");
+    match *doc.guide(id).unwrap() {
+        Guide::Line {
+            origin,
+            direction,
+            span,
+        } => {
+            assert!(origin.approx_eq(Point3::new(-1.0, 0.0, 0.0), 1e-12));
+            assert!(direction.approx_eq(Vec3::new(0.0, 1.0, 0.0), 1e-12));
+            let (from, to) = (span.from.unwrap(), span.to.unwrap());
+            assert!((from + 1.0).abs() < 1e-12 && (to - 2.0).abs() < 1e-12);
+        }
+        Guide::Point { .. } => panic!("expected a Line guide"),
+    }
+    assert_eq!(doc.guide_tags(id), &[vec!["Rig".to_string()]], "tags stay");
+}
+
+#[test]
+fn transform_guide_undo_redo_restores_exact_geometry() {
+    let mut doc = Document::new();
+    let id = doc
+        .add_guide_line(Point3::new(0.1, 0.2, 0.3), Vec3::new(1.0, 1.0, 0.0))
+        .unwrap();
+    let before = *doc.guide(id).unwrap();
+    let pose = Transform::rotation(Vec3::new(0.0, 0.0, 1.0), 0.7)
+        .unwrap()
+        .then(&Transform::translation(Vec3::new(0.3, 0.0, 1.1)));
+    doc.transform_guide(id, &pose).unwrap();
+    let after = *doc.guide(id).unwrap();
+    assert_ne!(before, after);
+
+    doc.undo().unwrap();
+    assert_eq!(*doc.guide(id).unwrap(), before, "undo is bit-exact");
+    doc.redo().unwrap();
+    assert_eq!(*doc.guide(id).unwrap(), after, "redo is bit-exact");
+}
+
+#[test]
+fn transform_guide_refusals_leave_the_document_untouched() {
+    let mut doc = Document::new();
+    let id = doc.add_guide_point(Point3::new(1.0e308, 0.0, 0.0)).unwrap();
+    let gone = doc.add_guide_point(Point3::ORIGIN).unwrap();
+    doc.delete_guide(gone).unwrap();
+    // A handle from another document, past every slot `doc` has (a
+    // slotmap key carries no document identity: a low one would alias).
+    let mut other = Document::new();
+    for _ in 0..2 {
+        other.add_guide_point(Point3::ORIGIN).unwrap();
+    }
+    let stray = other.add_guide_point(Point3::ORIGIN).unwrap();
+    let hash = doc.state_hash();
+    let move_x = Transform::translation(Vec3::new(1.0, 0.0, 0.0));
+
+    assert_eq!(
+        doc.transform_guide(gone, &move_x),
+        Err(DocumentError::UnknownGuide)
+    );
+    assert_eq!(
+        doc.transform_guide(stray, &move_x),
+        Err(DocumentError::UnknownGuide)
+    );
+    assert!(matches!(
+        doc.transform_guide(id, &Transform::uniform_scale(0.0)),
+        Err(DocumentError::Transform(_))
+    ));
+    // Overflows the position: refused, never clamped (rule 4).
+    assert_eq!(
+        doc.transform_guide(id, &Transform::translation(Vec3::new(1.0e308, 0.0, 0.0))),
+        Err(DocumentError::DegenerateGuide)
+    );
+    assert_eq!(doc.state_hash(), hash, "document untouched on Err");
+    doc.undo().unwrap();
+    assert_eq!(
+        doc.guide_ids(),
+        vec![id, gone],
+        "no undo entry pushed on Err"
+    );
+}
+
+#[test]
+fn duplicate_guide_array_places_copies_along_the_step_with_the_tags() {
+    let (mut doc, src) = doc_with_tagged_segment_guide();
+    let source = *doc.guide(src).unwrap();
+    let step = Transform::translation(Vec3::new(0.0, 0.5, 0.0));
+    let (copies, change) = doc
+        .duplicate_guide_array(src, &step, NonZeroU32::new(3).unwrap())
+        .expect("copy");
+    assert_eq!(copies.len(), 3);
+    assert_eq!(change.guides_touched, copies);
+    assert_eq!(*doc.guide(src).unwrap(), source, "the source stays put");
+    for (k, &c) in copies.iter().enumerate() {
+        match *doc.guide(c).unwrap() {
+            Guide::Line {
+                origin,
+                direction,
+                span,
+            } => {
+                let y = 1.0 + 0.5 * (k as f64 + 1.0);
+                assert!(origin.approx_eq(Point3::new(0.0, y, 0.0), 1e-12));
+                assert_eq!(direction, Vec3::new(1.0, 0.0, 0.0));
+                assert_eq!(span, source_span(&source));
+            }
+            Guide::Point { .. } => panic!("expected a Line guide"),
+        }
+        assert_eq!(doc.guide_tags(c), &[vec!["Rig".to_string()]]);
+    }
+}
+
+fn source_span(g: &Guide) -> kernel::GuideSpan {
+    match *g {
+        Guide::Line { span, .. } => span,
+        Guide::Point { .. } => panic!("expected a Line guide"),
+    }
+}
+
+#[test]
+fn duplicate_guide_array_is_one_undo_step_keeping_ids() {
+    let mut doc = Document::new();
+    let src = doc.add_guide_point(Point3::ORIGIN).unwrap();
+    let (copies, _) = doc
+        .duplicate_guide_array(
+            src,
+            &Transform::translation(Vec3::new(1.0, 0.0, 0.0)),
+            NonZeroU32::new(4).unwrap(),
+        )
+        .unwrap();
+    assert_eq!(doc.guide_ids().len(), 5);
+
+    doc.undo().unwrap();
+    assert_eq!(doc.guide_ids(), vec![src], "one undo hides every copy");
+    doc.redo().unwrap();
+    let mut expected = copies.clone();
+    expected.insert(0, src);
+    assert_eq!(doc.guide_ids(), expected, "redo restores the same ids");
+}
+
+#[test]
+fn duplicate_guide_array_refusals_insert_nothing() {
+    let mut doc = Document::new();
+    let id = doc.add_guide_point(Point3::new(1.0e308, 0.0, 0.0)).unwrap();
+    let hash = doc.state_hash();
+    let one = NonZeroU32::new(1).unwrap();
+    assert!(matches!(
+        doc.duplicate_guide_array(id, &Transform::uniform_scale(0.0), one),
+        Err(DocumentError::Transform(_))
+    ));
+    // Copy 1 fits, copy 2 overflows: the whole array refuses.
+    assert_eq!(
+        doc.duplicate_guide_array(
+            id,
+            &Transform::translation(Vec3::new(0.6e308, 0.0, 0.0)),
+            NonZeroU32::new(2).unwrap(),
+        ),
+        Err(DocumentError::DegenerateGuide)
+    );
+    doc.delete_guide(id).unwrap();
+    assert_eq!(
+        doc.duplicate_guide_array(id, &Transform::translation(Vec3::ZERO), one),
+        Err(DocumentError::UnknownGuide)
+    );
+    doc.undo().unwrap();
+    assert_eq!(doc.state_hash(), hash, "document untouched on Err");
+    assert_eq!(doc.guide_ids(), vec![id]);
+}
+
+proptest! {
+    /// A rigid pose carries a guide line as a rigid body: a point `t`
+    /// along the line lands on the moved line at the same `t`, the
+    /// direction stays unit-length, and undo restores the exact geometry.
+    #[test]
+    fn transform_guide_is_rigid_and_undoes_exactly(
+        o in prop::array::uniform3(-10.0f64..10.0),
+        d in prop::array::uniform3(-1.0f64..1.0),
+        axis in prop::array::uniform3(-1.0f64..1.0),
+        angle in -6.3f64..6.3,
+        shift in prop::array::uniform3(-10.0f64..10.0),
+        t in -5.0f64..5.0,
+    ) {
+        let dir = Vec3::new(d[0], d[1], d[2]);
+        let axis = Vec3::new(axis[0], axis[1], axis[2]);
+        prop_assume!(dir.length() > 1e-3 && axis.length() > 1e-3);
+        let mut doc = Document::new();
+        let origin = Point3::new(o[0], o[1], o[2]);
+        let id = doc.add_guide_line(origin, dir).unwrap();
+        let before = *doc.guide(id).unwrap();
+        let Guide::Line { direction: d0, .. } = before else { unreachable!() };
+        let pose = Transform::rotation(axis, angle)
+            .unwrap()
+            .then(&Transform::translation(Vec3::new(shift[0], shift[1], shift[2])));
+
+        doc.transform_guide(id, &pose).unwrap();
+        let Guide::Line { origin: o1, direction: d1, .. } = *doc.guide(id).unwrap() else {
+            unreachable!()
+        };
+        prop_assert!((d1.length() - 1.0).abs() < 1e-12);
+        let on_line = pose.apply_point(origin + d0 * t);
+        prop_assert!(on_line.approx_eq(o1 + d1 * t, 1e-9));
+
+        doc.undo().unwrap();
+        prop_assert_eq!(*doc.guide(id).unwrap(), before);
+    }
+
+    /// Copy `k` of an array sits `k` steps from the source.
+    #[test]
+    fn duplicate_guide_array_spaces_copies_evenly(
+        p in prop::array::uniform3(-10.0f64..10.0),
+        s in prop::array::uniform3(-2.0f64..2.0),
+        count in 1u32..8,
+    ) {
+        let mut doc = Document::new();
+        let src = doc.add_guide_point(Point3::new(p[0], p[1], p[2])).unwrap();
+        let step = Vec3::new(s[0], s[1], s[2]);
+        let (copies, _) = doc
+            .duplicate_guide_array(src, &Transform::translation(step), NonZeroU32::new(count).unwrap())
+            .unwrap();
+        prop_assert_eq!(copies.len(), count as usize);
+        for (k, &c) in copies.iter().enumerate() {
+            let Guide::Point { position } = *doc.guide(c).unwrap() else { unreachable!() };
+            let expected = Point3::new(p[0], p[1], p[2]) + step * (k as f64 + 1.0);
+            prop_assert!(position.approx_eq(expected, 1e-9));
+        }
+    }
+}
+
 // ------------------------------------------------------------------ slice
 
 #[test]
@@ -5352,6 +6180,7 @@ fn replacing_ops_refuse_a_grouped_leaf_and_leave_the_document_untouched() {
                 ],
                 restore: None,
                 curves: Vec::new(),
+                edge_attrs: Vec::new(),
             },
         )
         .expect("imprint sub-face")
@@ -5431,6 +6260,7 @@ fn push_through_sub_face_punches_hole_and_round_trips() {
                 ],
                 restore: None,
                 curves: Vec::new(),
+                edge_attrs: Vec::new(),
             },
         )
         .expect("imprint sub-face")
@@ -5476,7 +6306,11 @@ fn duplicate_object_clones_geometry_at_offset_and_round_trips() {
     let offset = Vec3::new(3.0, 0.0, 0.0);
 
     let (root, change) = doc
-        .duplicate_node(NodeId::Object(a), &Transform::translation(offset))
+        .duplicate_node(
+            NodeId::Object(a),
+            &Transform::translation(offset),
+            kernel::LinkPolicy::Independent,
+        )
         .expect("duplicate object");
     let b = match root {
         NodeId::Object(id) => id,
@@ -5541,6 +6375,7 @@ fn duplicate_group_clones_the_whole_subtree() {
         .duplicate_node(
             NodeId::Group(g),
             &Transform::translation(Vec3::new(0.0, 5.0, 0.0)),
+            kernel::LinkPolicy::Independent,
         )
         .unwrap();
     let g2 = match root {
@@ -5577,7 +6412,11 @@ fn duplicate_instance_shares_the_definition_at_offset_pose() {
     let offset = Vec3::new(4.0, 0.0, 0.0);
 
     let (root, _) = doc
-        .duplicate_node(NodeId::Instance(inst), &Transform::translation(offset))
+        .duplicate_node(
+            NodeId::Instance(inst),
+            &Transform::translation(offset),
+            kernel::LinkPolicy::Independent,
+        )
         .unwrap();
     let inst2 = match root {
         NodeId::Instance(id) => id,
@@ -5608,32 +6447,53 @@ fn duplicate_instance_shares_the_definition_at_offset_pose() {
     );
 }
 
-/// A singular or reflecting placement, and a stale source, are refused — the
-/// document is left exactly as it was (a partial clone is rolled back).
+/// A singular placement and a stale source are refused — the document is
+/// left exactly as it was (a partial clone is rolled back). A reflecting
+/// placement is accepted and baked as a mirrored copy.
 #[test]
 fn duplicate_refuses_bad_placement_and_stale_node() {
     let mut doc = Document::new();
     let a = extrude_box(&mut doc, 0.0, 0.0, 1.0, 1.0, 0.0, 1.0);
 
     assert_eq!(
-        doc.duplicate_node(NodeId::Object(a), &Transform::uniform_scale(0.0))
-            .map(|_| ()),
+        doc.duplicate_node(
+            NodeId::Object(a),
+            &Transform::uniform_scale(0.0),
+            kernel::LinkPolicy::Independent
+        )
+        .map(|_| ()),
         Err(DocumentError::Transform(TransformError::Singular))
-    );
-    assert_eq!(
-        doc.duplicate_node(NodeId::Object(a), &Transform::uniform_scale(-1.0))
-            .map(|_| ()),
-        Err(DocumentError::Transform(TransformError::Reflection))
     );
     assert_eq!(
         doc.visible_object_ids(),
         vec![a],
         "a refused duplicate leaves the document untouched"
     );
+    // A mirrored duplicate is a legal placement: it bakes a mirrored copy.
+    let (copy, _) = doc
+        .duplicate_node(
+            NodeId::Object(a),
+            &Transform::uniform_scale(-1.0),
+            kernel::LinkPolicy::Independent,
+        )
+        .expect("a reflecting duplicate bakes");
+    let copy_id = match copy {
+        NodeId::Object(o) => o,
+        other => panic!("expected an object copy, got {other:?}"),
+    };
+    let co = doc.object(copy_id).unwrap();
+    assert!(co.validate().is_ok());
+    assert_eq!(co.watertight(), WatertightState::Watertight);
+    assert!(co.signed_volume() > 0.0);
+    doc.undo().expect("undo the mirrored duplicate");
     let bogus = ObjectId::default();
     assert_eq!(
-        doc.duplicate_node(NodeId::Object(bogus), &Transform::IDENTITY)
-            .map(|_| ()),
+        doc.duplicate_node(
+            NodeId::Object(bogus),
+            &Transform::IDENTITY,
+            kernel::LinkPolicy::Independent
+        )
+        .map(|_| ()),
         Err(DocumentError::UnknownObject)
     );
 
@@ -5665,6 +6525,7 @@ fn array_copy_places_evenly_spaced_copies_as_one_undo_step() {
             &[NodeId::Object(a)],
             &Transform::translation(step),
             NonZeroU32::new(3).unwrap(),
+            kernel::LinkPolicy::Independent,
         )
         .expect("array duplicate");
     assert_eq!(roots.len(), 3, "three copies for count = 3");
@@ -5726,6 +6587,7 @@ fn array_copy_count_one_matches_single_duplicate() {
             &[NodeId::Object(a)],
             &Transform::translation(step),
             NonZeroU32::new(1).unwrap(),
+            kernel::LinkPolicy::Independent,
         )
         .expect("array duplicate of one");
     assert_eq!(roots.len(), 1);
@@ -5755,6 +6617,7 @@ fn array_copy_of_instances_shares_the_definition() {
             &[NodeId::Instance(inst), NodeId::Object(free)],
             &Transform::translation(step),
             NonZeroU32::new(2).unwrap(),
+            kernel::LinkPolicy::Independent,
         )
         .expect("mixed array duplicate");
     assert_eq!(roots.len(), 4, "two copies of each of two sources");
@@ -5814,35 +6677,57 @@ fn array_copy_rejects_bad_input_without_touching_the_document() {
     let t = Transform::translation(Vec3::new(1.0, 0.0, 0.0));
 
     assert_eq!(
-        doc.duplicate_nodes_array(&[], &t, one).map(|_| ()),
+        doc.duplicate_nodes_array(&[], &t, one, kernel::LinkPolicy::Independent)
+            .map(|_| ()),
         Err(DocumentError::EmptySelection)
     );
     assert_eq!(
-        doc.duplicate_nodes_array(&[NodeId::Object(a), NodeId::Object(a)], &t, one)
-            .map(|_| ()),
+        doc.duplicate_nodes_array(
+            &[NodeId::Object(a), NodeId::Object(a)],
+            &t,
+            one,
+            kernel::LinkPolicy::Independent
+        )
+        .map(|_| ()),
         Err(DocumentError::DuplicateMember)
     );
     let bogus = ObjectId::default();
     assert_eq!(
-        doc.duplicate_nodes_array(&[NodeId::Object(bogus)], &t, one)
-            .map(|_| ()),
+        doc.duplicate_nodes_array(
+            &[NodeId::Object(bogus)],
+            &t,
+            one,
+            kernel::LinkPolicy::Independent
+        )
+        .map(|_| ()),
         Err(DocumentError::UnknownObject)
     );
     assert_eq!(
-        doc.duplicate_nodes_array(&[NodeId::Object(a)], &Transform::uniform_scale(0.0), one)
-            .map(|_| ()),
+        doc.duplicate_nodes_array(
+            &[NodeId::Object(a)],
+            &Transform::uniform_scale(0.0),
+            one,
+            kernel::LinkPolicy::Independent
+        )
+        .map(|_| ()),
         Err(DocumentError::Transform(TransformError::Singular))
-    );
-    assert_eq!(
-        doc.duplicate_nodes_array(&[NodeId::Object(a)], &Transform::uniform_scale(-1.0), one)
-            .map(|_| ()),
-        Err(DocumentError::Transform(TransformError::Reflection))
     );
     assert_eq!(
         doc.visible_object_ids(),
         vec![a],
         "refused arrays leave the document untouched"
     );
+    // A reflecting array step bakes mirrored copies.
+    let made = doc
+        .duplicate_nodes_array(
+            &[NodeId::Object(a)],
+            &Transform::uniform_scale(-1.0),
+            one,
+            kernel::LinkPolicy::Independent,
+        )
+        .expect("a reflecting array bakes");
+    assert!(!made.0.is_empty());
+    doc.undo().expect("undo the mirrored array");
 
     // No refused call left a stray action behind.
     doc.undo().expect("undo the extrude");
@@ -5872,7 +6757,7 @@ proptest! {
             .duplicate_nodes_array(
                 &[NodeId::Object(a)],
                 &Transform::translation(step),
-                NonZeroU32::new(count).unwrap(),
+                NonZeroU32::new(count).unwrap(), kernel::LinkPolicy::Independent,
             )
             .expect("array duplicate");
         prop_assert_eq!(roots.len(), count as usize);
@@ -5946,6 +6831,7 @@ fn net_zero_tag_pair_restores_the_hash_but_not_the_generation() {
         &[NodeId::Object(a)],
         &Transform::translation(Vec3::new(2.0, 0.0, 0.0)),
         NonZeroU32::new(1).unwrap(),
+        kernel::LinkPolicy::Independent,
     )
     .expect("copy commit");
     let hash = doc.state_hash();
@@ -6005,6 +6891,7 @@ fn torture_mode_toggles_and_passes_a_real_op_sequence() {
         .duplicate_node(
             NodeId::Object(u),
             &Transform::translation(Vec3::new(6.0, 0.0, 0.0)),
+            kernel::LinkPolicy::Independent,
         )
         .expect("duplicate under torture")
         .0;
@@ -6303,7 +7190,11 @@ fn duplicate_nested_group_clones_structure_instances_and_attributes() {
     let offset = Vec3::new(0.0, 10.0, 0.0);
     let hash_before = doc.state_hash();
     let (root, _) = doc
-        .duplicate_node(NodeId::Group(outer), &Transform::translation(offset))
+        .duplicate_node(
+            NodeId::Group(outer),
+            &Transform::translation(offset),
+            kernel::LinkPolicy::Independent,
+        )
         .expect("duplicate nested group");
     let hash_after = doc.state_hash();
     let outer2 = match root {
@@ -6398,7 +7289,7 @@ proptest! {
         let hash_before = doc.state_hash();
         doc.duplicate_node(
             NodeId::Group(outer),
-            &Transform::translation(Vec3::new(dx, dy, dz)),
+            &Transform::translation(Vec3::new(dx, dy, dz)), kernel::LinkPolicy::Independent,
         )
         .expect("duplicate nested group");
         let hash_after = doc.state_hash();
@@ -6935,6 +7826,7 @@ fn boolean_nodes_refuses_leaky_leaves_naming_the_side() {
         section: None,
         view_style: None,
         extra: Default::default(),
+        geo: None,
     };
     let (report, change) = doc.ingest(scene, vec![]).unwrap();
     assert_eq!(report.leaky, 1);
@@ -7441,7 +8333,7 @@ fn follow_me_makes_a_sphere_from_perpendicular_circles() {
         let n = 32;
         let pt = |i: usize| {
             let a = (i % n) as f64 / n as f64 * std::f64::consts::TAU;
-            Point3::new(0.0, 0.1 * a.cos(), 0.1 + 0.1 * a.sin())
+            Point3::new(0.0, 0.1 * trig::cos(a), 0.1 + 0.1 * trig::sin(a))
         };
         for i in 0..n {
             sk.add_segment(pt(i), pt(i + 1)).unwrap();
@@ -8070,6 +8962,189 @@ fn follow_me_merged_consumes_the_path_solid_in_one_undo_step() {
 }
 
 #[test]
+fn follow_me_merged_cuts_a_rebate_from_a_profile_at_a_corner_of_the_board() {
+    // Issue #75: a board 13 3/8" x 7 3/4" x 3/4", its front face (z = 0)
+    // the path, and a 6 mm square drawn on the end face's plane (x = 0) at
+    // the front face's corner, over the board. Merged, the sweep cuts a 6 x
+    // 6 mm rebate all the way around the front face, in one undo step.
+    let (l, w, t, a) = (0.339725, 0.19685, 0.01905, 0.006);
+    let mut doc = Document::new();
+    let board = extrude_box(&mut doc, 0.0, 0.0, l, w, -t, t);
+    let front = {
+        let obj = doc.object(board).expect("board live");
+        obj.faces()
+            .iter()
+            .find(|(_, f)| f.plane.normal().z > 0.9)
+            .map(|(id, _)| id)
+            .expect("front face")
+    };
+    let ps = doc.add_sketch(profile_plane_x(0.0));
+    draw_profile_rect(&mut doc, ps, 0.0, 0.0, -a, a, 0.0);
+    let region = only_region(&doc, ps);
+    let path = kernel::FollowMePath::FaceLoop {
+        object: board,
+        face: front,
+    };
+    let (merged, _) = doc
+        .follow_me_merged(ps, region, &path, None)
+        .expect("the rebate sweeps and carves");
+    let obj = doc.object(merged).expect("merged live");
+    obj.validate().expect("valid");
+    assert_eq!(obj.watertight(), WatertightState::Watertight);
+    let rebate = (l * w - (l - 2.0 * a) * (w - 2.0 * a)) * a;
+    let v = enclosed_volume(obj);
+    assert!(
+        (v - (l * w * t - rebate)).abs() < 1e-12,
+        "volume {v}, expected {}",
+        l * w * t - rebate
+    );
+    assert_eq!(
+        doc.visible_object_ids(),
+        vec![merged],
+        "one gesture, one solid"
+    );
+    doc.undo().expect("undo the rebate");
+    assert!(doc.visible_object_ids().contains(&board), "board restored");
+    assert!(!doc.visible_object_ids().contains(&merged));
+}
+
+/// The #75 playtest board, 0.34 x 0.20 x 0.019 m, flat on the ground, with
+/// a 6 mm square drawn ON its x = 0 end face at the top corner `y0..y0+a`
+/// (the Rectangle tool's draw-on-face path): the imprint splits the end
+/// face and leaves the top face's outer loop with a fifth, collinear
+/// vertex where the imprint's top edge meets the board edge. Returns the
+/// document, the board, its top face, and the imprinted end-face region.
+fn board_with_end_imprint(y0: f64) -> (Document, kernel::ObjectId, FaceId, FaceId) {
+    let (l, w, t, a) = (0.34, 0.20, 0.019, 0.006);
+    let mut doc = Document::new();
+    let board = extrude_box(&mut doc, 0.0, 0.0, l, w, 0.0, t);
+    let end = {
+        let obj = doc.object(board).expect("board live");
+        obj.faces()
+            .values()
+            .find(|f| f.plane.normal().x < -0.9)
+            .map(|f| f.plane)
+            .expect("end face")
+    };
+    let mut objects = doc.draft_participants(end, None);
+    if !objects.contains(&board) {
+        objects.push(board);
+    }
+    let ring = [
+        Point3::new(0.0, y0, t - a),
+        Point3::new(0.0, y0 + a, t - a),
+        Point3::new(0.0, y0 + a, t),
+        Point3::new(0.0, y0, t),
+    ];
+    doc.draft(end, None, &objects, "Rectangle", |w| {
+        for i in 0..4 {
+            w.add_segment(ring[i], ring[(i + 1) % 4])?;
+        }
+        Ok(())
+    })
+    .expect("the rectangle imprints the end face");
+    let obj = doc.object(board).expect("board live after the imprint");
+    let top = obj
+        .faces()
+        .iter()
+        .find(|(_, f)| {
+            f.plane.normal().z > 0.9 && f.plane.signed_distance(Point3::ORIGIN).abs() > 0.01
+        })
+        .map(|(id, _)| id)
+        .expect("top face");
+    assert_eq!(
+        obj.loop_positions(obj.faces()[top].outer_loop).count(),
+        5,
+        "the imprint leaves a collinear vertex on the top face's rim"
+    );
+    let mid = Point3::new(0.0, y0 + a / 2.0, t - a / 2.0);
+    let imprint = obj
+        .faces()
+        .iter()
+        .find(|(_, f)| {
+            f.plane.normal().x < -0.9 && {
+                let ring: Vec<Point3> = obj.loop_positions(f.outer_loop).collect();
+                ring.len() == 4 && ring.iter().all(|p| (p.y - mid.y).abs() <= a / 2.0 + 1e-9)
+            }
+        })
+        .map(|(id, _)| id)
+        .expect("the imprinted end-face square");
+    (doc, board, top, imprint)
+}
+
+#[test]
+fn follow_me_rebate_still_sweeps_after_an_imprint_on_the_end_face() {
+    // Playtest of #75: imprinting a 6 mm square on the board's end face
+    // first leaves the top face's rim with a collinear vertex (zero turn).
+    // That vertex is no corner — the path's geometry is unchanged — so a
+    // 6 mm rebate profile at either top corner of either end still sweeps
+    // around the top face and carves the same rebate a clean board gets:
+    // a detached-sketch profile through `follow_me_merged`, and the
+    // imprinted end-face square itself through `follow_me_face`.
+    let (l, w, t, a) = (0.34, 0.20, 0.019, 0.006);
+    let expected = l * w * t - (l * w - (l - 2.0 * a) * (w - 2.0 * a)) * a;
+    let check = |doc: &Document, merged: kernel::ObjectId, what: &str| {
+        let obj = doc.object(merged).expect("merged live");
+        obj.validate()
+            .unwrap_or_else(|e| panic!("{what}: invalid: {e:?}"));
+        assert_eq!(obj.watertight(), WatertightState::Watertight, "{what}");
+        let v = enclosed_volume(obj);
+        assert!(
+            (v - expected).abs() < 1e-12,
+            "{what}: volume {v}, expected {expected}"
+        );
+        assert_eq!(doc.visible_object_ids(), vec![merged], "{what}: one solid");
+    };
+    for imprint_y in [0.0, w - a] {
+        // A detached 6 mm square at every top corner, on the end plane
+        // through it, hanging over the board.
+        for (x, y0) in [(0.0, 0.0), (0.0, w - a), (l, 0.0), (l, w - a)] {
+            let what = format!("imprint at y {imprint_y}, detached profile at ({x}, {y0})");
+            let (mut doc, board, top, _) = board_with_end_imprint(imprint_y);
+            let plane =
+                Plane::from_point_normal(Point3::new(x, 0.0, 0.0), Vec3::new(1.0, 0.0, 0.0))
+                    .expect("end plane");
+            let ring = [
+                Point3::new(x, y0, t - a),
+                Point3::new(x, y0 + a, t - a),
+                Point3::new(x, y0 + a, t),
+                Point3::new(x, y0, t),
+            ];
+            let (report, _) = doc
+                .draft_detached_new(plane, None, "Rectangle", |w| {
+                    for i in 0..4 {
+                        w.add_segment(ring[i], ring[(i + 1) % 4])?;
+                    }
+                    Ok(())
+                })
+                .expect("detached profile");
+            let ps = report.sketches[0];
+            let region = only_region(&doc, ps);
+            let path = kernel::FollowMePath::FaceLoop {
+                object: board,
+                face: top,
+            };
+            let (merged, _) = doc
+                .follow_me_merged(ps, region, &path, None)
+                .unwrap_or_else(|e| panic!("{what}: {e:?}"));
+            check(&doc, merged, &what);
+        }
+        // The imprinted square itself as the profile (a face of the board,
+        // so the sweep merges with it).
+        let what = format!("imprinted end-face profile at y {imprint_y}");
+        let (mut doc, board, top, imprint) = board_with_end_imprint(imprint_y);
+        let path = kernel::FollowMePath::FaceLoop {
+            object: board,
+            face: top,
+        };
+        let (merged, _) = doc
+            .follow_me_face(board, imprint, &path, None)
+            .unwrap_or_else(|e| panic!("{what}: {e:?}"));
+        check(&doc, merged, &what);
+    }
+}
+
+#[test]
 fn follow_me_sweeps_around_an_instanced_face_in_world_space() {
     // design §2e: a face loop reached through a component instance rides
     // the instance's pose into world space. Box → component; the original
@@ -8120,7 +9195,7 @@ fn follow_me_sweeps_around_an_instanced_face_in_world_space() {
         );
     }
 
-    // A reflected pose refuses typed.
+    // A reflected pose sweeps too.
     let mirror = Transform::from_affine(&[
         -1.0, 0.0, 0.0, 20.0, //
         0.0, 1.0, 0.0, 0.0, //
@@ -8130,7 +9205,7 @@ fn follow_me_sweeps_around_an_instanced_face_in_world_space() {
     let ps2 = doc.add_sketch(profile_plane_x(18.0));
     draw_profile_rect(&mut doc, ps2, 18.0, -0.3, 1.0, 0.0, 1.3);
     let r2 = only_region(&doc, ps2);
-    let err = doc
+    let (mirrored_sweep, _) = doc
         .follow_me(
             ps2,
             r2,
@@ -8140,11 +9215,10 @@ fn follow_me_sweeps_around_an_instanced_face_in_world_space() {
                 face: top,
             },
         )
-        .unwrap_err();
-    assert!(matches!(
-        err,
-        DocumentError::Transform(kernel::TransformError::Reflection)
-    ));
+        .expect("a mirrored instance's face loop sweeps");
+    let ms = doc.object(mirrored_sweep).expect("mirrored molding live");
+    assert_eq!(ms.watertight(), WatertightState::Watertight);
+    assert!(ms.signed_volume() > 0.0, "mirrored sweep is outward");
 }
 
 #[test]
@@ -9220,9 +10294,10 @@ fn radial_dimension_non_similarity_detach_freezes_the_whole_record_coherently() 
 /// sibling anchor configuration rides the SAME `t` in the same step: `a2`
 /// on `obj_a` (touched), `b2` free-floating (never touched) — the
 /// one-anchor case, which 01e852e's unconditional carry gets wrong (it
-/// would still apply `t.apply_vector`/`t.apply_plane` to the OLD
-/// `offset2`/`plane2` even though only one endpoint moved, producing a
-/// placement no longer perpendicular to the new, partially-moved baseline).
+/// would still apply `t.apply_vector` and the plane map (then named
+/// `apply_plane`) to the OLD `offset2`/`plane2` even though only one
+/// endpoint moved, producing a placement no longer perpendicular to the
+/// new, partially-moved baseline).
 #[test]
 fn linear_dimension_rigid_both_anchor_case_is_exact() {
     let mut doc = Document::new();
@@ -9271,7 +10346,7 @@ fn linear_dimension_rigid_both_anchor_case_is_exact() {
     let expected_a = t.apply_point(a0);
     let expected_b = t.apply_point(b0);
     let expected_offset = t.apply_vector(offset0);
-    let expected_plane = t.apply_plane(&plane0).unwrap();
+    let expected_plane = t.apply_plane_keeping_side(&plane0).unwrap();
     match doc.annotation(id).unwrap() {
         Annotation::LinearDimension {
             a,

@@ -522,8 +522,12 @@ fn outside_operands_refuse_under_a_group_frame() {
         DocumentError::ExplodeSessionScope
     );
     assert_eq!(
-        doc.duplicate_node(NodeId::Object(outside), &kernel::Transform::IDENTITY)
-            .unwrap_err(),
+        doc.duplicate_node(
+            NodeId::Object(outside),
+            &kernel::Transform::IDENTITY,
+            kernel::LinkPolicy::Independent
+        )
+        .unwrap_err(),
         DocumentError::ExplodeSessionScope
     );
     // The member itself duplicates fine, and the copy folds in.
@@ -531,6 +535,7 @@ fn outside_operands_refuse_under_a_group_frame() {
         .duplicate_node(
             NodeId::Object(a),
             &kernel::Transform::translation(kernel::Vec3::new(10.0, 0.0, 0.0)),
+            kernel::LinkPolicy::Independent,
         )
         .expect("duplicate a member");
     doc.close_group_session().expect("close");
@@ -780,6 +785,7 @@ fn ungrouping_a_nested_member_group_releases_its_contents_into_the_session() {
         .duplicate_node(
             NodeId::Object(a),
             &kernel::Transform::translation(kernel::Vec3::new(10.0, 0.0, 0.0)),
+            kernel::LinkPolicy::Independent,
         )
         .expect("released member duplicates mid-session");
 
@@ -862,6 +868,7 @@ fn nested_member_internals_stay_operable_under_a_group_frame() {
         .duplicate_node(
             NodeId::Object(a),
             &kernel::Transform::translation(kernel::Vec3::new(5.0, 0.0, 0.0)),
+            kernel::LinkPolicy::Independent,
         )
         .expect("nested member internals duplicate mid-session");
     match copy {

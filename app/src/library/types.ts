@@ -6,7 +6,7 @@
  * categories: every item is a `.hew` file; the category only decides where
  * it lists and which action is primary (Insert for components/materials,
  * Open for models). */
-export type LibraryCategory = 'component' | 'material' | 'model'
+export type LibraryCategory = 'component' | 'material' | 'model' | 'profile'
 
 /** The `hew.library` metadata carried in an item file's own document
  * attribute dictionary — the single source of truth (no separate database).
@@ -27,6 +27,30 @@ export interface LibraryItemMeta {
   savedAt?: string
   /** The document the item was saved out of (display only). */
   sourceDoc?: string
+  /** The remote note (`hew.library` / `remote`, shared-library-sources
+   * design 6.5): the source the item was fetched from. Absent for an item
+   * that did not come from a source. */
+  remote?: LibraryRemoteNote
+}
+
+/** The `hew.library` / `remote` note on a fetched item (design 6.5). */
+export interface LibraryRemoteNote {
+  /** Canonical source reference, e.g. `github:owner/repo`. */
+  source: string
+  /** The source's display name. */
+  name: string
+  /** The item's path in the source's index. */
+  path: string
+  /** SHA-256 of the file as published. */
+  sha256: string
+  /** The commit read from, for git sources only. */
+  commit?: string
+  /** The license shown when the item was taken. */
+  license?: string
+  /** ISO-8601 time the item was fetched. */
+  fetchedAt: string
+  /** True once the item was edited here, so it no longer matches the source. */
+  edited: boolean
 }
 
 /** One material row of a manifest summary (mirrors the wasm
@@ -64,6 +88,8 @@ export interface LibraryItemSummary {
   /** namespace → key → JSON value; `hew.library` metadata lives here. */
   doc_attrs: Record<string, Record<string, unknown>>
   material_entries: LibraryMaterialSummary[]
+  /** The file is one open drawn chain and nothing else: a profile. */
+  profile_chain_only: boolean
 }
 
 /** A file in the library folder, as the storage seam lists it. */

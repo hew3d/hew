@@ -54,6 +54,25 @@ const PRIVACY_URL = 'https://hew3d.com/privacy/bug-reports/'
 /** Keep a GitHub issue URL well under browsers' ~8000-char practical limit. */
 const MAX_ISSUE_URL_LENGTH = 6000
 
+/** Remembers whether "Let me know what happens" is ticked (design §6.5). */
+export const FOLLOW_PREF_KEY = 'hew.report.follow'
+
+function loadFollowPref(): boolean {
+  try {
+    return localStorage.getItem(FOLLOW_PREF_KEY) !== '0'
+  } catch {
+    return true
+  }
+}
+
+function saveFollowPref(on: boolean): void {
+  try {
+    localStorage.setItem(FOLLOW_PREF_KEY, on ? '1' : '0')
+  } catch {
+    /* best effort */
+  }
+}
+
 const DESCRIPTION_MIN = 10
 const DESCRIPTION_MAX = 10_000
 
@@ -70,7 +89,7 @@ const ROW_ORDER: { key: ReportRowKey; label: MessageDescriptor }[] = [
 type SendState =
   | { kind: 'idle' }
   | { kind: 'sending' }
-  | { kind: 'sent'; id: string }
+  | { kind: 'sent'; id: string; following: boolean }
   | { kind: 'failed'; kind_: ReportErrorKind; message: string }
 
 type SaveState =
@@ -312,7 +331,12 @@ function formatBytes(n: number): string {
 
 /** Open an external URL the OS-appropriate way — the opener plugin on
  *  desktop (App.tsx's user-guide link does the same), a new tab on the web. */
-function openExternal(url: string): void {
+/** The first 200 code points of `s`; never cuts an emoji's surrogate pair in half. */
+export function excerptOf(s: string): string {
+  return Array.from(s).slice(0, 200).join('')
+}
+
+export function openExternal(url: string): void {
   if (isTauri) {
     void import('@tauri-apps/plugin-opener')
       .then(({ openUrl }) => openUrl(url))
@@ -395,6 +419,7 @@ export function ReportBugDialog({ scene, documentName, crash, onClose }: ReportB
   // Percent of the compressed report uploaded so far, or null before the
   // first piece lands; a large report goes up in many pieces (design §4).
   const [sendPercent, setSendPercent] = useState<number | null>(null)
+  const [follow, setFollow] = useState(loadFollowPref)
   // Say what happened to a save: a file written with no confirmation is the
   // "where did it go?" problem this dialog replaces. A cancelled picker
   // returns silently to the form (`idle`) rather than reporting anything —
@@ -614,12 +639,21 @@ export function ReportBugDialog({ scene, documentName, crash, onClose }: ReportB
           }
           return
         }
-        const result = await submitReport(upload.gzip, (p) => {
-          if (mountedRef.current && p.totalBytes > 0) {
-            setSendPercent(Math.floor((p.sentBytes * 100) / p.totalBytes))
-          }
-        })
-        if (mountedRef.current) setSendState({ kind: 'sent', id: result.id })
+        const firstLine = description.trim().split(/\r?\n/, 1)[0] ?? ''
+        const result = await submitReport(
+          upload.gzip,
+          (p) => {
+            if (mountedRef.current && p.totalBytes > 0) {
+              setSendPercent(Math.floor((p.sentBytes * 100) / p.totalBytes))
+            }
+          },
+          {
+            follow,
+            excerpt: excerptOf(firstLine),
+            fileName: flags.failedFile && content.failedOpen != null ? content.failedOpen.name : null,
+          },
+        )
+        if (mountedRef.current) setSendState({ kind: 'sent', id: result.id, following: result.following })
       } catch (err) {
         if (!mountedRef.current) return
         const { kind, message } = reportErrorMessage(err)
@@ -859,6 +893,30 @@ export function ReportBugDialog({ scene, documentName, crash, onClose }: ReportB
           </>
         )}
 
+        {sendAvailable && sendState.kind !== 'sent' && saveState.kind !== 'saved' && (
+          <label style={{ ...ROW_STYLE, borderBottom: 'none', marginTop: '14px', cursor: 'pointer' }}>
+            <input
+              type="checkbox"
+              checked={follow}
+              disabled={busy}
+              data-testid="report-follow-checkbox"
+              onChange={(e) => {
+                setFollow(e.target.checked)
+                saveFollowPref(e.target.checked)
+              }}
+              style={{ marginTop: '2px' }}
+            />
+            <span style={{ flex: 1 }}>
+              <span style={{ ...ROW_LABEL_STYLE, display: 'block', fontWeight: 600 }}>
+                {t`Let me know what happens with this report`}
+              </span>
+              <span style={{ ...HINT_STYLE, display: 'block' }}>
+                {t`Hew keeps a private key for this report on this computer and checks for a reply when it starts. No account, no email. You can stop any time under Help ▸ Sent Reports.`}
+              </span>
+            </span>
+          </label>
+        )}
+
         {sendState.kind === 'failed' && (
           <div style={ERROR_STYLE} role="alert">
             {sendState.message}
@@ -881,6 +939,13 @@ export function ReportBugDialog({ scene, documentName, crash, onClose }: ReportB
                 {copied ? t`Copied` : t`Copy`}
               </button>
             </div>
+            {sendState.following && (
+              <div style={{ marginTop: '8px' }} data-testid="report-follow-confirmation">
+                <Trans>
+                  You’ll find replies and the report’s status under <strong>Help ▸ Sent Reports…</strong>
+                </Trans>
+              </div>
+            )}
             <div style={{ marginTop: '8px' }}>
               <button type="button" style={SECONDARY_BUTTON_STYLE} onClick={handleOpenGithubIssue}>
                 {t`Also open a public GitHub issue`}

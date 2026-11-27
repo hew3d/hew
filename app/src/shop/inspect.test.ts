@@ -29,6 +29,7 @@ function makeScene(overrides: Partial<{
   instance_pose: Record<string, ArrayLike<number>>
   instance_expanded_members: Record<string, bigint[]>
   instance_expanded_local_poses: Record<string, Float64Array>
+  instance_sketch_bounds: Record<string, number[]>
 }> = {}): WasmScene {
   return {
     object_name: (id: bigint) => overrides.object_name?.[String(id)],
@@ -55,6 +56,7 @@ function makeScene(overrides: Partial<{
     instance_pose: (id: bigint) => overrides.instance_pose?.[String(id)],
     instance_expanded_members: (id: bigint) => overrides.instance_expanded_members?.[String(id)] ?? [],
     instance_expanded_local_poses: (id: bigint) => overrides.instance_expanded_local_poses?.[String(id)] ?? new Float64Array(),
+    instance_sketch_bounds: (id: bigint) => Float64Array.from(overrides.instance_sketch_bounds?.[String(id)] ?? []),
   } as unknown as WasmScene
 }
 
@@ -163,6 +165,19 @@ describe('resolveInspect — node', () => {
       expect(result.label).toBe('Object 2')
       expect(result.tagLabel).toBeNull()
     }
+  })
+
+  it('sizes a component from its solids only: a line drawn outside the part is not part of it', () => {
+    const scene = makeScene({
+      instance_pose: { '7': [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0] },
+      instance_expanded_members: { '7': [1n] },
+      instance_expanded_local_poses: { '7': Float64Array.from([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0]) },
+      object_mesh: { '1': new Float32Array([0, 0, 0, 0.5, 0.25, 0.125]) },
+      // A line running 5 m past the part.
+      instance_sketch_bounds: { '7': [0, 0, 0, 5, 0.25, 0.1] },
+    })
+    const result = resolveInspect(scene, { kind: 'instance', id: 7n }, null)
+    expect(result).toMatchObject({ kind: 'node', extentsM: [0.5, 0.25, 0.125] })
   })
 
   it('extentsM is null for a node whose mesh contributes nothing (e.g. deleted-but-still-selected)', () => {

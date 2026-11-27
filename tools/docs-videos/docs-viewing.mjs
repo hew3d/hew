@@ -1,6 +1,6 @@
 // Docs-fleet clip: Viewing your model chapter (site/src/content/learn/viewing.md).
 // Silent, caption-carried, READ-ONLY (no geometry is touched). Beats: orbit,
-// pan, zoom with the mouse, the Top/Front/Iso viewport chips, Camera > Zoom
+// pan, zoom with the mouse, the view die (click a face or corner), Camera > Zoom
 // Extents. ~51 s.
 //   node docs-viewing.mjs   (DEBUG_SHOTS=1 for per-beat stills)
 
@@ -32,19 +32,11 @@ const pan = async (dx, dy, ms = 1400) => {
   await page.mouse.up({ button: 'right' });
   pos = { x: x1, y: y1 };
 };
-// Glide the cursor to a real <button> (viewport chips, menu triggers) by
-// its accessible name, then click — visible travel, not a teleporting cursor.
-const clickButton = async (name, exact = true) => {
-  const box = await page.getByRole('button', { name, exact }).boundingBox();
-  await glide(box.x + box.width / 2, box.y + box.height / 2, 380);
-  await h.click();
-};
-
 await h.showMark();
 await h.caption('Camera navigation never interrupts your work.', 700);
 await page.waitForTimeout(900);
 h.mark('scene-start');
-await h.expectBadge('2 objects', 'loaded');
+await h.expectBadge('4 objects', 'loaded');
 
 // beat 1 — orbit (middle-button drag)
 await h.caption('Orbit — drag with the middle mouse button.');
@@ -71,23 +63,23 @@ for (let i = 0; i < 7; i++) {
 h.mark('zoom');
 await page.waitForTimeout(1300); await shot(3);
 
-// beat 4 — standard views: the viewport's top-left Top/Front/Iso chips
-await h.caption("The viewport's top-left chips jump straight to Top, Front, or Iso.");
-await clickButton('Top');
-await page.waitForTimeout(1300); await shot(4);
-await clickButton('Front');
-await page.waitForTimeout(1300); await shot(5);
-await clickButton('Iso');
-h.mark('standard-views');
-await page.waitForTimeout(1300); await shot(6);
-
-// beat 5 — Camera > Zoom Extents
+// beat 4 — Camera > Zoom Extents
 await h.caption('Camera ▸ Zoom Extents frames everything — the fastest way back.');
 await page.getByTestId('menu-bar').getByRole('button', { name: 'Camera' }).click();
 await page.waitForTimeout(300); await shot(7);
 await page.getByTestId('menu-bar').getByText('Zoom Extents', { exact: true }).click();
 h.mark('zoom-extents');
 await page.waitForTimeout(1300); await shot(8);
+
+// beat 5 — standard views (after Zoom Extents, so the model is in frame): click the view die in the top-right corner
+await h.caption('Click a face of the die in the viewport corner to look straight at it.');
+await h.dieFace('top');
+await page.waitForTimeout(1300 - 900); await shot(4);
+await h.dieFace('front');
+await page.waitForTimeout(1300 - 900); await shot(5);
+await h.dieFacet('1,-1,1');
+h.mark('standard-views');
+await page.waitForTimeout(1300 - 900); await shot(6);
 
 await h.caption('hew3d.com/learn/viewing', 300);
 await page.waitForTimeout(2000);

@@ -1,0 +1,497 @@
+{
+  "frames": [
+    {
+      "compare": "/result/profile",
+      "note": "the handshake",
+      "request": {
+        "id": 0,
+        "jsonrpc": "2.0",
+        "method": "hew.meta.hello",
+        "params": {
+          "protocol": 1
+        }
+      },
+      "response": "core"
+    },
+    {
+      "note": "attach binds the connection",
+      "request": {
+        "id": 1,
+        "jsonrpc": "2.0",
+        "method": "hew.doc.attach",
+        "params": {}
+      },
+      "response": {
+        "id": 1,
+        "jsonrpc": "2.0",
+        "result": {}
+      }
+    },
+    {
+      "compare": "/result/label",
+      "note": "box a",
+      "request": {
+        "id": 2,
+        "jsonrpc": "2.0",
+        "method": "hew.doc.transact",
+        "params": {
+          "commands": [
+            {
+              "as": "r",
+              "method": "hew.sketch.draw_rect",
+              "params": {
+                "corner_a": [
+                  0.0,
+                  0.0,
+                  0.0
+                ],
+                "corner_b": [
+                  1.0,
+                  1.0,
+                  0.0
+                ],
+                "plane": {
+                  "ground": true
+                }
+              }
+            },
+            {
+              "method": "hew.solid.extrude",
+              "params": {
+                "distance": 1.0,
+                "region": {
+                  "$ref": "r#/region_id"
+                }
+              }
+            }
+          ],
+          "label": "a"
+        }
+      },
+      "response": "a"
+    },
+    {
+      "compare": "/result/label",
+      "note": "box b",
+      "request": {
+        "id": 3,
+        "jsonrpc": "2.0",
+        "method": "hew.doc.transact",
+        "params": {
+          "commands": [
+            {
+              "as": "r",
+              "method": "hew.sketch.draw_rect",
+              "params": {
+                "corner_a": [
+                  2.0,
+                  0.0,
+                  0.0
+                ],
+                "corner_b": [
+                  3.0,
+                  1.0,
+                  0.0
+                ],
+                "plane": {
+                  "ground": true
+                }
+              }
+            },
+            {
+              "method": "hew.solid.extrude",
+              "params": {
+                "distance": 1.0,
+                "region": {
+                  "$ref": "r#/region_id"
+                }
+              }
+            }
+          ],
+          "label": "b"
+        }
+      },
+      "response": "b"
+    },
+    {
+      "compare": "/result/label",
+      "note": "box c",
+      "request": {
+        "id": 4,
+        "jsonrpc": "2.0",
+        "method": "hew.doc.transact",
+        "params": {
+          "commands": [
+            {
+              "as": "r",
+              "method": "hew.sketch.draw_rect",
+              "params": {
+                "corner_a": [
+                  4.0,
+                  0.0,
+                  0.0
+                ],
+                "corner_b": [
+                  5.0,
+                  1.0,
+                  0.0
+                ],
+                "plane": {
+                  "ground": true
+                }
+              }
+            },
+            {
+              "method": "hew.solid.extrude",
+              "params": {
+                "distance": 1.0,
+                "region": {
+                  "$ref": "r#/region_id"
+                }
+              }
+            }
+          ],
+          "label": "c"
+        }
+      },
+      "response": "c"
+    },
+    {
+      "compare": "/result/label",
+      "note": "box d",
+      "request": {
+        "id": 5,
+        "jsonrpc": "2.0",
+        "method": "hew.doc.transact",
+        "params": {
+          "commands": [
+            {
+              "as": "r",
+              "method": "hew.sketch.draw_rect",
+              "params": {
+                "corner_a": [
+                  6.0,
+                  0.0,
+                  0.0
+                ],
+                "corner_b": [
+                  7.0,
+                  2.0,
+                  0.0
+                ],
+                "plane": {
+                  "ground": true
+                }
+              }
+            },
+            {
+              "method": "hew.solid.extrude",
+              "params": {
+                "distance": 0.5,
+                "region": {
+                  "$ref": "r#/region_id"
+                }
+              }
+            }
+          ],
+          "label": "d"
+        }
+      },
+      "response": "d"
+    },
+    {
+      "compare": "/result/volume",
+      "note": "a unit cube: volume",
+      "request": {
+        "id": 6,
+        "jsonrpc": "2.0",
+        "method": "hew.query.measure",
+        "params": {
+          "id": "obj_1"
+        }
+      },
+      "response": 1.0
+    },
+    {
+      "compare": "/result/area",
+      "note": "a unit cube: area",
+      "request": {
+        "id": 7,
+        "jsonrpc": "2.0",
+        "method": "hew.query.measure",
+        "params": {
+          "id": "obj_1"
+        }
+      },
+      "response": 6.0
+    },
+    {
+      "compare": "/result/bbox",
+      "note": "a unit cube: bounding box",
+      "request": {
+        "id": 8,
+        "jsonrpc": "2.0",
+        "method": "hew.query.measure",
+        "params": {
+          "id": "obj_1"
+        }
+      },
+      "response": {
+        "max": [
+          1.0,
+          1.0,
+          1.0
+        ],
+        "min": [
+          0.0,
+          0.0,
+          0.0
+        ]
+      }
+    },
+    {
+      "note": "group b and c",
+      "request": {
+        "id": 9,
+        "jsonrpc": "2.0",
+        "method": "hew.group.create",
+        "params": {
+          "members": [
+            "obj_3",
+            "obj_5"
+          ]
+        }
+      },
+      "response": {
+        "id": 9,
+        "jsonrpc": "2.0",
+        "result": {
+          "label": "hew.group.create",
+          "results": [
+            {
+              "group": "grp_8"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "compare": "/result/volume",
+      "note": "a group of two cubes: volume",
+      "request": {
+        "id": 10,
+        "jsonrpc": "2.0",
+        "method": "hew.query.measure",
+        "params": {
+          "id": "grp_8"
+        }
+      },
+      "response": 2.0
+    },
+    {
+      "note": "box d becomes the inner component",
+      "request": {
+        "id": 11,
+        "jsonrpc": "2.0",
+        "method": "hew.component.create",
+        "params": {
+          "members": [
+            "obj_7"
+          ]
+        }
+      },
+      "response": {
+        "id": 11,
+        "jsonrpc": "2.0",
+        "result": {
+          "label": "hew.component.create",
+          "results": [
+            {
+              "component": "cmp_9",
+              "instance": "ins_a"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "note": "the inner instance becomes the outer component",
+      "request": {
+        "id": 12,
+        "jsonrpc": "2.0",
+        "method": "hew.component.create",
+        "params": {
+          "members": [
+            "ins_a"
+          ]
+        }
+      },
+      "response": {
+        "id": 12,
+        "jsonrpc": "2.0",
+        "result": {
+          "label": "hew.component.create",
+          "results": [
+            {
+              "component": "cmp_b",
+              "instance": "ins_c"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "note": "a second placement, stretched to twice the width",
+      "request": {
+        "id": 13,
+        "jsonrpc": "2.0",
+        "method": "hew.component.place",
+        "params": {
+          "component": "cmp_b",
+          "pose": [
+            2.0,
+            0.0,
+            0.0,
+            10.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            1.0,
+            0.0
+          ]
+        }
+      },
+      "response": {
+        "id": 13,
+        "jsonrpc": "2.0",
+        "result": {
+          "label": "hew.component.place",
+          "results": [
+            {
+              "instance": "ins_d"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "compare": "/result/extents",
+      "note": "the nested part by path: extents follow the stretch",
+      "request": {
+        "id": 14,
+        "jsonrpc": "2.0",
+        "method": "hew.query.measure",
+        "params": {
+          "path": [
+            "ins_d",
+            "ins_a"
+          ]
+        }
+      },
+      "response": [
+        2.0,
+        2.0,
+        0.5
+      ]
+    },
+    {
+      "compare": "/result/volume",
+      "note": "the nested part by path: volume follows the determinant",
+      "request": {
+        "id": 15,
+        "jsonrpc": "2.0",
+        "method": "hew.query.measure",
+        "params": {
+          "path": [
+            "ins_d",
+            "ins_a"
+          ]
+        }
+      },
+      "response": 2.0
+    },
+    {
+      "note": "a member needs a path",
+      "request": {
+        "id": 16,
+        "jsonrpc": "2.0",
+        "method": "hew.query.measure",
+        "params": {
+          "id": "obj_7"
+        }
+      },
+      "response": {
+        "error": {
+          "code": -32000,
+          "data": {
+            "detail": {
+              "id": "obj_7"
+            },
+            "explanation": "That entity is placed only through instances; hew.query.occurrences lists its paths.",
+            "failed_index": 0,
+            "failed_method": "hew.query.measure",
+            "refusal": "unknown_occurrence"
+          },
+          "message": "refused"
+        },
+        "id": 16,
+        "jsonrpc": "2.0"
+      }
+    },
+    {
+      "compare": "/result/distance",
+      "note": "the legacy point pair",
+      "request": {
+        "id": 17,
+        "jsonrpc": "2.0",
+        "method": "hew.query.measure",
+        "params": {
+          "from": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "to": [
+            3.0,
+            4.0,
+            0.0
+          ]
+        }
+      },
+      "response": 5.0
+    },
+    {
+      "note": "both forms together",
+      "request": {
+        "id": 18,
+        "jsonrpc": "2.0",
+        "method": "hew.query.measure",
+        "params": {
+          "from": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "id": "obj_1",
+          "to": [
+            1.0,
+            0.0,
+            0.0
+          ]
+        }
+      },
+      "response": {
+        "error": {
+          "code": -32602,
+          "message": "hew.query.measure needs exactly one of {from, to}, {id}, or {path}"
+        },
+        "id": 18,
+        "jsonrpc": "2.0"
+      }
+    }
+  ],
+  "profile": "core"
+}

@@ -2,10 +2,13 @@
 //! stage 6).
 //!
 //! The viewport renders the stored facets; export may do better. A stamped
-//! cylinder wall ([`kernel::SurfaceRef`]) whose **entire boundary is still
-//! analytic** — pristine chord-quad facets between two caps perpendicular to
-//! the axis, side seams intact — can be re-sampled from its analytic
-//! definition at any chosen resolution. A wall that fails that legitimacy
+//! surface of revolution ([`kernel::SurfaceRef`]: a cylinder wall, a cone
+//! frustum, one row of a torus band) whose **entire boundary is still
+//! analytic** — pristine chord-quad facets between two circles about the
+//! axis, bordered by caps perpendicular to it or by other such bands on the
+//! same circles, side seams intact — can be re-sampled from its analytic
+//! definition at any chosen resolution. Bands sharing a circle refine
+//! together or not at all. Sphere fans export at their stored facets. A wall that fails that legitimacy
 //! condition (boolean seams across facets, bossed facets, slanted caps) is
 //! exported at its stored resolution, honestly, never approximated.
 //!
@@ -14,7 +17,9 @@
 //! mechanism is shared points, not tolerance welding — each new rim point is
 //! computed once per (band, rim, angle) *station* and the identical f64
 //! value is used by the wall quads and by every cap polygon that borders
-//! them, so matching is bitwise by construction. Original vertices that
+//! them, so matching is bitwise by construction. Two bands on one circle
+//! compute its points in one canonical form (one frame per axis line, swept
+//! positively from the same anchor vertex), so they agree bitwise too. Original vertices that
 //! outside geometry depends on (band ends, cap vertices with non-band
 //! edges) become *anchors*: they are preserved bit-exact and the resampling
 //! subdivides between them.
@@ -23,6 +28,7 @@
 //! qualifies and re-facets exactly, or every one of its faces falls back to
 //! stored facets (rule 4 in spirit — the fallback is the honest carrier).
 
+use kernel::trig;
 use std::collections::{BTreeMap, BTreeSet};
 
 use kernel::{EdgeId, FaceId, Object, Point3, SurfaceRef, Vec3, VertexId, WatertightState};
@@ -43,7 +49,7 @@ pub const MAX_SEGMENTS_PER_TURN: u32 = 512;
 /// `segments_per_turn == 0` disables re-faceting entirely (stored facets,
 /// still a valid export path); any other value is clamped to
 /// [`MIN_SEGMENTS_PER_TURN`]`..=`[`MAX_SEGMENTS_PER_TURN`] and re-facets
-/// every qualifying cylinder band at that angular resolution, subdividing
+/// every qualifying band at that angular resolution, subdividing
 /// between preserved anchor vertices. Non-watertight objects are exported
 /// at stored facets (re-faceting reasons over twins).
 ///
@@ -60,7 +66,7 @@ pub fn export_triangles(
 /// returns one [`FaceId`] per emitted triangle — the *originating* face for
 /// a cap/polygon triangle, or a band's chosen *representative* face
 /// (`Band::faces[0]`, the first face slot-order contributed to the band) for
-/// every triangle a re-faceted cylinder wall emits.
+/// every triangle a re-faceted band emits.
 ///
 /// That representative choice is the honest one available: a re-faceted
 /// band's stations are resampled on the analytic circle at the caller's
@@ -113,6 +119,26 @@ pub fn export_triangles_with_faces(
                     }
                 }
             }
+        }
+        // A band whose rim borders another band that stays at stored
+        // facets cannot refine either: the shared circle must match.
+        let refined: BTreeSet<FaceId> = bands
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| !demoted.contains(i))
+            .flat_map(|(_, b)| b.faces.iter().copied())
+            .collect();
+        let stale: BTreeSet<usize> = bands
+            .iter()
+            .enumerate()
+            .filter(|(i, b)| {
+                !demoted.contains(i) && b.claimed_neighbors.iter().any(|f| !refined.contains(f))
+            })
+            .map(|(i, _)| i)
+            .collect();
+        if !stale.is_empty() {
+            demoted.extend(stale);
+            continue;
         }
         match rewrite_caps(object, &bands, &demoted) {
             Ok(rewrites) => {
@@ -168,8 +194,6 @@ pub fn export_triangles_with_faces(
 /// (preserved bit-exact) or a point computed on the analytic circle.
 #[derive(Debug, Clone, Copy)]
 struct Station {
-    /// Unwrapped angle along the chain (monotone with station index).
-    angle: f64,
     lo: Point3,
     hi: Point3,
     /// Anchor rim vertices this station preserves, if any (lo, hi).
@@ -177,19 +201,18 @@ struct Station {
     hi_vertex: Option<VertexId>,
 }
 
-/// One connected chain of pristine chord-quad facets of a single cylinder
+/// One connected chain of pristine chord-quad facets of a single surface
 /// between two axial levels — the unit of re-faceting.
 #[derive(Debug, Clone)]
 struct Band {
     faces: Vec<FaceId>,
     axis_point: Point3,
     axis: Vec3,
+    /// The larger ring radius, for angular tolerances.
     radius: f64,
     /// Orthonormal basis perpendicular to `axis` (u × v = axis).
     u: Vec3,
     v: Vec3,
-    t_lo: f64,
-    t_hi: f64,
     /// Rim vertices in chain order per level; length = faces + 1 for an
     /// open chain, faces for a closed one.
     rim_lo: Vec<VertexId>,
@@ -197,9 +220,13 @@ struct Band {
     /// Unwrapped angle of each rim vertex (indexes match `rim_lo`).
     rim_angle: Vec<f64>,
     closed: bool,
-    /// Facet normals point away from the axis (an outer wall) or toward it
-    /// (a hole wall).
-    outward: bool,
+    /// The analytic surface, and the sign taking its normal to the stored
+    /// facets' outward side — what orients the emitted quads.
+    surface: SurfaceRef,
+    sense: f64,
+    /// Claimed faces outside the band bordering its rims: other bands on
+    /// the same circles, which must refine too or this band demotes.
+    claimed_neighbors: BTreeSet<FaceId>,
     /// Every edge belonging to a band facet (rim chords + verticals).
     band_edges: BTreeSet<EdgeId>,
     /// Rim chord edge -> (level, chain position i: the chord connects rim
@@ -215,7 +242,7 @@ enum RimLevel {
     Hi,
 }
 
-/// The tolerance used to accept a vertex as lying on its claimed cylinder
+/// The tolerance used to accept a vertex as lying on its claimed surface
 /// and to bucket axial levels. Same constant the kernel validator uses for
 /// the claim itself.
 fn tol_pm() -> f64 {
@@ -237,9 +264,23 @@ fn discover_bands(object: &Object) -> Vec<Band> {
         }
     }
 
+    // One frame per axis line, the first group's: coaxial surfaces whose
+    // stored axes differ by rounding still share every computed point.
+    let mut frames: Vec<(Point3, Vec3)> = Vec::new();
     let mut bands = Vec::new();
     for (sr, faces) in groups {
-        if let Some(mut group_bands) = build_group_bands(object, sr, &faces) {
+        let Some((p, a)) = revolution_axis(&sr) else {
+            continue;
+        };
+        let frame = match frames.iter().find(|&&(fp, fa)| coaxial(&sr, fp, fa)) {
+            Some(&f) => f,
+            None => {
+                let f = canonical_axis(p, a);
+                frames.push(f);
+                f
+            }
+        };
+        if let Some(mut group_bands) = build_group_bands(object, sr, frame, &faces) {
             bands.append(&mut group_bands);
         }
     }
@@ -248,13 +289,20 @@ fn discover_bands(object: &Object) -> Vec<Band> {
 
 /// Structural qualification of one surface group; `None` demotes the whole
 /// group to stored facets.
-fn build_group_bands(object: &Object, sr: SurfaceRef, faces: &[FaceId]) -> Option<Vec<Band>> {
-    let SurfaceRef::Cylinder {
-        axis_point,
-        axis,
-        radius,
-    } = sr;
-    let (u, v) = crate::plane_basis(axis);
+fn build_group_bands(
+    object: &Object,
+    sr: SurfaceRef,
+    (axis_point, axis): (Point3, Vec3),
+    faces: &[FaceId],
+) -> Option<Vec<Band>> {
+    // Surfaces of revolution re-facet here — cylinder walls, cone frusta
+    // and the rows of torus bands — each band a strip between two circles
+    // about the axis, resampled around it. Spheres export at stored facets.
+    let is_cylinder = matches!(sr, SurfaceRef::Cylinder { .. });
+    if matches!(sr, SurfaceRef::Sphere { .. }) {
+        return None;
+    }
+    let (u, v) = kernel::triangulate::plane_basis(axis);
     let group_set: BTreeSet<FaceId> = faces.iter().copied().collect();
 
     // Per-face structure: a chord quad with two vertices on each of two
@@ -268,6 +316,8 @@ fn build_group_bands(object: &Object, sr: SurfaceRef, faces: &[FaceId]) -> Optio
         faces: Vec<FaceId>,
         t_lo: f64,
         t_hi: f64,
+        r_lo: f64,
+        r_hi: f64,
         lo: [VertexId; 2],
         hi: [VertexId; 2],
         /// The two vertical (lo–hi) edges of the BASE row — what chain
@@ -297,23 +347,39 @@ fn build_group_bands(object: &Object, sr: SurfaceRef, faces: &[FaceId]) -> Optio
             let d = pos(vid) - axis_point;
             (d - axis * d.dot(axis)).length()
         };
-        if verts.iter().any(|&w| (radial(w) - radius).abs() > tol_pm()) {
+        if verts.iter().any(|&w| sr.distance(pos(w)).abs() > tol_pm()) {
             return None;
         }
-        let ts: Vec<f64> = verts.iter().map(|&w| t_of(w)).collect();
-        let t_min = ts.iter().cloned().fold(f64::INFINITY, f64::min);
-        let t_max = ts.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-        if t_max - t_min <= tol_pm() {
-            return None; // degenerate band height
-        }
-        let is_lo: Vec<bool> = ts.iter().map(|&t| (t - t_min).abs() <= tol_pm()).collect();
+        // Two rings, two vertices each: a ring is a (t, ρ) circle.
+        let keys: Vec<(f64, f64)> = verts.iter().map(|&w| (t_of(w), radial(w))).collect();
+        let same = |a: (f64, f64), b: (f64, f64)| {
+            (a.0 - b.0).abs() <= tol_pm() && (a.1 - b.1).abs() <= tol_pm()
+        };
+        let lo_key = keys
+            .iter()
+            .copied()
+            .min_by(|a, b| {
+                if (a.0 - b.0).abs() > tol_pm() {
+                    a.0.total_cmp(&b.0)
+                } else {
+                    a.1.total_cmp(&b.1)
+                }
+            })
+            .expect("four vertices");
+        let is_lo: Vec<bool> = keys.iter().map(|&k| same(k, lo_key)).collect();
+        let hi_key = keys[is_lo.iter().position(|&b| !b)?];
         if is_lo.iter().filter(|&&b| b).count() != 2
-            || ts
+            || keys
                 .iter()
                 .zip(&is_lo)
-                .any(|(&t, &lo)| !lo && (t - t_max).abs() > tol_pm())
+                .any(|(&k, &lo)| !lo && !same(k, hi_key))
+            || same(lo_key, hi_key)
         {
-            return None; // not exactly two levels, 2 + 2
+            return None; // not exactly two rings, 2 + 2
+        }
+        let (t_min, t_max) = (lo_key.0, hi_key.0);
+        if is_cylinder && t_max - t_min <= tol_pm() {
+            return None; // degenerate band height
         }
         // The two lo vertices must be cyclically adjacent (a chord quad,
         // not a bowtie).
@@ -347,6 +413,8 @@ fn build_group_bands(object: &Object, sr: SurfaceRef, faces: &[FaceId]) -> Optio
             faces: vec![fid],
             t_lo: t_min,
             t_hi: t_max,
+            r_lo: lo_key.1,
+            r_hi: hi_key.1,
             lo: [lo[0], lo[1]],
             hi: [hi[0], hi[1]],
             verticals: [verticals[0], verticals[1]],
@@ -380,6 +448,11 @@ fn build_group_bands(object: &Object, sr: SurfaceRef, faces: &[FaceId]) -> Optio
                 .push((qi, RimLevel::Hi));
         }
         for owners in chord_owner.values() {
+            if !is_cylinder {
+                // Rows of a torus or cone band share their rings; each row
+                // re-facets as its own band (the meridian is not straight).
+                continue;
+            }
             match owners.as_slice() {
                 [_] => {} // rim against a non-group face: cap checks below
                 [(a, la), (b, lb)] => {
@@ -455,6 +528,8 @@ fn build_group_bands(object: &Object, sr: SurfaceRef, faces: &[FaceId]) -> Optio
                     .collect(),
                 t_lo: quads[base].t_lo,
                 t_hi: quads[top].t_hi,
+                r_lo: quads[base].r_lo,
+                r_hi: quads[top].r_hi,
                 lo: quads[base].lo,
                 hi: quads[top].hi,
                 verticals: quads[base].verticals,
@@ -466,14 +541,17 @@ fn build_group_bands(object: &Object, sr: SurfaceRef, faces: &[FaceId]) -> Optio
         quads = merged;
     }
 
-    // Bucket by (t_lo, t_hi) within tolerance.
-    let mut buckets: Vec<(f64, f64, Vec<usize>)> = Vec::new();
+    // Bucket by the ring pair within tolerance.
+    let mut buckets: Vec<(f64, f64, f64, f64, Vec<usize>)> = Vec::new();
     for (qi, q) in quads.iter().enumerate() {
-        match buckets.iter_mut().find(|(lo, hi, _)| {
-            (q.t_lo - *lo).abs() <= tol_pm() && (q.t_hi - *hi).abs() <= tol_pm()
+        match buckets.iter_mut().find(|(lo, hi, rl, rh, _)| {
+            (q.t_lo - *lo).abs() <= tol_pm()
+                && (q.t_hi - *hi).abs() <= tol_pm()
+                && (q.r_lo - *rl).abs() <= tol_pm()
+                && (q.r_hi - *rh).abs() <= tol_pm()
         }) {
-            Some((_, _, list)) => list.push(qi),
-            None => buckets.push((q.t_lo, q.t_hi, vec![qi])),
+            Some((.., list)) => list.push(qi),
+            None => buckets.push((q.t_lo, q.t_hi, q.r_lo, q.r_hi, vec![qi])),
         }
     }
 
@@ -482,7 +560,11 @@ fn build_group_bands(object: &Object, sr: SurfaceRef, faces: &[FaceId]) -> Optio
     // Checked over every (possibly merged) quad's EXTREME chords, since the
     // whole group stands or falls together; interior rims were resolved by
     // the stacking pass above.
-    for q in &quads {
+    // A rim may also border another band on the same circle (a wall below
+    // a torus band, a torus band's rows): coaxial claimed neighbours are
+    // recorded, and demote this band if they do not refine with it.
+    let mut claimed_by_quad: Vec<BTreeSet<FaceId>> = vec![BTreeSet::new(); quads.len()];
+    for (qi, q) in quads.iter().enumerate() {
         for &chord in &[q.chord_lo, q.chord_hi] {
             let edge = &object.edges()[chord];
             let (h_a, h_b) = (edge.half_edge, edge.twin_half_edge?);
@@ -491,12 +573,20 @@ fn build_group_bands(object: &Object, sr: SurfaceRef, faces: &[FaceId]) -> Optio
                 if q.faces.contains(&f) {
                     continue;
                 }
-                if group_set.contains(&f) {
-                    return None; // non-stack group contact: unsupported
-                }
                 let neighbor = &object.faces()[f];
-                if neighbor.surface.is_some() {
-                    return None; // rim against another wall: unsupported
+                if group_set.contains(&f) {
+                    if is_cylinder {
+                        return None; // non-stack group contact: unsupported
+                    }
+                    claimed_by_quad[qi].insert(f);
+                    continue;
+                }
+                if let Some(other) = neighbor.surface {
+                    if !coaxial(&other, axis_point, axis) {
+                        return None; // rim against an unrelated wall
+                    }
+                    claimed_by_quad[qi].insert(f);
+                    continue;
                 }
                 if neighbor.plane.normal().dot(axis).abs() < 1.0 - kernel::tol::NORMAL_DIRECTION {
                     return None; // slanted cap: resampled rim would leave it
@@ -507,7 +597,7 @@ fn build_group_bands(object: &Object, sr: SurfaceRef, faces: &[FaceId]) -> Optio
 
     // Assemble chains per bucket via vertical-edge adjacency.
     let mut bands = Vec::new();
-    for (t_lo, t_hi, members) in buckets {
+    for (_, _, r_lo, r_hi, members) in buckets {
         // vertical edge -> quads using it (within this bucket).
         let mut by_vertical: BTreeMap<EdgeId, Vec<usize>> = BTreeMap::new();
         for &qi in &members {
@@ -654,7 +744,7 @@ fn build_group_bands(object: &Object, sr: SurfaceRef, faces: &[FaceId]) -> Optio
                 let d = object.vertices()[w].position - axis_point;
                 let x = d.dot(u);
                 let y = d.dot(v);
-                y.atan2(x)
+                trig::atan2(y, x)
             };
             let mut rim_angle: Vec<f64> = Vec::with_capacity(rim_lo.len());
             for (k, &w) in rim_lo.iter().enumerate() {
@@ -701,8 +791,7 @@ fn build_group_bands(object: &Object, sr: SurfaceRef, faces: &[FaceId]) -> Optio
                 return None;
             }
 
-            // Outward or inward, from the first facet's plane (any row of a
-            // merged column faces the same radial way; use the base row).
+            // The base row's first facet sets the band's outward side.
             let q0 = &quads[chain[0]];
             let face0 = &object.faces()[q0.faces[0]];
             let mid = {
@@ -710,11 +799,6 @@ fn build_group_bands(object: &Object, sr: SurfaceRef, faces: &[FaceId]) -> Optio
                 let b = object.vertices()[q0.lo[1]].position;
                 Point3::new((a.x + b.x) / 2.0, (a.y + b.y) / 2.0, (a.z + b.z) / 2.0)
             };
-            let radial_dir = {
-                let d = mid - axis_point;
-                d - axis * d.dot(axis)
-            };
-            let outward = face0.plane.normal().dot(radial_dir) > 0.0;
 
             let mut band_edges: BTreeSet<EdgeId> = BTreeSet::new();
             let mut chords: BTreeMap<EdgeId, (RimLevel, usize)> = BTreeMap::new();
@@ -728,6 +812,18 @@ fn build_group_bands(object: &Object, sr: SurfaceRef, faces: &[FaceId]) -> Optio
                 chords.insert(q.chord_hi, (RimLevel::Hi, k));
             }
 
+            let sense = {
+                let n = face0.plane.normal();
+                match sr.normal_at(mid) {
+                    Some(m) if m.dot(n) < 0.0 => -1.0,
+                    Some(_) => 1.0,
+                    None => return None,
+                }
+            };
+            let claimed_neighbors: BTreeSet<FaceId> = chain
+                .iter()
+                .flat_map(|&qi| claimed_by_quad[qi].iter().copied())
+                .collect();
             bands.push(Band {
                 faces: chain
                     .iter()
@@ -735,16 +831,16 @@ fn build_group_bands(object: &Object, sr: SurfaceRef, faces: &[FaceId]) -> Optio
                     .collect(),
                 axis_point,
                 axis,
-                radius,
+                radius: r_lo.max(r_hi),
                 u,
                 v,
-                t_lo,
-                t_hi,
                 rim_lo,
                 rim_hi,
                 rim_angle,
                 closed,
-                outward,
+                surface: sr,
+                sense,
+                claimed_neighbors,
                 band_edges,
                 chords,
                 stations: Vec::new(),
@@ -762,7 +858,7 @@ fn build_group_bands(object: &Object, sr: SurfaceRef, faces: &[FaceId]) -> Optio
 fn build_stations(object: &Object, band: &Band, step: f64) -> Option<Vec<Station>> {
     // Angular coincidence tolerance, derived from the kernel's point-merge
     // tolerance at this band's radius (arc length ≈ radius · angle).
-    let angular_eps = tol_pm() / band.radius;
+    let angular_eps = tol_pm() / band.radius.max(tol_pm());
     // Vertex -> incident edges, restricted to what we need: any edge NOT in
     // the band's own edge set makes a rim vertex an anchor.
     let mut has_outside_edge: BTreeSet<VertexId> = BTreeSet::new();
@@ -776,122 +872,132 @@ fn build_stations(object: &Object, band: &Band, step: f64) -> Option<Vec<Station
     }
 
     let n = band.rim_lo.len();
-    let foot_lo = band.axis_point + band.axis * band.t_lo;
-    let foot_hi = band.axis_point + band.axis * band.t_hi;
-    let point_at = |foot: Point3, angle: f64| -> Point3 {
-        foot + band.u * (band.radius * angle.cos()) + band.v * (band.radius * angle.sin())
+    let pos = |w: VertexId| object.vertices()[w].position;
+    let angle_of = |p: Point3| -> f64 {
+        let d = p - band.axis_point;
+        trig::atan2(d.dot(band.v), d.dot(band.u))
     };
 
-    // Anchor stations, in chain order. A lo anchor and hi anchor at the
-    // same chain position merge into one station (they are the two ends of
-    // one vertical edge — the original grid guarantees the pairing).
-    #[derive(Clone, Copy)]
-    struct AnchorStation {
-        angle: f64,
+    // Anchor positions in chain order: chain ends, and every rim index
+    // where either ring's vertex has an edge outside the band.
+    struct Anchor {
+        k: usize,
         lo_vertex: Option<VertexId>,
         hi_vertex: Option<VertexId>,
     }
-    let mut anchors: Vec<AnchorStation> = Vec::new();
+    let mut anchors: Vec<Anchor> = Vec::new();
     for k in 0..n {
         let lo_anchor = has_outside_edge.contains(&band.rim_lo[k]);
         let hi_anchor = has_outside_edge.contains(&band.rim_hi[k]);
         if !band.closed && (k == 0 || k == n - 1) {
             // Chain ends are always stations; their vertical edge borders a
             // neighbor face, so both rim vertices are necessarily anchors.
-            anchors.push(AnchorStation {
-                angle: band.rim_angle[k],
+            anchors.push(Anchor {
+                k,
                 lo_vertex: Some(band.rim_lo[k]),
                 hi_vertex: Some(band.rim_hi[k]),
             });
-            continue;
-        }
-        if lo_anchor || hi_anchor {
-            anchors.push(AnchorStation {
-                angle: band.rim_angle[k],
+        } else if lo_anchor || hi_anchor {
+            anchors.push(Anchor {
+                k,
                 lo_vertex: lo_anchor.then_some(band.rim_lo[k]),
                 hi_vertex: hi_anchor.then_some(band.rim_hi[k]),
             });
         }
     }
+    if band.closed && anchors.is_empty() {
+        // Free choice of phase: the first rim position.
+        anchors.push(Anchor {
+            k: 0,
+            lo_vertex: None,
+            hi_vertex: None,
+        });
+    }
+    if !band.closed && anchors.len() < 2 {
+        return None;
+    }
 
-    let make_station = |a: &AnchorStation| -> Station {
-        Station {
-            angle: a.angle,
-            lo: a
-                .lo_vertex
-                .map(|w| object.vertices()[w].position)
-                .unwrap_or_else(|| point_at(foot_lo, a.angle)),
-            hi: a
-                .hi_vertex
-                .map(|w| object.vertices()[w].position)
-                .unwrap_or_else(|| point_at(foot_hi, a.angle)),
-            lo_vertex: a.lo_vertex,
-            hi_vertex: a.hi_vertex,
+    // The subdivision points of one ring between two of its vertices, in
+    // a canonical form shared by every band on that circle: swept in the
+    // frame's positive sense from the start vertex, its (t, ρ) taken from
+    // that vertex, and reversed afterwards for a band running the other
+    // way. Same anchor vertices therefore give bitwise the same points.
+    let dir = (band.rim_angle[1 % n] - band.rim_angle[0]).signum();
+    let full_turn = 2.0 * std::f64::consts::PI;
+    let ring_points = |from: VertexId, to: VertexId| -> (usize, Vec<Point3>) {
+        let (s, e) = if dir > 0.0 { (from, to) } else { (to, from) };
+        let (ps, pe) = (pos(s), pos(e));
+        let a0 = angle_of(ps);
+        let mut sweep = angle_of(pe) - a0;
+        while sweep <= angular_eps {
+            sweep += full_turn;
         }
-    };
-    let subdivide = |from: f64, to: f64, out: &mut Vec<Station>| {
-        let sweep = to - from;
-        let count = ((sweep.abs() / step) - 1e-9).ceil().max(1.0) as usize;
-        for j in 1..count {
-            let angle = from + sweep * (j as f64) / (count as f64);
-            out.push(Station {
-                angle,
-                lo: point_at(foot_lo, angle),
-                hi: point_at(foot_hi, angle),
-                lo_vertex: None,
-                hi_vertex: None,
-            });
+        while sweep > full_turn + angular_eps {
+            sweep -= full_turn;
         }
+        let d = ps - band.axis_point;
+        let t = d.dot(band.axis);
+        let rho = (d - band.axis * t).length();
+        let foot = band.axis_point + band.axis * t;
+        let count = ((sweep / step) - 1e-9).ceil().max(1.0) as usize;
+        let mut pts: Vec<Point3> = (1..count)
+            .map(|j| {
+                let angle = a0 + sweep * (j as f64) / (count as f64);
+                foot + band.u * (rho * trig::cos(angle)) + band.v * (rho * trig::sin(angle))
+            })
+            .collect();
+        if dir < 0.0 {
+            pts.reverse();
+        }
+        (count, pts)
     };
 
     let mut stations: Vec<Station> = Vec::new();
-    if band.closed && anchors.is_empty() {
-        // Free choice of phase: start at the first rim vertex's angle.
-        let start = band.rim_angle[0];
-        let dir = (band.rim_angle[1] - band.rim_angle[0]).signum();
-        let full = 2.0 * std::f64::consts::PI * dir;
-        let count = ((full.abs() / step) - 1e-9).ceil().max(3.0) as usize;
-        for j in 0..count {
-            let angle = start + full * (j as f64) / (count as f64);
+    let segments = if band.closed {
+        anchors.len()
+    } else {
+        anchors.len() - 1
+    };
+    for i in 0..anchors.len() {
+        let a = &anchors[i];
+        let (lo, hi) = (pos(band.rim_lo[a.k]), pos(band.rim_hi[a.k]));
+        stations.push(Station {
+            lo,
+            hi,
+            lo_vertex: a.lo_vertex,
+            hi_vertex: a.hi_vertex,
+        });
+        if i >= segments {
+            break;
+        }
+        let b = &anchors[(i + 1) % anchors.len()];
+        if b.k != a.k {
+            let sweep = (band.rim_angle[b.k] - band.rim_angle[a.k]).abs();
+            let wrapped = if band.closed && b.k < a.k {
+                full_turn - sweep
+            } else {
+                sweep
+            };
+            if wrapped <= angular_eps {
+                return None; // two unpaired anchors at one angle
+            }
+        }
+        let (n_lo, lo_pts) = ring_points(band.rim_lo[a.k], band.rim_lo[b.k]);
+        let (n_hi, hi_pts) = ring_points(band.rim_hi[a.k], band.rim_hi[b.k]);
+        if n_lo != n_hi {
+            return None; // the two rings would not subdivide alike
+        }
+        for (lo, hi) in lo_pts.into_iter().zip(hi_pts) {
             stations.push(Station {
-                angle,
-                lo: point_at(foot_lo, angle),
-                hi: point_at(foot_hi, angle),
+                lo,
+                hi,
                 lo_vertex: None,
                 hi_vertex: None,
             });
         }
-    } else if band.closed {
-        // Anchored full circle: subdivide between consecutive anchors,
-        // wrapping from the last back to the first.
-        let dir = (band.rim_angle[1] - band.rim_angle[0]).signum();
-        for i in 0..anchors.len() {
-            let a = anchors[i];
-            stations.push(make_station(&a));
-            let next_angle = if i + 1 < anchors.len() {
-                anchors[i + 1].angle
-            } else {
-                anchors[0].angle + 2.0 * std::f64::consts::PI * dir
-            };
-            if (next_angle - a.angle).abs() <= angular_eps {
-                return None; // two unpaired anchors at one angle
-            }
-            subdivide(a.angle, next_angle, &mut stations);
-        }
-    } else {
-        for i in 0..anchors.len() {
-            let a = anchors[i];
-            stations.push(make_station(&a));
-            if i + 1 < anchors.len() {
-                if (anchors[i + 1].angle - a.angle).abs() <= angular_eps {
-                    return None;
-                }
-                subdivide(a.angle, anchors[i + 1].angle, &mut stations);
-            }
-        }
-        if stations.len() < 2 {
-            return None;
-        }
+    }
+    if stations.len() < 2 || (band.closed && stations.len() < 3) {
+        return None;
     }
     Some(stations)
 }
@@ -902,15 +1008,19 @@ fn build_stations(object: &Object, band: &Band, step: f64) -> Option<Vec<Station
 fn emit_band(band: &Band, soup: &mut Vec<f64>) {
     let s = &band.stations;
     let count = if band.closed { s.len() } else { s.len() - 1 };
-    // Winding: increasing angle is CCW seen from +axis; an outward wall
-    // swept CCW winds [lo_i, lo_j, hi_j, hi_i] to face outward. A clockwise
-    // chain or an inward (hole) wall flips — and both together cancel.
-    let increasing = if band.closed && s.len() >= 2 {
-        s[1].angle > s[0].angle
-    } else {
-        s[s.len() - 1].angle > s[0].angle
+    // Winding: the first quad against the analytic normal at its middle,
+    // turned to the stored facets' outward side.
+    let flip = {
+        let j = 1 % s.len();
+        let (a, b, c) = (s[0].lo, s[j].lo, s[j].hi);
+        let mid = Point3::new(
+            (s[0].lo.x + s[j].hi.x) / 2.0,
+            (s[0].lo.y + s[j].hi.y) / 2.0,
+            (s[0].lo.z + s[j].hi.z) / 2.0,
+        );
+        let n = band.surface.normal_at(mid).unwrap_or(band.axis) * band.sense;
+        (b - a).cross(c - a).dot(n) < 0.0
     };
-    let flip = band.outward != increasing;
     for i in 0..count {
         let j = (i + 1) % s.len();
         let quad = [s[i].lo, s[j].lo, s[j].hi, s[i].hi];
@@ -932,16 +1042,17 @@ fn emit_polygon(
     loops: &[Vec<Point3>],
     soup: &mut Vec<f64>,
 ) -> Result<(), TessellateError> {
-    let (u, v) = crate::plane_basis(normal);
+    let (u, v) = kernel::triangulate::plane_basis(normal);
     let to_arr = |l: &Vec<Point3>| -> Vec<[f64; 3]> { l.iter().map(|p| [p.x, p.y, p.z]).collect() };
     let outer = to_arr(&loops[0]);
     let holes: Vec<Vec<[f64; 3]>> = loops[1..].iter().map(to_arr).collect();
     if outer.len() < 3 {
         return Err(TessellateError::DegenerateFace { face: fid });
     }
-    let poly = crate::build_polygon_with_holes(&outer, &holes, u, v)
-        .map_err(|crate::UnbridgeableHole| TessellateError::UnbridgeableHole { face: fid })?;
-    for [i, j, k] in crate::ear_clip(&poly) {
+    let poly = kernel::triangulate::bridge_holes(&outer, &holes, u, v).map_err(
+        |kernel::triangulate::UnbridgeableHole| TessellateError::UnbridgeableHole { face: fid },
+    )?;
+    for [i, j, k] in kernel::triangulate::ear_clip(&poly) {
         soup.extend([
             poly[i][0], poly[i][1], poly[i][2], poly[j][0], poly[j][1], poly[j][2], poly[k][0],
             poly[k][1], poly[k][2],
@@ -1170,7 +1281,7 @@ fn rewrite_caps(
 /// point by which edge it sits on, which would demote a tangent rim on some
 /// edges and not others. An edge running along another ring is invalid.
 fn loops_valid(normal: Vec3, loops: &[Vec<Point3>]) -> bool {
-    let (u, v) = crate::plane_basis(normal);
+    let (u, v) = kernel::triangulate::plane_basis(normal);
     let project = |l: &Vec<Point3>| -> Vec<[f64; 2]> {
         l.iter()
             .map(|p| [p.to_vec().dot(u), p.to_vec().dot(v)])
@@ -1316,6 +1427,45 @@ fn point_in_polygon_2d(p: [f64; 2], ring: &[[f64; 2]]) -> bool {
         j = i;
     }
     inside
+}
+
+/// The axis line in a canonical form: the direction with its first nonzero
+/// component positive, the point the line's foot from the origin.
+fn canonical_axis(point: Point3, axis: Vec3) -> (Point3, Vec3) {
+    let flip = if axis.x.abs() > 1e-12 {
+        axis.x < 0.0
+    } else if axis.y.abs() > 1e-12 {
+        axis.y < 0.0
+    } else {
+        axis.z < 0.0
+    };
+    let axis = if flip { -axis } else { axis };
+    let p = point.to_vec();
+    let foot = p - axis * p.dot(axis);
+    (Point3::new(foot.x, foot.y, foot.z), axis)
+}
+
+/// Whether surface `s` revolves about the same axis line.
+fn coaxial(s: &SurfaceRef, axis_point: Point3, axis: Vec3) -> bool {
+    let Some((p, a)) = revolution_axis(s) else {
+        return false;
+    };
+    let d = p - axis_point;
+    a.dot(axis).abs() >= 1.0 - kernel::tol::NORMAL_DIRECTION
+        && (d - axis * d.dot(axis)).length() <= tol_pm()
+}
+
+/// A point on the axis and the axis direction of a surface of revolution
+/// that re-facets here; `None` for a sphere.
+fn revolution_axis(s: &SurfaceRef) -> Option<(Point3, Vec3)> {
+    match *s {
+        SurfaceRef::Cylinder {
+            axis_point, axis, ..
+        } => Some((axis_point, axis)),
+        SurfaceRef::Cone { apex, axis, .. } => Some((apex, axis)),
+        SurfaceRef::Torus { center, axis, .. } => Some((center, axis)),
+        SurfaceRef::Sphere { .. } => None,
+    }
 }
 
 #[cfg(test)]

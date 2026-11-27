@@ -1,0 +1,10 @@
+{
+  "manifest": 1,
+  "id": "com.example.minimal",
+  "name": {
+    "unknown field": 5
+  },
+  "version": "1.0.0",
+  "api": 1,
+  "main": "main.js"
+}

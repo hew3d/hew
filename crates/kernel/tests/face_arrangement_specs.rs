@@ -21,6 +21,7 @@
 //! - I6 the group's faces equal the ground's regions for the same edges;
 //! - I7 the saved document reopens and saves back to the same bytes.
 
+use kernel::trig;
 use std::f64::consts::{PI, TAU};
 
 use kernel::{
@@ -28,7 +29,7 @@ use kernel::{
 };
 use proptest::prelude::*;
 
-mod face_arrangement_support;
+use crate::face_arrangement_support;
 use face_arrangement_support::*;
 
 // ------------------------------------------------- the inscribed circle
@@ -397,7 +398,7 @@ proptest! {
         let local: Vec<(f64, f64)> = (0..24)
             .map(|i| {
                 let a = TAU * f64::from(i) / 24.0;
-                (cx + r * a.cos(), cy + r * a.sin())
+                (cx + r * trig::cos(a), cy + r * trig::sin(a))
             })
             .collect();
         let depth_in = |p: (f64, f64)| {
@@ -405,7 +406,7 @@ proptest! {
                 .map(|i| {
                     let (a, b) = (local[i], local[(i + 1) % 24]);
                     let (ex, ey) = (b.0 - a.0, b.1 - a.1);
-                    (ex * (p.1 - a.1) - ey * (p.0 - a.0)) / ex.hypot(ey)
+                    (ex * (p.1 - a.1) - ey * (p.0 - a.0)) / trig::hypot(ex, ey)
                 })
                 .fold(f64::INFINITY, f64::min)
         };
@@ -641,7 +642,7 @@ fn a_circle_tangent_twice_around_an_imprint_reports_the_drawn_region() {
     // R = 10 mm about the wall's center: tangent to its top and bottom at
     // vertices 6 and 18, the imprint inside, drawn from the wall.
     let r = 10.0 * MM;
-    let gon = 12.0 * 100.0 * (TAU / 24.0).sin();
+    let gon = 12.0 * 100.0 * trig::sin(TAU / 24.0);
     region_case(
         || {
             let (w, _) = with_imprint(wall_30x20(), 12.0, 8.0, 6.0, 4.0);
@@ -879,7 +880,7 @@ fn merge_tolerance_fuzz(amp: f64) {
                     corners[(k + 1) % 4].0 - corners[k].0,
                     corners[(k + 1) % 4].1 - corners[k].1,
                 );
-                let len = ex.hypot(ey);
+                let len = trig::hypot(ex, ey);
                 let (hx, hy) = (ex / len * 0.1 * MM, ey / len * 0.1 * MM);
                 vec![
                     (base.0 - hx, base.1 - hy),

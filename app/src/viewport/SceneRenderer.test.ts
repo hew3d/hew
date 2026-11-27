@@ -30,7 +30,7 @@ import { describe, expect, it, vi, afterEach } from 'vitest'
 import * as THREE from 'three'
 import { LineSegments2 } from 'three/examples/jsm/lines/LineSegments2.js'
 import type { Scene as WasmScene } from '../wasm/loader'
-import { EDGE_COLOR_SEE_THROUGH_DARK, EDGE_COLOR_SELECTED, SceneRenderer, edgeColorFor, toggledRenderMode, type SectionWidgetCoverage } from './SceneRenderer'
+import { EDGE_COLOR_HOVER, EDGE_COLOR_SEE_THROUGH_DARK, EDGE_COLOR_SELECTED, SceneRenderer, edgeColorFor, toggledRenderMode, type SectionWidgetCoverage } from './SceneRenderer'
 import { facePlaneBasis } from './geoHelpers'
 import { buildInstancePreviewClone } from '../tools/transformPreview'
 import { buildSelectionPreview } from '../tools/transformSelection'
@@ -54,6 +54,8 @@ function makeMesh(watertight: boolean) {
     group_counts: () => new Uint32Array([3]),
     group_backs: () => new Uint8Array([0]),
     edge_positions: () => new Float32Array([0, 0, 0, 1, 0, 0]),
+    tangent_edge_positions: () => new Float32Array(0),
+    cage_edge_positions: () => new Float32Array(0),
     watertight: () => watertight,
     free: vi.fn(),
   }
@@ -66,6 +68,9 @@ function makeMesh(watertight: boolean) {
  * as a default) — `IDENTITY_POSE` below is the same array, kept as a
  * separately named const so each reads clearly at its own call sites. */
 const IDENTITY_LOCAL_POSE = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0]
+
+/** `u64::MAX`, the kernel's "no material" sentinel. */
+const NO_MATERIAL = 0xffff_ffff_ffff_ffffn
 
 /** One definition member an instance places — `localPose` is the row-major
  * 3×4 DEF-LOCAL pose (identity for a flat definition's members; a nested
@@ -95,13 +100,22 @@ function makeScene(opts: {
     memberIds: bigint[]
     memberWatertight: Record<string, boolean>
     placements?: MockPlacement[]
+    /** The material each placement inherits (`instance_expanded_inherited`),
+     * parallel to the placements; omitted, none. */
+    inherited?: bigint[]
   }>
+  /** Instances rendering a definition on loan to an open session — the
+   *  kernel's `session_placements` (live sibling placements). Mutable by
+   *  reference, like `objects`/`instances`, so a test can open a session
+   *  between refreshes. Empty by default (no session). */
+  sessionPlacements?: bigint[]
 }): WasmScene {
   const objects = opts.objects ?? {}
   const instances = opts.instances ?? {}
+  const sessionPlacements = opts.sessionPlacements ?? []
   const placementsOf = (inst: { memberIds: bigint[]; placements?: MockPlacement[] }): MockPlacement[] =>
     inst.placements ?? inst.memberIds.map((memberId) => ({ memberId, localPose: IDENTITY_LOCAL_POSE }))
-  return {
+  const scene: Record<string, unknown> = {
     object_ids: () => BigUint64Array.from(Object.keys(objects).map(BigInt)),
     instance_ids: () => BigUint64Array.from(Object.keys(instances).map(BigInt)),
     // vi.fn so the targeted-refresh tests can count exactly which meshes get
@@ -135,13 +149,67 @@ function makeScene(opts: {
       if (inst === undefined) return new Uint8Array()
       return Uint8Array.from(placementsOf(inst).map((p) => (p.hidden === true ? 0 : 1)))
     },
+    instance_expanded_inherited: (id: bigint) => {
+      const inst = instances[id.toString()]
+      if (inst === undefined) return new BigUint64Array()
+      return BigUint64Array.from(placementsOf(inst).map((_, i) => inst.inherited?.[i] ?? NO_MATERIAL))
+    },
+    // A member drawn under an inherited material (a painted placement):
+    // its baked colors are black, so a test can tell the variants apart.
+    member_mesh: vi.fn((id: bigint, _inherited: bigint) => {
+      for (const inst of Object.values(instances)) {
+        if (inst.memberIds.includes(id)) {
+          return { ...makeMesh(inst.memberWatertight[id.toString()]), colors: () => new Float32Array(9) }
+        }
+      }
+      throw new Error(`unexpected member_mesh(${id})`)
+    }),
     // No def-owned sketches by default — overridden by callers that seed
     // `defSketches` (see `makeSceneWithDefSketches` in the def-sketch
     // rendering describe block below).
     component_member_sketches: () => new BigUint64Array(),
+    component_rendered_sketches: () => new BigUint64Array(),
+    component_sketch_frame: () => Float64Array.from([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0]),
+    session_placements: () => BigUint64Array.from(sessionPlacements),
+    component_ids: () =>
+      BigUint64Array.from([...new Set(Object.values(instances).map((i) => i.def))]),
     sketch_ids: () => new BigUint64Array(),
     guide_ids: () => new BigUint64Array(),
-  } as unknown as WasmScene
+    guide_dash: () => undefined,
+  }
+  // The kernel's one walk of what an instance draws: by default its
+  // definition's rendered sketches, each at the definition's sketch frame
+  // (identity unless a test lends the definition to a session). A test seeds
+  // nested drawing by overriding this.
+  scene.instance_sketch_placements = (instanceId: bigint) => {
+    const def = (scene.instance_def as (id: bigint) => bigint | undefined)(instanceId)
+    const sketches = def === undefined
+      ? new BigUint64Array()
+      : (scene.component_rendered_sketches as (c: bigint) => BigUint64Array)(def)
+    const frame = def === undefined ? [] : Array.from((scene.component_sketch_frame as (c: bigint) => Float64Array)(def))
+    return placementsOfSketches(sketches, sketches.length === 0 ? [] : Array.from(sketches, () => frame).flat())
+  }
+  return scene as unknown as WasmScene
+}
+
+/** The segment endpoints (start, end per segment, xyz) of a group's fat line. */
+function fatLinePositions(group: THREE.Group): Float32Array {
+  const line = group.children.find((c) => 'isLineSegments2' in c) as unknown as {
+    geometry: { attributes: { instanceStart: { data: { array: Float32Array } } } }
+  }
+  return line.geometry.attributes.instanceStart.data.array
+}
+
+/** An `InstanceSketchPlacementsJs` double. */
+function placementsOfSketches(sketches: BigUint64Array | bigint[], poses: number[]): unknown {
+  const ids = BigUint64Array.from(sketches)
+  return {
+    len: () => ids.length,
+    is_empty: () => ids.length === 0,
+    sketches: () => ids,
+    poses: () => Float64Array.from(poses),
+    free: () => {},
+  }
 }
 
 /** Identity pose (row-major 3x4: no rotation/reflection, zero translation). */
@@ -210,6 +278,53 @@ function isDegenerate(m: THREE.Matrix4): boolean {
   const e = m.elements
   return [0, 1, 2, 4, 5, 6, 8, 9, 10].every((i) => e[i] === 0)
 }
+
+describe('SceneRenderer — an object the kernel cannot tessellate (#77)', () => {
+  const refusal = () => {
+    throw new Error('UnbridgeableHole: face FaceId(158v1) has a hole that cannot be bridged')
+  }
+
+  it('skips a standalone object that throws and still draws the others, toasting once', () => {
+    const objects: Record<string, boolean> = { '1': true, '2': true }
+    const scene = makeScene({ objects })
+    const good = (scene as unknown as { object_mesh: (id: bigint) => unknown }).object_mesh
+    ;(scene as unknown as { object_mesh: (id: bigint) => unknown }).object_mesh = (id: bigint) =>
+      id === 1n ? refusal() : good(id)
+    const renderer = new SceneRenderer(new THREE.Scene(), scene)
+    const onUnrenderable = vi.fn()
+    renderer.onUnrenderable = onUnrenderable
+    expect(() => renderer.refresh()).not.toThrow()
+    expect(renderer.getObjectGroup(1n)).toBeNull()
+    expect(renderer.getObjectGroup(2n)).not.toBeNull()
+    renderer.refresh()
+    expect(onUnrenderable).toHaveBeenCalledTimes(1)
+  })
+
+  it('a kernel trap is not "part left out": it propagates and no toast fires', () => {
+    const scene = makeScene({ objects: { '1': true } })
+    ;(scene as unknown as { object_mesh: () => unknown }).object_mesh = () => {
+      throw new WebAssembly.RuntimeError('unreachable')
+    }
+    const renderer = new SceneRenderer(new THREE.Scene(), scene)
+    const onUnrenderable = vi.fn()
+    renderer.onUnrenderable = onUnrenderable
+    expect(() => renderer.refresh()).toThrow(WebAssembly.RuntimeError)
+    expect(onUnrenderable).not.toHaveBeenCalled()
+  })
+
+  it('a placed member that throws is left out without crashing instance paths', () => {
+    const scene = makeScene({
+      instances: { '10': { def: 1n, pose: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1], memberIds: [5n], memberWatertight: { '5': true } } },
+    })
+    ;(scene as unknown as { object_mesh: (id: bigint) => unknown }).object_mesh = refusal
+    const renderer = new SceneRenderer(new THREE.Scene(), scene)
+    const onUnrenderable = vi.fn()
+    renderer.onUnrenderable = onUnrenderable
+    expect(() => renderer.refreshInstances()).not.toThrow()
+    expect(() => renderer.instanceFaceParts(10n)).not.toThrow()
+    expect(onUnrenderable).toHaveBeenCalledTimes(1)
+  })
+})
 
 describe('SceneRenderer — double-sided rendering for open shells', () => {
   it('a watertight object keeps THREE.FrontSide', () => {
@@ -283,6 +398,82 @@ function meshSpy(scene: WasmScene): ReturnType<typeof vi.fn> {
   return (scene as unknown as { object_mesh: ReturnType<typeof vi.fn> }).object_mesh
 }
 
+describe('SceneRenderer — tangent edges (View ▸ Tangent Edges)', () => {
+  const TANGENT = new Float32Array([0, 0, 0, 0, 0, 1])
+  function tangentScene(extra: Parameters<typeof makeScene>[0]) {
+    const scene = makeScene(extra)
+    const base = scene.object_mesh as unknown as (id: bigint) => object
+    ;(scene as unknown as { object_mesh: unknown }).object_mesh = vi.fn((id: bigint) => ({
+      ...base(id),
+      tangent_edge_positions: () => TANGENT,
+      cage_edge_positions: () => new Float32Array(0),
+    }))
+    return scene
+  }
+
+  it('builds a hidden half-opacity line per object and shows it with the setting', () => {
+    const renderer = new SceneRenderer(new THREE.Scene(), tangentScene({ objects: { '1': true } }))
+    renderer.refresh()
+    expect(renderer.getTangentEdgeInfo()).toEqual({ lines: 1, visible: 0, segments: 1 })
+    const group = renderer.objectsGroup.getObjectByName('Object_1') as THREE.Group
+    const tangent = group.children.find(
+      (c) => c instanceof THREE.LineSegments && (c.material as THREE.LineBasicMaterial).opacity === 0.5,
+    ) as THREE.LineSegments
+    expect((tangent.material as THREE.LineBasicMaterial).transparent).toBe(true)
+    renderer.setTangentEdgesVisible(true)
+    expect(renderer.getTangentEdgeInfo().visible).toBe(1)
+    renderer.setTangentEdgesVisible(false)
+    expect(renderer.getTangentEdgeInfo().visible).toBe(0)
+  })
+
+  it('a rebuild while the setting is on keeps the lines visible, and a plain object has none', () => {
+    const renderer = new SceneRenderer(new THREE.Scene(), tangentScene({ objects: { '1': true } }))
+    renderer.setTangentEdgesVisible(true)
+    renderer.refresh()
+    expect(renderer.getTangentEdgeInfo().visible).toBe(1)
+    renderer.refreshTouched({ objectIds: [1n] })
+    expect(renderer.getTangentEdgeInfo()).toEqual({ lines: 1, visible: 1, segments: 1 })
+    const plain = new SceneRenderer(new THREE.Scene(), makeScene({ objects: { '1': true } }))
+    plain.refresh()
+    expect(plain.getTangentEdgeInfo().lines).toBe(0)
+  })
+
+  it('disposes the tangent geometry and material with the object', () => {
+    const renderer = new SceneRenderer(new THREE.Scene(), tangentScene({ objects: { '1': true } }))
+    renderer.refresh()
+    const group = renderer.objectsGroup.getObjectByName('Object_1') as THREE.Group
+    const tangent = group.children.find(
+      (c) => c instanceof THREE.LineSegments && (c.material as THREE.LineBasicMaterial).opacity === 0.5,
+    ) as THREE.LineSegments
+    const geo = vi.spyOn(tangent.geometry, 'dispose')
+    const mat = vi.spyOn(tangent.material as THREE.Material, 'dispose')
+    renderer.refreshTouched({ objectIds: [1n] })
+    expect(geo).toHaveBeenCalled()
+    expect(mat).toHaveBeenCalled()
+  })
+
+  it('instanced members get a tangent batch that follows the setting', () => {
+    const renderer = new SceneRenderer(
+      new THREE.Scene(),
+      tangentScene({
+        instances: { '10': { def: 5n, memberIds: [20n], memberWatertight: { '20': true }, pose: IDENTITY_POSE } },
+      }),
+    )
+    renderer.refresh()
+    expect(renderer.getTangentEdgeInfo()).toEqual({ lines: 1, visible: 0, segments: 1 })
+    renderer.setTangentEdgesVisible(true)
+    expect(renderer.getTangentEdgeInfo().visible).toBe(1)
+  })
+
+  it('print edge collection includes tangent lines only while the setting is on', () => {
+    const renderer = new SceneRenderer(new THREE.Scene(), tangentScene({ objects: { '1': true } }))
+    renderer.refresh()
+    const off = renderer.collectPrintEdgeSegments().length
+    renderer.setTangentEdgesVisible(true)
+    expect(renderer.collectPrintEdgeSegments().length).toBe(off + 6)
+  })
+})
+
 describe('SceneRenderer — targeted refresh (refreshTouched)', () => {
   it('rebuilds only the touched object group and leaves untouched groups alone', () => {
     const scene = makeScene({ objects: { '1': true, '2': true } })
@@ -333,6 +524,42 @@ describe('SceneRenderer — targeted refresh (refreshTouched)', () => {
     expect(renderer.objectsGroup.getObjectByName('Object_3')).toBeDefined()
     // The untouched survivor was not rebuilt.
     expect(renderer.objectsGroup.getObjectByName('Object_1')).toBe(survivorBefore)
+  })
+
+  it('re-pulls a live sibling placement so a solid created mid-session draws on it (ARCHITECTURE 2.11)', () => {
+    // A component session is open: object 1 is the session's world member
+    // (drawn by the object path) AND the member the sibling instance 10
+    // draws through the inverse session pose; the kernel reports 10 as a
+    // session placement. A world object 2 is then created inside the
+    // session — the tool's commit names only `objectIds: [2]`, yet the
+    // sibling's expanded placements now include 2 as well.
+    const objects: Record<string, boolean> = { '1': true }
+    const memberWatertight: Record<string, boolean> = { '1': true }
+    const instances = {
+      '10': { def: 100n, pose: IDENTITY_POSE, memberIds: [1n], memberWatertight },
+    }
+    const scene = makeScene({ objects, instances, sessionPlacements: [10n] })
+    const renderer = new SceneRenderer(new THREE.Scene(), scene)
+    renderer.refresh()
+    expect(instancedBatches(renderer.instancesGroup)).toHaveLength(1)
+
+    objects['2'] = true
+    instances['10'].memberIds.push(2n)
+    instances['10'].memberWatertight['2'] = true
+    renderer.refreshTouched({ objectIds: [2n] })
+
+    // The new solid draws twice: once as a world object, once instanced
+    // on the sibling — a second batch, with the sibling's slot in it.
+    expect(renderer.objectsGroup.getObjectByName('Object_2')).toBeDefined()
+    const batches = instancedBatches(renderer.instancesGroup)
+    expect(batches).toHaveLength(2)
+    for (const b of batches) expect(b.count).toBe(1)
+
+    // And a session edit on the shared member re-pulls its mesh for the
+    // sibling batch too (the dirty-member path), not just the object group.
+    meshSpy(scene).mockClear()
+    renderer.refreshTouched({ objectIds: [1n] })
+    expect(meshSpy(scene).mock.calls.filter((c) => c[0] === 1n).length).toBeGreaterThanOrEqual(2)
   })
 
   it('a touched instance updates its batch slot in place, without re-pulling shared member geometry', () => {
@@ -1461,7 +1688,7 @@ describe('SceneRenderer — definition-owned sketch rendering (component-edit-pa
       '11': { def: 100n, pose: [1, 0, 0, 5, 0, 1, 0, 0, 0, 0, 1, 0], memberIds: [1n], memberWatertight: { '1': true } },
     }
     const scene = makeScene({ instances }) as unknown as Record<string, unknown>
-    scene.component_member_sketches = (componentId: bigint) =>
+    scene.component_rendered_sketches = (componentId: bigint) =>
       live && componentId === 100n ? BigUint64Array.from([500n]) : new BigUint64Array()
     // A closed unit square in DEFINITION-LOCAL coordinates (z=0 plane).
     scene.sketch_lines = (id: bigint) =>
@@ -1509,6 +1736,126 @@ describe('SceneRenderer — definition-owned sketch rendering (component-edit-pa
     expect(g11.matrix.elements[12]).toBe(5)
   })
 
+  it('a sibling of an open session draws the session\'s world drawing through the inverse session pose (ARCHITECTURE 2.11)', () => {
+    // The definition is on loan: the entered placement 11 (at +5 x) is
+    // hidden, so only sibling 10 is live. The kernel reports the session's
+    // WORLD sketch (drawn where 11 sits, x in [5, 6]) and the inverse
+    // session pose (-5 x) as the frame; the sibling's group matrix must be
+    // pose(10) × frame, which brings the drawing back onto 10.
+    const instances = {
+      '10': { def: 100n, pose: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0], memberIds: [1n], memberWatertight: { '1': true } },
+    }
+    const scene = makeScene({ instances, sessionPlacements: [10n] }) as unknown as Record<string, unknown>
+    scene.component_rendered_sketches = (componentId: bigint) =>
+      componentId === 100n ? BigUint64Array.from([500n]) : new BigUint64Array()
+    scene.component_sketch_frame = (componentId: bigint) =>
+      Float64Array.from(componentId === 100n ? [1, 0, 0, -5, 0, 1, 0, 0, 0, 0, 1, 0] : [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0])
+    scene.sketch_lines = (id: bigint) =>
+      id === 500n ? new Float32Array([5, 0, 0, 6, 0, 0, 6, 0, 0, 6, 1, 0]) : new Float32Array()
+    scene.sketch_regions = () => new BigUint64Array()
+    const renderer = new SceneRenderer(new THREE.Scene(), scene as unknown as WasmScene)
+    renderer.refresh()
+
+    // The kernel's placements carry the inverse session pose, so the drawing
+    // is already back in the instance's frame: the group stays at the
+    // instance's own pose and the lines start at the origin.
+    const g10 = renderer.sketchGroup.getObjectByName('DefSketch_10') as THREE.Group
+    expect(g10).toBeDefined()
+    expect(g10.matrix.elements[12]).toBe(0)
+    expect(Array.from(fatLinePositions(g10)).slice(0, 3)).toEqual([0, 0, 0])
+  })
+
+  it('draws the lines of a nested definition at their placement pose inside the instance, and a fill at its own matrix', () => {
+    const instances = {
+      '10': { def: 100n, pose: [1, 0, 0, 2, 0, 1, 0, 0, 0, 0, 1, 0], memberIds: [1n], memberWatertight: { '1': true } },
+    }
+    const scene = makeScene({ instances }) as unknown as Record<string, unknown>
+    // Sketch 500 is the definition's own (identity); 501 belongs to a nested
+    // definition placed +3 in y, with a fill.
+    scene.component_rendered_sketches = () => BigUint64Array.from([500n])
+    scene.instance_sketch_placements = () =>
+      placementsOfSketches([500n, 501n], [
+        1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0,
+        1, 0, 0, 0, 0, 1, 0, 3, 0, 0, 1, 0,
+      ])
+    scene.sketch_lines = (id: bigint) => new Float32Array(id === 500n ? [0, 0, 0, 1, 0, 0] : [0, 0, 0, 0, 1, 0])
+    scene.sketch_regions = (id: bigint) => (id === 501n ? BigUint64Array.from([1n]) : new BigUint64Array())
+    scene.region_boundary = () => new Float32Array([0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0])
+    const renderer = new SceneRenderer(new THREE.Scene(), scene as unknown as WasmScene)
+    renderer.refresh()
+
+    const g = renderer.sketchGroup.getObjectByName('DefSketch_10') as THREE.Group
+    expect(g.matrix.elements[12]).toBe(2)
+    // Both sketches' segments, the nested one carried through its pose.
+    expect(Array.from(fatLinePositions(g))).toEqual([0, 0, 0, 1, 0, 0, 0, 3, 0, 0, 4, 0])
+    const fill = g.children.find((c) => (c as THREE.Mesh).isMesh === true) as THREE.Mesh
+    expect(fill.matrix.elements[13]).toBe(3)
+  })
+
+  /** One instance (10n) whose drawing places the SAME sketch (500n, one
+   *  region) twice at different poses — a component holding two instances of
+   *  a drawn component. */
+  function makeTwiceNestedScene(): WasmScene {
+    const instances = {
+      '10': { def: 100n, pose: IDENTITY_POSE, memberIds: [1n], memberWatertight: { '1': true } },
+    }
+    const scene = makeScene({ instances }) as unknown as Record<string, unknown>
+    scene.component_rendered_sketches = () => BigUint64Array.from([500n])
+    scene.instance_sketch_placements = () =>
+      placementsOfSketches([500n, 500n], [
+        1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0,
+        1, 0, 0, 4, 0, 1, 0, 0, 0, 0, 1, 0,
+      ])
+    scene.sketch_lines = () => new Float32Array([0, 0, 0, 1, 0, 0])
+    scene.sketch_regions = () => BigUint64Array.from([1n])
+    scene.region_boundary = () => new Float32Array([0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0])
+    return scene as unknown as WasmScene
+  }
+
+  it('keeps one fill per placement when the same nested sketch is placed twice, and disposes and dims both', () => {
+    setThemeSetting('dark')
+    const renderer = new SceneRenderer(new THREE.Scene(), makeTwiceNestedScene())
+    renderer.refresh()
+    const g = renderer.sketchGroup.getObjectByName('DefSketch_10') as THREE.Group
+    const fills = g.children.filter((c) => (c as THREE.Mesh).isMesh === true && !('isLineSegments2' in c)) as THREE.Mesh[]
+    expect(fills).toHaveLength(2)
+    expect(fills[0].matrix.elements[12]).toBe(0)
+    expect(fills[1].matrix.elements[12]).toBe(4)
+
+    // Both dim with the edit context (sibling of the edited instance).
+    renderer.setActiveContext(new Set([2n]), new Set([99n]))
+    for (const f of fills) {
+      expect((f.material as THREE.MeshBasicMaterial).opacity).toBeLessThan(1)
+    }
+    const opacities = fills.map((f) => (f.material as THREE.Material).opacity)
+    expect(opacities[0]).toBe(opacities[1])
+
+    // Both dispose on the rebuild.
+    const spies = fills.map((f) => vi.spyOn(f.geometry, 'dispose'))
+    renderer.refreshAllSketches()
+    for (const sp of spies) expect(sp).toHaveBeenCalled()
+  })
+
+  it('skips the per-instance placement walk when no definition draws anything', () => {
+    const scene = makeDefSketchScene(false) as unknown as Record<string, unknown>
+    const walk = vi.fn(scene.instance_sketch_placements as (id: bigint) => unknown)
+    scene.instance_sketch_placements = walk
+    const renderer = new SceneRenderer(new THREE.Scene(), scene as unknown as WasmScene)
+    renderer.refresh()
+    expect(walk).not.toHaveBeenCalled()
+  })
+
+  it('a targeted refresh leaves the rebuilt def-sketch lines and fills clipped by the active section', () => {
+    const renderer = new SceneRenderer(new THREE.Scene(), makeDefSketchScene(true))
+    renderer.refresh()
+    renderer.setSectionPlane({ origin: [0.5, 0, 0], normal: [1, 0, 0], active: true })
+    renderer.refreshTouched({ instanceIds: [10n] })
+    const g = renderer.sketchGroup.getObjectByName('DefSketch_10') as THREE.Group
+    const mats = g.children.map((c) => (c as THREE.Mesh).material as THREE.Material)
+    expect(mats.length).toBeGreaterThan(1)
+    for (const m of mats) expect(m.clippingPlanes?.length).toBe(1)
+  })
+
   it('an undone/deleted def sketch (component_member_sketches no longer reports it) renders NO group', () => {
     const scene = makeDefSketchScene(false)
     const renderer = new SceneRenderer(new THREE.Scene(), scene)
@@ -1525,7 +1872,7 @@ describe('SceneRenderer — definition-owned sketch rendering (component-edit-pa
 
     // Simulate the sketch's creation being undone: the wasm accessor now
     // reports no live sketches for the component.
-    scene.component_member_sketches = () => new BigUint64Array()
+    scene.component_rendered_sketches = () => new BigUint64Array()
     renderer.refreshAllSketches()
 
     expect(defSketchGroups(renderer.sketchGroup)).toHaveLength(0)
@@ -1653,7 +2000,7 @@ describe('SceneRenderer — edit-context dimming (component-edit-parity.md Findi
     // renders through both instances' poses (the sole scenario Finding 1
     // exists for).
     const square = new Float32Array([0, 0, 0, 1, 0, 0, 1, 0, 0, 1, 1, 0, 1, 1, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0])
-    scene.component_member_sketches = (c: bigint) => (c === 100n ? BigUint64Array.from([500n]) : new BigUint64Array())
+    scene.component_rendered_sketches = (c: bigint) => (c === 100n ? BigUint64Array.from([500n]) : new BigUint64Array())
     scene.sketch_lines = (id: bigint) => (id === 500n ? square : new Float32Array())
     scene.sketch_regions = () => new BigUint64Array()
     scene.region_boundary = () => new Float32Array()
@@ -1691,6 +2038,27 @@ function edgesMaterial(root: THREE.Group, name: string): THREE.LineBasicMaterial
 
 describe('SceneRenderer — section plane (DESIGN §3/§4)', () => {
   const PLANE = { origin: [0, 0, 0] as [number, number, number], normal: [0, 0, 1] as [number, number, number], active: true }
+
+  it('draws the cut profile in the document style\'s color and width, Hew\'s own without one', () => {
+    const scene = makeScene({ objects: { '1': true } })
+    const renderer = new SceneRenderer(new THREE.Scene(), scene)
+    renderer.refresh()
+    renderer.setSectionPlane({ origin: [0.5, 0, 0], normal: [1, 0, 0], active: true })
+    const cut = () => {
+      renderer.debugSectionCutSegments()
+      const line = renderer.sectionCutGroup.children[0] as unknown as { material: { color: THREE.Color; linewidth: number } }
+      return { hex: line.material.color.getHex(), width: line.material.linewidth }
+    }
+    expect(cut()).toEqual({ hex: 0x000000, width: 2.5 })
+    renderer.setSectionCutStyle([200, 0, 10], 5)
+    expect(cut()).toEqual({ hex: 0xc8000a, width: 5 })
+    // A width past what reads as a line is held to the widest.
+    renderer.setSectionCutStyle([200, 0, 10], 400)
+    expect(cut().width).toBe(12)
+    // No style: back to Hew's own.
+    renderer.setSectionCutStyle(null, null)
+    expect(cut()).toEqual({ hex: 0x000000, width: 2.5 })
+  })
 
   it('draws the cut profile where the active section passes through drawn solids, and only there', () => {
     const scene = makeScene({ objects: { '1': true } })
@@ -2034,6 +2402,8 @@ describe('SceneRenderer — section widget coverage (D1, section-plane-polish)',
       group_counts: () => new Uint32Array([3]),
       group_backs: () => new Uint8Array([0]),
       edge_positions: () => new Float32Array([ox, oy, oz, ox + 1, oy, oz]),
+      tangent_edge_positions: () => new Float32Array(0),
+      cage_edge_positions: () => new Float32Array(0),
       watertight: () => true,
       free: vi.fn(),
     }
@@ -2050,6 +2420,7 @@ describe('SceneRenderer — section widget coverage (D1, section-plane-polish)',
       instance_pose: () => undefined,
       component_member_objects: () => new BigUint64Array(),
       component_member_sketches: () => new BigUint64Array(),
+      component_ids: () => new BigUint64Array(),
       sketch_ids: () => new BigUint64Array(),
       guide_ids: () => new BigUint64Array(),
     } as unknown as WasmScene
@@ -2391,6 +2762,8 @@ describe('SceneRenderer — untextured painted materials', () => {
         group_counts: () => new Uint32Array([3]),
         group_backs: () => new Uint8Array([0]),
         edge_positions: () => new Float32Array([0, 0, 0, 1, 0, 0]),
+        tangent_edge_positions: () => new Float32Array(0),
+        cage_edge_positions: () => new Float32Array(0),
         watertight: () => true,
         free: vi.fn(),
       }
@@ -2400,6 +2773,10 @@ describe('SceneRenderer — untextured painted materials', () => {
         g: () => 100,
         b: () => 50,
         a: () => 255,
+        has_pbr: () => false,
+        metallic: () => 0,
+        roughness: () => 1,
+        has_normal_map: () => false,
         free: vi.fn(),
       }
       const scene = {
@@ -2413,6 +2790,7 @@ describe('SceneRenderer — untextured painted materials', () => {
         instance_expanded_local_poses: () => new Float64Array(),
         instance_expanded_shown: () => new Uint8Array(),
         component_member_sketches: () => new BigUint64Array(),
+        component_ids: () => new BigUint64Array(),
         sketch_ids: () => new BigUint64Array(),
         guide_ids: () => new BigUint64Array(),
         material_info: () => materialInfo,
@@ -2636,6 +3014,22 @@ describe('SceneRenderer — guide spans (segments and rays)', () => {
     renderer.refreshGuides()
     return renderer
   }
+  it('draws each line guide with its own stipple mask, short dashes when it has none', () => {
+    const scene = makeScene({ objects: {} })
+    ;(scene as unknown as { guide_kind: (id: bigint) => string }).guide_kind = () => 'line'
+    ;(scene as unknown as { guide_geometry: (id: bigint) => Float64Array }).guide_geometry = () =>
+      new Float64Array([0, 0, 0, 1, 0, 0])
+    ;(scene as unknown as { guide_ids: () => BigUint64Array }).guide_ids = () => new BigUint64Array([1n, 2n])
+    ;(scene as unknown as { guide_dash: (id: bigint) => number | undefined }).guide_dash = (id) =>
+      id === 1n ? 0x1c47 : undefined
+    const renderer = new SceneRenderer(new THREE.Scene(), scene)
+    renderer.refresh()
+    renderer.refreshGuides()
+    const line = renderer.guidesGroup.children.find((c) => c instanceof THREE.LineSegments) as THREE.LineSegments
+    const stipple = Array.from(line.geometry.getAttribute('stipple').array)
+    expect(stipple).toEqual([0x1c47, 0x1c47, 0x3333, 0x3333])
+  })
+
   function drawn(renderer: SceneRenderer): { pos: number[]; dist: number[] } {
     const line = renderer.guidesGroup.children.find((c) => c instanceof THREE.LineSegments) as THREE.LineSegments
     return {
@@ -2930,5 +3324,328 @@ describe('SceneRenderer — whole-model render mode (X-ray / Wireframe)', () => 
     const m = facesMaterial(renderer.objectsGroup, 'Object_1')
     expect(m.opacity).toBeCloseTo(0.4)
     expect(m.depthWrite).toBe(false)
+  })
+})
+
+describe('SceneRenderer — instance materials (inherited by members)', () => {
+  function sceneWith(inherited: Record<string, bigint[]>) {
+    const instances: Parameters<typeof makeScene>[0]['instances'] = {
+      '10': { def: 100n, pose: IDENTITY_POSE, memberIds: [1n], memberWatertight: { '1': true }, inherited: inherited['10'] },
+      '11': { def: 100n, pose: [1, 0, 0, 5, 0, 1, 0, 0, 0, 0, 1, 0], memberIds: [1n], memberWatertight: { '1': true }, inherited: inherited['11'] },
+      '12': { def: 101n, pose: IDENTITY_POSE, memberIds: [2n], memberWatertight: { '2': true }, inherited: inherited['12'] },
+    }
+    return { scene: makeScene({ instances }), instances }
+  }
+  const memberMeshSpy = (scene: WasmScene) =>
+    (scene as unknown as { member_mesh: ReturnType<typeof vi.fn> }).member_mesh
+
+  it('two placements of one member with different inherited materials build two batches', () => {
+    const { scene } = sceneWith({ '10': [30n] })
+    const renderer = new SceneRenderer(new THREE.Scene(), scene)
+    renderer.refresh()
+    const forMember1 = instancedBatches(renderer.instancesGroup).filter((b) => b.name.startsWith('InstanceBatch_1_'))
+    expect(forMember1).toHaveLength(2)
+    expect(forMember1.map((b) => b.count).sort()).toEqual([1, 1])
+    expect(forMember1.some((b) => b.name.endsWith('_30'))).toBe(true)
+    // Only the painted placement's variant crossed through member_mesh.
+    expect(memberMeshSpy(scene)).toHaveBeenCalledWith(1n, 30n)
+    expect(memberMeshSpy(scene)).toHaveBeenCalledTimes(1)
+    expect(renderer.debugInstanceInherited(10n)).toEqual([30n])
+    expect(renderer.debugInstanceInherited(11n)).toEqual([NO_MATERIAL])
+  })
+
+  it("changing one instance's material rebuilds only that member's batches", () => {
+    const { scene, instances } = sceneWith({})
+    const renderer = new SceneRenderer(new THREE.Scene(), scene)
+    renderer.refresh()
+    const before = instancedBatches(renderer.instancesGroup)
+    const member2Before = before.find((b) => b.name.startsWith('InstanceBatch_2_'))
+    const member1Before = before.find((b) => b.name.startsWith('InstanceBatch_1_'))
+    expect(member1Before?.count).toBe(2)
+
+    instances!['11'].inherited = [40n]
+    renderer.refreshTouched({ instanceIds: [11n] })
+
+    const after = instancedBatches(renderer.instancesGroup)
+    const member1After = after.filter((b) => b.name.startsWith('InstanceBatch_1_'))
+    expect(member1After).toHaveLength(2)
+    expect(member1After.find((b) => b.name.endsWith('_40'))?.count).toBe(1)
+    expect(member1After).not.toContain(member1Before)
+    // The other member's batch is the very same object.
+    expect(after.find((b) => b.name.startsWith('InstanceBatch_2_'))).toBe(member2Before)
+  })
+
+  it('a materialized placement draws the geometry of its own inherited material', () => {
+    const { scene } = sceneWith({ '10': [30n] })
+    const renderer = new SceneRenderer(new THREE.Scene(), scene)
+    renderer.refresh()
+    memberMeshSpy(scene).mockClear()
+    meshSpy(scene).mockClear()
+    renderer.setSelectedInstances([10n])
+    // Served from the per-(member, inherited) cache: no fresh pull, and the
+    // plain variant was never asked for this placement.
+    expect(meshSpy(scene)).not.toHaveBeenCalled()
+    const group = materializedGroups(renderer.instancesGroup).find((g) => g.name === 'Instance_10')
+    expect(group).toBeDefined()
+    expect(renderer.debugInstanceInherited(10n)).toEqual([30n])
+    // The group's face geometry is the inherited variant (black), not the
+    // plain one instance 11 draws (white) — the plain variant is cached too,
+    // so a wrong id would be served silently without this check.
+    const faces = group!.children.find((c) => c instanceof THREE.Mesh) as THREE.Mesh
+    const colors = faces.geometry.getAttribute('color').array as Float32Array
+    expect(Array.from(colors).every((c) => c === 0)).toBe(true)
+    renderer.setSelectedInstances([11n])
+    const plain = materializedGroups(renderer.instancesGroup).find((g) => g.name === 'Instance_11')
+    const plainFaces = plain!.children.find((c) => c instanceof THREE.Mesh) as THREE.Mesh
+    expect(Array.from(plainFaces.geometry.getAttribute('color').array as Float32Array).every((c) => c > 0)).toBe(true)
+  })
+
+  it('the Paint hover outlines the whole placement and clears', () => {
+    const { scene } = sceneWith({})
+    const renderer = new SceneRenderer(new THREE.Scene(), scene)
+    renderer.refresh()
+    renderer.setHoveredInstance(11n)
+    expect(renderer.getHoveredInstance()).toBe(11n)
+    const group = materializedGroups(renderer.instancesGroup).find((g) => g.name === 'Instance_11')
+    expect(group).toBeDefined()
+    const edges = group!.children.filter((c) => c instanceof THREE.LineSegments) as THREE.LineSegments[]
+    expect((edges[0].material as THREE.LineBasicMaterial).color.getHex()).toBe(EDGE_COLOR_HOVER)
+    renderer.setHoveredInstance(null)
+    expect(materializedGroups(renderer.instancesGroup).find((g) => g.name === 'Instance_11')).toBeUndefined()
+  })
+})
+
+describe('SceneRenderer — draw color language (free blue / attached orange)', () => {
+  // The Draw color language: a sketch whose edges an Object owns is part of a
+  // solid's face (orange); every other sketch (world, detached, group-held,
+  // member) is free (blue). Reads the colour the renderer actually paints.
+  const FREE = 0x2266cc
+  const ATTACHED = 0xe0761c
+  const SQUARE = new Float32Array([0, 0, 0, 1, 0, 0, 1, 0, 0, 1, 1, 0, 1, 1, 0, 0, 1, 0, 0, 1, 0, 0, 0, 0])
+
+  function drawingLines(renderer: SceneRenderer): { kind: string; color: number }[] {
+    const out: { kind: string; color: number }[] = []
+    renderer.sketchGroup.traverse((o) => {
+      if (!('isLineSegments2' in o)) return
+      const mat = (o as unknown as { material: LineMaterial }).material
+      out.push({ kind: mat.userData.drawKind as string, color: mat.color.getHex() })
+    })
+    return out
+  }
+
+  function sketchRenderer(owners: Record<string, bigint | undefined>): SceneRenderer {
+    const scene = makeScene({}) as unknown as Record<string, unknown>
+    scene.sketch_ids = () => BigUint64Array.from(Object.keys(owners).map(BigInt))
+    scene.sketch_owner_object = (s: bigint) => owners[s.toString()]
+    scene.sketch_lines = () => SQUARE
+    scene.sketch_regions = () => new BigUint64Array()
+    scene.region_boundary = () => new Float32Array()
+    const renderer = new SceneRenderer(new THREE.Scene(), scene as unknown as WasmScene)
+    renderer.refresh()
+    renderer.refreshAllSketches()
+    return renderer
+  }
+
+  it('a sketch owned by an Object draws in the attached orange ink', () => {
+    expect(drawingLines(sketchRenderer({ '5': 7n }))).toEqual([{ kind: 'attached', color: ATTACHED }])
+  })
+
+  it('a sketch with no owning Object draws in the free blue ink', () => {
+    expect(drawingLines(sketchRenderer({ '5': undefined }))).toEqual([{ kind: 'free', color: FREE }])
+  })
+
+  it('mixed sketches split into one orange and one blue batch', () => {
+    const lines = drawingLines(sketchRenderer({ '5': 7n, '6': undefined }))
+    expect(lines).toHaveLength(2)
+    expect(lines).toContainEqual({ kind: 'attached', color: ATTACHED })
+    expect(lines).toContainEqual({ kind: 'free', color: FREE })
+  })
+
+  it('an imported sketch draws in the neutral edge colour at native width, with no fill', () => {
+    const scene = makeScene({}) as unknown as Record<string, unknown>
+    scene.sketch_ids = () => BigUint64Array.from([5n, 6n])
+    scene.sketch_owner_object = () => undefined
+    scene.sketch_is_imported = (s: bigint) => s === 5n
+    scene.sketch_lines = () => SQUARE
+    scene.sketch_regions = () => BigUint64Array.from([1n])
+    scene.region_boundary = () => new Float32Array([0, 0, 0, 1, 0, 0, 1, 1, 0])
+    const renderer = new SceneRenderer(new THREE.Scene(), scene as unknown as WasmScene)
+    renderer.refresh()
+    renderer.refreshAllSketches()
+    const lines = drawingLines(renderer)
+    expect(lines).toContainEqual({ kind: 'plain', color: 0x1a1a1a })
+    expect(lines).toContainEqual({ kind: 'free', color: FREE })
+    // only the free sketch's region is filled
+    expect((renderer as unknown as { sketchRegionMeshes: Map<unknown, unknown> }).sketchRegionMeshes.size).toBe(1)
+    // the mark is re-read on every rebuild: clearing it brings the ink back
+    scene.sketch_is_imported = () => false
+    renderer.refreshAllSketches()
+    expect(drawingLines(renderer).every((l) => l.kind === 'free')).toBe(true)
+  })
+})
+
+describe('SceneRenderer — face mask (Fillet preview)', () => {
+  /** Two one-triangle faces: vertices 0-2 are face 1, vertices 3-5 face 2. */
+  function maskScene() {
+    const scene = makeScene({ objects: { '1': true } })
+    ;(scene as unknown as { object_mesh: unknown }).object_mesh = vi.fn(() => ({
+      ...makeMesh(true),
+      positions: () => new Float32Array([0, 0, 0, 1, 0, 0, 0, 1, 0, 2, 0, 0, 3, 0, 0, 2, 1, 0]),
+      normals: () => new Float32Array(18),
+      colors: () => new Float32Array(18),
+      uvs: () => new Float32Array(12),
+      indices: () => new Uint32Array([0, 1, 2, 3, 4, 5]),
+      group_counts: () => new Uint32Array([6]),
+    }))
+    ;(scene as unknown as { face_mesh_range: unknown }).face_mesh_range = vi.fn((_o: bigint, f: bigint) =>
+      f === 1n ? Uint32Array.from([0, 3]) : f === 2n ? Uint32Array.from([3, 3]) : undefined,
+    )
+    return scene
+  }
+  const indexOf = (root: THREE.Group): { count: number; start: number; groupCount: number } => {
+    const mesh = root.getObjectByName('Object_1')!.children[0] as THREE.Mesh
+    const g = mesh.geometry
+    return { count: g.getIndex()!.count, start: g.groups[0].start, groupCount: g.groups[0].count }
+  }
+
+  it('drops the masked faces triangles and restores them on clear', () => {
+    const root = new THREE.Scene()
+    const renderer = new SceneRenderer(root, maskScene())
+    renderer.refresh()
+    expect(indexOf(renderer.objectsGroup).count).toBe(6)
+    expect(renderer.setFaceMask(1n, [2n], 1000)).toBe(true)
+    expect(indexOf(renderer.objectsGroup)).toEqual({ count: 3, start: 0, groupCount: 3 })
+    // Same set again: no rebuild, still masked.
+    expect(renderer.setFaceMask(1n, [2n], 1000)).toBe(true)
+    // A different set rebuilds from the original buffer, not the filtered one.
+    expect(renderer.setFaceMask(1n, [1n], 1000)).toBe(true)
+    expect(indexOf(renderer.objectsGroup).count).toBe(3)
+    renderer.clearFaceMask(1n)
+    expect(indexOf(renderer.objectsGroup)).toEqual({ count: 6, start: 0, groupCount: 6 })
+  })
+
+  it('skips the mask on an object over the triangle budget', () => {
+    const renderer = new SceneRenderer(new THREE.Scene(), maskScene())
+    renderer.refresh()
+    expect(renderer.setFaceMask(1n, [2n], 1)).toBe(false)
+    expect(indexOf(renderer.objectsGroup).count).toBe(6)
+  })
+
+  it('forgets the mask when the object is rebuilt', () => {
+    const renderer = new SceneRenderer(new THREE.Scene(), maskScene())
+    renderer.refresh()
+    renderer.setFaceMask(1n, [2n], 1000)
+    renderer.refresh()
+    expect(indexOf(renderer.objectsGroup).count).toBe(6)
+    // Clearing a mask that was dropped is a no-op.
+    expect(() => renderer.clearFaceMask(1n)).not.toThrow()
+  })
+})
+
+describe('SceneRenderer — hover highlight (setHoverHighlight)', () => {
+  const NONE = {
+    objects: [] as bigint[],
+    instances: [] as bigint[],
+    member: null,
+    sketches: [] as bigint[],
+    sketchInstance: null,
+    draftSegments: new Float32Array(0),
+    guide: null,
+  }
+
+  function hoverGroup(threeScene: THREE.Scene): THREE.Group {
+    const g = threeScene.getObjectByName('Hover')
+    if (g === undefined) throw new Error('no Hover group')
+    return g as THREE.Group
+  }
+
+  it('redraws a hovered object\'s edges in the selection color, leaving its selection state alone', () => {
+    const threeScene = new THREE.Scene()
+    const renderer = new SceneRenderer(threeScene, makeScene({ objects: { '1': true } }))
+    renderer.refresh()
+    renderer.setHoverHighlight({ ...NONE, objects: [1n] })
+
+    const [edges] = hoverGroup(threeScene).children as THREE.LineSegments[]
+    expect((edges.material as THREE.LineBasicMaterial).color.getHex()).toBe(EDGE_COLOR_SELECTED)
+    expect(Array.from(edges.geometry.getAttribute('position').array)).toEqual([0, 0, 0, 1, 0, 0])
+    expect(renderer.getSelectedIds().objects).toEqual([])
+
+    renderer.setHoverHighlight(null)
+    expect(hoverGroup(threeScene).children).toHaveLength(0)
+  })
+
+  it('a print pass leaves it out, and it is back after', () => {
+    const threeScene = new THREE.Scene()
+    const renderer = new SceneRenderer(threeScene, makeScene({ objects: { '1': true } }))
+    renderer.refresh()
+    renderer.setHoverHighlight({ ...NONE, objects: [1n] })
+    renderer.beginPrintPass({ style: 'shaded', restrictTo: null, includeGuides: true })
+    expect(hoverGroup(threeScene).visible).toBe(false)
+    renderer.endPrintPass()
+    expect(hoverGroup(threeScene).visible).toBe(true)
+    expect(hoverGroup(threeScene).children).toHaveLength(1)
+  })
+
+  it('a batched instance is outlined at its pose without materializing it', () => {
+    const threeScene = new THREE.Scene()
+    const renderer = new SceneRenderer(threeScene, makeScene({
+      instances: {
+        '10': { def: 100n, pose: [1, 0, 0, 2, 0, 1, 0, 0, 0, 0, 1, 0], memberIds: [1n], memberWatertight: { '1': true } },
+      },
+    }))
+    renderer.refresh()
+    renderer.setHoverHighlight({ ...NONE, instances: [10n] })
+
+    const [edges] = hoverGroup(threeScene).children as THREE.LineSegments[]
+    expect(edges.matrix.elements[12]).toBe(2) // the instance's translation
+    expect(materializedGroups(renderer.instancesGroup)).toHaveLength(0)
+  })
+
+  it('drawn shapes get the on-top fat-line overlay; ids that no longer render are skipped', () => {
+    const threeScene = new THREE.Scene()
+    const renderer = new SceneRenderer(threeScene, makeScene({}))
+    renderer.refresh()
+    renderer.setHoverHighlight({ ...NONE, objects: [42n], draftSegments: new Float32Array([0, 0, 0, 1, 1, 0]) })
+
+    const children = hoverGroup(threeScene).children
+    expect(children).toHaveLength(1)
+    expect(children[0]).toBeInstanceOf(LineSegments2)
+  })
+})
+
+describe('SceneRenderer — the face cue of a component member (OW-14)', () => {
+  const OUTER = [1, 0, 0, 10, 0, 1, 0, 0, 0, 0, 1, 0] // outer instance: +10 in x
+  const NESTED = [1, 0, 0, 0, 0, 1, 0, 5, 0, 0, 1, 0] // def-local placement: +5 in y
+
+  function cueRenderer(placements: { memberId: bigint; localPose: number[] }[]): SceneRenderer {
+    const scene = makeScene({
+      instances: { '10': { def: 100n, pose: OUTER, memberIds: [1n], memberWatertight: { '1': true }, placements } },
+    })
+    ;(scene as unknown as Record<string, unknown>).face_mesh_range = () => [0, 3]
+    const renderer = new SceneRenderer(new THREE.Scene(), scene)
+    renderer.refresh()
+    return renderer
+  }
+
+  it('draws a flat definition\'s member at the instance pose', () => {
+    const r = cueRenderer([{ memberId: 1n, localPose: IDENTITY_LOCAL_POSE }])
+    const tris = r.faceTrianglePositions(1n, 7n, 10n)
+    expect(Array.from(tris ?? [])).toEqual([10, 0, 0, 11, 0, 0, 10, 1, 0])
+  })
+
+  it('draws a nested member at the instance pose times its definition-local pose', () => {
+    const r = cueRenderer([{ memberId: 1n, localPose: NESTED }])
+    const tris = r.faceTrianglePositions(1n, 7n, 10n)
+    expect(Array.from(tris ?? [])).toEqual([10, 5, 0, 11, 5, 0, 10, 6, 0])
+    expect(r.memberPlacementPose(1n, 10n)?.[7]).toBe(5)
+  })
+
+  it('draws nothing when the member is placed twice at different poses (the pick cannot say which)', () => {
+    const r = cueRenderer([
+      { memberId: 1n, localPose: IDENTITY_LOCAL_POSE },
+      { memberId: 1n, localPose: NESTED },
+    ])
+    expect(r.memberPlacementPose(1n, 10n)).toBeNull()
+    expect(r.faceTrianglePositions(1n, 7n, 10n)).toBeNull()
   })
 })

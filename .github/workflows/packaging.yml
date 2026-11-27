@@ -49,18 +49,20 @@ env:
 
 jobs:
   render:
+    if: ${{ !github.event.release.prerelease && !contains(github.event.release.tag_name || inputs.tag, '-pre.') }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: packaging/scripts/render-templates.sh "$TAG"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: rendered-packaging
           path: packaging/
 
   pacman:
+    if: ${{ !github.event.release.prerelease && !contains(github.event.release.tag_name || inputs.tag, '-pre.') }}
     # x86_64 only — mainline Arch has no aarch64 port (Docker Hub's official
     # `archlinux` image is amd64-only for the same reason); see the
     # PKGBUILD comment.
@@ -68,7 +70,7 @@ jobs:
     runs-on: ubuntu-latest
     container: archlinux:latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: rendered-packaging
           path: packaging/
@@ -86,16 +88,17 @@ jobs:
           keyid="$(gpg --batch --with-colons --list-secret-keys | awk -F: '$1=="sec"{print $5; exit}')"
           cd pacman-out
           repo-add -s -k "$keyid" hew.db.tar.gz ./*.pkg.tar.zst
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: pacman-x86_64
           path: pacman-out/
 
   flatpak:
+    if: ${{ !github.event.release.prerelease && !contains(github.event.release.tag_name || inputs.tag, '-pre.') }}
     needs: render
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: rendered-packaging
           path: packaging/
@@ -119,17 +122,18 @@ jobs:
           packaging/scripts/build-flatpak-repo.sh \
             flatpak-out/repo flatpak-out/hew.flatpak \
             https://hew3d.github.io/hew-packages
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: flatpak-repo
           path: flatpak-out/
 
   gentoo-validate:
+    if: ${{ !github.event.release.prerelease && !contains(github.event.release.tag_name || inputs.tag, '-pre.') }}
     needs: render
     runs-on: ubuntu-latest
     container: gentoo/stage3:latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: rendered-packaging
           path: packaging/
@@ -138,18 +142,19 @@ jobs:
           packaging/scripts/validate-gentoo-ebuild.sh
 
   publish-pages:
+    if: ${{ !github.event.release.prerelease && !contains(github.event.release.tag_name || inputs.tag, '-pre.') }}
     needs: [pacman, flatpak]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: pacman-x86_64
           path: layout/pacman/x86_64
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: flatpak-repo
           path: layout/flatpak-staged
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           sparse-checkout: packaging/pages
           path: source
@@ -182,11 +187,34 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh release upload "$TAG" layout/flatpak/hew.flatpak --repo hew3d/hew --clobber
 
+  # After the Pages publish: does an installed Flatpak actually update to
+  # this release, and does a fresh install get it? Reporting only — it runs
+  # after the publish, never gates or undoes one, and a failure here is a
+  # flag to look at the Flatpak channel (hence continue-on-error).
+  flatpak-update-smoke:
+    if: ${{ !github.event.release.prerelease && !contains(github.event.release.tag_name || inputs.tag, '-pre.') }}
+    needs: publish-pages
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          sparse-checkout: packaging/scripts
+      - name: Install Flatpak
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends flatpak
+      - name: Update from the previous release's bundle, then install fresh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: packaging/scripts/smoke-flatpak-update.sh "$TAG"
+
   gentoo-publish:
+    if: ${{ !github.event.release.prerelease && !contains(github.event.release.tag_name || inputs.tag, '-pre.') }}
     needs: [render, gentoo-validate]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: rendered-packaging
           path: packaging/
@@ -205,6 +233,7 @@ jobs:
           git push
 
   homebrew-validate:
+    if: ${{ !github.event.release.prerelease && !contains(github.event.release.tag_name || inputs.tag, '-pre.') }}
     # Installs the rendered cask for real on a macOS runner — download,
     # checksum, the app, and the hew-cli link — then zaps it under a scratch
     # HOME, so a wrong digest, a moved sidecar, or an over-broad zap list
@@ -212,7 +241,7 @@ jobs:
     needs: render
     runs-on: macos-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: rendered-packaging
           path: packaging/
@@ -225,10 +254,11 @@ jobs:
           packaging/scripts/validate-homebrew-cask.sh "${TAG#v}"
 
   homebrew-publish:
+    if: ${{ !github.event.release.prerelease && !contains(github.event.release.tag_name || inputs.tag, '-pre.') }}
     needs: [render, homebrew-validate]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: rendered-packaging
           path: packaging/

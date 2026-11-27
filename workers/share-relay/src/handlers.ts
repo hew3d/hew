@@ -32,8 +32,9 @@ export const CONTRACT_VERSION = 1
 
 /** Optional path prefix. Self-hosting serves the relay from the SAME origin
  *  as the web app under `/relay/` (docs/design/self-hosting-relay.md §2), and
- *  the public deployment adds an `app.hew3d.com/relay/*` route to this Worker
- *  alongside the legacy `share.hew3d.com/*` one. `route()` strips this once
+ *  the public deployment adds `app.hew3d.com/relay/*` and
+ *  `beta.hew3d.com/relay/*` routes to this Worker alongside the legacy
+ *  `share.hew3d.com/*` one. `route()` strips this once
  *  and dispatches, so `/relay/drop` and `/drop` are the same route — a
  *  reverse proxy that strips the prefix itself (nginx `proxy_pass` with a
  *  URI part) and one that forwards it verbatim both work. */
@@ -67,20 +68,26 @@ const DROP_NAME = 'ciphertext'
 /** 128 bits of token entropy, base64url-encoded (22 chars, no padding). */
 const TOKEN_BYTES = 16
 
-/** The always-on origins: the hosted phone app plus the two Tauri-webview
- *  origins the desktop dialog runs under — no wildcard, per README.md.
+/** The always-on origins: the hosted phone app (the release host and the
+ *  beta host, beta.hew3d.com) plus the two Tauri-webview origins the desktop
+ *  dialog runs under — no wildcard, per README.md.
  *  `tauri://localhost` is the Windows/Linux WebView2/WebKitGTK origin;
  *  `https://tauri.localhost` is macOS's. (The desktop upload actually goes
  *  through the native HTTP plugin now, bypassing browser CORS, but the two
  *  tauri origins stay allowed harmlessly.) */
-const BASE_ALLOWED_ORIGINS = ['https://app.hew3d.com', 'tauri://localhost', 'https://tauri.localhost']
+const BASE_ALLOWED_ORIGINS = [
+  'https://app.hew3d.com',
+  'https://beta.hew3d.com',
+  'tauri://localhost',
+  'https://tauri.localhost',
+]
 
 /** The effective allowlist for one request: the base origins plus any set
  *  in the `EXTRA_ALLOWED_ORIGINS` env var (comma-separated). That var is the
  *  supported way to point a self-hosted HTTPS test origin — e.g. a homelab
  *  `https://hew.granroth.xyz` serving the shop build — at this relay without
  *  editing (or shipping) it in the committed default. Unset in production, so
- *  production stays exactly the three base origins. */
+ *  production stays exactly the four base origins. */
 export function resolveAllowedOrigins(env: DropEnv): Set<string> {
   const extra = (env.EXTRA_ALLOWED_ORIGINS ?? '')
     .split(',')

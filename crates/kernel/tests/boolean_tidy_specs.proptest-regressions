@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 56be8bcf748f8ff31302d1d579d0754c5bc78f71c0acc1502fd294fdaa588c15 # shrinks to corners = [(0, -3.8310669413341994e-7, 1.0, 0.0), (0, 3.066216403425015e-7, 0.01, 0.0), (0, 9.404155187798221e-8, 0.01, 0.0), (2, -3.844439424012634e-7, 0.01, 0.0), (2, -3.0255997092207914e-7, 0.01, 0.0), (1, 0.0, 0.01, 0.0)], axis = (0.0, 0.0, 0.1), angle = 0.0
+cc a54bcf0f09f4db0b3dc39b4a158464d60366827774471b691c47b1ce37acf9e0 # shrinks to corners = [(2, 0.0, 0.01, 0.0), (2, -9.460638921672576e-8, 0.1, 0.0), (0, 0.0, 0.01, 0.0), (2, 0.0, 0.01, 0.0), (3, 0.0, 0.01, 0.0), (0, 0.0, 0.01, 0.0)], axis = (0.0, 0.0, 0.1), angle = 0.0

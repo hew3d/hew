@@ -14,6 +14,17 @@ crate-type = ["cdylib", "rlib"]
 # kernel-class-pure (kernel, slotmap, serde only — DEVELOPMENT.md rule 1),
 # so this is a safe addition at the WASM boundary where it belongs (§3).
 api.workspace = true
+# Plugin command declarations the app registers on the shared registry
+# (docs/agents/PLUGINS.md "Commands"); pure, already in `api`'s tree.
+plugin-manifest.workspace = true
+# The plugin install store's pure half (package reading, consent) for the
+# web build. Plugins are a Preview feature that loads code: the crate is
+# empty in a production build and this crate uses it only under
+# `cfg(hew_preview)`.
+plugin-host.workspace = true
+# Shared Library sources: the index/reference/URL rules the app runs through
+# three exports (docs/design/shared-library-sources.md 6.4). Pure Rust.
+sources = { path = "../sources" }
 kernel.workspace = true
 inference.workspace = true
 tessellate.workspace = true
@@ -22,6 +33,9 @@ softrender.workspace = true
 # Hidden-line removal for vector Line-art prints and SVG export
 # (docs/design/printing.md §7b) — pure geometry, same posture as softrender.
 hlr.workspace = true
+# The renderers behind hew.view.snapshot / hew.view.line_drawing, shared with
+# hew-cli (pure over &Document; no new third-party dependency).
+headless-render.workspace = true
 # Hew-native PDF for Save PDF… (docs/design/printing.md §9b).
 pdfwrite.workspace = true
 dae-import.workspace = true
@@ -40,3 +54,10 @@ serde_json.workspace = true
 # see the workspace-level `sha2` entry's doc comment. Pure Rust, no
 # randomness, compiles cleanly for wasm32-unknown-unknown.
 sha2.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+url.workspace = true
+# Stored `.hewplugin` fixtures for the plugin install exports' tests; the
+# version the kernel already uses.
+zip.workspace = true

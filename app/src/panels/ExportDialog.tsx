@@ -25,6 +25,7 @@ import { VIEW_LABEL, type PrintViewKind } from '../print/printJob'
 import { scalePresetsFor, type PrintScale } from '../print/scale'
 import {
   DEFAULT_STL_SEGMENTS,
+  CAGE_FORMATS,
   EXPORT_FORMATS,
   STL_RESOLUTIONS,
   defaultSvgScaleIndex,
@@ -32,6 +33,7 @@ import {
   type ExportFormat,
   type SvgExportOptions,
 } from '../io/savePanel'
+import { compatLabel, olderGroupHeading } from '../io/docFormat'
 import { getLengthUnit } from '../settings/units'
 import { isComposingKey } from '../input/keyboard'
 
@@ -43,7 +45,18 @@ interface ExportDialogProps {
    * `stlSegmentsPerTurn` is the STL curve resolution (segments per full
    * turn, 0 = stored facets); meaningless for glTF.
    */
-  onExport: (format: ExportFormat, stlSegmentsPerTurn: number, svg?: SvgExportOptions) => void
+  onExport: (
+    format: ExportFormat,
+    stlSegmentsPerTurn: number,
+    svg?: SvgExportOptions,
+    skpCompat?: boolean,
+    cages?: boolean,
+  ) => void
+  /** The "avoid features older SketchUp versions cannot open" box starts
+   * ticked (the open file is revision 17 of the 2021-and-later container). */
+  initialCompat?: boolean
+  /** The model has a Smooth object: offer "Export cages instead". */
+  hasSmoothed?: boolean
   /** Abort the dialog (also triggered by Escape). */
   onCancel: () => void
 }
@@ -124,10 +137,12 @@ const EXPORT_BUTTON_STYLE: React.CSSProperties = {
   cursor: 'pointer',
 }
 
-export function ExportDialog({ onExport, onCancel }: ExportDialogProps) {
+export function ExportDialog({ onExport, onCancel, initialCompat = false, hasSmoothed = false }: ExportDialogProps) {
   const { t } = useLingui()
   const [format, setFormat] = useState<ExportFormat>('glb')
+  const [skpCompat, setSkpCompat] = useState(initialCompat)
   const [stlSegments, setStlSegments] = useState(DEFAULT_STL_SEGMENTS)
+  const [cages, setCages] = useState(false)
   // SVG line-drawing options (docs/design/printing.md §7b): a view, a
   // drawing scale from the unit family's ladder (1:1 default — laser/CNC
   // software reads the file at true size), dashed hidden lines, dimensions.
@@ -179,12 +194,31 @@ export function ExportDialog({ onExport, onCancel }: ExportDialogProps) {
           onChange={(e) => setFormat(e.target.value as ExportFormat)}
           autoFocus
         >
-          {EXPORT_FORMATS.map((f) => (
+          {EXPORT_FORMATS.filter((f) => f.group === undefined).map((f) => (
             <option key={f.format} value={f.format}>
               {f.hint === '' ? f.label : `${f.label} — ${f.hint}`}
             </option>
           ))}
+          <optgroup label={olderGroupHeading()}>
+            {EXPORT_FORMATS.filter((f) => f.group === 'older').map((f) => (
+              <option key={f.format} value={f.format}>
+                {f.hint === '' ? f.label : `${f.label} — ${f.hint}`}
+              </option>
+            ))}
+          </optgroup>
         </select>
+
+        {format === 'skp' && (
+          <label style={{ ...LABEL_STYLE, display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '16px' }}>
+            <input
+              type="checkbox"
+              checked={skpCompat}
+              onChange={(e) => setSkpCompat(e.target.checked)}
+              data-testid="export-skp-compat"
+            />{' '}
+            {compatLabel()}
+          </label>
+        )}
 
         {format === 'svg' && (
           <>
@@ -233,11 +267,27 @@ export function ExportDialog({ onExport, onCancel }: ExportDialogProps) {
           </>
         )}
 
+        {hasSmoothed && CAGE_FORMATS.has(format) && (
+          <label style={{ ...LABEL_STYLE, display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '16px' }}>
+            <input type="checkbox" data-export-cages checked={cages} onChange={(e) => setCages(e.target.checked)} /> <Trans>Export cages instead</Trans>
+          </label>
+        )}
+
         <div style={BUTTON_ROW_STYLE}>
           <button style={CANCEL_BUTTON_STYLE} onClick={onCancel}>
             <Trans>Cancel</Trans>
           </button>
-          <button style={EXPORT_BUTTON_STYLE} onClick={() => onExport(format, stlSegments, format === 'svg' ? svgOptions() : undefined)}>
+          <button
+            style={EXPORT_BUTTON_STYLE}
+            onClick={() => {
+              const svg = format === 'svg' ? svgOptions() : undefined
+              const compat = format === 'skp' && skpCompat
+              // The cages flag is passed only where it applies, so a model
+              // with no Smooth object calls onExport exactly as before.
+              if (hasSmoothed && CAGE_FORMATS.has(format)) onExport(format, stlSegments, svg, compat, cages)
+              else onExport(format, stlSegments, svg, compat)
+            }}
+          >
             <Trans>Export</Trans>
           </button>
         </div>

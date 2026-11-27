@@ -28,7 +28,16 @@ import {
   collectDescendants,
   filterTreeKeys,
   dropTargetFor,
+  placementLabel,
+  selKey,
+  isNodeItem,
+  selectionNodes,
+  selectionGuides,
+  selectionAnnotations,
+  withNodes,
+  type LabelScene,
   type NodeRef,
+  type SelItem,
 } from './treeModel'
 
 // Draft refs (the drawing on a plane) carry the plane's canonical context
@@ -525,10 +534,20 @@ describe('canBoolean', () => {
     expect(canBoolean([inst, { kind: 'instance', id: 6n }], topLevel, live)).toBe(true)
   })
 
-  it('requires exactly two distinct operands', () => {
+  it('requires two or more distinct operands', () => {
     expect(canBoolean([a], topLevel, live)).toBe(false)
+    expect(canBoolean([], topLevel, live)).toBe(false)
     expect(canBoolean([a, a], topLevel, live)).toBe(false)
-    expect(canBoolean([a, b, g], topLevel, live)).toBe(false)
+    expect(canBoolean([a, b, a], topLevel, live)).toBe(false)
+    expect(canBoolean([a, b, g], topLevel, live)).toBe(true)
+    expect(canBoolean([a, b, g, inst], topLevel, live)).toBe(true)
+  })
+
+  it('every one of three operands must be live and top-level', () => {
+    const gNested = (n: NodeRef) => (n.id === 3n ? 99n : undefined)
+    expect(canBoolean([a, b, g], gNested, live)).toBe(false)
+    const gStale = (n: NodeRef) => n.id !== 3n
+    expect(canBoolean([a, b, g], topLevel, gStale)).toBe(false)
   })
 
   it('false when either operand is NESTED inside a group — the gate must match the kernel GroupedOperand refusal', () => {
@@ -560,9 +579,14 @@ describe('canBooleanInComponent', () => {
     expect(canBooleanInComponent([a, b], member)).toBe(true)
   })
 
-  it('requires exactly two distinct operands', () => {
+  it('requires two or more distinct operands', () => {
+    const c: NodeRef = { kind: 'object', id: 5n }
+    const memberOfThree = (n: NodeRef) => n.id === 1n || n.id === 2n || n.id === 5n
     expect(canBooleanInComponent([a], member)).toBe(false)
     expect(canBooleanInComponent([a, a], member)).toBe(false)
+    expect(canBooleanInComponent([a, b, a], memberOfThree)).toBe(false)
+    expect(canBooleanInComponent([a, b, c], memberOfThree)).toBe(true)
+    expect(canBooleanInComponent([a, b, c], member)).toBe(false)
   })
 
   it('false for a group or instance operand — a definition has no nested groups/instances', () => {
@@ -682,6 +706,52 @@ describe('mergeSelection (marquee / Select All / Invert)', () => {
     const eOther = dr('draft-edge', CTX2, 4)
     expect(mergeSelection([e], [eOther], 'add')).toEqual([e, eOther])
     expect(mergeSelection([e], [eOther], 'subtract')).toEqual([e])
+  })
+})
+
+describe('the mixed selection (nodes, guides, annotations in one ordered list)', () => {
+  const box: NodeRef = { kind: 'object', id: 10n }
+  const grp: NodeRef = { kind: 'group', id: 30n }
+  const guide: SelItem = { kind: 'guide', id: 10n }
+  const guide2: SelItem = { kind: 'guide', id: 11n }
+  const dim: SelItem = { kind: 'annotation', id: 10n }
+
+  it('keys each kind apart, even on the same handle value', () => {
+    expect(new Set([box, guide, dim].map(selKey)).size).toBe(3)
+    expect(selKey(box)).toBe(nodeKey(box))
+  })
+
+  it('a modified click mixes kinds and keeps the first pick primary', () => {
+    let sel: SelItem[] = nextSelection<SelItem>([], guide, 'replace')
+    sel = nextSelection(sel, box, 'toggle')
+    sel = nextSelection(sel, dim, 'add')
+    expect(sel).toEqual([guide, box, dim])
+    expect(nextSelection(sel, guide, 'toggle')).toEqual([box, dim])
+    expect(nextSelection(sel, dim, 'subtract')).toEqual([guide, box])
+  })
+
+  it('a plain click on a node replaces guides and annotations too', () => {
+    expect(nextSelection<SelItem>([guide, dim], box, 'replace')).toEqual([box])
+  })
+
+  it('a multi pick merges across kinds', () => {
+    expect(mergeSelection<SelItem>([guide, box], [box, dim], 'toggle')).toEqual([guide, dim])
+    expect(mergeSelection<SelItem>([guide], [guide, guide2], 'add')).toEqual([guide, guide2])
+  })
+
+  it('splits into per-kind views in pick order', () => {
+    const sel: SelItem[] = [guide2, box, dim, guide, grp]
+    expect(selectionNodes(sel)).toEqual([box, grp])
+    expect(selectionGuides(sel)).toEqual([11n, 10n])
+    expect(selectionAnnotations(sel)).toEqual([10n])
+    expect(sel.filter(isNodeItem)).toEqual([box, grp])
+  })
+
+  it('withNodes swaps the nodes for a result and keeps the rest selected', () => {
+    expect(withNodes([box, guide, grp, dim], [grp])).toEqual([grp, guide, dim])
+    expect(withNodes([guide, box], [])).toEqual([guide])
+    const nodesOnly: SelItem[] = [box, grp]
+    expect(withNodes(nodesOnly, [box, grp])).toBe(nodesOnly)
   })
 })
 
@@ -960,6 +1030,35 @@ describe('pruneDeadSelection — drop handles the document no longer holds', () 
   })
 })
 
+describe('pruneDeadSelection — guides and annotations', () => {
+  const box: NodeRef = { kind: 'object', id: 1n }
+  const guide = (id: bigint): SelItem => ({ kind: 'guide', id })
+  const dim = (id: bigint): SelItem => ({ kind: 'annotation', id })
+  const view = (guides: bigint[], annotations: bigint[]) => ({
+    object_ids: () => [1n],
+    group_ids: () => [],
+    instance_ids: () => [],
+    sketch_ids: () => [],
+    guide_ids: () => guides,
+    shown_annotation_ids: () => annotations,
+  })
+
+  it('keeps the shown ones and drops the rest, in order', () => {
+    const sel: SelItem[] = [guide(5n), box, dim(7n), guide(6n), dim(8n)]
+    expect(pruneDeadSelection(view([6n], [8n]), sel)).toEqual([box, guide(6n), dim(8n)])
+  })
+
+  it('returns the same array when everything is shown', () => {
+    const sel: SelItem[] = [guide(5n), box, dim(7n)]
+    expect(pruneDeadSelection(view([5n], [7n]), sel)).toBe(sel)
+  })
+
+  it('drops them from a scene that cannot list them', () => {
+    const scene = { object_ids: () => [1n], group_ids: () => [], instance_ids: () => [], sketch_ids: () => [] }
+    expect(pruneDeadSelection(scene, [guide(5n), box, dim(7n)])).toEqual([box])
+  })
+})
+
 describe('dropTargetFor', () => {
   // g contains b and h (nested); h contains c.
   const a: NodeRef = { kind: 'object', id: 1n }
@@ -1007,6 +1106,24 @@ describe('dropTargetFor', () => {
 
   it('refuses dragging a sketch-scoped node — it has no kernel NodeId', () => {
     expect(dropTargetFor([sk], g, view())).toBeNull()
+  })
+
+  it('a frozen row cannot be dragged and nothing drops into a frozen group (OW-1)', () => {
+    const frozen = new Set<string>(['object:1', 'group:11'])
+    const isFrozen = (n: NodeRef): boolean => frozen.has(`${n.kind}:${n.id}`)
+    const v = { getGroupMembers, sessionOpen: false, isFrozen }
+    // a locked row does not move, even to the top level
+    expect(dropTargetFor([a], g, v)).toBeNull()
+    expect(dropTargetFor([a], 'root', v)).toBeNull()
+    // a selection holding one locked row does not move at all
+    expect(dropTargetFor([a, b], g, v)).toBeNull()
+    // a free row drops into a free group, but not into a locked one
+    expect(dropTargetFor([b], g, v)).toEqual({ group: 10n })
+    expect(dropTargetFor([b], h, v)).toBeNull()
+    // a locked group row cannot be dragged out
+    expect(dropTargetFor([h], 'root', v)).toBeNull()
+    // without the predicate nothing is frozen
+    expect(dropTargetFor([a], g, view())).toEqual({ group: 10n })
   })
 
   it('refuses every drop while a group/component session is open', () => {
@@ -1064,5 +1181,38 @@ describe('makeLabelFor — sketches', () => {
   it('an unplaced sketch is "Sketch", never a wrong "Sketch 1"', () => {
     const label = makeLabelFor(scene([4n]), new Map())
     expect(label({ kind: 'sketch', id: 99n })).toBe('Sketch')
+  })
+})
+
+describe('placementLabel', () => {
+  const scene = (opts: {
+    linked: boolean
+    instanceName?: string
+    defName?: string
+    members?: { id: bigint; name?: string }[]
+  }): LabelScene => ({
+    group_name: () => undefined,
+    object_name: (id) => opts.members?.find((m) => m.id === id)?.name,
+    instance_name: () => opts.instanceName,
+    instance_def: () => 100n,
+    component_name: () => opts.defName,
+    is_linked: () => opts.linked,
+    component_member_objects: () => (opts.members ?? []).map((m) => m.id),
+  })
+
+  it('placementLabel_prefers_instance_then_definition_then_single_member_then_a_plain_object_name', () => {
+    const members = [{ id: 5n, name: 'Leg' }]
+    expect(placementLabel(scene({ linked: true, instanceName: 'Front leg', defName: 'Leg set', members }), 1n, 0)).toBe('Front leg')
+    expect(placementLabel(scene({ linked: true, defName: 'Leg set', members }), 1n, 0)).toBe('Leg set')
+    expect(placementLabel(scene({ linked: true, members }), 1n, 0)).toBe('Leg')
+    expect(placementLabel(scene({ linked: true, members: [{ id: 5n }] }), 1n, 0)).toBe('Object 1')
+    expect(placementLabel(scene({ linked: true, members: [{ id: 5n, name: 'A' }, { id: 6n, name: 'B' }] }), 1n, 0)).toBe('Object 1')
+  })
+
+  it('an_ordinary_component_keeps_its_label', () => {
+    const s = scene({ linked: false, instanceName: 'Left', defName: 'Chair' })
+    expect(placementLabel(s, 1n, 0)).toBe('Left (Chair)')
+    expect(placementLabel(scene({ linked: false, defName: 'Chair' }), 1n, 0)).toBe('Chair')
+    expect(placementLabel(scene({ linked: false }), 1n, 2)).toBe(resolveLabel(undefined, undefined, 'instance', 2))
   })
 })

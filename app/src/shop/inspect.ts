@@ -133,7 +133,7 @@ export function resolveInspect(scene: WasmScene, node: NodeRef | null, snap: Sna
   // is this?" is the one-tap win); everything else is the part.
   if (node !== null && isWholePartKind(node.kind)) {
     const { label, tagLabel } = nodeLabelAndTag(scene, node)
-    const bounds = worldBoundsForSelection(scene, [node])
+    const bounds = worldBoundsForSelection(scene, [node], { lines: false })
     return { kind: 'node', node, label, tagLabel, extentsM: bounds === null ? null : boundsExtents(bounds) }
   }
   return null

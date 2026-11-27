@@ -1,9 +1,10 @@
 // Docs-fleet clip: "Drawing on other planes" section of the Drawing chapter
 // (site/src/content/learn/drawing.md, slug drawing-planes). Silent,
 // caption-carried. Beats: a box to work against; Circle drawn on its face;
-// Rectangle with an idle → plane lock standing in empty space, then pulled
-// into a wall; Line with ↑ lifting a segment off the ground and closing a
-// vertical face, then pulled. ~55 s.
+// Rectangle with a pip click locking the red plane (padlock in the pip),
+// then pulled into a wall; Shift pinning a face's plane; Line with ↑ lifting
+// a segment off the ground and closing a vertical face, then pulled. The view
+// die and its four pips (top-right of the viewport) stay in frame throughout.
 //   node docs-drawing-planes.mjs   (DEBUG_SHOTS=1 for per-beat stills)
 
 import { startCapture } from './capture-lib.mjs';
@@ -20,15 +21,17 @@ await page.waitForTimeout(1200);
 h.mark('scene-start');
 
 // beat 1 — a box to work against (same footprint as the push/pull scene)
-await h.caption('The ground is only the plane the tools fall back to.');
+await h.caption('Over the ground the blue pip is filled: that is where your next click draws.');
 await page.keyboard.press('r');
 await page.waitForTimeout(250);
 await h.glide(700, 600, 350);
+await page.waitForTimeout(900); await shot('1a');
 await h.click();
 await h.glide(950, 690, 400);
 await h.typeSlow('12,8');
 await page.keyboard.press('Enter');
 await page.waitForTimeout(1000);
+await h.caption('Push/Pull turns the rectangle into a solid box.', 0);
 await page.keyboard.press('p');
 await page.waitForTimeout(200);
 await h.glide(790, 640, 300);
@@ -40,40 +43,35 @@ h.mark('box');
 await h.expectBadge('1 object', 'box');
 await page.waitForTimeout(1300); await shot(1);
 
-// beat 2 — Circle drawn on the box's front face, pulled out as a boss
-await h.caption('Point a tool at a face and it draws there — no plane to choose.');
+// beat 2 — Circle drawn on the box's front face (the shape cuts the face)
+await h.caption('Point a tool at a face: its pip lights and the shape is drawn on that face.');
 await page.keyboard.press('c');
 await page.waitForTimeout(250);
 await h.glide(800, 610, 400);
+await page.waitForTimeout(1100); await shot('2a');
 await h.click();
 await h.typeSlow('1.5');
-await page.keyboard.press('Enter');
-await page.waitForTimeout(1000);
-await page.keyboard.press('p');
-await page.waitForTimeout(200);
-await h.glide(800, 610, 300);
-await h.click();
-await h.glide(760, 640, 400);
-await h.typeSlow('2');
 await page.keyboard.press('Enter');
 h.mark('face-circle');
 await h.expectBadge('1 object', 'face-circle');
 await page.waitForTimeout(1300); await shot(2);
 
-// beat 3 — Rectangle with an idle plane lock: → before the first click
-await h.caption('Press → before clicking: the rectangle stands on the red plane through that point.');
+// beat 3 — Rectangle: click the red pip to lock that plane (the mouse form
+// of →), then stand a rectangle up on it through the first click
+await h.caption('Click a pip, or press → ↑ ←, to lock that plane — the pip holds a padlock.');
 await page.keyboard.press('r');
 await page.waitForTimeout(250);
 await h.glide(1150, 640, 400);
-await page.keyboard.press('ArrowRight');
-await page.waitForTimeout(700);
+await h.diePip('red');
+await page.waitForTimeout(1000); await shot('3a');
+await h.glide(1150, 640, 400);
 await h.click();
 await h.glide(1220, 560, 400);
 await h.typeSlow('8,5');
 await page.keyboard.press('Enter');
-await page.waitForTimeout(1000);
-await page.keyboard.press('ArrowRight');       // release the lock
-await page.waitForTimeout(400); await shot(3);
+await page.waitForTimeout(1000); await shot('3b');
+await h.diePip('red');                          // click the held pip again: release
+await page.waitForTimeout(600); await shot(3);
 await h.caption('An ordinary sketch region: Push/Pull extrudes it sideways into a wall.');
 await page.keyboard.press('p');
 await page.waitForTimeout(200);
@@ -86,11 +84,26 @@ h.mark('locked-rect');
 await h.expectBadge('2 objects', 'locked-rect');
 await page.waitForTimeout(1300); await shot(4);
 
+// beat 3b — Shift pins the plane under the cursor; the pip holds it
+await h.caption('Shift pins the plane under the cursor; press it again to release.');
+await page.keyboard.press('r');
+await page.waitForTimeout(250);
+await h.glide(740, 550, 400);
+await page.waitForTimeout(700);
+await page.keyboard.press('Shift');
+await page.waitForTimeout(500);
+await h.glide(500, 760, 450);                   // off the face, over the ground
+await page.waitForTimeout(1100); await shot('3c');
+await page.keyboard.press('Shift');
+await page.waitForTimeout(900); await shot('3d');
+await page.keyboard.press('Escape');
+await page.waitForTimeout(300);
+
 // beat 4 — Line into space: a ground segment first (it stays in the
 // ground sketch), then ↑ lifts the chain onto a fresh vertical sketch whose
 // own start point B closes the face; the return leg stops a centimetre
 // short of A so the chain never revisits the ground sketch's vertex.
-await h.caption('Line: ↑ runs the next segment straight up, and the sketch follows off the ground.');
+await h.caption('Line: ↑ lifts the next segment off the ground; the pip shows the new plane.');
 await page.keyboard.press('l');
 await page.waitForTimeout(250);
 await h.glide(560, 700, 400);

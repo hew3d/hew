@@ -1,4 +1,5 @@
 import { defineConfig, devices } from '@playwright/test'
+import { isProductionShape } from './e2e/helpers/preview'
 
 /**
  * Playwright config for Hew's web-build E2E (docs/dev/DEVELOPMENT.md).
@@ -59,6 +60,9 @@ export default defineConfig({
   reporter: isCI ? [['list'], ['html', { open: 'never' }]] : 'list',
   use: {
     baseURL,
+    // The production-shape build registers its service worker like a release
+    // does; a worker's precache must not stand between a spec and the page.
+    serviceWorkers: 'block',
     trace: 'on-first-retry',
     screenshot: 'only-on-failure',
     // Suppress the welcome screen on bare launches: every spec boots a fresh
@@ -99,6 +103,21 @@ export default defineConfig({
       name: 'webkit',
       use: { ...devices['Desktop Safari'] },
     },
+    // Plugin realm probe on Firefox (stage P0). On demand only: set
+    // HEW_PROBE_FIREFOX=1 and select it with `--project firefox` after
+    // `pnpm --dir app exec playwright install firefox`; the default run and CI
+    // never include it. Playwright has no per-project opt-out, and worker
+    // processes reload this config without the parent's argv, so the project is
+    // gated on an environment variable (inherited by workers) instead.
+    ...(process.env.HEW_PROBE_FIREFOX === '1'
+      ? [
+          {
+            name: 'firefox',
+            testDir: './e2e/plugin-realm',
+            use: { ...devices['Desktop Firefox'] },
+          },
+        ]
+      : []),
     //  — visual-regression goldens on a *pinned* configuration: fixed
     // viewport + DPR=1 + SwiftShader software GL, so a golden PNG is reproducible
     // off a real GPU (docs/dev/DEVELOPMENT.md). Runs ONLY the e2e/visual/ specs (the global
@@ -118,16 +137,35 @@ export default defineConfig({
     },
   ],
 
+  // Which build is under test is decided in e2e/helpers/preview.ts, from
+  // HEW_PREVIEW: `1` (or unset) serves the Vite dev server below, flag on;
+  // `0` builds the app the way a production release is built (flag off) and
+  // serves that. The build keeps the semantic harness (VITE_HEW_TEST=1) so
+  // the specs can drive it; nothing else about it differs from production.
+  //
   // Serve the app via the Vite dev server. Dev mode auto-enables the
   // `window.__hew_test` harness (`import.meta.env.DEV`), which the semantic E2E
   // tests drive — without shipping the harness in a production bundle or
   // plumbing a build flag. The production build is validated separately by
   // `vite build` in scripts/verify.sh. The dev server needs the WASM pkg built
   // (scripts/verify.sh / wasm-pack does this; present locally).
-  webServer: {
-    command: `pnpm exec vite --host ${HOST} --port ${PORT} --strictPort`,
-    url: baseURL,
-    reuseExistingServer: !isCI,
-    timeout: 180_000,
-  },
+  webServer: isProductionShape
+    ? {
+        command:
+          `pnpm exec vite build --outDir dist/e2e-production --emptyOutDir && ` +
+          `pnpm exec vite preview --outDir dist/e2e-production --host ${HOST} --port ${PORT} --strictPort`,
+        env: { HEW_PREVIEW: '0', VITE_HEW_TEST: '1' },
+        url: baseURL,
+        // A stale server from a flag-on run must never answer a flag-off one.
+        reuseExistingServer: false,
+        timeout: 600_000,
+      }
+    : {
+        command: `pnpm exec vite --host ${HOST} --port ${PORT} --strictPort`,
+        // The flag-on run is the dev server with the flag on, whatever the shell says.
+        env: { HEW_PREVIEW: '1' },
+        url: baseURL,
+        reuseExistingServer: !isCI,
+        timeout: 180_000,
+      },
 })

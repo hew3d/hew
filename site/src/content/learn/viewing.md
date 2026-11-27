@@ -82,11 +82,11 @@ None of this does anything under Parallel Projection — a parallel view has no 
 
 ## Standard views and framing
 
-- The viewport's top-left chips jump straight to **Top**, **Iso**, or **Front**.
+- The view die in the viewport's top-right corner jumps straight to a standard view: click a face to look straight at it, or a corner to look from that corner. Drag it to orbit.
 - **Camera ▸ Standard Views** offers all seven: Top, Bottom, Front, Back, Left, Right, and Iso. All are also in the command palette ("Standard View: …"). Top, Bottom, Front, Back, Left, and Right only turn the camera about the point you're orbiting and keep your zoom, so the model stays the same size on screen; Iso re-frames the whole model.
 
-![The Top button looking straight down at a two-part bracket](/docs/views-top.webp)
-![The Front button switching the same bracket to a straight-on front view](/docs/views-front.webp)
+![The Top view looking straight down at a two-part bracket](/docs/views-top.webp)
+![The Front view switching the same bracket to a straight-on front view](/docs/views-front.webp)
 
 - **Camera ▸ Zoom Extents** (palette: "zoom to fit") frames every visible thing in the model — solids and sketches alike (guides don't count) — the fastest way back when you've orbited into a corner. Hew also zooms to fit on its own when a model is opened, and a small unit chosen on the welcome screen starts the blank view zoomed in to match.
 
@@ -95,8 +95,9 @@ None of this does anything under Parallel Projection — a parallel view has no 
 - **View ▸ Axes** shows or hides the world axes.
 - **View ▸ Grid** shows or hides the ground grid, independently of the axes. The ground is a virtual backdrop — it never hides your model, so a Bottom view sees the model straight through it, and geometry lying exactly on the ground stays visible.
 - **View ▸ Guides** shows or hides all construction guides (see [Precision, measurement, and guides](/learn/measurement-and-guides/)). Hidden guides also stop participating in snapping.
-- **View ▸ Section Cut** turns a placed section's cut on or off (below); unlike the other three, it's grayed out until you've placed one.
-- **View ▸ X-ray** draws every face see-through, so edges and parts hidden behind other faces show through. Materials that are already see-through (glass) get fainter still. Selection and hover highlights look the same. Nothing hides anything in X-ray: every edge, endpoint, and midpoint snaps and can be selected, hidden or not. Faces still count wherever the cursor is not on an edge or point: clicking one selects as usual and push/pull works on it, and where faces stack up the front one is picked.
+- **View ▸ Tangent Edges** shows the thin lines where one smooth surface joins another without a crease. They're hidden by default, since a smooth join isn't an edge, and they print only when the setting is on.
+- **View ▸ Section Cut** turns a placed section's cut on or off (below); unlike the other four, it's grayed out until you've placed one.
+- **View ▸ X-ray** draws every face see-through, so edges and parts hidden behind other faces show through. Materials that are already see-through (glass) get fainter still. Selection and hover highlights look the same. Nothing hides anything in X-ray: every edge, endpoint, and midpoint snaps and can be selected, hidden or not. Faces still count wherever the cursor is not on an edge or point: clicking one selects as usual and push/pull works on it, and where faces stack up the front one is picked. While a group, component, or object is open for editing, the tools reach its faces through whatever is in front of them, in Shaded as well as in X-ray: bury a component partly inside a box, double-click the component, and Push/Pull can grab its buried face directly while the box is skipped. Everything outside the open thing is drawn translucent while you edit, so the tools skip it. If none of the open thing is behind the cursor, the tool acts as it did before. The top level is unchanged.
 - **View ▸ Wireframe** draws only the edges, including the ones a face would normally hide. Faces are not there for clicking either: hovering where a face would be finds no face to snap to, select, push/pull, or paint, and drawing lands on the ground, a locked plane, or an edge or point. To select an object, click one of its edges.
 - X-ray and Wireframe are one setting: choosing one turns the other off, and choosing the one that's on returns to the normal view. On the dark theme both draw edges in a light gray so they read against the background. They apply to this window only, are not saved in the file, and start off in a new session. A print or image capture shows the model the way it looks on screen.
 - The **Outliner** and **Tags** panels have per-object and per-tag visibility toggles ([Organizing your model](/learn/organizing/)).
@@ -121,3 +122,5 @@ Only one section plane exists at a time — placing a new one replaces whichever
 ## Reading the axes
 
 The world axes use the conventional colors (**X red, Y green, Z blue**), drawn solid in the positive direction and dashed in the negative. Inference cues reuse these colors: when a drawing or move operation locks to an axis, the cue and preview take on that axis's color. Hew is a Z-up application: "up" in your model is the blue axis.
+
+**View ▸ Part Axes** draws the same three colors on the part you have selected, so you can see which way its length runs. Select a component (or step into one) and a small red, green, and blue triad appears at its origin, tilted with it and staying the same size on screen as you zoom. A loose object with no axes of its own shows nothing. The setting is off by default and is remembered between sessions.

@@ -116,6 +116,13 @@ pub struct Scene {
     /// from the document's own `view_style`, so a document shown Hew's
     /// way captures none; `None` leaves the look alone on apply.
     pub view_style: Option<crate::style::ViewStyle>,
+    /// The Scene's own transition time in seconds (a `.skp` page's
+    /// transition); `None` is the document's own. Not a captured view
+    /// property: it plays no part in apply or drift.
+    pub transition_s: Option<f64>,
+    /// The Scene's own delay in seconds before the next one; `None` is the
+    /// document's own.
+    pub delay_s: Option<f64>,
 }
 
 impl Scene {
@@ -310,6 +317,8 @@ impl Document {
             section: None,
             display: None,
             view_style: None,
+            transition_s: None,
+            delay_s: None,
         };
         self.capture_into(&mut scene, props, camera, display);
         self.scenes.insert(index, scene);
@@ -392,6 +401,35 @@ impl Document {
         let index = self.scene_index(sid)?;
         self.scenes[index].description = text;
         Ok(())
+    }
+
+    /// Sets a Scene's own transition time (seconds, finite and not
+    /// negative); `None` returns it to the document's own.
+    pub fn set_scene_transition(
+        &mut self,
+        sid: u64,
+        seconds: Option<f64>,
+    ) -> Result<(), DocumentError> {
+        let index = self.scene_index(sid)?;
+        let seconds = Self::check_scene_seconds(seconds)?;
+        self.scenes[index].transition_s = seconds;
+        Ok(())
+    }
+
+    /// Sets a Scene's own delay (seconds, finite and not negative); `None`
+    /// returns it to the document's own.
+    pub fn set_scene_delay(&mut self, sid: u64, seconds: Option<f64>) -> Result<(), DocumentError> {
+        let index = self.scene_index(sid)?;
+        let seconds = Self::check_scene_seconds(seconds)?;
+        self.scenes[index].delay_s = seconds;
+        Ok(())
+    }
+
+    fn check_scene_seconds(seconds: Option<f64>) -> Result<Option<f64>, DocumentError> {
+        match seconds {
+            Some(s) if !s.is_finite() || s < 0.0 => Err(DocumentError::NonFiniteAttrValue),
+            other => Ok(other),
+        }
     }
 
     /// Moves a Scene to position `index` in tab order (clamped to the end).

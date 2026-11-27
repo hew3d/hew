@@ -64,13 +64,24 @@
  * cursor (via the Viewport-injected selection acquirer — same context-aware
  * resolution a Select click uses) and starts the move on it in the same
  * gesture; only a click over empty space shows a hint toast and stays idle.
+ *
+ * Guides: a selected construction guide (the app keeps it apart from the
+ * node selection, `setGuideTarget`) moves the same way — preview, axis
+ * locks, typed and retyped distances — committing one `transform_guide`;
+ * copy mode and its ×N / /N array place copies through one
+ * `duplicate_guide_array`, the last copy becoming the selected guide. With
+ * no nodes selected, a click on a guide starts moving that guide
+ * (`setGuideHooks`), before the node acquirer runs — as a Select click
+ * takes a guide over the object beneath. A guide taken that way is
+ * selected only for the gesture (guideTarget.ts): afterwards the selection
+ * is what it was before the click.
  * On commit: one kernel transform call, then handleSceneRefresh + onDocumentChanged.
  */
 
 import { formatNumber } from '../i18n/format'
 import { plural, t } from '@lingui/core/macro'
 import * as THREE from 'three'
-import type { Tool, Snap, EditContext, SnapConstraint } from './types'
+import type { ClickAcquire, Tool, Snap, EditContext, SnapConstraint } from './types'
 import { editContextEq } from './types'
 import { allFree, isDraftRef, planeOfCtx } from './planeUnits'
 import { worldFacePlane } from './faceDraw'
@@ -80,31 +91,41 @@ import { getDrawingAxes } from './drawingAxes'
 import { translationAffine, affineToFloat64 } from './transformMath'
 import { parseKernelErrorCode, kernelErrorMessage } from '../kernelErrors'
 import { clearPreview } from './transformPreview'
+import { gateCopyOperands, leaveBehind } from '../lock/lockGate'
 import {
   commitSelectionTransform,
   buildSelectionPreview,
   dropRidingDrafts,
   copyOwnersAndDrawing,
 } from './transformSelection'
+import { surfaceSketchTransformReports } from './draftCommit'
 import {
   arrowToAxis,
+  axisLockColorName,
   editArrayBuffer,
   editLengthBuffer,
   isLengthInputKey,
   parseArraySpec,
   pointAlong,
+  type ArraySpec,
 } from './moveInput'
 import { RetypeWindow, retypeStaleMessage } from './retypeWindow'
+import { buildGuidePreview } from './guidePreview'
+import { GuideTarget, type OnGuideCommit } from './guideTarget'
 import type { NodeRef } from '../panels/treeModel'
 import { isSketchScopedKind, nodeKindToNumber, nodeRefFromJs } from '../panels/treeModel'
 import { displayedLength, isFreePick } from './displayedValue'
 import { formatLength, parseLengthToMeters, getLengthUnit, typedReadout } from '../settings/units'
 import { isMac, COPY_MODIFIER_LABEL } from '../platform'
+import { nextCopyState, linkedFor, type CopyState, type OnCopyModeChange } from './copyMode'
+import { getCopiesLinked } from '../settings/editing'
+import { parseLinkedResult, type LinkedWrapRef } from '../viewport/linkedWraps'
+import { DashedLink } from './dashedLink'
 
 export type OnMoveCommit = (nodes: NodeRef[]) => void
 export type OnToast = (message: string, code?: string) => void
 export type OnMeasurement = (text: string) => void
-export type OnCopyModeChange = (on: boolean) => void
+export type { OnCopyModeChange } from './copyMode'
 
 /** Axis guide colours matching the world axis convention */
 const AXIS_COLOR: Record<0 | 1 | 2, number> = {
@@ -121,6 +142,8 @@ type Stage =
   | {
       kind: 'base'
       nodes: NodeRef[]
+      /** The construction guide being moved instead of `nodes` (then empty). */
+      guide: bigint | null
       base: [number, number, number]
       previewMesh: THREE.Object3D | null
       /** Last snapped/computed destination (updated every pointer move). */
@@ -136,34 +159,79 @@ type Stage =
  * both — a buffer that parses as an array spec (`3x`, `/3`) resolves the
  * array, anything else that parses as a length retypes the distance.
  */
-type RetypeSpec = { nodes: NodeRef[]; vector: [number, number, number]; copy: boolean }
+/** What an array resolve placed: node copies, or a guide's (the last one). */
+type ArrayLanding = { nodes: NodeRef[] } | { guide: bigint }
+
+type RetypeSpec = { nodes: NodeRef[]; guide: bigint | null; vector: [number, number, number]; copyState: CopyState; linked: boolean }
 
 export class MoveTool implements Tool {
   readonly name = 'Move'
   /** Click-drag-release works as well as click-click (Tool.dragCommits). */
   readonly dragCommits = true
 
+  /** Hover highlight (types.ts `ClickAcquire`), mirroring `onPointerDown`'s
+   * idle branch: with no nodes selected a click takes a guide under it; with
+   * no guide selected either it takes the node under it. A selected guide
+   * with no guide under the click is moved from there — nothing to highlight
+   * but the guide already selected. */
+  clickAcquire(): ClickAcquire | null {
+    if (this.stage.kind !== 'idle' || this.selection.length > 0) return null
+    const guides = this.guides.canAcquire
+    const nodes = this.guides.selected === null && this.acquireSelection !== null
+    return guides || nodes ? { guides, nodes } : null
+  }
+
   /** Live status-bar guidance for the current stage (see Tool.statusHint). */
   statusHint(): string {
     if (this.stage.kind === 'idle') {
       if (this.retype.isOpen) {
         return this.arrayHot !== null
-          ? t`Type an exact distance to redo the copy you just made, or 3x / 3/ for an array — Enter applies.`
+          ? this._armedArrayHint(true)
           : t`Type an exact distance to redo the move you just made — or click a base point to start another.`
       }
       if (this.arrayHot !== null) {
-        return t`Type 3x to make 3 copies, or 3/ to divide the distance — Enter applies.`
+        return this._armedArrayHint()
       }
-      if (this.selection.length === 0) {
+      if (this.selection.length === 0 && this.guides.selected === null) {
         return t`Click the object you want to move.`
       }
-      return this.copyMode
-        ? t`Copy is on — click a base point to start the copy. Tap ${COPY_MODIFIER_LABEL} to move instead.`
-        : t`Click a base point to start the move.`
+      const kind = this._copyKindLabel()
+      const next = this._cycleNextLabel()
+      return this.copyState === 'off'
+        ? t`Click a base point to start the move.`
+        : t`${kind} is on — click a base point to start the copy. Tap ${COPY_MODIFIER_LABEL} to ${next}.`
     }
-    return this.copyMode
-      ? t`Click where the copy lands — type an exact distance, arrow keys lock an axis, tap ${COPY_MODIFIER_LABEL} to move instead.`
-      : t`Click the destination — type an exact distance, arrow keys lock an axis, tap ${COPY_MODIFIER_LABEL} to place a copy.`
+    const next = this._cycleNextLabel()
+    return this.copyState === 'off'
+      ? t`Click the destination — type an exact distance, arrow keys lock an axis, tap ${COPY_MODIFIER_LABEL} to place a copy.`
+      : t`Click where the copy lands — type an exact distance, arrow keys lock an axis, tap ${COPY_MODIFIER_LABEL} to ${next}.`
+  }
+
+  /** Whether `key` is an arrow Move owns right now: only with a grid laid or
+   *  a two-count spec being typed. Otherwise arrows keep their global meaning,
+   *  as they did before grids. */
+  private _arrowsAreGridKeys(key: string): boolean {
+    if (this.arrayHot === null) return false
+    if (arrowToAxis(key) === null && key !== 'ArrowDown') return false
+    return this.arrayLast?.count2 !== undefined || this.typed.includes(',')
+  }
+
+  /** The hint while the array window is armed: what to type, and, once a
+   *  grid is laid, which way its rows run. */
+  private _armedArrayHint(redoable = false): string {
+    const hot = this.arrayHot
+    if (hot !== null && this.arrayLast?.count2 !== undefined) {
+      // Always the axis of the grid that is laid, never a pending choice.
+      const axis = this._gridAxisIndex(hot)
+      if (axis !== null) {
+        const color = axisLockColorName(axis)
+        return t`Rows along ${color} — press an arrow key to change them, or type another count. Enter applies.`
+      }
+      return t`Rows across the move — press an arrow key to change them, or type another count. Enter applies.`
+    }
+    return redoable
+      ? t`Type an exact distance to redo the copy you just made, 3x to add copies, 3/ to divide it, or 4x,3x for a grid — Enter applies.`
+      : t`Type 3x to make 3 copies, 3/ to divide the distance, or 4x,3x for a grid — Enter applies.`
   }
 
   private stage: Stage = { kind: 'idle' }
@@ -179,7 +247,14 @@ export class MoveTool implements Tool {
   private shiftAxisLock: boolean = false
   /** Durable copy toggle (tap Option on macOS, Ctrl elsewhere — see
    *  `toggleCopyMode`) — while true, commits duplicate. */
-  private copyMode: boolean = false
+  private copyState: CopyState = 'off'
+  /** Whether a copy commits right now (any state but plain Move). */
+  private get copyMode(): boolean {
+    return this.copyState !== 'off'
+  }
+  /** True from a click refused because the target is locked until the next
+   *  click or Escape: typed digits are swallowed, not sent to hotkeys. */
+  private refusedClick = false
   /** VCB buffer — raw string being typed by the user */
   private typed: string = ''
   /**
@@ -199,8 +274,18 @@ export class MoveTool implements Tool {
     sources: NodeRef[]
     /** The ORIGINAL drawn shapes / sketches (`duplicateSketchSelectionByAffineArray`). */
     sketchSources: NodeRef[]
+    /** The ORIGINAL guide (`duplicate_guide_array`), when a guide was copied. */
+    guide: bigint | null
     vector: [number, number, number]
     historyGen: string
+    /** Whether the copy this window follows was linked; the array repeats it. */
+    linked: boolean
+    /** The copy state the copy was made under, re-armed on the retype window. */
+    copyState: CopyState
+    /** The second-direction axis of the grid that is laid (null = the default direction). */
+    axis2: 0 | 1 | 2 | null
+    /** An arrow choice not yet laid (typed text was in the way); undefined = none. */
+    pendingAxis2?: 0 | 1 | 2 | null
   } | null = null
   /** Array-copy VCB buffer ("x3" / "/3"), live only while `arrayHot` is set. */
   private arrayTyped: string = ''
@@ -208,7 +293,7 @@ export class MoveTool implements Tool {
   /** The ×N / /N spec the array window last resolved, or null while the hot
    *  copy is still a single copy — a distance typed afterwards re-spaces the
    *  whole array rather than collapsing it back to one copy. */
-  private arrayLast: { mode: 'multiply' | 'divide'; count: number } | null = null
+  private arrayLast: ArraySpec | null = null
   /** The move/copy just committed, redoable at a typed distance until the
    *  next pointer action, Escape, tool switch, or other document mutation
    *  (see `RetypeSpec` and retypeWindow.ts). */
@@ -216,6 +301,9 @@ export class MoveTool implements Tool {
 
   /** THREE.js LineSegments for the axis guide drawn in the preview group */
   private guideLine: THREE.LineSegments | null = null
+  /** SketchUp's dashed line from the base point to the destination, live
+   * while a move runs (`_setLink`). Null when not shown. */
+  private link: DashedLink | null = null
 
   /** The full selection at tool activation (set by Viewport from selectedIds). */
   private selection: NodeRef[] = []
@@ -224,10 +312,36 @@ export class MoveTool implements Tool {
    * pick + context-resolve the node under the cursor, lift it into the app
    * selection, and return it — or null on a miss. Lets a click on an object
    * with an empty selection select AND start moving it in one gesture.
+   *
+   * The selection a click takes lasts only for the gesture, as SketchUp's
+   * Move on a pre-highlighted entity: once the move lands, is cancelled, or
+   * is refused, `release` empties the app selection again — after a copy
+   * or an ×N / /N array too: the array refines from the gesture's own
+   * sources, not from the selection. A selection made beforehand is kept
+   * (copies become it, so a follow-up move chains off them).
    */
   private acquireSelection: ((ray: Ray) => NodeRef[] | null) | null = null
-  setSelectionAcquirer(acquire: ((ray: Ray) => NodeRef[] | null) | null): void {
+  private releaseSelection: (() => void) | null = null
+  /** The gesture's nodes were taken by its click (`acquireSelection`). */
+  private nodesAcquired = false
+  setSelectionAcquirer(
+    acquire: ((ray: Ray) => NodeRef[] | null) | null,
+    release: (() => void) | null = null,
+  ): void {
     this.acquireSelection = acquire
+    this.releaseSelection = release
+  }
+
+  /** The construction guide this tool acts on instead of nodes (see
+   *  guideTarget.ts). */
+  private readonly guides = new GuideTarget()
+  /** The app's selected guide, pushed by the Viewport like `setSelection`. */
+  setGuideTarget(guide: bigint | null): void {
+    this.guides.selected = guide
+  }
+  /** The Viewport's guide click pick and post-commit refresh. */
+  setGuideHooks(acquire: ((ray: Ray) => bigint | null) | null, onCommit: OnGuideCommit): void {
+    this.guides.setHooks(acquire, onCommit)
   }
 
   /** The current editing context (component-edit-parity.md phase A1). When
@@ -253,6 +367,8 @@ export class MoveTool implements Tool {
    */
   setSelection(nodes: NodeRef[]): void {
     this.selection = nodes
+    // Something else selected between gestures: no longer ours to release.
+    if (this.stage.kind === 'idle' && nodes.length > 0) this.nodesAcquired = false
   }
   /** THREE.js object group from the SceneRenderer (read-only reference for cloning). */
   private objectsGroup: THREE.Group | null = null
@@ -297,17 +413,54 @@ export class MoveTool implements Tool {
    * Flip the durable copy toggle. Called from `onKey`'s bare Option/Alt tap
    * on macOS, and — duck-typed by method name — from the Viewport's
    * window-scope Control clean tap on Windows/Linux (see `platform.ts`'s
-   * `COPY_MODIFIER_KEY`). Same effect either way: flips `copyMode`, notifies
+   * `COPY_MODIFIER_KEY`). Same effect either way: advances the copy cycle (Move, Copy, the other kind of copy, Move), notifies
    * the cursor badge, and refreshes the mid-gesture measurement readout so
    * the "Copy · " prefix appears/disappears immediately rather than waiting
    * for the next pointer move.
    */
   toggleCopyMode(): void {
-    this.copyMode = !this.copyMode
-    this.onCopyModeChange(this.copyMode)
+    this.copyState = nextCopyState(this.copyState)
+    this.onCopyModeChange(this.copyState, linkedFor(this.copyState, getCopiesLinked()))
     if (this.stage.kind === 'base') {
       this._reportMeasurement(this.stage.base, this.stage.dest)
     }
+  }
+
+  /** The loose nodes the latest linked copy wrapped as sets; a wrap removes
+   *  a world node, so the host needs a full refresh rather than a targeted one. */
+  private linkedWraps: readonly LinkedWrapRef[] = []
+  /** While a retype redoes a copy: the kind that copy was, whatever the preference says now. */
+  private retypeLinked: boolean | null = null
+  /** The copy state a typed value would redo or apply: the one the open retype window holds, else the current one. */
+  private _shownCopyState(): CopyState {
+    return this.retype.isOpen && this.retype.spec !== null ? this.retype.spec.copyState : this.copyState
+  }
+  /** The current copy state, for the host to badge the cursor when the preference changes mid-gesture. */
+  currentCopyState(): CopyState {
+    return this.copyState
+  }
+  /** Hand over (and forget) the wraps the latest copy made. */
+  takeLinkedWraps(): readonly LinkedWrapRef[] {
+    const w = this.linkedWraps
+    this.linkedWraps = []
+    return w
+  }
+
+  /** What a copy made right now is called: "Copy" for the preferred kind,
+   *  "Linked copy" or "Independent copy" when the tap chose the other one. */
+  private _copyKindLabel(state: CopyState = this.copyState): string {
+    if (state === 'alternate') {
+      return getCopiesLinked() ? t`Independent copy` : t`Linked copy`
+    }
+    return t`Copy`
+  }
+
+  /** What the next tap of the copy key switches to, as an action phrase. */
+  private _cycleNextLabel(): string {
+    if (this.copyState === 'primary') {
+      return getCopiesLinked() ? t`make an independent copy` : t`make a linked copy`
+    }
+    return t`move instead`
   }
 
   // ── Optional Tool interface extensions ─────────────────────────────────────
@@ -379,12 +532,17 @@ export class MoveTool implements Tool {
    */
   capturesKey(key: string): boolean {
     if (this.stage.kind === 'base') return true
+    // After a refused click (a locked thing) digits belong to nobody: they
+    // are ignored rather than jumping the view.
+    if (this.refusedClick && ((key >= '0' && key <= '9') || key === '-' || key === '.')) return true
     if (this.arrayHot === null && !this.retype.isOpen) return false
     const arrayKey = key === 'x' || key === 'X' || key === '*' || key === '/'
     if ((key >= '0' && key <= '9') || key === '-' || key === '.') return true
     // The array window's own set, unchanged: its tokens and the guarded
     // Delete keystroke, whatever the buffer holds.
-    if (this.arrayHot !== null && (arrayKey || key === 'Backspace' || key === 'Delete' || key === 'Enter')) return true
+    if (this.arrayHot !== null && (arrayKey || key === ',' || key === 'Backspace' || key === 'Delete' || key === 'Enter')) return true
+    // The grid's second direction is chosen with the arrow keys while the window is armed.
+    if (this._arrowsAreGridKeys(key)) return true
     // The retype window: with an empty buffer every other key keeps its
     // global meaning; once something is typed the length grammar follows.
     if (this.typed === '' || key === ' ') return false // Space always resets to Select
@@ -492,6 +650,7 @@ export class MoveTool implements Tool {
 
     const dest: [number, number, number] = [snap.x, snap.y, snap.z]
     this.stage.dest = dest
+    this._setLink(base, dest)
 
     if (previewMesh !== null) {
       const dx = snap.x - base[0]
@@ -504,6 +663,7 @@ export class MoveTool implements Tool {
   }
 
   onPointerDown(snap: Snap | null, ray: Ray): void {
+    this.refusedClick = false
     // Any pointer action ends the retype window — the next move begins —
     // and a half-typed post-commit value must not leak into the next
     // gesture's own length buffer.
@@ -516,35 +676,62 @@ export class MoveTool implements Tool {
 
     if (this.stage.kind === 'idle') {
       let nodes = this.selection
-      if (nodes.length === 0 && this.acquireSelection !== null) {
+      // No nodes selected: a click on a guide takes THAT guide, whether
+      // another one is selected or none — selecting and moving it in one
+      // gesture. A click elsewhere moves the selected guide from there.
+      // With nodes selected the click is their base point, a guide's snap
+      // included.
+      const guide = this.guides.start(ray, nodes.length === 0, true)
+      this.nodesAcquired = false
+      if (nodes.length === 0 && guide === null && this.acquireSelection !== null) {
         // Empty selection: auto-select whatever the click landed on and
         // start the move on it in the same gesture (no separate Select step).
         const acquired = this.acquireSelection(ray)
         if (acquired !== null && acquired.length > 0) {
           this.selection = acquired
           nodes = acquired
+          this.nodesAcquired = true
         }
       }
-      if (nodes.length === 0) {
+      if (nodes.length === 0 && guide === null) {
         this.onToast(t`Click an object to move it`)
         return
+      }
+      // Locked things are left behind (OW-1): the move runs on the rest and
+      // one toast says what it left; if nothing is left, nothing starts and
+      // the toast is the "Locked." line with Unlock.
+      // A COPY of a locked thing is allowed (the original stays put): in
+      // copy mode only a node frozen by what holds it is refused.
+      if (guide === null) {
+        const go = this.copyMode
+          ? gateCopyOperands(this.wasmScene, nodes, this.onToast)
+          : leaveBehind(this.wasmScene, nodes, this.onToast, { descendants: true })
+        if (go === null) {
+          this._releaseAcquiredNodes()
+          // The refusal ended the gesture before it began: a number typed
+          // next is not a distance, and must not reach the view hotkeys.
+          this.refusedClick = true
+          return
+        }
+        nodes = go
       }
 
       // Starting a new gesture ends the ×N / /N refinement window.
       this.arrayHot = null
       this.arrayTyped = ''
 
-      const previewMesh = this._buildPreview(nodes)
+      const previewMesh = guide !== null ? buildGuidePreview(this.wasmScene, guide) : this._buildPreview(nodes)
       const base: [number, number, number] = [snap.x, snap.y, snap.z]
       if (previewMesh !== null) {
         previewMesh.position.set(0, 0, 0)
         this.preview.add(previewMesh)
       }
 
-      this.stage = { kind: 'base', nodes, base, previewMesh, dest: [...base] }
+      this.stage = { kind: 'base', nodes, guide, base, previewMesh, dest: [...base] }
+      this._setLink(base, base)
       this._updateGuideLine()
     } else if (this.stage.kind === 'base') {
-      const { nodes, base } = this.stage
+      const { nodes, guide, base } = this.stage
       const tx = snap.x - base[0]
       const ty = snap.y - base[1]
       const tz = snap.z - base[2]
@@ -552,6 +739,8 @@ export class MoveTool implements Tool {
       // Degenerate: no movement
       if (Math.abs(tx) < 1e-9 && Math.abs(ty) < 1e-9 && Math.abs(tz) < 1e-9) {
         this._resetToIdle()
+        this.guides.ended()
+        this._releaseAcquiredNodes()
         return
       }
 
@@ -569,12 +758,13 @@ export class MoveTool implements Tool {
         }
       }
 
-      this._commitAndReset(nodes, tx, ty, tz)
+      this._commitAndReset(nodes, guide, tx, ty, tz)
     }
   }
 
   onKey(ev: KeyboardEvent): void {
     if (ev.key === 'Escape') {
+      this.refusedClick = false
       this.cancel()
       return
     }
@@ -616,6 +806,10 @@ export class MoveTool implements Tool {
         }
         const meters = parseLengthToMeters(buf)
         if (meters !== null && this.retype.isOpen) this._retypeDistance(meters)
+        return
+      }
+      if (this._arrowsAreGridKeys(ev.key)) {
+        this._chooseGridAxis(arrowToAxis(ev.key))
         return
       }
       const next = this._editIdleBuffer(this.typed, ev.key)
@@ -668,15 +862,40 @@ export class MoveTool implements Tool {
   }
 
   cancel(): void {
+    const live = this.stage.kind === 'base'
     this._resetToIdle()
+    if (live) {
+      this.guides.ended()
+      this._releaseAcquiredNodes()
+    }
+  }
+
+  /** A gesture on click-taken nodes ended (landed, cancelled, or refused):
+   *  give the selection back to empty, what it was before the click. */
+  private _releaseAcquiredNodes(): void {
+    if (!this.nodesAcquired) return
+    this.nodesAcquired = false
+    this.selection = []
+    this.releaseSelection?.()
+  }
+
+  /** A transform or copy landed (moved nodes, copies, an ×N / /N array, a
+   *  retyped value): click-taken nodes were selected for the gesture only,
+   *  so the selection empties again, copies included — SketchUp's rule.
+   *  The flag stays set while the post-commit windows are open, since a
+   *  retype or an array re-lands on the same click-taken source. */
+  private _landedOnAcquired(): void {
+    if (!this.nodesAcquired) return
+    this.selection = []
+    this.releaseSelection?.()
   }
 
   // ── Private helpers ─────────────────────────────────────────────────────────
 
   /** Commit the move via translationAffine, then reset to idle. */
-  private _commitAndReset(nodes: NodeRef[], tx: number, ty: number, tz: number): void {
+  private _commitAndReset(nodes: NodeRef[], guide: bigint | null, tx: number, ty: number, tz: number): void {
     this._resetToIdle()
-    this._commit(nodes, tx, ty, tz)
+    this._commit(nodes, guide, tx, ty, tz)
   }
 
   /**
@@ -686,7 +905,7 @@ export class MoveTool implements Tool {
    */
   private _commitFromTyped(dist: number): void {
     if (this.stage.kind !== 'base') return
-    const { nodes, base, dest } = this.stage
+    const { nodes, guide, base, dest } = this.stage
 
     let dir: [number, number, number]
     if (this.lockAxis !== null) {
@@ -710,14 +929,17 @@ export class MoveTool implements Tool {
     if (Math.abs(tx) < 1e-9 && Math.abs(ty) < 1e-9 && Math.abs(tz) < 1e-9) {
       // A distance typed before the cursor left the base point has no
       // direction to go in; say so rather than silently doing nothing.
+      // The gesture ends here, like every other exit from a live one.
       this._resetToIdle()
+      this.guides.ended()
+      this._releaseAcquiredNodes()
       if (dist !== 0) {
         this.onToast(t`Move the cursor the way it should go, or lock an axis with an arrow key, then type the distance.`)
       }
       return
     }
 
-    this._commitAndReset(nodes, tx, ty, tz)
+    this._commitAndReset(nodes, guide, tx, ty, tz)
   }
 
   private _resetToIdle(): void {
@@ -730,6 +952,7 @@ export class MoveTool implements Tool {
     this.arrayTyped = ''
     clearPreview(this.preview)
     this.guideLine = null   // clearPreview removed it
+    this.link = null        // and disposed this one
     this.onMeasurementCb('')
   }
 
@@ -740,7 +963,8 @@ export class MoveTool implements Tool {
   /** True when the kernel accepted the commit (false = refused, toasted).
    *  Opens the retype window on the result either way it commits — a plain
    *  move or a copy (whose array window opens alongside). */
-  private _commit(allNodes: NodeRef[], tx: number, ty: number, tz: number): boolean {
+  private _commit(allNodes: NodeRef[], guide: bigint | null, tx: number, ty: number, tz: number): boolean {
+    if (guide !== null) return this._commitGuide(guide, tx, ty, tz)
     try {
       // Drawn shapes on a selected object ride with it (see `dropRidingDrafts`).
       const nodes = dropRidingDrafts(this.wasmScene, allNodes)
@@ -763,11 +987,14 @@ export class MoveTool implements Tool {
         // exactly one step. A refusal changes nothing; the finally block only
         // reselects whatever did land.
         const committed: NodeRef[] = []
+        // The preference is read at the moment of the copy, not when the
+        // tool was armed.
+        const linked = this.retypeLinked ?? linkedFor(this.copyState, getCopiesLinked())
         try {
           const sketchSources = nodes.filter((n) => isSketchScopedKind(n.kind))
           committed.push(
             ...copyOwnersAndDrawing(this.wasmScene, copyables, sketchSources, [affineF64], () =>
-              this._duplicateArray(copyables, affineF64, 1),
+              this._duplicateArray(copyables, affineF64, 1, linked),
             ),
           )
           // The copy gesture is now "hot" for an ×N / /N array refinement,
@@ -775,27 +1002,76 @@ export class MoveTool implements Tool {
           this.arrayHot = {
             sources: copyables,
             sketchSources,
+            guide: null,
             vector: [tx, ty, tz],
             historyGen: this.wasmScene.history_generation().toString(),
+            linked,
+            copyState: this.copyState,
+            axis2: null,
           }
           this.arrayTyped = ''
         } finally {
           if (committed.length > 0) {
             this.selection = committed
             this.onCommit(committed)
+            this._landedOnAcquired()
           }
         }
-        this.retype.arm({ nodes, vector: [tx, ty, tz], copy: true })
+        surfaceSketchTransformReports((m) => this.onToast(m))
+        this.retype.arm({ nodes, guide: null, vector: [tx, ty, tz], copyState: this.copyState, linked })
       } else {
         // The whole selection: the planner leaves riding shapes to their
         // owner and hands them back re-found where they landed.
         const committed = commitSelectionTransform(this.wasmScene, allNodes, affineF64, this._activeInstance)
         this.onCommit(committed)
+        surfaceSketchTransformReports((m) => this.onToast(m))
+        this._landedOnAcquired()
         // The window is armed with the PRE-commit `nodes`, not `committed`:
         // its apply() undoes the commit first, which restores the drawing
         // with its ORIGINAL unit keys (they are geometry hashes), and an
         // arranging landing's re-resolved refs name the moved geometry.
-        this.retype.arm({ nodes: allNodes, vector: [tx, ty, tz], copy: false })
+        this.retype.arm({ nodes: allNodes, guide: null, vector: [tx, ty, tz], copyState: 'off', linked: false })
+      }
+      return true
+    } catch (err) {
+      const code = parseKernelErrorCode(err)
+      const rawMsg = err instanceof Error ? err.message : String(err)
+      this.onToast(kernelErrorMessage(code ?? 'Unknown', rawMsg), code ?? undefined)
+      // A refused first landing ends the gesture. A refused retype does not:
+      // the window survives on the landing already made (whose selection was
+      // already given back), and a later retype that lands must give it back
+      // again, so the click-taken flag stays.
+      if (!this.retype.isOpen) this._releaseAcquiredNodes()
+      return false
+    }
+  }
+
+  /** `_commit` for a construction guide: one `transform_guide`, or in copy
+   *  mode one `duplicate_guide_array` (count 1) whose copy becomes the
+   *  selected guide and is hot for an ×N / /N array. */
+  private _commitGuide(guide: bigint, tx: number, ty: number, tz: number): boolean {
+    try {
+      this.arrayLast = null
+      const affineF64 = affineToFloat64(translationAffine(tx, ty, tz))
+      if (this.copyMode) {
+        const copy = this.wasmScene.duplicate_guide_array(guide, affineF64, 1)[0]
+        this.arrayHot = {
+          sources: [],
+          sketchSources: [],
+          guide,
+          vector: [tx, ty, tz],
+          historyGen: this.wasmScene.history_generation().toString(),
+          linked: false,
+          copyState: this.copyState,
+          axis2: null,
+        }
+        this.arrayTyped = ''
+        this.guides.landed(copy)
+        this.retype.arm({ nodes: [], guide, vector: [tx, ty, tz], copyState: this.copyState, linked: false })
+      } else {
+        this.wasmScene.transform_guide(guide, affineF64)
+        this.guides.landed(guide)
+        this.retype.arm({ nodes: [], guide, vector: [tx, ty, tz], copyState: 'off', linked: false })
       }
       return true
     } catch (err) {
@@ -850,17 +1126,14 @@ export class MoveTool implements Tool {
     if (spec === null) return this._commitHot(hot, v)
     const arr = this.arrayHot
     if (arr === null) return this._commitHot(hot, v)
-    const step: [number, number, number] =
-      spec.mode === 'divide' ? [v[0] / spec.count, v[1] / spec.count, v[2] / spec.count] : v
     try {
-      const created = this._arrayAt(arr, step, spec.count)
+      const created = this._arrayAt(arr, v, spec)
       this.arrayHot = {
         ...arr,
         vector: v,
         historyGen: this.wasmScene.history_generation().toString(),
       }
-      this.selection = created
-      this.onArrayCommit(created)
+      this._landArray(created)
       return true
     } catch (err) {
       const code = parseKernelErrorCode(err)
@@ -872,12 +1145,14 @@ export class MoveTool implements Tool {
 
   /** Lay the hot move down along `v`, under the copy toggle it was committed with. */
   private _commitHot(hot: RetypeSpec, v: [number, number, number]): boolean {
-    const prev = this.copyMode
-    this.copyMode = hot.copy
+    const prev = this.copyState
+    this.copyState = hot.copyState
+    this.retypeLinked = hot.linked
     try {
-      return this._commit(hot.nodes, v[0], v[1], v[2])
+      return this._commit(hot.nodes, hot.guide, v[0], v[1], v[2])
     } finally {
-      this.copyMode = prev
+      this.copyState = prev
+      this.retypeLinked = null
     }
   }
 
@@ -888,7 +1163,7 @@ export class MoveTool implements Tool {
     const multiplyKey = key === 'x' || key === 'X' || key === '*'
     if (this.arrayHot !== null) {
       // A copy is hot: the full array grammar, `/` included (divide).
-      if (/[x/]/.test(buf) || multiplyKey || key === '/') return editArrayBuffer(buf, key)
+      if (/[x/]/.test(buf) || multiplyKey || key === '/' || key === ',') return editArrayBuffer(buf, key)
     } else if (multiplyKey || /x/.test(buf)) {
       // No copy to array: an `x3` attempt is still kept as typed — so Enter
       // finds no length in it and stays inert — rather than being read as
@@ -904,7 +1179,7 @@ export class MoveTool implements Tool {
   private _idleReadout(): string {
     if (this.typed === '') return ''
     const arrayish = /x/.test(this.typed) || (this.arrayHot !== null && /\//.test(this.typed))
-    return arrayish ? this.typed.replace('x', '×') : this._decorate(this._typedReadout())
+    return arrayish ? this.typed.replace(/x/g, '×').replace(',', ', ') : this._decorate(this._typedReadout())
   }
 
   /**
@@ -920,52 +1195,184 @@ export class MoveTool implements Tool {
       this.arrayHot = { ...hot, historyGen: this.wasmScene.history_generation().toString() }
       // The undo + redo moved the generation: re-arm the retype window on
       // the restored entry, or a distance typed next reports 'stale'.
-      this.retype.arm({ nodes: [...hot.sources, ...hot.sketchSources], vector: hot.vector, copy: true })
+      this.retype.arm({ nodes: [...hot.sources, ...hot.sketchSources], guide: hot.guide, vector: hot.vector, copyState: hot.copyState, linked: hot.linked })
     } catch {
       this.arrayHot = null
     }
   }
 
-  /** Lay `count` copies of the hot sources at multiples of `step`: the
-   *  drawn shapes through cumulative translations, the objects through one
-   *  `duplicate_selection_array` call. */
-  private _arrayAt(
-    arr: NonNullable<MoveTool['arrayHot']>,
-    step: [number, number, number],
-    count: number,
-  ): NodeRef[] {
-    const affines: Float64Array[] = []
-    for (let k = 1; k <= count; k += 1) {
-      affines.push(affineToFloat64(translationAffine(step[0] * k, step[1] * k, step[2] * k)))
+  /** The unit direction of a grid's second axis for a move `v`: the arrow
+   *  key's drawing axis when one was chosen, else the horizontal direction
+   *  most nearly perpendicular to the move (world Z crossed with it; world X
+   *  when the move is vertical). Null when the chosen axis runs along the move. */
+  private _gridDir2(v: readonly [number, number, number], axis2: 0 | 1 | 2 | null): [number, number, number] | null {
+    const len = Math.hypot(v[0], v[1], v[2])
+    if (len < 1e-12) return null
+    if (axis2 !== null) {
+      const d = this.axisDir(axis2)
+      const cx = d[1] * v[2] - d[2] * v[1]
+      const cy = d[2] * v[0] - d[0] * v[2]
+      const cz = d[0] * v[1] - d[1] * v[0]
+      // Near-parallel (under about 6 degrees) would stack the rows on the columns.
+      return Math.hypot(cx, cy, cz) < 0.1 * len ? null : [d[0], d[1], d[2]]
     }
-    return copyOwnersAndDrawing(
-      this.wasmScene,
-      arr.sources,
-      arr.sketchSources,
-      affines,
-      () => this._duplicateArray(arr.sources, affineToFloat64(translationAffine(step[0], step[1], step[2])), count),
-    )
+    // z cross v
+    const hx = -v[1]
+    const hy = v[0]
+    const h = Math.hypot(hx, hy)
+    if (h < 1e-9 * len) return [1, 0, 0]
+    return [hx / h, hy / h, 0]
   }
 
-  /** One `duplicate_selection_array` call over `nodes`, mapped to NodeRefs. */
+  /** The drawing axis (0 red, 1 green, 2 blue) a laid grid's rows run along,
+   *  or null when they run along none of them. */
+  private _gridAxisIndex(hot: NonNullable<MoveTool['arrayHot']>): 0 | 1 | 2 | null {
+    if (hot.axis2 !== null) return hot.axis2
+    const d = this._gridDir2(hot.vector, null)
+    if (d === null) return null
+    for (const a of [0, 1, 2] as const) {
+      const f = this.axisDir(a)
+      if (Math.abs(f[0] * d[0] + f[1] * d[1] + f[2] * d[2]) > 0.999) return a
+    }
+    return null
+  }
+
+  /** An arrow key while the array window is armed (Down clears): chooses
+   *  the grid's second direction. A laid grid is re-laid along it at once;
+   *  otherwise the choice waits for the next two-count Enter. */
+  private _chooseGridAxis(axis: 0 | 1 | 2 | null): void {
+    const hot = this.arrayHot
+    if (hot === null) return
+    const laid = this.arrayLast?.count2 !== undefined
+    if (laid && axis !== null && this._gridDir2(hot.vector, axis) === null) {
+      this.onToast(t`Rows cannot run along the move — pick another direction.`)
+      return
+    }
+    const last = this.arrayLast
+    if (laid && last !== null && this.typed === '') {
+      if (axis !== hot.axis2) this._resolveArray(last, axis)
+    } else {
+      // Held back until Enter: the laid grid, and the hint, stay as they are.
+      this.arrayHot = { ...hot, pendingAxis2: axis }
+    }
+  }
+
+  /** The translations an array of `spec` lays down for the move `v`, in
+   *  placement order. A grid is the lattice `i*v + j*s2` (`s2` one move long
+   *  along the second direction) with the original's slot left out. */
+  private _placementSteps(
+    arr: NonNullable<MoveTool['arrayHot']>,
+    v: [number, number, number],
+    spec: ArraySpec,
+  ): [number, number, number][] {
+    if (spec.count2 === undefined) {
+      const step: [number, number, number] =
+        spec.mode === 'divide' ? [v[0] / spec.count, v[1] / spec.count, v[2] / spec.count] : v
+      const out: [number, number, number][] = []
+      for (let k = 1; k <= spec.count; k += 1) out.push([step[0] * k, step[1] * k, step[2] * k])
+      return out
+    }
+    const len = Math.hypot(v[0], v[1], v[2])
+    const d = this._gridDir2(v, arr.axis2) ?? this._gridDir2(v, null) ?? [1, 0, 0]
+    const out: [number, number, number][] = []
+    for (let i = 0; i <= spec.count; i += 1) {
+      for (let j = 0; j <= spec.count2; j += 1) {
+        if (i === 0 && j === 0) continue
+        out.push([i * v[0] + j * len * d[0], i * v[1] + j * len * d[1], i * v[2] + j * len * d[2]])
+      }
+    }
+    return out
+  }
+
+  /** Lay the array `spec` describes for the move `v` on the hot sources:
+   *  the drawn shapes through the same translations, the objects through
+   *  one call — `duplicate_selection_array` for a row, `duplicate_selection_placements`
+   *  for a grid — or a hot guide's copies through one `duplicate_guide_array` call. */
+  private _arrayAt(
+    arr: NonNullable<MoveTool['arrayHot']>,
+    v: [number, number, number],
+    spec: ArraySpec,
+  ): ArrayLanding {
+    if (arr.guide !== null) {
+      const step: [number, number, number] =
+        spec.mode === 'divide' ? [v[0] / spec.count, v[1] / spec.count, v[2] / spec.count] : v
+      const affine = affineToFloat64(translationAffine(step[0], step[1], step[2]))
+      const copies = this.wasmScene.duplicate_guide_array(arr.guide, affine, spec.count)
+      return { guide: copies[copies.length - 1] }
+    }
+    const steps = this._placementSteps(arr, v, spec)
+    const affines = steps.map((s) => affineToFloat64(translationAffine(s[0], s[1], s[2])))
+    return {
+      nodes: copyOwnersAndDrawing(this.wasmScene, arr.sources, arr.sketchSources, affines, () =>
+        spec.count2 === undefined
+          ? this._duplicateArray(arr.sources, affines[0], spec.count, arr.linked)
+          : this._duplicatePlacements(arr.sources, affines, arr.linked),
+      ),
+    }
+  }
+
+  /** Hand an array's copies to the host: node copies become the selection
+   *  (none when the click took the source, `_landedOnAcquired`),
+   *  a guide's last copy the selected guide. */
+  private _landArray(landed: ArrayLanding): void {
+    if ('guide' in landed) {
+      this.guides.landed(landed.guide)
+    } else {
+      this.selection = landed.nodes
+      this.onArrayCommit(landed.nodes)
+      surfaceSketchTransformReports((m) => this.onToast(m))
+      this._landedOnAcquired()
+    }
+  }
+
+  /** One `duplicate_selection_array` call over `nodes`, mapped to NodeRefs.
+   *  A linked copy goes through the call that reports its wraps; the
+   *  returned nodes are then placements. */
   private _duplicateArray(
     nodes: readonly NodeRef[],
     affineF64: Float64Array,
     count: number,
+    linked: boolean,
   ): NodeRef[] {
-    const created = this.wasmScene.duplicate_selection_array(
-      new Uint8Array(nodes.map((n) => nodeKindToNumber(n.kind))),
-      new BigUint64Array(nodes.map((n) => n.id)),
-      affineF64,
-      count,
-    )
-    return created.map(nodeRefFromJs)
+    this.linkedWraps = []
+    const kinds = new Uint8Array(nodes.map((n) => nodeKindToNumber(n.kind)))
+    const ids = new BigUint64Array(nodes.map((n) => n.id))
+    if (linked) {
+      const result = parseLinkedResult(
+        this.wasmScene.duplicate_selection_array_linked(kinds, ids, affineF64, count),
+      )
+      this.linkedWraps = result.linked
+      return result.nodes
+    }
+    return this.wasmScene
+      .duplicate_selection_array(kinds, ids, affineF64, count, false)
+      .map(nodeRefFromJs)
+  }
+
+  /** One `duplicate_selection_placements` call over `nodes` (a grid), mapped
+   *  to NodeRefs; a linked grid reports its wraps as a linked row does. */
+  private _duplicatePlacements(
+    nodes: readonly NodeRef[],
+    affines: readonly Float64Array[],
+    linked: boolean,
+  ): NodeRef[] {
+    this.linkedWraps = []
+    const kinds = new Uint8Array(nodes.map((n) => nodeKindToNumber(n.kind)))
+    const ids = new BigUint64Array(nodes.map((n) => n.id))
+    const flat = new Float64Array(affines.length * 12)
+    affines.forEach((a, i) => flat.set(a, i * 12))
+    if (linked) {
+      const result = parseLinkedResult(this.wasmScene.duplicate_selection_placements_linked(kinds, ids, flat))
+      this.linkedWraps = result.linked
+      return result.nodes
+    }
+    return this.wasmScene.duplicate_selection_placements(kinds, ids, flat, false).map(nodeRefFromJs)
   }
 
   /** The array buffer as a readout, with the display glyph for `x` (the
    * buffer holds at most one, leading `x5` or trailing `5x`). */
   private _arrayReadout(): string {
-    return this.arrayTyped.replace('x', '×')
+    return this.arrayTyped.replace(/x/g, '×').replace(',', ', ')
   }
 
   /**
@@ -976,19 +1383,29 @@ export class MoveTool implements Tool {
    * places the whole array — leaving a single undo step for all N copies.
    * The gesture stays hot afterwards so a different count can be re-entered.
    */
-  private _resolveArray(): void {
-    const hot = this.arrayHot
-    const spec = parseArraySpec(this.arrayTyped)
+  private _resolveArray(override?: ArraySpec, axis2?: 0 | 1 | 2 | null): void {
+    const current = this.arrayHot
+    const spec = override ?? parseArraySpec(this.arrayTyped)
     this.arrayTyped = ''
     this.onMeasurementCb('')
-    if (hot === null || spec === null) return
+    if (current === null || spec === null) return
+    // A chosen direction takes effect only if the re-lay succeeds. An arrow
+    // held back while text was typed applies now.
+    const chosen = axis2 !== undefined ? axis2 : current.pendingAxis2
+    const hot = chosen === undefined ? current : { ...current, axis2: chosen }
 
     const cap = this.wasmScene.max_array_count()
-    if (spec.count > cap) {
+    // A grid's copies are its lattice slots less the original's own.
+    const placements = spec.count2 === undefined ? spec.count : (spec.count + 1) * (spec.count2 + 1) - 1
+    if (placements > cap) {
       const limit = formatNumber(cap, { grouping: false })
       this.onToast(
         plural(cap, { one: `Array copy is limited to ${limit} copy`, other: `Array copy is limited to ${limit} copies` }),
       )
+      return
+    }
+    if (spec.count2 !== undefined && hot.guide !== null) {
+      this.onToast(t`A guide copies along one direction only — type a single count.`)
       return
     }
 
@@ -999,26 +1416,20 @@ export class MoveTool implements Tool {
     // rather than Enter silently doing nothing. View-state toggles (hide/
     // tag visibility) don't move it, so decluttering the scene mid-gesture
     // keeps the window open.
-    if (this.wasmScene.history_generation().toString() !== hot.historyGen) {
+    if (this.wasmScene.history_generation().toString() !== current.historyGen) {
       this.arrayHot = null
       this.onToast(t`Array entry ended — the model changed since the copy`)
       return
     }
 
-    const [tx, ty, tz] = hot.vector
-    const step: [number, number, number] =
-      spec.mode === 'divide'
-        ? [tx / spec.count, ty / spec.count, tz / spec.count]
-        : [tx, ty, tz]
-
     // Retract the previous commit/resolve: always exactly one entry.
     this.wasmScene.scene_undo().free()
     const genBefore = this.wasmScene.history_generation()
-    let created: NodeRef[]
+    let created: ArrayLanding
     try {
-      created = this._arrayAt(hot, step, spec.count)
+      created = this._arrayAt(hot, hot.vector, spec)
     } catch (err) {
-      this._restoreAfterRefusedArray(hot, genBefore)
+      this._restoreAfterRefusedArray(current, genBefore)
       const code = parseKernelErrorCode(err)
       const rawMsg = err instanceof Error ? err.message : String(err)
       this.onToast(kernelErrorMessage(code ?? 'Unknown', rawMsg), code ?? undefined)
@@ -1027,14 +1438,14 @@ export class MoveTool implements Tool {
 
     this.arrayHot = {
       ...hot,
+      pendingAxis2: undefined,
       historyGen: this.wasmScene.history_generation().toString(),
     }
     this.arrayLast = spec
     // A distance typed now re-spaces THIS array (see `_relayArray`); the
     // array is one undo step, so one undo retracts it.
-    this.retype.arm({ nodes: [...hot.sources, ...hot.sketchSources], vector: hot.vector, copy: true })
-    this.selection = created
-    this.onArrayCommit(created)
+    this.retype.arm({ nodes: [...hot.sources, ...hot.sketchSources], guide: hot.guide, vector: hot.vector, copyState: hot.copyState, linked: hot.linked })
+    this._landArray(created)
   }
 
   /**
@@ -1066,7 +1477,26 @@ export class MoveTool implements Tool {
 
   /** Prefix a "Copy" tag onto the readout while the copy toggle is on. */
   private _decorate(text: string): string {
-    return this.copyMode ? t({ comment: 'Measurements box readout while the Copy toggle is on, followed by the measured value', message: `Copy · ${text}` }) : text
+    const shown = this._shownCopyState()
+    if (shown === 'off') return text
+    const kind = this._copyKindLabel(shown)
+    return t({ comment: 'Measurements box readout while a copy is armed: the kind of copy (Copy, Independent copy, or Linked copy), then the measured value', message: `${kind} · ${text}` })
+  }
+
+  /** Run the base→destination dashed line, creating it on first use
+   * (`_resetToIdle` clears it with the rest of the preview). */
+  private _setLink(from: readonly [number, number, number], to: readonly [number, number, number]): void {
+    if (this.link === null) {
+      this.link = new DashedLink(() => getDrawingAxes(this.wasmScene))
+      this.preview.add(this.link.line)
+    }
+    this.link.set(from, to)
+  }
+
+  /** Keep the dashed line's dash a constant on-screen size — the render
+   * loop's per-frame screen-constant hook (Tool.updateDiskScale). */
+  updateDiskScale(camera: THREE.Camera, worldPerPixel: (dist: number) => number): void {
+    this.link?.fitDash(camera, worldPerPixel)
   }
 
   /**

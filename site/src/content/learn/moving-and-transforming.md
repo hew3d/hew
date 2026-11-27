@@ -4,7 +4,7 @@ description: "Move, Rotate, or Scale with full snapping, axis locks, and typed v
 order: 9
 ---
 
-Move, Rotate, and Scale all work on the current selection — but they don't demand one. With nothing selected, clicking an object with any of the three selects it and starts the gesture in the same click, so moving something is one fluid motion, not Select-then-Move. With a selection already made, the click places the first reference point as usual.
+Move, Rotate, and Scale all work on the current selection — but they don't demand one. With nothing selected, hovering highlights what a click would take — an object, a group, a component, a drawn shape, or (Move and Rotate) a guide. With Move and Rotate, clicking it selects it and starts the gesture in the same click, so moving something is one fluid motion, not Select-then-Move. That selection lasts only for the gesture: once a Move or Rotate lands (or you press `Esc`), nothing is selected again, ready for the next object. With a selection already made, their click places the first reference point as usual, and the selection stays. Scale's first click only selects and shows the grips to drag (see Scale below).
 
 <docs-video theme="dark" slug="moving-and-transforming" label="moving and transforming demonstration"></docs-video>
 
@@ -19,7 +19,7 @@ A quick refresher:
 - **Click** an object, sketch, or guide to select it, replacing whatever was selected before. Clicking empty space clears the selection.
 - **Triple-click** a line, or a drawn arc or circle, to select its whole connected shape instead of just the one line or curve run under the cursor. This works on the ground and on a solid's face alike.
 - **Drag an object** to move it (see above). `Esc` mid-drag cancels the move and puts everything back.
-- **Drag from empty space** to rubber-band a selection, SketchUp-style: dragging left→right draws a solid rectangle and selects what falls **entirely inside** it; dragging right→left draws a dashed rectangle and selects everything the rectangle **touches**.
+- **Drag from empty space** to rubber-band a selection, SketchUp-style: dragging left→right draws a solid blue rectangle tagged Window and selects what falls **entirely inside** it, plus anything it covers at least 80% of on screen and touches; dragging right→left draws a dashed green rectangle tagged Crossing and selects everything the rectangle **touches**.
 - **Double-click** a group, component, or object to enter its editing context (the rest of the scene dims); press `Esc` to step back out.
 
 ### Selecting more than one thing
@@ -37,7 +37,7 @@ Beyond clicking and dragging, **Edit ▸ Select All** (`⌘A` / `Ctrl+A`) select
 ## Move (`M`)
 
 1. Click a **base point**. Pick a meaningful one, like a corner you want to land somewhere. (With nothing selected, this click also selects the object under the cursor.)
-2. Click the **destination**. The base point lands exactly there, snapping to anything the inference engine finds.
+2. Click the **destination**. The base point lands exactly there, snapping to anything the inference engine finds. A dashed line runs from the base point to the cursor, gray like a guide, or in the axis color when it lies along an axis.
 
 Move, Rotate, and Scale also take a drag: press on the first point (Move's base point, Rotate's pivot, a Scale grip), drag, and let go where the second click would go; a short press is still a click, and a value typed right after you let go applies just as it would after a click.
 
@@ -45,18 +45,23 @@ Move, Rotate, and Scale also take a drag: press on the first point (Move's base 
 
 **Axis locking:** hold `Shift` to lock to the dominant axis of your drag, or press `→` for X, `←` for Y, `↑` for Z (`↓` clears). The preview line takes the axis color.
 
-**Copy instead of move:** tap `Option` (Mac) / `Ctrl` (Windows, Linux) — copy mode switches on and stays on, with the readout prefixed "Copy ·", a `+` badge on the cursor, and the status bar confirming it. Because it's a toggle rather than a held key, everything else works exactly as in a plain move: type an exact distance and press `Enter` to place a copy at a precise offset. The original stays put, the copy lands at the destination and becomes the new selection, so repeated moves chain copies. Sketch shapes copy too, keeping their curve identity — a copied circle is a true circle, center snap and all. Copy a shape within its plane and the duplicate is redrawn the way hand drawing would be, so if it lands on other lines they split each other exactly as drawn lines would. That holds on a solid's face too: copy a shape across a face, or past its edge, and the copy splits into a part on the face and a part beyond. Copy a shape *off* its plane — lifting a ground profile straight up, say — and the copy arrives on a new sketch on the plane it landed on, with the original untouched (handy for [Follow Me](/learn/follow-me/): copy a profile up instead of moving the only one you have). Tap the same key again to go back to moving.
+**Copy instead of move:** tap `Option` (Mac) / `Ctrl` (Windows, Linux) — copy mode switches on and stays on, with the readout prefixed "Copy ·", a `+` badge on the cursor, and the status bar confirming it. Because it's a toggle rather than a held key, everything else works exactly as in a plain move: type an exact distance and press `Enter` to place a copy at a precise offset. The original stays put and the copy lands at the destination. If you had selected the original beforehand, the copy becomes the new selection, so repeated moves chain copies; if the click took it, nothing stays selected.
+
+By default a copy is a **linked copy**: it shares its shape with the original, so editing one changes both ([Linked copies](/learn/groups-and-components/#linked-copies)). Tap the copy key again and you get an **independent copy**, the readout reads "Independent copy ·" and the badge reads "+ independent", which is a plain duplicate with no link. One more tap goes back to moving. If you would rather copies start out independent, turn off **Copies are linked** in [Settings](/learn/settings/#editing); the taps then run Copy (independent), Linked copy, Move.
+
+Sketch shapes copy too, keeping their curve identity — a copied circle is a true circle, center snap and all. Copy a shape within its plane and the duplicate is redrawn the way hand drawing would be, so if it lands on other lines they split each other exactly as drawn lines would. That holds on a solid's face too: copy a shape across a face, or past its edge, and the copy splits into a part on the face and a part beyond. Copy a shape *off* its plane — lifting a ground profile straight up, say — and the copy arrives on a new sketch on the plane it landed on, with the original untouched (handy for [Follow Me](/learn/follow-me/): copy a profile up instead of moving the only one you have).
 
 **Retyping after the commit:** once the destination click lands, type a length and press `Enter` again — the move (or copy) you just made redoes at the new distance along the same direction, positive keeping it and negative flipping it — as many times as you like, until you click a new base point, press `Esc`, or switch tools. One `Undo` afterward removes the whole move, no matter how many times you retyped it.
 
 **Array copy:** right after a copy commits, type a multiplier and press `Enter`:
 
 - `3x` (or `x3`, or `*3` — either order works) makes **3 copies total** at that same spacing, continuing along the same line — copy something 2 m over, type `5x`, and five copies march off at 2 m intervals.
-- `3/` (or `/3`) makes **3 copies dividing the distance** — place the last fence post first, then `3/` fills the run with evenly spaced posts between.
+- `3/` (or `/3`) makes **3 copies dividing the distance** — place the last fence post first, then `3/` fills the run with evenly spaced posts between. This is also how you distribute copies evenly along a move.
+- `4x,3x` (or `x4,x3`, or `*4,*3`) makes a **grid**: 4 copies along the move and 3 along a second direction, a lattice of 5 by 4 spots with the original at one corner and 19 new copies. The rows sit one move length apart. The second direction is the horizontal line across the move (green, for a move along red); for a vertical move it is red. Press an arrow key (right for red, left for green, up for blue) to choose another direction — before you press `Enter`, or afterward to re-lay the grid. The grid follows the kind of copy you made, and Hew refuses a grid of more than 1,000 copies. It is one undo step.
 
 ![A cedar fence with six evenly spaced posts and two rails, one post shown mid-copy down the line](/docs/transform-array.webp)
 
-The gesture stays live until you start something else, so if `5x` turns out wrong, type `8x` or `4/` instead and the array re-resolves. However many copies it made, the whole array is **one undo step**. Copies of a component are new instances of the same component; copies of plain objects and groups are independent duplicates. Arrays work for drawn shapes too: a Move or Rotate copy of a shape takes `3x` and `3/`, on the ground or on a face, and the whole array is still one undo step.
+The gesture stays live until you start something else, so if `5x` turns out wrong, type `8x` or `4/` instead and the array re-resolves. However many copies it made, the whole array is **one undo step**. An array follows the kind of copy it continues: after a linked copy, `5x` makes five linked copies; after an independent copy, five independent ones. Arrays work for drawn shapes too: a Move or Rotate copy of a shape takes `3x` and `3/`, on the ground or on a face, and the whole array is still one undo step.
 
 The retyped-distance window and the array window share one typed buffer: right after a copy commits, a plain length retypes the distance and `3x`/`3/` makes an array — either one applies to that same commit. Once you've typed an array, the gesture stays hot for another array spec (`8x` after `5x`, say), but the plain-distance retype closes; make a fresh copy to retype a distance again.
 
@@ -65,7 +70,7 @@ The retyped-distance window and the array window share one typed buffer: right a
 Rotate puts a **protractor** — a round dial — under your cursor. The dial lies in the plane you'll rotate in, and its color is the axis you'll spin around: blue on the ground (vertical Z), red for X, green for Y, or purple for an off-axis face. As you move over the model the dial tilts to whatever **face or edge** is under the cursor, so you can see the axis before you commit to it.
 
 1. Hover until the dial shows the axis you want, then click the **pivot** (the center of rotation).
-2. Click a **reference point** to define the zero direction.
+2. Click a **reference point** to define the zero direction. A dashed line runs from the pivot to it, in the axis color when it lies along an axis.
 3. Sweep to the new angle and click to commit. A dim arm marks 0° and a colored arm tracks the live angle.
 
 **Locking the axis.** Hold `Shift` to lock the dial to the axis it's currently showing — it renders solid, with a short stub along the axis, so the lock is obvious. Or force a world axis outright: `→` X, `←` Y, `↑` Z; `↓` clears the lock and goes back to following faces. Locking with an arrow is how you rotate something that offers no face to aim at — tipping a **cylinder** onto its side, say: hover it, press `←` or `→` to lock a horizontal axis, then pick your two points. Once locked, your reference click and the live sweep are held to that plane, so you can snap exactly onto a point in it — a corner, an edge — instead of the nearest point in full 3D, which could read differently than the flat angle you're actually setting.
@@ -76,7 +81,9 @@ Type degrees again right after the commit and Hew redoes the rotation about that
 
 ## Scale (`S`)
 
-Scale draws a **grip gizmo** on the selection's bounding box: a grip at the center of each of the 6 faces, one at each of the 8 corners, and one at each of the 12 edge midpoints.
+Scale draws a **grip gizmo** on the selection's bounding box: a grip at the center of each of the 6 faces, one at each of the 8 corners, and one at each of the 12 edge midpoints. With nothing selected, the first click on an object only selects it and shows its grips. After that, a click off the grips picks another object to scale, and a click on empty space clears the selection.
+
+Hovering a grip highlights it together with the point it scales about, joined by a dashed line — so you can see what will move and what stays put before you grab it. The pair stays visible through the drag.
 
 ![The Scale tool active on a box, showing the full grip gizmo; the status bar explains what each grip does](/docs/scale-grips.webp)
 
@@ -86,7 +93,7 @@ Scale draws a **grip gizmo** on the selection's bounding box: a grip at the cent
    - A **corner grip** scales all three axes together — uniform scale, like SketchUp's own corner handles.
 2. **Click again** to commit. The live readout shows the factor (`×1.50`) tagged with the axis for a face grip, both axes' factors for an edge grip.
 
-By default the grip **opposite** the one you grabbed stays anchored — grab the top face and the bottom stays put, so the object grows upward from there. Tap `Control` to durably anchor at the box's **center** instead, so both sides move symmetrically; tap it again to go back to the opposite-grip anchor. Dragging a grip past its anchor never flips the object inside out — it clamps at a tiny minimum size instead (mirroring is a separate tool).
+By default the grip **opposite** the one you grabbed stays anchored — grab the top face and the bottom stays put, so the object grows upward from there. Tap `Control` to durably anchor at the box's **center** instead, so both sides move symmetrically; tap it again to go back to the opposite-grip anchor. Dragging a grip through its anchor to the far side mirrors the object, as SketchUp's Scale does; it stays a solid, right side out. To mirror across a plane in one click, use [Flip](#flip).
 
 **Exact values:** type a plain number (`0.5`, `2.54`) and press `Enter` for a factor on the driven axis or axes — a corner grip's one typed value drives all three. Type a length instead (`50mm`, `8"`) and Hew reads it as a **target dimension**: the driven axis scales to land at exactly that size, computed against the box's current extent.
 
@@ -94,23 +101,42 @@ By default the grip **opposite** the one you grabbed stays anchored — grab the
 
 Scaling a component instance scales that instance alone — the shared definition and every sibling instance are untouched, even for a non-uniform stretch.
 
+## Flip
+
+Flip mirrors the selection across a plane. Pick **Flip** in the Tools menu or the Modify group of the tool rail (it has no shortcut), and three see-through colored planes appear through the middle of the selection's bounding box, one per axis. Each plane is colored by the axis that runs straight through it: the red plane mirrors left to right along the red axis, the green one along green, the blue one top to bottom.
+
+1. Hover a colored plane. It brightens and a ghost shows where the selection would land.
+2. Click it. The selection mirrors across that plane, in place, as one undo step.
+
+To mirror across a face of the model instead, hover that face (anywhere on it, including a face of the selection itself) and click: the selection mirrors across the face's plane, so a side panel flips over to the far side of a divider. Across the selection's own face, it moves to the other side of that face, or, with the copy modifier, leaves a mirrored twin there. When a colored plane and a face are under the cursor together, the plane wins. `Esc` drops the ghost. With nothing selected, the first click selects what is under the cursor, as Move's does, and the next click flips it.
+
+A flipped solid stays a solid, with every face the right way out. A component instance keeps its shared shape and takes a mirrored placement instead, so its other copies are untouched. A group mirrors with everything in it, drawn lines included.
+
+**Mirrored copies:** tap `Option` (Mac) / `Ctrl` (Windows, Linux) before clicking, as in Move, and Flip leaves the original where it is and places a mirrored copy. By default it is a **linked copy**: a left-hand and a right-hand side of a cabinet share one shape, so a Push/Pull on either one changes both, each the mirror of the other. Tap again for an independent copy; tap once more to go back to flipping in place. The copy becomes the selection.
+
+**Object ▸ Flip Along ▸ Red / Green / Blue** mirrors the selection across its own center in one step, without switching tools. It always flips in place; for a copy, use the Flip tool.
+
 ## What transforms apply to
 
-Move, Rotate, and Scale act on the whole selection: an object, a group (with everything inside it), a component instance (each instance transforms independently), a free-standing sketch — or any multi-selection of these at once. Select All followed by Move relocates an entire model in one gesture, and the whole act is a single undo step. A multi-selection's Scale gizmo is built from the union of every selected object's bounding box, so grabbing a grip spreads the whole selection apart (or together) correctly around the chosen anchor, rather than resizing each object in place. A copy-move duplicates everything in the selection — solids, groups, components, and sketch shapes alike. A sketch's in-plane copies arrive as one undo step per sketch. A copy that leaves its sketch plane lands on a new sketch on the plane it moved to — a whole sketch's shapes travel together onto that one new sketch, so a shape with a hole keeps its hole, one undo step per sketch, the original left where it was. Object copies of one commit — array copies included — undo as a single step.
+Move, Rotate, and Scale act on the whole selection: an object, a group (with everything inside it), a component instance (each instance transforms independently), a free-standing sketch — or any multi-selection of these at once. Select All followed by Move relocates an entire model in one gesture, and the whole act is a single undo step. Move and Rotate also take a construction guide: with no objects selected, a click on a guide moves or rotates (or copies) that guide — see [Working with guides](/learn/measurement-and-guides/#working-with-guides). A multi-selection's Scale gizmo is built from the union of every selected object's bounding box, so grabbing a grip spreads the whole selection apart (or together) correctly around the chosen anchor, rather than resizing each object in place. A copy-move duplicates everything in the selection — solids, groups, components, and sketch shapes alike. A sketch's in-plane copies arrive as one undo step per sketch. A copy that leaves its sketch plane lands on a new sketch on the plane it moved to — a whole sketch's shapes travel together onto that one new sketch, so a shape with a hole keeps its hole, one undo step per sketch, the original left where it was. Object copies of one commit — array copies included — undo as a single step.
 
 Drawn geometry transforms at shape granularity, on the ground and on a solid's face alike. Whether you selected a filled shape, one of its lines, or a drawn arc or circle, the transform moves the whole connected shape as a rigid body — an open chain of lines included. Rotation isn't confined to the sketch plane: tipping a drawn profile upright (the [Follow Me](/learn/follow-me/) setup) rotates the shape out of the ground with the same gesture as any other rotation. If the shape is the only thing in its sketch, the whole sketch tips with it; if it shares the working sketch with other drawing, the shape splits off into its own sketch on the new plane and everything else stays where it was. An in-plane move that lands a shape on top of another joins them exactly as drawing it there would: lines split and merge and the regions re-form, as one undo step, and the moved shape stays selected. A face is no different from the ground here: a shape moved or dragged half past a face's edge splits into a part on the face and a part beyond it, each ready for Push/Pull, and moving it back joins them again. A solid's own edges and corners are not part of the drawing, so none of these tools can move them.
 
 ## Copy and paste
 
-Move+Alt (above) is the fastest way to duplicate something in place, but `⌘C`/`⌘V` work too, and they're the way to carry a selection somewhere the model doesn't reach on its own — a different open document, say.
+Move with copy (above) is the fastest way to duplicate something in place, but `⌘C`/`⌘V` work too, and they're the way to carry a selection somewhere the model doesn't reach on its own — a different open document, say.
 
-- **Copy** (`⌘C` / `Ctrl+C`) copies the selected objects, groups, and components. It needs at least one of those in the selection; a sketch-only selection refuses with a reminder to use Move+Alt instead, which does carry sketch geometry.
+- **Copy** (`⌘C` / `Ctrl+C`) copies the selected objects, groups, components, and drawn shapes. A selected line or region takes its whole shape with it, the same way Move does.
 - **Paste** (`⌘V` / `Ctrl+V`) arms a placement ghost that follows the cursor with the same inference snapping as Move — click to drop it, `Esc` to cancel. Paste again for another copy at a new spot.
 - **Paste In Place** (`⇧⌘V` / `Ctrl+Shift+V`) drops the copy back exactly where it was cut or copied from, with no click.
 - **Cut** (`⌘X` / `Ctrl+X`) copies, then deletes the selection — one undo step for the delete.
 
-A copy of a component instance reuses the original's definition (pasting the same clipboard twice doesn't mint two definitions); a copy of a plain object or group stays a plain object or group.
+Paste into the same model and you get a linked copy of what you copied, just as Move with copy makes one: the original and the pasted copy share a shape, so editing one changes both. **Edit ▸ Paste independent** makes a plain copy with no link instead. If you turned off **Copies are linked** in Settings, an ordinary Paste is the independent one and **Edit ▸ Paste linked** is how you ask for a link. Cut and Paste is always independent, since the original is gone; so is pasting into a different model.
+
+Pasting the same clipboard twice doesn't make two shapes; the second paste joins the same set of linked copies.
+
+Pasted shapes behave as if you drew them where they land. Paste a rectangle onto a box's face and it splits the face, ready for Push/Pull; paste it over other lines and they split each other; paste it in empty space and it becomes a new sketch. A pasted shape keeps the orientation it was copied with, so a rectangle copied from the ground stays flat even when you click on a wall. Circles stay true circles, and a shape drawn as a separate shape stays separate. One Undo removes the whole paste, objects and shapes together. Paste In Place right after a copy has nothing to add, so Hew tells you the shapes are already there and leaves the model alone.
 
 ## Deleting
 
-`Delete` or `Backspace` removes the current selection with any tool active. The contextual dock's **Erase** button and **Edit ▸ Delete** do the same. Deleting is undoable, like everything else — `⌘Z` / `Ctrl+Z` undoes, `⇧⌘Z` / `Ctrl+Shift+Z` redoes, across the entire document history.
+`Delete` or `Backspace` removes the current selection with any tool active. The contextual dock's **Erase** button and **Edit ▸ Delete** do the same. Deleting is undoable, like everything else — `⌘Z` / `Ctrl+Z` undoes, `⇧⌘Z` / `Ctrl+Shift+Z` (or `Ctrl+Y`) redoes, across the entire document history.

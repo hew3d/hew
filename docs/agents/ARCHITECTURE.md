@@ -84,6 +84,19 @@ doesn't exist yet — only its 2D sketch outline does, and that outline is
 consumed once the extrusion happens: it becomes the solid's base face and
 leaves the sketch (see 2.6).
 
+There is a second road to an Object that also has no "make solid" step:
+closed faces. When an edit leaves flat faces that enclose a space with no
+gap, they become a solid in the same undo step (2.4, "The close pass";
+`document/cells.rs`). Six Rectangles arranged as a cube, twelve Lines, or
+a Rectangle with four Lines up to an apex all arrive at the same solid. A
+shape that closes against one existing solid's faces grows that solid
+instead: the result is a new id, the old Object is hidden, and its name,
+tags, and parent carry over. A detached shape (2.6) is a solid of its own.
+A closed shape drawn inside a solid does nothing automatic, since the
+matching rule would have to carve, and carving stays push-through.
+Nothing is repaired to get there: a cell that is not watertight, or
+that fails `validate()`, leaves the faces as they are.
+
 ### 2.3 Combination is always explicit
 
 Two Objects only become one via a deliberate command: boolean union,
@@ -95,7 +108,11 @@ triangle-soup CSG library — this lets coplanar contact (shared walls,
 stacked solids, coincident faces) be resolved exactly instead of falling back
 to numerically fragile epsilon comparisons. A boolean that would depend on
 resolving a pure tangency (an edge lying exactly on a face, with no volume
-overlap) refuses cleanly rather than guess.
+overlap) refuses cleanly rather than guess. Within its own result a
+boolean merges away the slivers its cut leaves narrower than 0.1 µm
+(`tol::FEATURE_MIN`): a bounded, reported weld that never changes an
+operand or joins two Objects (`boolean::tidy`; see DEVELOPMENT.md rule
+4).
 
 ### 2.4 Sticky geometry, scoped to an Object
 
@@ -143,7 +160,9 @@ moment a drawn region is pushed or pulled it is solid geometry again.
 Three kernel ops carry the topology half of every lowered edit and stay
 the vocabulary of history replay: `split_face` (a boundary-to-boundary cut,
 or a cut with both ends on the same hole loop), `merge_faces` (its exact
-inverse, across one run or, through the re-trace, several), and
+inverse, across one run or, through the re-trace, several — a run passing
+through a vertex other edges also use counts as the pieces it splits
+into there, so its undo re-inserts each boundary to boundary), and
 `retrace_face`, which inserts several paths at once and rebuilds the
 face's loops by rotational order at each vertex, the half-edge form of the
 ground's region tracer. Every loop is simple (no vertex twice in one
@@ -173,7 +192,24 @@ events) edits the whole drawing on one plane as one undo step:
   on it, those objects' owned sketches, and the free sketches there. A
   solid's own edges on the plane (where its faces meet non-coplanar ones)
   are FIXED: drafting splits them where lines meet them but never moves or
-  removes them.
+  removes them. So are the edges between two of its faces on the plane that
+  are its content — a paint or attribute boundary, a soft seam — except
+  that a soft seam the edit leaves hanging (a dangling end or a bridge once
+  the drawing it ended on is gone) is removed with that drawing, since a
+  planar face carries no geometry along it; a hanging paint or attribute
+  boundary, or a soft seam with an attribute dictionary, refuses the edit
+  (`DraftBoundaryEdgeTouched`). So are **foreign edges**
+  (`gather_foreign`): straight edges that lie in the plane, both ends
+  within `tol::PLANE_DIST`, but belong to something else. They come from
+  live free sketches of the frame on other planes (a sketch facing the other way on the same plane counts as
+  another plane, because `planes_coincide` is same-facing) and from
+  visible Objects' edges that bound no face on this plane, either facing
+  (for a detached shape the Object rule differs; see §2.6). A part of a
+  foreign edge lying over a participating Object's face on
+  the plane is not lifted, since it could close nothing there. Only what
+  participates lends edges: a free sketch must be shown (live, in the
+  frame, no hidden tag, not in a closed group), and an Object must pass
+  the same visibility rule as `drawable_objects_on_plane`'s owner rule.
 - **Edit.** Any ordinary `Sketch` method runs on the working sketch
   (drawing, erasing, moving islands, dragging points, offsetting,
   re-faceting), and the sticky rules arrange the edit exactly as they do
@@ -188,7 +224,14 @@ events) edits the whole drawing on one plane as one undo step:
   to that object's OWNED sketch. An edge over no face goes to a FREE
   sketch. Stores whose content did not change are not rewritten. A region
   the face cannot hold (a sliver too small for a saved file to reopen) is
-  kept as owned drawing instead of refused.
+  kept as owned drawing instead of refused. **Take**: when a foreign edge
+  is materialized into a free region's sketch and, in the free sketch it
+  came from, it bounded no region, it is removed there in the same step,
+  so a loose line that becomes a face's edge moves to the face's sketch;
+  a curve's facets move as their curve chain, and what is left at home
+  stays a chain per contiguous run. A detached lower takes only lines of
+  its connected set. An edge that bounds faces on two planes has a copy in
+  each, which is the only duplication.
 - **Materialization.** A free region may be closed partly by a solid's
   edge (a crescent closed by a face's edge). Before any operation moves or
   removes solid edges (transform, delete, boolean, slice, push/pull) the
@@ -196,6 +239,62 @@ events) edits the whole drawing on one plane as one undo step:
   void keeps what the user saw; spans backed by a face edge again are
   dropped afterwards. A free region is thereby extrudable like any ground
   region, and a covered region is pushed or pulled as its face.
+- **Close pass** (`close_faces_pass`). A loop on one plane is a face
+  whichever sketches hold its lines, but the tool draws each line on the
+  plane it chose, which is not always the plane of the loop. So after an
+  edit adds or moves free edges, the pass looks at each such edge e:
+  every edge of the frame that meets an end of e and is not collinear
+  with it names a candidate plane (through e and that edge). Each
+  candidate other than e's own plane is lifted with foreign edges, and
+  every region whose ring contains e, that no Object face on the plane
+  covers and that is not already a face there, is written into that
+  plane's free sketch by the materialization path, with take. One edge
+  can close several faces (the last top edge of a wire cube closes a side
+  and the top). A plane the pass chose faces as a free sketch of the same
+  kind already on it does; failing that, for ordinary drawing, as an
+  Object's face on it does, which is how a gable closes against its end
+  face's edge; failing that, canonically (first nonzero of z, y, x
+  positive). The pass runs inside the edit's undo step and is seeded by
+  drafts (`lower_draft`) and by sketch moves and copies
+  (`transform_sketch`, the island variants, `copy_sketch_islands`,
+  `move_sketch_vertex`). It never runs on load, import, library insert,
+  undo, or redo: a file reopens as it was saved. `DraftReport` carries
+  `faces_closed` (faces made on other planes) and `cells` (solid
+  outcomes, below); a sketch move or copy reports in the same shape
+  (`Document::sketch_edit_report`), and the wasm `transform_sketch_islands`
+  and `copy_sketch_islands` return it as the JSON `draft_end` returns, so
+  a Move, Rotate, Scale or Copy that closes a face or a solid tells the
+  app as a draw does (a whole-sketch move reports nothing yet). Planarity is exact (`tol::PLANE_DIST`): four points
+  that miss a plane by more make no face, and the tool says so.
+- **Closed cells** (`crates/kernel/src/document/cells.rs`). The faces an
+  edit made or moved seed a search. It gathers every face connected to a
+  seed through shared edges (rings are refined first, so a vertex of one
+  ring on another's edge splits it), prunes faces with an open edge that
+  no cappable rim covers, orders the rest around each edge by angle, and
+  walks the rotation to close cells. Two rooms that share a wall are two
+  cells. Faces with the same loop on one plane (one wall drawn twice, as
+  a detached shape and as ordinary drawing, which never merge; a point
+  along a side does not make another loop) are one face to the search: it takes the ordinary one, else the earlier drawn,
+  and the other stays a sketch on the solid's face. Faces that lie over
+  each other without being the same loop decline the cells they bound
+  (`OverlappingFaces`), naming the edges where they do, which Make
+  Solid's overlay draws. Each bounded cell is built through `from_polygons_impl` (holes
+  included) and must be Watertight and pass `validate()`; any failure
+  leaves the faces as the edit left them. The commit is one of three: a
+  new Object; an Object grown by `Object::boolean(Union, ...)` plus
+  `merge_coplanar_faces` (the `push_through` pattern), committed like
+  `push_pull_through` with the old name, tags, and parent carried over;
+  or, when a detached face is in the cell or the rim lies on two or more
+  Objects, a new Object that includes its caps as faces, with nothing
+  unioned. If the union refuses, the cell is a separate Object and the
+  user is told. A cell inside the Object it rims makes nothing. Faces are
+  flat; a circle on a ring edge stays edge metadata. A face takes part
+  only under the visibility rule above. The same search runs on demand as
+  Make Solid on selected sketches, after the close pass over every line
+  of the selection (so faces an older build never formed are made on the
+  way), all as one step; when no solid forms nothing is kept, the pass's
+  faces included, and when one forms every face the pass made is kept
+  (`faces_open_edges` reads the gaps).
 - **Units and keys** (`crates/kernel/src/unit_key.rs`, `Document::
   plane_units`). Islands, curve runs, edges, and regions are keyed by
   geometry, not slot history: FNV-1a over the `(u, v)` bit patterns in the
@@ -257,7 +356,10 @@ degenerate ("zero-thickness") solid Object, for two reasons:
 
 A Sketch has one of three owners: the world (a **free** sketch, drawn over
 no face), a component definition (in definition-local coordinates, reaching
-the scene through its instances), or an **Object** (an *owned* sketch, kept
+the scene through its instances; its plane is the drawing instance's
+pose-inverse applied to the world plane keeping its side, so through that
+instance, mirrored or not, the sketch faces the user's up and a positive
+extrusion goes where they pointed), or an **Object** (an *owned* sketch, kept
 in `object_sketches`). An owned sketch holds exactly the drawing over the
 owner's faces that cannot be face topology (loose chains, sliver regions); it is expressed in the owner's frame and is in exactly one of the
 three states, never two. Its liveness is derived from the owner, so every
@@ -277,6 +379,48 @@ all inside the same undo step (`Document::complete_change` adds owned
 sketches to a change). The file records an owned sketch's owner as
 `owner_object` (HEW_FILE_FORMAT.md 4.6, v17).
 
+A free sketch may be **detached**: it takes part in no plane arrangement
+(`Sketch::detached`, format v23), is its own drafting context, and
+extrudes only to a new Object. It is the one way to draw on a face
+without joining it; nothing joins it later. That holds for closing faces
+too. A detached lift has no fixed edges from faces or sketches on its own
+plane, and foreign edges reach it only from other detached sketches of
+the frame and from Objects' edges lying in the plane whose two ends are
+both vertices of the detached shape (no Object takes part in a detached
+lift). The shape is the drawn sketch plus the detached edges in the plane
+connected to it end to end; a line that only ends on its edge does not
+link. So a detached gable whose rafters end on a box's top corners closes
+against the box's top edge, while a detached rectangle drawn around the
+box's footprint shares no vertex with it and stays one region. A detached
+draft's shape is known only after its edit, so the lowering adds the
+Object edges the drawn shape now ends on before it lowers (not after a
+vertex drag, which closes nothing on its own plane). Every region the
+connected shape bounds is a face of the gesture, not only those its own
+lines bound: a gable split by a post closes both halves when the second
+rafter adds the box's top edge, the half on the first rafter's side
+included. Other detached sketches on the same plane are neither lifted
+nor foreign in a detached draft, and a line from another plane that the
+drawn shape does not reach end to end drops out of its lift, so it
+neither splits nor joins the shape. The close pass is more generous: it
+looks at every detached sketch lying in a candidate plane, the draft's
+own plane included when another shape there shares a corner, so a
+detached line closes a face whichever plane the tool homed it on, and
+four detached Line gestures on one plane that share corners make a face
+(four that never share an end make none). It arranges the connected set
+only: a line that merely crosses it stays whole and loose. No Object face
+covers a detached shape, so a detached loop on a box's top is a loose
+face there. A region a loop of the connected set already holds, faced or
+not, is never made again, so shapes that share a corner or a side stay as
+drawn, and a face is final to later detached gestures (a diagonal drawn
+across a detached square stays a loose line; drawn first, the square
+closes as two triangles); a loop the set does not reach never blocks,
+so nested shapes both fill. Ordinary drawing and detached
+lines never close a face together, and a face the pass makes from a
+detached edge is a detached sketch. A solid formed from a detached face
+is a new Object, never a growth of the solid under it. The viewport draws a
+detached sketch, like any free sketch, in blue, and the edges and regions
+of a solid's face (imprints, object-owned sketches) in orange.
+
 Imports are the one source of open Objects, and many of them are
 **surfaces**: a single sheet SketchUp let someone draw on purpose (a pane
 of glass, a sign, terrain). Model Health (`kernel::health`) reports that as
@@ -287,7 +431,8 @@ Object to every operation; the verdict only keeps the UI from presenting it
 as broken, and the one flag a person can set (`hew.health` / `surface` in
 the Object's attributes) records that they accepted it as a surface. Native
 drawing still never makes one: a flat shape stays a Sketch until it is
-extruded.
+extruded, or until faces drawn around a space close it into a solid
+(2.2). Faces that do not close stay Sketches, never an open Object.
 
 A Sketch is the larval form of a solid: extruding a region makes the
 drawn profile BECOME the solid's base face, so the geometry that bounded
@@ -351,21 +496,176 @@ directly into vertex and plane data. This keeps the kernel's core geometry
 representation pose-free everywhere except Component instances, which is the
 one place a persistent pose earns its complexity.
 
+A placement can be forked by occurrence path (`make_unique_by_path`): with
+the cascade on, every definition on the path is forked so only that
+placement diverges; the call returns the ids it created (the remap). A
+forked definition keeps its attributes and its name, and sheds its Library
+provenance.
+
+A **linked set** is an ordinary definition carrying the attribute `hew` /
+`linked`; it is how a copy of an Object or a Group links to its source.
+`Document::wrap_linked` folds the node into a new definition without
+flattening it: the node keeps its id, name, tags, attributes, history, and
+subtree, no geometry moves, and one identity placement takes its spot in
+its parent (a group, or an outer definition for a node reached by path).
+The duplicating ops take a `LinkPolicy`: with `Linked`, each Object or
+Group root is wrapped as its own set and every copy is a further placement
+of it, so a reflecting step makes a mirrored placement instead of baked
+geometry (a linked mirrored copy from Flip is such a placement, its pose
+the reflection across the chosen plane); the wraps and the copies are one
+undo entry, and undoing it returns the loose node exactly. A set that a
+delete, an explode, an Unlink, or a definition delete reduces to one
+placement is no set at all: that last copy is baked into plain geometry
+where it stands, in the same undo entry, when that is an edit the document
+allows (a world placement, inside the open session if one is, bakeable);
+otherwise it stays a placement of a set of one, which reads as not
+linked. So does a copy that carries an annotation (the bake would detach
+it), the copy a Cut leaves (`cut_selection`, so a paste rejoins the set),
+and the copies Make Unique leaves (it keeps the placement it forks). A linked
+set goes with its last live placement —
+deleting, exploding, or unlinking it hides the definition and its members,
+and undo brings them back. The rule is transitive: a set placed only by
+instances among those hidden members goes too, as does one placed only
+inside a deleted definition — while a named component stays available with
+no placements. Removing the attribute (`promote_linked`) turns a set into
+a named component; the reverse does not exist. `join_linked` folds a
+separately drawn look-alike into an existing set: the loose Object is
+hidden and a new placement of the set takes its place at the pose the
+caller gives (the app derives it from both Objects' signature frames; a
+reflecting pose makes a mirrored placement), in one undo entry. The
+kernel checks the pose rather than trusting it: the set's one solid,
+posed, must have the Object's vertex set at the signature's 1 µm quantum,
+or the join refuses `NotIdentical` (a pose with a non-finite entry
+refuses `Transform`). The placement carries the Object's name, tags,
+user-hidden flag, and attributes, and its object material becomes the
+placement's instance material; the Object's face paint cannot survive a
+shared solid and is dropped, and its own `hew.part` / `frame` stays
+behind, since the member's frame serves every placement through the
+pose. The op reports both (`LinkedJoin::dropped_face_paint`,
+`frame_differed`) so the app can say so.
+
+Color in a linked set lives on the placements, not on the shared
+member, because a placement's instance material shows only where the
+member has no base material and no face paint. Wrapping an Object moves
+its base material onto its placement and clears it on the member (face
+paint stays), and every copy then carries it too. A join moves whatever
+base the member still has (painted for all copies, or an older file)
+onto every placement the set already has and clears it, while the new
+placement takes the joined Object's own base, so a red keeper and a blue
+joiner stay red and blue and nothing visible changes; the join's one
+undo entry restores the member's base and each placement's prior
+material exactly. The trip back is lossless: unlinking a placement
+(`make_unique_by_path` on a linked set) moves the placement's own
+material onto its private copy, as the base of each copied Object
+without one, and clears it on the placement, and exploding one bakes it
+the same way. A named component's fork leaves instance materials alone.
+
+A base can still reach a linked set's member: Ctrl-click inside an open
+set sets it, and so do older files. Painting one copy then makes the
+join's move first (`set_instance_material`): the member's base goes onto
+every other copy of the set as its own material, user-hidden copies and
+the one an open session hid included, and is cleared on the member; then
+the paint applies, so the painted copy shows its color and the others
+look the same. It is one undo entry (`SetInstanceMaterial` carries the
+move), exact by state hash, and the change lists the member and every
+placement as modified. A Shift-click replace of unpainted faces across
+the model (`replace_material(Document, None, to)`) never puts a base on
+a one-solid linked set's member: each copy with no color of its own
+takes `to` instead (the copy an open session entered too, so it matches
+the others after the close), so a painted copy keeps its color. A set
+whose member already has a base shows that base everywhere, so the
+replace leaves it alone. A linked paste gives its new copy the
+source's `instance_appearance_material`: the source's own material, or
+none when the member's base covers it (painting the copy would move the
+base and show the hidden material instead). A named
+component's base means "every copy", so painting one of its placements
+leaves the base alone and the base still shows.
+
+The app presents a linked set as copies, never as a definition: Move,
+Rotate, arrays, and Paste link by default (a preference), the Outliner and
+Object Info label a placement by its own name, the set's name, or its
+part's name, and the app's own booleans route Subtract through the shared
+shape while Union and Intersect unlink the placement first and announce it.
+
 Editing a definition's members is covered separately in 2.11: because a
 definition's members are already ordinary Objects (just owned by a
 `ComponentId` rather than the world), editing one in place is a matter of
 temporarily changing what owns them, not a distinct editing mode.
 
+**Lock.** A lock belongs to a shape, not to one copy of it. Objects and
+groups carry their own `locked` flag, and so does a component definition;
+an instance has none and is locked exactly when its definition is, so
+locking any copy of a component or linked set locks every copy by
+construction (`Document::set_nodes_locked`, one undo entry labeled Lock or
+Unlock, an instance standing for its definition). A node is *frozen*
+(`Document::node_frozen`, which names the locked node behind it) when it
+is locked, when a group above it is frozen, or when it is part of a shape
+whose contents are frozen: a definition that is locked, or that has a
+placement which is itself frozen, since editing such a shape would change
+the locked thing that places it. A copy placed outside the locked thing
+is not frozen itself (moving it changes no shape); Make Unique gives it a
+shape of its own, and the new definition starts with the lock of the one
+it left. Locking is itself an undo entry, so undo and redo never meet a
+frozen node (rule 9 needs no exception). The flags are saved as
+`objects[].locked`, `groups[].locked` and `components[].locked` (manifest
+v33).
+
+A definition's contents are frozen when `Document::def_frozen` answers:
+the definition is locked, or one of its placements is frozen. Every edit
+to a definition (its member geometry, its member list, its name, its
+attributes) is refused then, including one made through a placement
+that is not itself frozen; the refusal says so (`via_shared_shape`), and
+the way out is Make Unique on that placement. Enforcement is two layers.
+Every mutating method checks up front (`refuse_frozen` on the nodes it
+would modify or remove, `refuse_def_frozen` on a definition it would
+edit, `refuse_frozen_container` for an edit to a node's container only)
+and refuses `DocumentError::LockedNode { node, via_shared_shape }` before
+any work. Then, in debug and test builds, `commit_new_action` runs every
+committed entry through its change set and panics when anything modified
+or removed is frozen; only a wrap and Make Unique are exempt, by entry
+kind (`audit_exempt`), because they re-own a locked subtree without
+changing it. A linked copy of a locked Object or group wraps it, and the
+wrap moves the node's lock onto the new definition, so every placement of
+the set carries it (`WrappedLinked.moved_lock`; undo puts it back on the
+node). A root member of a linked set therefore never carries a lock of
+its own: locking it by its path locks the set, and a file that carries
+one there is read as the set's lock. Drawing on a frozen Object's face
+leaves it out of the draft (`draft_participants`), so the drawing is free
+and the face is not cut.
+
 ### 2.8 Materials and Tags
 
 Materials are a document-level palette; each face carries an optional
 material reference, and each Object carries an optional default material
-that unmarked faces fall back to. A material is a name, a color, and an
+that unmarked faces fall back to. Each component instance carries an
+optional material of its own as well: a member face with neither its own
+material nor an Object default shows the material of the nearest instance
+above it that has one, so one definition can show a different color per
+placement while painted faces keep theirs (SketchUp's rule). The kernel
+resolves that chain (`Document::inherited_material`) and the tessellator
+takes the inherited material as an input, so a member's render mesh is
+keyed by member and inherited material. A material is a name, a color, and an
 optional texture. Textures are stored as opaque, already-encoded image bytes
 — the kernel never decodes an image, keeping image codecs out of a crate
 that must stay dependency-light and pure — mapped onto a face by an affine
 UV frame precise enough to reproduce an imported model's original texture
 scale and orientation, not just a generic planar projection.
+
+Attribute dictionaries (client data the kernel stores and never
+interprets, docs/agents/HEW_API.md §8) live on the document and its
+entities in one document-level table, and on a solid's faces and edges
+inside the Object itself: the Object holds an append-only table of
+interned dictionaries, and each face and edge carries a small `Copy` slot
+into it (none by default). A write interns a new dictionary and repoints
+the element, never editing a slot in place, so elements may share one and
+an undo snapshot can record a slot by value; slots are never renumbered
+while the Object lives, and a dictionary nothing references any more is
+simply not written on save. Each operation assigns slots at the place it
+builds an element (a face built from another takes its slot, a fresh wall
+none, a merge keeps the survivor's); whole-Object rebuilds (booleans,
+slices, thickening, component splits) carry face dictionaries by value
+into the new Object and rebuild edges without any. History replay restores
+dictionaries with the rest of the recorded state (§5.7).
 
 Tags (Hew's analog of SketchUp Layers) are first-class document metadata used
 to group and show/hide Objects, Groups, and Instances independently of the
@@ -401,8 +701,19 @@ is designed so that watertightness can never be broken as a side effect:
 
 - **Push-through.** Pushing or pulling a face past the Object's opposite
   face performs a boolean subtraction of the swept volume rather than
-  producing an open shell — this is the *only* way material is removed from
-  a solid in Hew.
+  producing an open shell. Together with the blend and Deform operations
+  below, this is one of the few ways material is removed from or moved on a
+  solid in Hew. Every result piece carries the source's name and tags
+  (when an inward push severs the solid, each piece does: tags are
+  membership, and names are not unique). Undo is unchanged. Booleans give
+  their result no name and no tags, since two Objects merge there and
+  neither name wins.
+- **Close to solid.** Flat faces that enclose a space become an Object
+  (or grow the one they close against) by construction: the cell is built
+  through the same polygon builder, must be Watertight and validate, and
+  otherwise nothing happens (2.2, 2.4). The growing path is a boolean
+  union followed by coplanar merging, so it keeps the Object's coplanar
+  edge segments the way push-through does.
 - **Slice.** Cutting an Object with a plane produces two independent,
   fully watertight Objects sharing a coincident cut face — a real geometric
   split (in the spirit of a CAD "split body" operation), not a virtual
@@ -421,6 +732,16 @@ is designed so that watertightness can never be broken as a side effect:
   (an import's stray sheet, an importer's partition sheet); a solid refuses
   it with `ObjectIsSolid`, the same stance.
 
+Blends (fillets and chamfers) and Deform are the second and third
+sanctioned ways a solid's material changes, each by clone-validate-swap:
+the operation edits a clone, validates it as a watertight solid, and swaps
+it in or refuses with the object untouched. The invariant's purpose (no
+everyday action opens a shell) is therefore kept by construction, rather
+than by routing the change through push-through's boolean. Shell and the
+surface-following depth of Project change material the same way. Every one
+of them records the exact pre-operation object so Undo restores it and
+Redo re-runs the recorded operation on it.
+
 ### 2.11 The session model: editing containers with the unmodified tool set
 
 Editing inside a container — a Group's members, a Component's shared
@@ -433,7 +754,13 @@ temporarily ARE, and lets the unmodified tool set do the rest. Entering a
 container opens a **session frame** on a kernel-held stack; frames nest
 one per container level and close strictly LIFO (Escape, double-click
 outside). Both frame kinds lean on the same structural insight: the
-contents are already real Objects, merely attached to a container.
+contents are already real Objects, merely attached to a container. While
+a frame is open, picks favor its own geometry in Shaded and X-ray alike
+(the editing view draws everything outside it translucent): the kernel
+skips faces and drawing outside the frame (`PickScope`, plus the frame's
+own sketches from `Document::session_frame_sketches`) so a tool reaches a
+buried face of the component or group being edited through whatever
+encloses it.
 
 Entering a **Group** is a transient *ungroup*: the group's direct members
 have their parents cleared to the top level and the group record hides
@@ -458,13 +785,81 @@ kernel bakes the instance's pose into the definition's member Objects and
 sketches — the SAME `ObjectId`/`SketchId`s, a move of ownership rather than
 a copy — and retargets them from the definition to the world tree. From
 that point every tool sees ordinary world geometry and behaves exactly as
-it does anywhere else, because that is what it now is. Every other live
-instance of the definition is hidden for the session's duration: there is
-exactly one copy of the geometry, and it is on loan to the world tree, so
-there is nothing left to keep in sync — a deliberate trade of live
-per-instance propagation during the edit for a tool set that needs no
-component-awareness at all. Closing the session (Escape, double-click
-outside) folds the members back: an Object or sketch the session touched
+it does anywhere else, because that is what it now is. Only the entered
+instance hides (its geometry is the world geometry now; drawing it through
+the instance path too would double it). Every other placement of the
+definition stays live and shows the edit as it happens — **live sibling
+placements**, SketchUp's behavior. There is still exactly one copy of the
+geometry, on loan to the world tree, so nothing is kept in sync: a sibling
+simply renders the session's world objects through the session's inverse
+pose and then its own. That is `Document::expand_def_core`'s on-loan rule:
+`expanded_def_placements` of an on-loan definition answers with the frame's
+live world objects — the original members plus everything created since
+the open and not claimed by a deeper frame — at the inverse session pose,
+and with the frame's surfaced and mid-session-placed instances expanded
+the same way one level down. A placement inside another definition, and
+a sibling nested in a group, render through the same rule, and nested
+frames compose, so a sibling of the outer frame shows an edit made two
+frames deep. Because a sibling is a real live instance, inference snaps to
+it, picks report it, and the Outliner lists it, with no sibling-specific
+code anywhere; the renderer's instanced-batch path draws it from the same
+cached member mesh it would use for a closed definition, so a session edit
+costs one mesh re-pull per changed object, not one per placement. Every
+mid-session `DocChange` lists the live placements in `instances_touched`
+(`Document::complete_change`; `Scene::session_placements` reads the same
+list), exactly as a definition edit lands every instance there. The
+gesture BEFORE the commit shows on the siblings too, as it does in
+SketchUp: a tool previews in the session's world coordinates (Push/Pull's
+swept prism, a Move/Rotate/Scale ghost of the selection, Offset's loops —
+each marked as session geometry by the preview builder that makes it,
+`markSessionGhost`), and the viewport's sibling preview mirror
+(`app/src/viewport/siblingPreview.ts`) draws every marked ghost again
+through each sibling's frame — `Scene::session_sibling_frames`, one
+world-to-world affine per shown placement image: the inverse session pose,
+the nesting poses for a placement reached through another definition,
+then the placement's own pose, with the entered instance and any hidden,
+tag-hidden, or isolated-away placement left out. The mirrors are clones
+sharing the ghost's geometry and materials, built when the ghost appears
+and dropped when the preview empties (commit, cancel, Escape, tool
+switch). A snapshot of the ghost tree (node identity, geometry, material,
+transform, visibility) decides what a frame costs: nothing when nothing
+changed, a retarget of the existing clones when the same shape carries
+new geometry or transforms (Push/Pull's fresh prism per move, a driven
+Move/Rotate/Scale ghost, a child swapped in place), a rebuild only when
+the tree's shape changes — so a drag never re-tessellates per move. The
+frames are read when a gesture's first ghost appears and again only when
+the session fingerprint (entered instance, placement list) changes or the
+viewport invalidates them on a document, visibility, or isolation change,
+so a mid-gesture undo or hide never leaves a mirror at a stale pose. Two
+budgets bound a big model: the frame cap (the first N placements in
+kernel order get a mirror) and a total node budget (a big multi-select
+ghost gets fewer full mirrors; one too big for even one mirror is drawn
+on every frame as a wireframe box of its bounds). The out-of-band
+capture render syncs the mirrors too, so a thumbnail never draws clones
+of geometry a tool has already disposed. Cursor cues that are not
+geometry — a protractor, a leader, a station marker — are not marked and
+are not mirrored. What a
+sibling cannot be is an operand of a definition-level op while the loan is
+out: `make_unique`, `transform_instance`, `apply_def_op`,
+`delete_def_member`, and the in-instance surfaces refuse
+`ExplodeSessionOpen` on it, since the definition's members are world
+objects right now and treating them as def-local content would corrupt
+them; the session's own world-path tools are the way to edit what it
+shows. The frame's drawing travels the same way: `def_rendered_sketches`
+answers, for an on-loan definition, with the session's live world sketches
+(the definition's own, baked at open; free sketches drawn mid-session; the
+members' owned sketches) and the inverse session pose as their frame, so a
+sibling's def-sketch linework follows the drawing as it happens (those
+lines snap only through the entered copy, as a closed definition's sketches
+snap only through the active instance). Undo inside the session reverts
+the siblings with the edit, and undoing the open restores the plain
+definition render. A close that empties the definition tombstones the
+siblings with it (`emptied_instances`), splices a grouped sibling out of
+its group's member list and detaches annotations anchored to one exactly
+as `delete_node` would (`emptied_parent_members`, `reanchored`), and undo
+revives and re-lists exactly those. Closing the session
+(Escape, double-click outside) folds the members back: an Object or sketch
+the session touched
 unbakes through the inverse pose, one it never touched is restored from a
 pristine snapshot taken at open (bit-exact, sidestepping round-trip
 floating-point noise entirely for the common case of a session that only
@@ -473,30 +868,55 @@ new Objects, new sketches — folds in too, becoming part of the definition
 (SketchUp's "what you draw while editing goes into the component"). A
 member group ungrouped during the session releases its contents to the
 definition's top level, and they are listed as direct members of the
-definition at close. Every placement of the definition then shows the
-result.
+definition at close. A linked copy made in the session wraps a session
+member into a set of its own; the close leaves that member in the set and
+folds the set's placements in, so they come back as a nested pair. Every
+placement of the definition then shows the result.
 
-This works only when the instance's pose is a **similarity with a positive
-determinant** — uniform scale, no mirror (`Transform::similarity_scale`).
+This works only when the instance's pose is a **similarity** — a rotation,
+uniform scale, and optionally a mirror (`Transform::similarity_scale`).
 Similarities are exactly the transforms that keep a circle a circle, which
 is what lets analytic curve and surface metadata (2.6) survive the
-bake/unbake round trip intact; baking a mirrored pose directly would invert
-winding and produce an inside-out solid. Group nesting gates a session the
-same way: the bake produces top-level world objects and must hide every
-placement of the definition, neither of which a group-nested placement can
-survive coherently (splicing baked members into a containing group is not
-modeled, and a group may not list a hidden member). Session nesting
-dissolves the common case of that gate: an instance inside a Group is
-genuinely top-level while its group's frame is open, so drilling in
-through the group opens its explode session normally — only a
-same-definition placement grouped *elsewhere* still trips it. An instance
-that fails either gate — a non-uniform scale, a mirror, or a sibling
-placement nested inside some other group — falls back to the previous
+bake/unbake round trip intact. A mirrored pose bakes like any other: the
+geometry is mirrored and every face is turned over, so the solid stays
+right side out. Group nesting gates a session the same way for the
+ENTERED instance: the bake produces top-level world objects, which a
+group-nested placement cannot survive coherently (splicing baked members
+into a containing group is not modeled). A sibling nested in some other
+group does not trip it: nothing hides a sibling, so its group keeps
+listing a live member. Session nesting dissolves the common case of the
+gate: an instance inside a Group is genuinely top-level while its group's
+frame is open, so drilling in through the group opens its explode session
+normally. An instance that fails either gate — a non-uniform scale, or a
+placement entered directly inside a group — falls back to the previous
 in-context editing model instead: the tool set operates on the
 definition's members directly, through the pose, without baking or
 retargeting anything. That model remains fully supported for exactly
 these cases; the session stack is the default path, not a replacement for
 it.
+
+The bus can drive the same entry convergence the Outliner uses
+(`hew.view.enter`, `exit`, and `exit_all`, HEW_API.md §6.3): the app opens
+the same session frames level by level, falls back to the in-context entry
+for the same instances, and reports the result as `context_changed` with
+`stack` and `fallback`. The call answers after the window has acted: `{}`
+when it entered, or a refusal naming why when the window declined, with the
+window put back where it was.
+
+The API's path forms use the same through-the-pose model with no session
+at all: a move, turn, scale, copy, boolean, or slice addressed to a
+member by an occurrence path (`Document::transform_def_members`,
+`duplicate_def_members_array`, `boolean_through_placement`,
+`boolean_members_through_placement`, `slice_through_placement`) is conjugated, or mapped, through the path's
+composed pose (`Document::path_pose`) and applied to the definition in
+its own frame, so every placement follows in one undo entry; a
+definition on loan to an open session refuses them, because its members
+are world nodes for the session's duration. The ones that make new
+members (copy, boolean, slice) refuse while any session is open, since a
+session close folds every node made since its open into the open
+container. `boolean_through_placement` runs only a subtract: a union or
+intersect with a world tool would move world material into every
+placement, which unlinking is for (Addendum D §5).
 
 The stack also gives in-context resize a natural target: the Tape
 Measure's measure-then-type-a-length gesture, which resizes the whole
@@ -522,6 +942,38 @@ only: it is never part of what `.hew` serializes, and saving (autosave
 included) while a session is open transparently writes the document as if
 the session had already been closed, without interrupting the edit.
 
+**The change ring.** Every history change the `Document` makes leaves one
+session-only record in a bounded ring (256 records, `crates/kernel/src/
+changes.rs`): a pushed entry, an undo, a redo, an aborted transaction or
+compound, a document replacement. Each record carries the history clock,
+the entry's label and origin, and a change set classified from the entry's
+`DocAction`s (`document/change_sets.rs`, an exhaustive match: created
+entities are added, deleted or consumed ones removed, everything else
+touched modified; an import or a rescale is `full`). A bracket that drains
+its children into one entry (a transaction, a compound, a definition
+delete, 3D Text) replaces their records with its own, so the ring holds
+one record per visible entry; while such a bracket is open the ring does
+not trim, so its children never push older history out. An abort drops
+its children's records and adds one `full` record. The ring is never serialized and is not part of the file format.
+The API builds `document_changed` events and `hew.query.changes_since`
+from it (HEW_API.md §4.5).
+
+**Rehearsals.** An API dry run (HEW_API.md §6.6) runs an envelope's
+commands on one clone of the `Document` with no bracket open, against a
+host that refuses every view or selection effect, and drops the clone.
+The untouched original stands in for the bracket's snapshot:
+`Document::rehearsal_disturbance` makes the same three refusals a commit
+would (history disturbed, session or gesture unbalanced) by comparing the
+clone with it, so a rehearsal answers exactly what the commit would at
+the cost of one clone, and the live document's history, epoch, and change
+ring never move. The pure computations (`hew.compute.*`, §7.6) copy only
+their operands and run the kernel's pure functions on them
+(`Object::boolean_product`, the same product a committed boolean
+records). A cut through a placement can take such a transient solid as
+its cutter (`Document::subtract_solid_through_placement`): its
+`DocAction::Boolean` carries no `b`, so undo has only the host to bring
+back.
+
 ## 3. Crate and Module Topology
 
 | Crate / module | Responsibility | Depends on |
@@ -533,14 +985,16 @@ the session had already been closed, without interrupting the edit.
 | `crates/mesh-export` | STL, 3MF, glTF/GLB, and USDZ writers for `hew.doc.export`, shared by every host that implements it | `kernel`, `tessellate` |
 | `crates/dae-import` | COLLADA (`.dae`) → Objects/Instances | `kernel`, `mesh-heal` |
 | `crates/gltf-import` | glTF/GLB → Objects/Instances | `kernel`, `mesh-heal` |
-| `crates/skp-import` | Clean-room SketchUp (`.skp`) → Objects/Instances, built on the `openskp` reader | `kernel`, `mesh-heal`, `openskp` |
-| `crates/skp-export` | Document → SketchUp `.skp` (2026 container or 2017 format) on OpenSKP's writers, and the save back over an opened `.skp` that keeps what did not change | `kernel`, `tessellate`, `skp-import`, `openskp` |
+| `crates/skp-import` | Clean-room SketchUp (`.skp`) → Objects/Instances, built on the `skpwright` reader | `kernel`, `mesh-heal`, `skpwright` |
+| `crates/skp-export` | Document → SketchUp `.skp` (2026 container, or any stream release 3 to 8 and 2013 to 2020) on Skpwright's writers, and the save back over an opened `.skp` that keeps what did not change | `kernel`, `tessellate`, `skp-import`, `skpwright` |
 | `crates/stl-import` | STL (binary + ASCII, hand-written parser) → Objects | `kernel`, `mesh-heal` |
 | `crates/image-import` | PNG/JPEG → a placed picture: one face painted with it in a component, placed once (the `.skp` image shape); reads only the pixel size from the header | `kernel` |
 | `crates/softrender` | Headless render device: a pure software rasterizer over `tessellate`'s buffers, for `hew.view.snapshot` off-screen | `kernel`, `tessellate` |
 | `crates/hlr` | Hidden-line removal: projects tessellated solids onto a view plane and returns visible line work — hard edges, curved-wall silhouettes, section-cut outlines — as 2D segments, plus an SVG writer, for vector Line art printing and SVG export | `kernel`, `tessellate` |
+| `crates/headless-render` | The renderers behind `hew.view.snapshot` and `hew.view.line_drawing` (selection, background, fitted cameras, view helpers shared with `hew.print.pdf`), pure over `&Document` and shared by `hew-cli`'s `CliHost` and the app's `LiveHost` | `api`, `kernel`, `softrender`, `hlr` |
 | `crates/pdfwrite` | Small hand-written PDF 1.4 writer (pages of images, stroked paths, text) for Save PDF… and headless `hew.print.pdf` | nothing in-tree (`miniz_oxide` for DEFLATE) |
-| `crates/wasm-api` | `wasm-bindgen` surface exposing the kernel (plus inference, tessellate, hlr, pdfwrite, softrender, the api, and the importers/exporters) to the UI | `kernel`, `inference`, `tessellate`, `hlr`, `pdfwrite`, `softrender`, `api`, `mesh-export`, `dae-import`, `gltf-import`, `skp-import`, `skp-export`, `stl-import`, `image-import` |
+| `crates/wasm-api` | `wasm-bindgen` surface exposing the kernel (plus inference, tessellate, hlr, pdfwrite, softrender, headless-render, the api, and the importers/exporters) to the UI | `kernel`, `inference`, `tessellate`, `hlr`, `pdfwrite`, `softrender`, `headless-render`, `api`, `mesh-export`, `dae-import`, `gltf-import`, `skp-import`, `skp-export`, `stl-import`, `image-import` |
+| `crates/plugin-manifest` | The plugin manifest (`hew-plugin.json`) parser and validator, pure and shared by every host; `crates/api` reads permission names from it (docs/agents/PLUGINS.md) | `serde`, `semver` only |
 | `crates/library` | The Hew Library's on-disk layout: folder resolution, item naming, atomic list/read/write/remove, content hashing — one implementation behind `hew-cli`'s `hew.library.*` and the desktop shell's `library_*` commands | `kernel` |
 | `app/` | TypeScript/React UI: viewport, tools, panels | `wasm-api` (via the compiled WASM package) |
 | `shells/tauri` | Desktop shell | `app/`, `library` |
@@ -615,11 +1069,11 @@ teaching the kernel about any external format:
   correctly-oriented, watertight-or-honestly-leaky Objects rather than raw
   triangle soup.
 - **`skp-import`** reads SketchUp's native `.skp` format directly, built on
-  [OpenSKP](https://github.com/hew3d/openskp), a clean-room reader
+  [Skpwright](https://github.com/hew3d/skpwright), a clean-room reader
   maintained as its own project and consumed as an ordinary versioned
   dependency. It shares the same `mesh-heal` pipeline as every other
   importer, and reports where each imported node came from in the file.
-- **`skp-export`** writes `.skp` on OpenSKP's writers, in the mapping
+- **`skp-export`** writes `.skp` on Skpwright's writers, in the mapping
   `skp-import` reads back as the same document. Saving back over an
   opened `.skp` starts from the file's own model and reuses its records
   for everything the document did not change, so a file can go Hew →
@@ -701,7 +1155,7 @@ This is binding, for three reinforcing reasons. It makes the boundary the
 *solely through the documented Plugin API* — true by construction rather than
 by policy. It keeps proprietary plugins clear of the copyleft of any GPL
 dependency embedded in the kernel: a sandboxed plugin is mere aggregation,
-not a combined work, so OpenSKP's GPLv3 (or any future GPL dependency's) does
+not a combined work, so Skpwright's GPLv3 (or any future GPL dependency's) does
 not reach it. And it contains an untrusted third party — a plugin can crash
 neither the kernel nor the open document, and sees only what the API hands
 it. On a WASM stack this isolation is nearly free, where a native host would
@@ -768,11 +1222,15 @@ common in practice, not edge cases, so the boolean engine classifies
 coplanar sub-faces by an exact, tolerance-free coverage test instead of
 falling back to a numerically fragile epsilon comparison. A genuinely
 ambiguous case (an edge lying exactly on a face with no area overlap) is
-refused outright rather than resolved arbitrarily. Results are also cleaned
-up: coplanar seams a boolean (or a through-cut push/pull) introduces are
-dissolved, so two joined tops read as one face — while coplanar edges the
-operands already carried (drawing on faces, not yet extruded) are
-preserved, and differing face materials are a hard stop.
+refused outright rather than resolved arbitrarily. A Subtract whose cutter
+is disjoint from, or only touches, the target is refused as `NothingRemoved`
+(the arrangement dropped no face of the target and kept no face of the
+cutter, so the target's skin is unchanged), since handing back the target
+unchanged would read as a cut that silently did nothing.
+Results are also cleaned up: coplanar seams a boolean (or a through-cut
+push/pull) introduces are dissolved, so two joined tops read as one face —
+while coplanar edges the operands already carried (drawing on faces, not
+yet extruded) are preserved, and differing face materials are a hard stop.
 
 **A baked transform for plain geometry; a real pose only for Component
 instances.** Move, rotate, and scale write directly into an Object's or
@@ -793,10 +1251,12 @@ affine per-face UV frame is precise enough to reproduce an imported model's
 authored texture mapping without needing per-vertex UV storage, which a
 flat-faced, solids-first model doesn't otherwise require.
 
-**Push-through is the only way to remove material from a solid.** Covered
-in 2.10. Centralizing material removal in one boolean-backed operation is
-what makes the "delete a whole node only" restriction on plain deletion safe
-rather than merely convenient.
+**Plain deletion never removes material from a solid; push-through is the
+everyday route.** Covered in 2.10, which also names the blend, Deform,
+Shell and Project operations that change material by clone-validate-swap.
+Keeping material removal in a few validated operations is what makes the
+"delete a whole node only" restriction on plain deletion safe rather than
+merely convenient.
 
 **Units are a display concern layered losslessly over an f64-meter
 kernel.** The kernel always works in meters; metric and imperial display
@@ -810,7 +1270,7 @@ from a proprietary SDK — its headers, its constants, or format knowledge
 obtained under its license — may enter the kernel's dependency chain,
 including transitively through an interop crate. What that permits is not
 "never support `.skp`," but "support it only through a reader whose entire
-provenance is clean" — which is what makes a clean-room reader like OpenSKP,
+provenance is clean" — which is what makes a clean-room reader like Skpwright,
 maintained independently and consumed as an ordinary dependency, an
 acceptable way to read a proprietary format without ever touching its SDK.
 
@@ -871,7 +1331,13 @@ on its own: `cap_rims` closes flat openings with faces, `thicken_sheet`
 pulls a flat surface into a solid, `delete_faces` removes faces from an
 open Object, and marking a surface sets one attribute. Each is an ordinary
 undoable operation that commits only a result the validator accepts and
-refuses typed otherwise (`kernel::repair`).
+refuses typed otherwise (`kernel::repair`). `rejoin_as_one_solid` is built
+from them: it caps a split shape's pieces at exactly their shared rims,
+deletes the inside walls, and unions the pieces with the ordinary boolean
+(which resolves the coincident caps), as one undo entry. It takes one
+whole family, every piece and wall, under one parent; a subset, a family
+split across groups, a shape that stays open after its seams are capped,
+or pieces that meet only through a wall refuse `RejoinNotPossible`.
 
 ### 5.4 Tolerance policy
 

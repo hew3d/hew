@@ -124,6 +124,18 @@ describe('MultiClickTracker', () => {
     expect(tracker.press(press(50, 100, 100, 2))).toBe(1)
   })
 
+  it('a right press between two left clicks at one spot (a fly hold) leaves the second one a fresh click', () => {
+    // The Viewport feeds every button's press to the tracker; the right
+    // press is what breaks the pairing (a Line's second point placed where
+    // the first was, right after a fly, must not be the swallowed "second
+    // half" of a double-click).
+    const tracker = new MultiClickTracker()
+    tracker.press(press(0, 100, 100, 0))
+    tracker.release(press(5, 100, 100, 0))
+    tracker.press(press(100, 100, 100, 2)) // the fly hold's right press
+    expect(tracker.press(press(250, 100, 100, 0))).toBe(1)
+  })
+
   it('does not pair presses from different pointer types', () => {
     const tracker = new MultiClickTracker()
     tracker.press(press(0, 100, 100, 0, 'mouse'))

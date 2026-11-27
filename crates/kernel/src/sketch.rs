@@ -38,6 +38,7 @@
 //!
 //! The executable contract lives in `crates/kernel/tests/op_specs.rs`.
 
+use crate::trig;
 use slotmap::{SlotMap, new_key_type};
 
 use crate::geom2d::{
@@ -89,7 +90,7 @@ pub const MAX_CIRCLE_SEGMENTS: usize = 1024;
 /// never stored. This is the durable form of what the drawing tool computed
 /// and, before this existed, immediately discarded — the foundation the
 /// true-curves plan builds on.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CurveGeom {
     /// Circle center, on the sketch plane (within
     /// [`tol::PLANE_DIST`](crate::tol::PLANE_DIST)).
@@ -118,11 +119,11 @@ impl CurveGeom {
         let f = self.center - a;
         let apothem = (f - d * f.dot(d)).length();
         let ratio = (apothem / r).clamp(-1.0, 1.0);
-        let n = (std::f64::consts::PI / ratio.acos()).round();
+        let n = (std::f64::consts::PI / trig::acos(ratio)).round();
         if !(3.0..=100_000.0).contains(&n) {
             return None;
         }
-        ((apothem - r * (std::f64::consts::PI / n).cos()).abs() <= tol).then_some(n as u32)
+        ((apothem - r * trig::cos(std::f64::consts::PI / n)).abs() <= tol).then_some(n as u32)
     }
 }
 
@@ -209,8 +210,8 @@ impl SketchCurveRim {
             .filter(|&q| self.covers(q))
             .map(|q| {
                 self.center
-                    + self.basis_u * (self.radius * q.cos())
-                    + self.basis_v * (self.radius * q.sin())
+                    + self.basis_u * (self.radius * trig::cos(q))
+                    + self.basis_v * (self.radius * trig::sin(q))
             })
             .collect()
     }
@@ -374,7 +375,7 @@ pub struct VertexMoved {
 }
 
 /// Typed failures of sketch operations. Nothing is repaired silently.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum SketchError {
     /// An input point is farther than [`tol::PLANE_DIST`](crate::tol::PLANE_DIST) from the sketch
     /// plane. The kernel does not project; the caller decides.
@@ -453,7 +454,31 @@ pub enum SketchError {
     /// the offset loops cross themselves or each other. The sketch is
     /// untouched — no silent repair (rule 4).
     OffsetCollapsed,
+    /// [`Sketch::blend_corner`] was pointed at a vertex that is not a corner
+    /// of exactly two straight lines: it has some other number of incident
+    /// edges, or one of its two edges belongs to a curve chain (an arc or
+    /// circle facet, or a polygon side).
+    CornerNotBlendable,
+    /// The two edges of the corner are collinear (the interior angle is
+    /// within [`tol::NORMAL_DIRECTION`] of a half turn), so there is no corner
+    /// to round or chamfer.
+    CornerIsStraight,
+    /// A corner blend is too large: a tangent point would reach or pass the
+    /// far end of one of the two edges.
+    CornerRadiusTooLarge {
+        /// The largest radius (for a round) or the largest uniform scale of
+        /// both setbacks (for a chamfer) that fits; the blend succeeds for
+        /// any smaller positive value.
+        max: f64,
+    },
+    /// A corner blend on a drafted face drawing would leave the face: the
+    /// corner lies along the solid's own boundary, or a point of the new arc
+    /// or chamfer segment falls outside the face.
+    CornerLeavesFace,
 }
+
+// `DocumentError` is `Eq`; every f64 payload is finite by construction.
+impl Eq for SketchError {}
 
 impl std::fmt::Display for SketchError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -514,6 +539,24 @@ impl std::fmt::Display for SketchError {
             SketchError::OffsetCollapsed => {
                 write!(f, "the offset distance collapses the boundary")
             }
+            SketchError::CornerNotBlendable => {
+                write!(
+                    f,
+                    "only a corner where two straight lines meet can be rounded"
+                )
+            }
+            SketchError::CornerIsStraight => {
+                write!(
+                    f,
+                    "the lines are in a straight line; there is no corner to round"
+                )
+            }
+            SketchError::CornerRadiusTooLarge { max } => {
+                write!(f, "the radius is too large for this corner (at most {max})")
+            }
+            SketchError::CornerLeavesFace => {
+                write!(f, "the rounded corner would leave the face")
+            }
         }
     }
 }
@@ -524,6 +567,23 @@ impl std::error::Error for SketchError {}
 #[derive(Debug, Clone)]
 pub struct Sketch {
     plane: Plane,
+    /// A **detached shape** (persisted, part of equality): drawing that
+    /// takes part in no plane arrangement. A drafting lift of its plane
+    /// leaves it out, so later drawing there neither splits nor merges with
+    /// it and it never becomes face topology; it is edited only through its
+    /// own sketch-only draft ([`crate::Document::draft_detached`]), and
+    /// extruding one of its regions always makes a new Object. Never set on
+    /// an object-owned sketch (invariant I9). Every rebuild of an existing
+    /// sketch starts from [`Sketch::blank_like`], which carries it.
+    detached: bool,
+    /// **Imported drawing** (persisted, part of equality): the sketch came
+    /// in from a foreign file (a `.skp`'s loose edges, built by
+    /// [`crate::Document::ingest`]) and the user has not drawn in it since,
+    /// so a viewer shows its lines as the source's own, not as drawing made
+    /// in Hew. Every rebuild from [`Sketch::blank_like`] carries it, so a
+    /// move, copy or split keeps it; the document clears it when the user
+    /// adds to or edits the sketch (a draft or gesture that draws into it).
+    imported: bool,
     vertices: SlotMap<SketchVertexId, SketchVertex>,
     edges: SlotMap<SketchEdgeId, SketchEdge>,
     regions: SlotMap<SketchRegionId, SketchRegion>,
@@ -533,6 +593,14 @@ pub struct Sketch {
     /// committed before geometry capture existed (pre-v10 files) or through
     /// the plain [`Sketch::begin_curve`].
     curves: SlotMap<SketchCurveId, Option<CurveAnalytic>>,
+    /// Chains that were drawn as circles or arcs and lost their analytic
+    /// record to a non-similarity transform (true-curves.md §3.3 rule 2,
+    /// E1): extrusion and Follow Me shade their facet seams smooth.
+    /// Invariant: a curve id is here only if its slot exists and its
+    /// analytic record is `None`. A regular polygon's chain never is (its
+    /// sides are its geometry), and an analytic-less chain drawn as such
+    /// (a too-flat arc's chord) never was. Persisted in manifest v30.
+    smooth_curves: std::collections::BTreeSet<SketchCurveId>,
     /// Current connected components (derived; see [`SketchIsland`]).
     islands: SlotMap<SketchIslandId, SketchIsland>,
     /// Curve id applied to edges inserted by `add_segment` while a
@@ -558,6 +626,21 @@ pub struct Sketch {
     /// ([`Sketch::apply_transform_edges`], [`Sketch::copy_edges_transformed`]),
     /// so the drafting engine can heal a seam moved off the boundary.
     seams: Vec<Point3>,
+    /// Transient (never saved, ignored by equality): how far an inserted
+    /// point may lie from the plane. [`tol::PLANE_DIST`] for every sketch a
+    /// user draws in; a boolean's arrangement sketch over an IMPORTED face
+    /// (flat only to its object's planarity tolerance) takes that tolerance
+    /// ([`Sketch::on_plane_with_tol`]). Points are stored as given, never
+    /// projected.
+    plane_tol: f64,
+    /// Transient drafting state (never saved, ignored by equality): lines a
+    /// drafting lift holds from elsewhere (another plane's or sketch's
+    /// drawing lying in this plane) that new drawing must not bend. A
+    /// facet of a curve chain lying along one is split only on its own
+    /// line, never at a point of its exact circle off that line
+    /// ([`Sketch::split_circle_facet_at`]): the line stays drawn end to end
+    /// as its home holds it.
+    rigid: Vec<(Point3, Point3)>,
 }
 
 /// Everything an undo needs to re-insert consumed scaffolding
@@ -584,19 +667,108 @@ pub(crate) struct RemovedScaffolding {
 }
 
 impl Sketch {
-    /// An empty sketch on `plane`.
+    /// An estimate of the heap this sketch holds, for the undo-memory
+    /// budget ([`crate::Document::history_memory`]): each table at its
+    /// capacity plus the rings and edge lists its regions and islands own.
+    pub(crate) fn heap_bytes_estimate(&self) -> usize {
+        use crate::shared::slotmap_heap_bytes as table;
+        let ids = std::mem::size_of::<SketchVertexId>();
+        let rings: usize = self
+            .regions
+            .values()
+            .map(|r| (r.outer.capacity() + r.holes.iter().map(Vec::capacity).sum::<usize>()) * ids)
+            .sum();
+        let island_lists: usize = self
+            .islands
+            .values()
+            .map(|i| i.edges.capacity() * std::mem::size_of::<SketchEdgeId>())
+            .sum();
+        table(&self.vertices)
+            + table(&self.edges)
+            + table(&self.regions)
+            + rings
+            + table(&self.curves)
+            + table(&self.islands)
+            + island_lists
+            + self.seams.capacity() * std::mem::size_of::<Point3>()
+    }
+
+    /// An empty sketch on `plane` (not detached).
     pub fn on_plane(plane: Plane) -> Sketch {
+        Self::blank(plane, false)
+    }
+
+    /// An empty **detached** sketch on `plane` (see the field `detached`).
+    pub fn detached_on_plane(plane: Plane) -> Sketch {
+        Self::blank(plane, true)
+    }
+
+    /// Whether this sketch is a detached shape: drawing that takes part in
+    /// no plane arrangement (see the field `detached`).
+    pub fn detached(&self) -> bool {
+        self.detached
+    }
+
+    /// Whether this sketch is imported drawing the user has not drawn in
+    /// since (see the field `imported`).
+    pub fn imported(&self) -> bool {
+        self.imported
+    }
+
+    /// Marks or clears this sketch as imported drawing (see the field
+    /// `imported`).
+    pub(crate) fn set_imported(&mut self, imported: bool) {
+        self.imported = imported;
+    }
+
+    /// An empty sketch on this sketch's plane with its `detached` and
+    /// `imported` flags: what every rebuild of an existing sketch starts
+    /// from, so the flags are carried structurally. Transient drafting
+    /// state (curve bracket, bulk insertion cells, snapping, seams, rigid
+    /// lines) is NOT copied.
+    pub fn blank_like(&self) -> Sketch {
+        let mut s = Self::blank(self.plane, self.detached);
+        s.imported = self.imported;
+        s
+    }
+
+    /// [`Sketch::blank_like`] on another plane: an empty sketch on `plane`
+    /// carrying this sketch's `detached` and `imported` flags — the start
+    /// of a rebuild that lands this sketch's drawing on a transformed plane.
+    pub(crate) fn blank_like_on(&self, plane: Plane) -> Sketch {
+        let mut s = Self::blank(plane, self.detached);
+        s.imported = self.imported;
+        s
+    }
+
+    /// The one empty-sketch constructor every other one goes through.
+    fn blank(plane: Plane, detached: bool) -> Sketch {
         Sketch {
             plane,
+            detached,
+            imported: false,
             vertices: SlotMap::with_key(),
             edges: SlotMap::with_key(),
             regions: SlotMap::with_key(),
             curves: SlotMap::with_key(),
+            smooth_curves: std::collections::BTreeSet::new(),
             active_curve: None,
             islands: SlotMap::with_key(),
             bulk_vertex_cells: None,
             snap_to_existing: false,
             seams: Vec::new(),
+            plane_tol: tol::PLANE_DIST,
+            rigid: Vec::new(),
+        }
+    }
+
+    /// An empty sketch on `plane` whose inserted points may lie up to `tol`
+    /// from it (see the field `plane_tol`): the arrangement sketch a boolean
+    /// builds over a face of an imported object. Crate-internal.
+    pub(crate) fn on_plane_with_tol(plane: Plane, tol: f64) -> Sketch {
+        Sketch {
+            plane_tol: tol.max(crate::tol::PLANE_DIST),
+            ..Sketch::on_plane(plane)
         }
     }
 
@@ -615,6 +787,11 @@ impl Sketch {
     /// The seam points, carried through moves and copies.
     pub(crate) fn seams(&self) -> &[Point3] {
         &self.seams
+    }
+
+    /// Sets the rigid lines (see the field `rigid`).
+    pub(crate) fn set_rigid(&mut self, rigid: Vec<(Point3, Point3)>) {
+        self.rigid = rigid;
     }
 
     /// `t` of every seam that is an endpoint of one of `edges` (the drawing
@@ -771,6 +948,34 @@ impl Sketch {
             .map(|a| a.geom)
     }
 
+    /// Whether `curve`'s facet seams shade smooth when it is extruded or swept:
+    /// it carries a [`SketchCurveKind::Circle`] record, or it lost one to a
+    /// non-similarity transform (`smooth_curves`, E1).
+    pub fn curve_is_smooth(&self, curve: SketchCurveId) -> bool {
+        matches!(
+            self.curves.get(curve).copied().flatten(),
+            Some(CurveAnalytic {
+                kind: SketchCurveKind::Circle,
+                ..
+            })
+        ) || self.smooth_curves.contains(&curve)
+    }
+
+    /// Marks an analytic-less chain smooth (E1). A no-op for a stale id or a
+    /// chain that still carries an analytic record (the invariant on
+    /// `smooth_curves`).
+    pub(crate) fn mark_curve_smooth(&mut self, curve: SketchCurveId) {
+        if matches!(self.curves.get(curve), Some(None)) {
+            self.smooth_curves.insert(curve);
+        }
+    }
+
+    /// [`Sketch::mark_curve_smooth`] for the executable specs.
+    #[doc(hidden)]
+    pub fn mark_curve_smooth_for_test(&mut self, curve: SketchCurveId) {
+        self.mark_curve_smooth(curve);
+    }
+
     /// The full analytic record of `curve` — circle *and* what it claims —
     /// regardless of kind. `None` when the chain carries none, or the handle
     /// is stale.
@@ -906,7 +1111,7 @@ impl Sketch {
                     if radial.length() <= tol::NORMALIZE_MIN_LENGTH {
                         None
                     } else {
-                        Some(radial.dot(v).atan2(radial.dot(u)))
+                        Some(trig::atan2(radial.dot(v), radial.dot(u)))
                     }
                 };
                 if let (Some(a), Some(b)) = (angle_of(e.from), angle_of(e.to)) {
@@ -938,6 +1143,46 @@ impl Sketch {
             });
         }
         out
+    }
+
+    /// The axis-aligned bounds `(low, high)` of this sketch's drawing seen
+    /// through `pose`: every vertex mapped by it, widened to the true
+    /// extent of each drawn circle or arc ([`Sketch::curve_rims`]) — a
+    /// curve bulges past its facet chords, and an affine pose maps it to an
+    /// ellipse whose extreme along each axis is solved for exactly and kept
+    /// when the curve covers that angle. `None` for a sketch with no
+    /// vertices. Read-only.
+    pub fn bounds_under(&self, pose: &crate::Transform) -> Option<(Point3, Point3)> {
+        let mut acc: Option<(Point3, Point3)> = None;
+        let mut grow = |p: Point3| {
+            acc = Some(match acc {
+                None => (p, p),
+                Some((lo, hi)) => (
+                    Point3::new(lo.x.min(p.x), lo.y.min(p.y), lo.z.min(p.z)),
+                    Point3::new(hi.x.max(p.x), hi.y.max(p.y), hi.z.max(p.z)),
+                ),
+            });
+        };
+        for v in self.vertices.values() {
+            grow(pose.apply_point(v.position));
+        }
+        for rim in self.curve_rims() {
+            // P(θ) = pose(center) + r·(cos θ·L·u + sin θ·L·v) for the pose's
+            // linear part L: along axis k that is a·cos θ + b·sin θ, extreme
+            // at θ = atan2(b, a) and opposite it.
+            let c = pose.apply_point(rim.center);
+            let lu = pose.apply_vector(rim.basis_u) * rim.radius;
+            let lv = pose.apply_vector(rim.basis_v) * rim.radius;
+            for (a, b) in [(lu.x, lv.x), (lu.y, lv.y), (lu.z, lv.z)] {
+                let peak = trig::atan2(b, a);
+                for theta in [peak, peak + std::f64::consts::PI] {
+                    if rim.covers(theta) {
+                        grow(c + lu * trig::cos(theta) + lv * trig::sin(theta));
+                    }
+                }
+            }
+        }
+        acc
     }
 
     /// The exact drawn centers of this sketch's [`SketchCurveKind::Polygon`]
@@ -1039,15 +1284,29 @@ impl Sketch {
         }
 
         // Assign ids: reuse where the anchor edge landed; fresh otherwise.
+        // Each component takes, of the unused old islands anchored on one
+        // of its edges, the one with the smallest (anchor, id) — found by
+        // walking its ascending edges through an anchor index, so a sketch
+        // of thousands of islands is not quadratic in them.
+        let mut by_anchor: std::collections::BTreeMap<SketchEdgeId, Vec<SketchIslandId>> =
+            std::collections::BTreeMap::new();
+        for &(id, anchor) in &old_anchors {
+            by_anchor.entry(anchor).or_default().push(id);
+        }
+        for ids in by_anchor.values_mut() {
+            ids.sort();
+        }
         let mut used: std::collections::BTreeSet<SketchIslandId> =
             std::collections::BTreeSet::new();
         let mut assignments: Vec<(Option<SketchIslandId>, Vec<SketchEdgeId>)> = Vec::new();
         for comp in components {
-            let reuse = old_anchors
-                .iter()
-                .filter(|(id, anchor)| !used.contains(id) && comp.binary_search(anchor).is_ok())
-                .min_by_key(|(id, anchor)| (*anchor, *id))
-                .map(|(id, _)| *id);
+            let reuse = comp.iter().find_map(|e| {
+                by_anchor
+                    .get(e)?
+                    .iter()
+                    .copied()
+                    .find(|id| !used.contains(id))
+            });
             if let Some(id) = reuse {
                 used.insert(id);
             }
@@ -1163,7 +1422,8 @@ impl Sketch {
     /// Move a SET of islands together by one in-plane transform. The
     /// transform must keep every vertex on the sketch plane
     /// ([`SketchError::PointOffPlane`] otherwise); the caller (the document
-    /// layer) has already vetted invertibility and rejected reflections.
+    /// layer) has already vetted invertibility; an in-plane mirror reshapes
+    /// its islands (their regions are re-traced with new ids).
     ///
     /// A moved shape lands exactly as the same shape DRAWN there would
     /// (unified-drafting decision 4): where it touches, crosses, or overlaps
@@ -1274,7 +1534,19 @@ impl Sketch {
             if inside == 0 {
                 continue; // untouched chain
             }
-            s.curves[cid] = match (s.curves[cid], scale, inside == members.len()) {
+            let whole = inside == members.len();
+            // A whole drawn circle stretched by a non-similarity stays a
+            // smooth curve (E1); a polygon's sides stay hard.
+            let stretched_circle = whole
+                && scale.is_none()
+                && matches!(
+                    s.curves[cid],
+                    Some(CurveAnalytic {
+                        kind: SketchCurveKind::Circle,
+                        ..
+                    })
+                );
+            s.curves[cid] = match (s.curves[cid], scale, whole) {
                 (Some(a), Some(sc), true) => Some(CurveAnalytic {
                     geom: CurveGeom {
                         center: t.apply_point(a.geom.center),
@@ -1284,6 +1556,9 @@ impl Sketch {
                 }),
                 _ => None,
             };
+            if stretched_circle {
+                s.mark_curve_smooth(cid);
+            }
         }
 
         // Containment may have changed even though nothing touched (a shape
@@ -1340,7 +1615,9 @@ impl Sketch {
         t: &crate::Transform,
         plane: Plane,
     ) -> Result<Sketch, SketchError> {
-        let mut fresh = Sketch::on_plane(plane);
+        // The new sketch is this one's kind: a detached shape's islands
+        // detach or copy into a detached sketch.
+        let mut fresh = self.blank_like_on(plane);
         self.replay_islands_into(islands, t, &mut fresh)?;
         Ok(fresh)
     }
@@ -1384,7 +1661,7 @@ impl Sketch {
         t: &crate::Transform,
         plane: Plane,
     ) -> Result<Sketch, SketchError> {
-        let mut fresh = Sketch::on_plane(plane);
+        let mut fresh = self.blank_like_on(plane);
         self.replay_edges_into(edges, t, &mut fresh)?;
         Ok(fresh)
     }
@@ -1394,7 +1671,7 @@ impl Sketch {
     /// (its members in `edges` order). Curve geometry maps when `t` restricted
     /// to this sketch's plane is a similarity and drops otherwise. `target` is
     /// left partially written on `Err`; callers pass a clone or a fresh sketch.
-    fn replay_edges_into(
+    pub(crate) fn replay_edges_into(
         &self,
         edges: &[SketchEdgeId],
         t: &crate::Transform,
@@ -1436,8 +1713,19 @@ impl Sketch {
                                 a.kind,
                             )?;
                         }
-                        _ => {
-                            target.begin_curve();
+                        (None, _) => {
+                            let c = target.begin_curve();
+                            if self.smooth_curves.contains(&cid) {
+                                target.mark_curve_smooth(c);
+                            }
+                        }
+                        (Some(a), None) => {
+                            // A circle copied through a non-similarity keeps
+                            // its smooth shading (E1); a polygon does not.
+                            let c = target.begin_curve();
+                            if a.kind == SketchCurveKind::Circle {
+                                target.mark_curve_smooth(c);
+                            }
                         }
                     }
                     for &member in edges.iter().filter(|&&m| self.edges[m].curve == Some(cid)) {
@@ -1506,7 +1794,7 @@ impl Sketch {
     /// The first segment the sticky rules refuse, as [`Sketch::add_segment`]
     /// refuses it; the sketch then holds the segments before it, the
     /// regions recomputed, and the caller decides (a lift discards it).
-    pub(crate) fn add_segments(&mut self, segs: &[(Point3, Point3)]) -> Result<(), SketchError> {
+    pub fn add_segments(&mut self, segs: &[(Point3, Point3)]) -> Result<(), SketchError> {
         let curve = self.active_curve;
         let segs: Vec<(Point3, Point3, Option<SketchCurveId>)> =
             segs.iter().map(|&(a, b)| (a, b, curve)).collect();
@@ -1702,6 +1990,48 @@ impl Sketch {
             .collect()
     }
 
+    /// Give its face back to every faceless region whose outer ring
+    /// coincides with one of `rings` (the same corners within
+    /// [`tol::POINT_MERGE`], from any start, in either direction): an
+    /// import's record of the faces its source drew on the edges
+    /// ([`crate::ImportSketch::filled`]). A ring matching no region changes
+    /// nothing; no geometry moves.
+    pub(crate) fn fill_regions_on_rings(&mut self, rings: &[Vec<Point3>]) {
+        // Two coinciding rings pair their corners within the tolerance, so
+        // their least x differ by no more than it: each region is tried
+        // only against the rings whose least x lies in a window about its
+        // own (a file's floor plan can hold thousands of filled regions
+        // in one sketch). The window is twice the tolerance, for rounding;
+        // `rings_coincide` decides.
+        let min_x = |ring: &[Point3]| ring.iter().map(|p| p.x).fold(f64::INFINITY, f64::min);
+        let mut keyed: Vec<(f64, &[Point3])> = rings
+            .iter()
+            .map(|k| (min_x(k), k.as_slice()))
+            .filter(|(x, _)| x.is_finite())
+            .collect();
+        if keyed.is_empty() {
+            return;
+        }
+        keyed.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let window = 2.0 * tol::POINT_MERGE;
+        let vertices = &self.vertices;
+        for r in self.regions.values_mut().filter(|r| r.faceless) {
+            let ring: Vec<Point3> = r.outer.iter().map(|&v| vertices[v].position).collect();
+            let x = min_x(&ring);
+            if !x.is_finite() {
+                continue;
+            }
+            let from = keyed.partition_point(|(k, _)| *k < x - window);
+            if keyed[from..]
+                .iter()
+                .take_while(|(k, _)| *k <= x + window)
+                .any(|(_, k)| rings_coincide(k, &ring))
+            {
+                r.faceless = false;
+            }
+        }
+    }
+
     /// Make faceless every region whose outer ring is a faceless loop of
     /// `source`, each source position passed through `map` (module docs,
     /// rule 6: a loop replayed into this sketch, moved, copied or rebuilt,
@@ -1773,9 +2103,13 @@ impl Sketch {
     /// no region is gained or lost. This is what move/rotate/scale on a
     /// free-standing sketch commit (Phase D), mirroring [`Object::apply_transform`].
     ///
+    /// A reflection (determinant < 0) gives the plane the mapped normal
+    /// ([`Transform::apply_plane_keeping_side`]) and reverses every
+    /// region's stored cycles, because the map reverses their winding seen
+    /// from that normal; region ids are kept.
+    ///
     /// Validated up front so the mutation is transactional: a singular linear
-    /// part is [`TransformError::Singular`] and an orientation-flipping one
-    /// (determinant < 0) is [`TransformError::Reflection`] — both refused
+    /// part is [`TransformError::Singular`], refused
     /// before any vertex moves, so the sketch is never left half-transformed.
     ///
     /// [`Object::apply_transform`]: crate::Object::apply_transform
@@ -1784,15 +2118,15 @@ impl Sketch {
         transform: &crate::Transform,
     ) -> Result<(), crate::TransformError> {
         // Reject before mutating. `inverse()` fails iff the linear part is
-        // singular; a negative determinant would flip the plane normal and the
-        // perceived winding of every region.
+        // singular.
         transform.inverse()?;
-        if transform.determinant() < 0.0 {
-            return Err(crate::TransformError::Reflection);
-        }
         // The plane first: an invertible but extremely anisotropic map can
         // still squash it to no direction, refused before anything moves.
-        let plane = transform.apply_plane(&self.plane)?;
+        // The sketch's normal is its up (the side it extrudes toward and
+        // the side a riding sketch shares with its face), so the plane maps
+        // keeping its side: under a reflection the winding-following refit
+        // would turn it over.
+        let plane = transform.apply_plane_keeping_side(&self.plane)?;
         // Curve geometry maps when the transform is an in-plane similarity
         // (center through the point map, radius by the uniform factor) and is
         // DROPPED otherwise — a non-uniform in-plane scale turns the circle
@@ -1801,6 +2135,27 @@ impl Sketch {
         // stops claiming an analytic ancestry it no longer has
         // (the true-curves design). Chain identity always survives.
         let scale = in_plane_similarity_scale(transform, self.plane.normal());
+        // E1: a circle chain whose record is about to drop stays smooth.
+        if scale.is_none() {
+            let circles: Vec<SketchCurveId> = self
+                .curves
+                .iter()
+                .filter(|(_, a)| {
+                    matches!(
+                        a,
+                        Some(CurveAnalytic {
+                            kind: SketchCurveKind::Circle,
+                            ..
+                        })
+                    )
+                })
+                .map(|(id, _)| id)
+                .collect();
+            for cid in circles {
+                self.curves[cid] = None;
+                self.smooth_curves.insert(cid);
+            }
+        }
         for analytic in self.curves.values_mut() {
             *analytic = match (*analytic, scale) {
                 (Some(a), Some(s)) => Some(CurveAnalytic {
@@ -1813,12 +2168,45 @@ impl Sketch {
                 _ => None,
             };
         }
-        // Remap the plane, then move every vertex onto it.
+        // Remap the plane, then move every vertex onto it. The cycles,
+        // whose winding a reflection reverses about the kept normal, are
+        // reversed below.
+        let reflects = transform.determinant() < 0.0;
         self.plane = plane;
         for v in self.vertices.values_mut() {
             v.position = transform.apply_point(v.position);
         }
+        if reflects {
+            self.reverse_region_cycles();
+            debug_assert!(
+                self.regions_match_a_fresh_trace(),
+                "a reflected sketch's stored regions must equal a fresh trace"
+            );
+        }
         Ok(())
+    }
+
+    /// Reverses every region's outer and hole cycles in place, keeping the
+    /// region ids (the winding flip a reflection causes).
+    fn reverse_region_cycles(&mut self) {
+        for r in self.regions.values_mut() {
+            r.outer.reverse();
+            for h in &mut r.holes {
+                h.reverse();
+            }
+        }
+    }
+
+    /// Whether the stored regions are exactly a fresh trace's (same outer
+    /// cycles up to rotation, same orientation).
+    fn regions_match_a_fresh_trace(&self) -> bool {
+        let fresh = self.compute_all_regions();
+        fresh.len() == self.regions.len()
+            && fresh.iter().all(|f| {
+                self.regions
+                    .values()
+                    .any(|r| cycles_equal(&r.outer, &f.outer))
+            })
     }
 
     /// Inserts the segment `from -> to`, applying the sticky rules in the
@@ -1857,8 +2245,9 @@ impl Sketch {
     /// one facet's span but on none of its points, splits that facet at `p`
     /// into two chords of the same circle in the same chain, so drawing that
     /// ends on the curve (a quadrant, any point the curve's own snaps offer)
-    /// meets it there rather than a sagitta outside it. Returns whether it
-    /// split.
+    /// meets it there rather than a sagitta outside it. A facet lying along
+    /// a rigid line (see the field `rigid`) is never split so. Returns
+    /// whether it split.
     fn split_circle_facet_at(&mut self, p: Point3) -> Result<bool, SketchError> {
         let m = tol::POINT_MERGE;
         let found = self.edges.iter().find_map(|(id, e)| {
@@ -1873,6 +2262,12 @@ impl Sketch {
             }
             let (a, b) = (self.vertices[e.from].position, self.vertices[e.to].position);
             if p.approx_eq(a, m) || p.approx_eq(b, m) {
+                return None;
+            }
+            if self.rigid.iter().any(|&(r0, r1)| {
+                crate::geom2d::point_near_segment(a, r0, r1, m)
+                    && crate::geom2d::point_near_segment(b, r0, r1, m)
+            }) {
                 return None;
             }
             let ab = b - a;
@@ -2125,7 +2520,7 @@ impl Sketch {
             if radial.length() <= tol::NORMALIZE_MIN_LENGTH {
                 return None;
             }
-            Some(radial.dot(v).atan2(radial.dot(u)))
+            Some(trig::atan2(radial.dot(v), radial.dot(u)))
         };
         let mut intervals: Vec<[f64; 2]> = Vec::with_capacity(members.len());
         for &eid in &members {
@@ -2176,7 +2571,7 @@ impl Sketch {
         let ring: Vec<Point3> = (0..segments)
             .map(|k| {
                 let a = start + std::f64::consts::TAU * (k as f64) / (segments as f64);
-                geom.center + u * (geom.radius * a.cos()) + v * (geom.radius * a.sin())
+                geom.center + u * (geom.radius * trig::cos(a)) + v * (geom.radius * trig::sin(a))
             })
             .collect();
 
@@ -2348,8 +2743,18 @@ impl Sketch {
                 }
                 let ef = proj(s.vertices[oth.from].position);
                 let et = proj(s.vertices[oth.to].position);
-                let events =
-                    seg_seg_intersections_2d(nf, nt, ef, et, &s.vertices, *oth, u_ax, v_ax, anchor);
+                let events = seg_seg_intersections_2d(
+                    nf,
+                    nt,
+                    ef,
+                    et,
+                    &s.vertices,
+                    *oth,
+                    u_ax,
+                    v_ax,
+                    anchor,
+                    None,
+                );
                 for ev in events {
                     let bad = match ev {
                         Intersection2D::Proper { .. }
@@ -2835,6 +3240,30 @@ impl Sketch {
         let hole_curves: Vec<Vec<Option<CurveGeom>>> =
             r.holes.iter().map(|h| loop_geoms(h)).collect();
         profile.set_curve_attribution(outer_curves, hole_curves);
+
+        // Smooth-chain keys (E1): an analytic-less chain that still shades
+        // smooth, keyed densely in first-appearance order over the outer
+        // loop, then the holes.
+        let mut keys: std::collections::BTreeMap<SketchCurveId, u32> =
+            std::collections::BTreeMap::new();
+        let mut loop_keys = |cycle: &[SketchVertexId]| -> Vec<Option<u32>> {
+            (0..cycle.len())
+                .map(|k| {
+                    let cid = self
+                        .edge_between(cycle[k], cycle[(k + 1) % cycle.len()])
+                        .and_then(|eid| self.edges[eid].curve)?;
+                    (self.smooth_curves.contains(&cid) && self.curves.get(cid) == Some(&None)).then(
+                        || {
+                            let next = keys.len() as u32;
+                            *keys.entry(cid).or_insert(next)
+                        },
+                    )
+                })
+                .collect()
+        };
+        let outer_smooth = loop_keys(&r.outer);
+        let hole_smooth: Vec<Vec<Option<u32>>> = r.holes.iter().map(|h| loop_keys(h)).collect();
+        profile.set_smooth_attribution(outer_smooth, hole_smooth);
         Ok(profile)
     }
 
@@ -2982,11 +3411,12 @@ impl Sketch {
     }
 }
 
-/// Content equality: same plane and identical vertex/edge/region storage,
-/// **including handle identity** (same `SlotMap` keys). Gesture undo snapshots
-/// (see `Document::end_sketch_gesture`) rely on the handle-identity part —
-/// restoring a snapshot must keep every previously-issued id valid — so plain
-/// positional equality would be too weak here.
+/// Content equality: same plane, same `detached` and `imported` flags, and identical
+/// vertex/edge/region storage, **including handle identity** (same `SlotMap`
+/// keys). Gesture undo snapshots (see `Document::end_sketch_gesture`) rely
+/// on the handle-identity part — restoring a snapshot must keep every
+/// previously-issued id valid — so plain positional equality would be too
+/// weak here.
 impl PartialEq for Sketch {
     fn eq(&self, other: &Sketch) -> bool {
         fn slotmaps_eq<K: slotmap::Key, V: PartialEq>(
@@ -2996,10 +3426,13 @@ impl PartialEq for Sketch {
             a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| x == y)
         }
         self.plane == other.plane
+            && self.detached == other.detached
+            && self.imported == other.imported
             && slotmaps_eq(&self.vertices, &other.vertices)
             && slotmaps_eq(&self.edges, &other.edges)
             && slotmaps_eq(&self.regions, &other.regions)
             && slotmaps_eq(&self.curves, &other.curves)
+            && self.smooth_curves == other.smooth_curves
     }
 }
 
@@ -3059,10 +3492,10 @@ impl Sketch {
             return Err(SketchError::PointOffPlane { which: 1 });
         }
         // ── Step 1: validate planarity ────────────────────────────────────────
-        if self.plane.signed_distance(from).abs() > tol::PLANE_DIST {
+        if self.plane.signed_distance(from).abs() > self.plane_tol {
             return Err(SketchError::PointOffPlane { which: 0 });
         }
-        if self.plane.signed_distance(to).abs() > tol::PLANE_DIST {
+        if self.plane.signed_distance(to).abs() > self.plane_tol {
             return Err(SketchError::PointOffPlane { which: 1 });
         }
 
@@ -3139,8 +3572,18 @@ impl Sketch {
 
             // Find all intersections between the new segment [fp,tp] and this
             // existing edge [ep,eq_].
-            let intersections =
-                seg_seg_intersections_2d(fp, tp, ep, eq_, &self.vertices, edge, u_ax, v_ax, anchor);
+            let intersections = seg_seg_intersections_2d(
+                fp,
+                tp,
+                ep,
+                eq_,
+                &self.vertices,
+                edge,
+                u_ax,
+                v_ax,
+                anchor,
+                (self.plane_tol > tol::PLANE_DIST).then_some((from_pos, to_pos)),
+            );
 
             for isect in intersections {
                 match isect {
@@ -3640,8 +4083,8 @@ impl Sketch {
             neighbors.sort_by(|&a, &b| {
                 let pa = proj(self.vertices[a].position);
                 let pb = proj(self.vertices[b].position);
-                let angle_a = (pa.1 - fp.1).atan2(pa.0 - fp.0);
-                let angle_b = (pb.1 - fp.1).atan2(pb.0 - fp.0);
+                let angle_a = trig::atan2(pa.1 - fp.1, pa.0 - fp.0);
+                let angle_b = trig::atan2(pb.1 - fp.1, pb.0 - fp.0);
                 angle_a.partial_cmp(&angle_b).unwrap()
             });
         }
@@ -3749,12 +4192,20 @@ impl Sketch {
 
         // Compute signed area for each cycle.  Positive = CCW (candidate region
         // outer boundary); negative = CW (hole boundary or outer face).
+        // Areas are taken about one point of the drawing, not the world
+        // origin: far from the origin the shoelace terms are large and
+        // cancel, and the unbounded face's match below is relative.
+        let origin = cycles
+            .iter()
+            .find_map(|c| c.first())
+            .map(|&vid| self.vertices[vid].position)
+            .unwrap_or(Point3::ORIGIN);
         let cycle_areas: Vec<f64> = cycles
             .iter()
             .map(|cycle| {
                 let pts: Vec<Point3> = cycle
                     .iter()
-                    .map(|&vid| self.vertices[vid].position)
+                    .map(|&vid| Point3::ORIGIN + (self.vertices[vid].position - origin))
                     .collect();
                 signed_area_on_plane(&pts, normal)
             })
@@ -3774,10 +4225,18 @@ impl Sketch {
             .iter()
             .map(|a| a.abs())
             .fold(f64::NEG_INFINITY, f64::max);
+        // The match is relative to the largest area: an absolute slack lets
+        // every cycle of a small drawing (millimeter parts, under a few
+        // square centimeters) qualify, and the first CW hole cycle listed
+        // was then taken for the unbounded face, leaving the ring around
+        // it without its hole. The largest qualifying CW cycle wins, the
+        // first on a tie.
         let unbounded_idx = cycle_areas
             .iter()
             .enumerate()
-            .filter(|&(_, a)| *a < 0.0 && (a.abs() - max_abs_area).abs() < tol::POINT_MERGE * 1e6)
+            .filter(|&(_, a)| {
+                *a < 0.0 && (a.abs() - max_abs_area).abs() <= max_abs_area * tol::AREA_TIE_REL
+            })
             // The most negative of them: a cycle split off a pinched walk
             // (a hole touching the outer ring) may come first and lie
             // within that window of the true outside.
@@ -3924,22 +4383,12 @@ fn split_ring_at_repeats(walk: Vec<SketchVertexId>) -> Vec<Vec<SketchVertexId>> 
 // ═════════════════════════════════════════════ structural reconstruction
 
 impl Sketch {
-    /// Create an empty sketch for structural reconstruction. Unlike `on_plane`,
-    /// this is `pub(crate)` so the serializer can build a Sketch by directly
-    /// inserting pre-validated elements (bypassing the sticky-geometry pipeline).
-    pub(crate) fn reconstruct(plane: Plane) -> Sketch {
-        Sketch {
-            plane,
-            vertices: SlotMap::with_key(),
-            edges: SlotMap::with_key(),
-            regions: SlotMap::with_key(),
-            curves: SlotMap::with_key(),
-            active_curve: None,
-            islands: SlotMap::with_key(),
-            bulk_vertex_cells: None,
-            snap_to_existing: false,
-            seams: Vec::new(),
-        }
+    /// Create an empty sketch for structural reconstruction, `detached` as
+    /// the file says. Unlike `on_plane`, this is `pub(crate)` so the
+    /// serializer can build a Sketch by directly inserting pre-validated
+    /// elements (bypassing the sticky-geometry pipeline).
+    pub(crate) fn reconstruct(plane: Plane, detached: bool) -> Sketch {
+        Self::blank(plane, detached)
     }
 
     /// Insert a vertex directly into the slotmap (no planarity check, no merging).
@@ -4018,11 +4467,24 @@ fn seg_seg_intersections_2d(
     u_ax: Vec3,
     v_ax: Vec3,
     anchor: Point3,
+    keep_3d: Option<(Point3, Point3)>,
 ) -> Vec<Intersection2D> {
     // Reconstruct 3D position from 2D plane coords. `anchor` carries the
     // out-of-plane component (the plane need not pass through the origin); the
     // 2D coords supply the in-plane displacement.
     let pos_from_2d = |p: (f64, f64)| -> Point3 { anchor + u_ax * p.0 + v_ax * p.1 };
+    // A sketch whose points may lie off its plane (`plane_tol`, a boolean's
+    // arrangement over an imported face) keeps contact points in 3D instead:
+    // a touching endpoint is the new segment's own point and a crossing is
+    // read along the new segment, so no point is moved onto the plane and
+    // every face sharing an edge computes the same point.
+    let new_3d = |p2d: (f64, f64)| -> Point3 {
+        match keep_3d {
+            Some((a, _)) if p2d == nf => a,
+            Some((_, b)) if p2d == nt => b,
+            _ => pos_from_2d(p2d),
+        }
+    };
     let eps = tol::POINT_MERGE;
 
     let sub = |a: (f64, f64), b: (f64, f64)| (a.0 - b.0, a.1 - b.1);
@@ -4072,7 +4534,7 @@ fn seg_seg_intersections_2d(
             let s = param(np2d, ef, d_ext, ext_len2);
             if interior(s, ext_len) {
                 s_params_on_existing.push(s);
-                points_on_existing.push(pos_from_2d(np2d));
+                points_on_existing.push(new_3d(np2d));
             }
         }
         if t_params_on_new.is_empty() && s_params_on_existing.is_empty() {
@@ -4093,7 +4555,7 @@ fn seg_seg_intersections_2d(
         if on_line && interior(s, ext_len) {
             events.push(Intersection2D::NewEndpointOnExisting {
                 s_existing: s,
-                point: pos_from_2d(np2d),
+                point: new_3d(np2d),
             });
         }
     }
@@ -4125,7 +4587,10 @@ fn seg_seg_intersections_2d(
         let w = sub(ef, nf);
         let t = (cross(w, d_ext) / denom).clamp(0.0, 1.0);
         let s = (cross(w, d_new) / denom).clamp(0.0, 1.0);
-        let point = pos_from_2d((ef.0 + d_ext.0 * s, ef.1 + d_ext.1 * s));
+        let point = match keep_3d {
+            Some((a, b)) => a + (b - a) * t,
+            None => pos_from_2d((ef.0 + d_ext.0 * s, ef.1 + d_ext.1 * s)),
+        };
         return vec![Intersection2D::Proper {
             t_new: t,
             s_existing: s,
@@ -4225,6 +4690,14 @@ pub struct Profile {
     outer_curves: Vec<Option<CurveGeom>>,
     /// Same, per hole boundary edge. Parallel to `holes` when non-empty.
     hole_curves: Vec<Vec<Option<CurveGeom>>>,
+    /// Smooth-chain keys per outer boundary edge (E1): `Some(key)` when the
+    /// edge belongs to a chain that shades smooth but carries no analytic
+    /// record (a circle that lost its circle to a non-uniform scale). Keys
+    /// are dense per profile in first-appearance order, so the edges of one
+    /// chain share a key. Parallel to `outer`; empty ⇒ none.
+    outer_smooth: Vec<Option<u32>>,
+    /// Same, per hole boundary edge.
+    hole_smooth: Vec<Vec<Option<u32>>>,
 }
 
 /// Typed reasons a would-be [`Profile`] is rejected. The kernel never fixes
@@ -4371,6 +4844,8 @@ impl Profile {
             holes,
             outer_curves: Vec::new(),
             hole_curves: Vec::new(),
+            outer_smooth: Vec::new(),
+            hole_smooth: Vec::new(),
         })
     }
 
@@ -4392,6 +4867,34 @@ impl Profile {
         );
         self.outer_curves = outer_curves;
         self.hole_curves = hole_curves;
+    }
+
+    /// Attaches per-edge smooth-chain keys (see the field docs). Lengths
+    /// must be parallel to the boundaries.
+    pub(crate) fn set_smooth_attribution(
+        &mut self,
+        outer_smooth: Vec<Option<u32>>,
+        hole_smooth: Vec<Vec<Option<u32>>>,
+    ) {
+        debug_assert_eq!(outer_smooth.len(), self.outer.len());
+        debug_assert_eq!(hole_smooth.len(), self.holes.len());
+        self.outer_smooth = outer_smooth;
+        self.hole_smooth = hole_smooth;
+    }
+
+    /// The smooth-chain key of outer edge `k` (E1), or `None` (no chain, a
+    /// chain with an analytic record, or one that shades hard).
+    pub fn outer_smooth(&self, k: usize) -> Option<u32> {
+        self.outer_smooth.get(k).copied().flatten()
+    }
+
+    /// The smooth-chain key of hole `i`'s edge `k` (E1), or `None`.
+    pub fn hole_smooth(&self, i: usize, k: usize) -> Option<u32> {
+        self.hole_smooth
+            .get(i)
+            .and_then(|h| h.get(k))
+            .copied()
+            .flatten()
     }
 
     /// The supporting plane.
@@ -4620,7 +5123,7 @@ mod tests {
                 (0..n)
                     .map(|i| {
                         let a = std::f64::consts::TAU * (i as f64) / (n as f64);
-                        Point3::new(r * a.cos(), r * a.sin(), 0.0)
+                        Point3::new(r * trig::cos(a), r * trig::sin(a), 0.0)
                     })
                     .collect()
             };

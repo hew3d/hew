@@ -7,9 +7,13 @@
 //! expressible at all before this, since sketch edges carried no public
 //! id and no locator named them.
 
-use api::{Connection, DispatchOutcome, NoHost, Profile, Request, RequestId, Response, codes};
+use api::{Connection, DispatchOutcome, Grant, NoHost, Request, RequestId, Response, codes};
 use kernel::Document;
 use serde_json::{Value, json};
+
+/// The registry every dispatch in this file runs against.
+static REGISTRY: std::sync::LazyLock<api::Registry> =
+    std::sync::LazyLock::new(api::Registry::protocol_1);
 
 // --------------------------------------------------------------- fixtures
 
@@ -25,6 +29,7 @@ fn req(id: i64, method: &str, params: Value) -> Request {
 
 fn hello_attach(conn: &mut Connection, doc: &mut Document) {
     let DispatchOutcome::Reply(r) = conn.dispatch(
+        &REGISTRY,
         doc,
         &mut NoHost,
         req(0, "hew.meta.hello", json!({ "protocol": 1 })),
@@ -32,9 +37,12 @@ fn hello_attach(conn: &mut Connection, doc: &mut Document) {
         panic!("hello replies")
     };
     assert!(r.error.is_none(), "hello failed: {:?}", r.error);
-    let DispatchOutcome::Reply(r) =
-        conn.dispatch(doc, &mut NoHost, req(1, "hew.doc.attach", json!({})))
-    else {
+    let DispatchOutcome::Reply(r) = conn.dispatch(
+        &REGISTRY,
+        doc,
+        &mut NoHost,
+        req(1, "hew.doc.attach", json!({})),
+    ) else {
         panic!("attach replies")
     };
     assert!(r.error.is_none(), "attach failed: {:?}", r.error);
@@ -47,7 +55,9 @@ fn call(
     method: &str,
     params: Value,
 ) -> Response {
-    let DispatchOutcome::Reply(r) = conn.dispatch(doc, &mut NoHost, req(id, method, params)) else {
+    let DispatchOutcome::Reply(r) =
+        conn.dispatch(&REGISTRY, doc, &mut NoHost, req(id, method, params))
+    else {
         panic!("{method} replies")
     };
     r
@@ -172,7 +182,7 @@ fn assert_one_undo_and_clean_undo(doc: &mut Document, depth_before: usize, bytes
 #[test]
 fn sketch_query_lists_edges_and_entity_answers_an_edge_id_directly() {
     let mut doc = Document::new();
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     hello_attach(&mut conn, &mut doc);
 
     let sketch = draw_rect(&mut conn, &mut doc, 2, [0.0, 0.0, 0.0], [2.0, 1.0, 0.0]);
@@ -225,7 +235,7 @@ fn sketch_query_lists_edges_and_entity_answers_an_edge_id_directly() {
 #[test]
 fn resolve_edge_locator_by_point_and_by_endpoints_matches_the_listed_id() {
     let mut doc = Document::new();
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     hello_attach(&mut conn, &mut doc);
 
     let sketch = draw_rect(&mut conn, &mut doc, 2, [0.0, 0.0, 0.0], [2.0, 1.0, 0.0]);
@@ -304,7 +314,7 @@ fn resolve_edge_locator_by_point_and_by_endpoints_matches_the_listed_id() {
 #[test]
 fn resolve_edge_locator_refuses_ambiguous_when_the_point_sits_on_a_shared_vertex() {
     let mut doc = Document::new();
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     hello_attach(&mut conn, &mut doc);
 
     let sketch = draw_rect(&mut conn, &mut doc, 2, [0.0, 0.0, 0.0], [2.0, 1.0, 0.0]);
@@ -325,7 +335,7 @@ fn resolve_edge_locator_refuses_ambiguous_when_the_point_sits_on_a_shared_vertex
 #[test]
 fn resolve_edge_locator_refuses_a_miss_and_bad_params() {
     let mut doc = Document::new();
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     hello_attach(&mut conn, &mut doc);
 
     let sketch = draw_rect(&mut conn, &mut doc, 2, [0.0, 0.0, 0.0], [2.0, 1.0, 0.0]);
@@ -365,7 +375,7 @@ fn resolve_edge_locator_refuses_a_miss_and_bad_params() {
 #[test]
 fn delete_erases_one_sketch_edge_as_one_undo_entry_and_undoes_byte_identically() {
     let mut doc = Document::new();
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     hello_attach(&mut conn, &mut doc);
 
     let sketch = draw_rect(&mut conn, &mut doc, 2, [0.0, 0.0, 0.0], [2.0, 1.0, 0.0]);
@@ -408,7 +418,7 @@ fn delete_erases_one_sketch_edge_as_one_undo_entry_and_undoes_byte_identically()
 #[test]
 fn delete_refuses_a_stale_sketch_edge_id_and_touches_nothing() {
     let mut doc = Document::new();
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     hello_attach(&mut conn, &mut doc);
 
     let sketch = draw_rect(&mut conn, &mut doc, 2, [0.0, 0.0, 0.0], [2.0, 1.0, 0.0]);
@@ -477,7 +487,7 @@ fn delete_refuses_a_stale_sketch_edge_id_and_touches_nothing() {
 #[test]
 fn tutorial_trim_leaves_a_single_wedge_region_of_the_expected_area() {
     let mut doc = Document::new();
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     hello_attach(&mut conn, &mut doc);
 
     let sketch = draw_rect(&mut conn, &mut doc, 2, [0.0, 0.0, 0.0], [2.0, 1.0, 0.0]);

@@ -5,6 +5,7 @@
 //! results. The analytic-overlay path (path B in that document) rests on
 //! this staying true; these tests keep the claim honest.
 
+use kernel::trig;
 use kernel::{BooleanOp, Object, Plane, Point3, Profile, Transform, Vec3, WatertightState};
 
 fn ngon_prism(center: Point3, radius: f64, n: usize, height: f64) -> Object {
@@ -13,8 +14,8 @@ fn ngon_prism(center: Point3, radius: f64, n: usize, height: f64) -> Object {
         .map(|i| {
             let a = 2.0 * std::f64::consts::PI * (i as f64) / (n as f64);
             Point3::new(
-                center.x + radius * a.cos(),
-                center.y + radius * a.sin(),
+                center.x + radius * trig::cos(a),
+                center.y + radius * trig::sin(a),
                 center.z,
             )
         })

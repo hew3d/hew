@@ -11,8 +11,10 @@
  */
 
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { materialSubline, metadataLine, type CollectionNode, normalizeCollectionPath, savedLine } from '../../library/libraryModel'
+import { isBuiltInItem, materialSubline, metadataLine, type CollectionNode, normalizeCollectionPath, savedLine } from '../../library/libraryModel'
 import type { LibraryCategory, LibraryItem } from '../../library/types'
+import { markTooltip, type MarkedState } from '../../library/libraryUpdates'
+import type { LocalSourceInfo } from '../../library/sourceModel'
 import { CubeGlyph, RerenderGlyph, WarningGlyph } from './icons'
 import { i18n } from '@lingui/core'
 import { plural, t as tCore } from '@lingui/core/macro'
@@ -27,6 +29,7 @@ import { isComposingKey } from '../../input/keyboard'
 const NEW_COLLECTION_VALUE = '\u0000__new__'
 
 function actionLabels(category: LibraryCategory): { primary: string; secondary: string } {
+  if (category === 'profile') return { primary: tCore`Use`, secondary: tCore`Open for editing` }
   if (category === 'component') return { primary: tCore`Insert`, secondary: tCore`Open as document` }
   if (category === 'model') return { primary: tCore`Open as document`, secondary: tCore`Insert` }
   return { primary: tCore`Paint`, secondary: tCore`Add to palette` }
@@ -52,6 +55,14 @@ export interface LibraryDetailPaneProps {
    * pre-order with `depth` for indentation — see `collectionTreeFromPaths`. */
   collections: CollectionNode[]
   placementCount: number
+  /** Where the model's copies stand against this item, when they differ. */
+  linkState?: MarkedState | undefined
+  /** Open Review for the parts that differ; absent where it cannot. */
+  onReview?: (() => void) | undefined
+  /** Where this item came from, when it carries a note (design 7.5). */
+  sourceInfo?: LocalSourceInfo | undefined
+  onUpdateFromSource?: (() => void) | undefined
+  onUnlinkFromSource?: (() => void) | undefined
   canReveal: boolean
   /** Web: browser storage has no Reveal — offer a plain file download of
    * the item's `.hew` bytes instead (the data's escape hatch). */
@@ -76,6 +87,9 @@ export interface LibraryDetailPaneProps {
   onPrimaryAction: () => void
   onSecondaryAction: () => void
   onOpenAsDocument: () => void
+  /** Components and models can be opened in place for editing. */
+  canEdit: boolean
+  onEdit: () => void
   onReRenderThumbnail: () => void
   onReveal: () => void
   onDownload: () => void
@@ -92,6 +106,11 @@ export function LibraryDetailPane({
   native,
   collections,
   placementCount,
+  linkState,
+  onReview,
+  sourceInfo,
+  onUpdateFromSource,
+  onUnlinkFromSource,
   canReveal,
   canDownload,
   inPalette,
@@ -106,6 +125,8 @@ export function LibraryDetailPane({
   onPrimaryAction,
   onSecondaryAction,
   onOpenAsDocument,
+  canEdit,
+  onEdit,
   onReRenderThumbnail,
   onReveal,
   onDownload,
@@ -186,6 +207,30 @@ export function LibraryDetailPane({
         {deleteArmed && (
           <DeleteConfirm onConfirm={onConfirmDelete} onCancel={onCancelDelete} name={item.displayName} />
         )}
+      </div>
+    )
+  }
+
+  if (isBuiltInItem(item)) {
+    // A built-in profile is bundled with the app: read-only, usable and
+    // copyable, with nothing to rename, collect or delete.
+    return (
+      <div className="hwlib__detail" style={widthStyle}>
+        <div className="hwlib__detail-thumb">
+          {thumbUrl ? <img src={thumbUrl} alt="" className="hwlib__detail-thumb-img" /> : <CubeGlyph />}
+        </div>
+        <div className="hwlib__detail-name">{item.displayName}</div>
+        <p className="hwlib__detail-error" style={{ color: 'var(--text-faint)' }}>
+          <Trans>Built-in profile. Use it in the Fillet tool, or save a copy to edit.</Trans>
+        </p>
+        <div className="hwlib__manage-row">
+          <button type="button" className={btnClass('hwlib__btn-primary')} onClick={onPrimaryAction}>
+            <Trans>Use</Trans>
+          </button>
+          <button type="button" className={btnClass('hwlib__btn-secondary')} onClick={onSecondaryAction}>
+            <Trans>Save a copy</Trans>
+          </button>
+        </div>
       </div>
     )
   }
@@ -392,6 +437,37 @@ export function LibraryDetailPane({
           {plural(placementCount, { one: '# instance in this model', other: '# instances in this model' })}
         </div>
       )}
+      {linkState !== undefined && (
+        <div className="hwlib__inmodel" data-testid="library-item-state" data-state={linkState}>
+          <div>{markTooltip(linkState)}</div>
+          {linkState === 'edited_here' && <div><Trans>To put your version in the Library, select the part and choose Save to Library.</Trans></div>}
+          {linkState !== 'edited_here' && onReview !== undefined && (
+            <button type="button" className="hwlib__btn-link" onClick={onReview}>
+              <Trans>Review…</Trans>
+            </button>
+          )}
+        </div>
+      )}
+      {sourceInfo !== undefined && (
+        <div className="hwlib__inmodel" data-testid="library-item-source" data-state={sourceInfo.state}>
+          <div className="hwlib__src-from">{sourceInfo.fromLine}</div>
+          {sourceInfo.stateLines.map((line) => (
+            <div key={line} className={`hwlib__src-state${sourceInfo.state === 'gone' || sourceInfo.state === 'orphan' ? ' hwlib__src-state--warn' : ''}`}>
+              {line}
+            </div>
+          ))}
+          {sourceInfo.canUpdate && onUpdateFromSource !== undefined && (
+            <button type="button" className="hwlib__btn-link" onClick={onUpdateFromSource}>
+              <Trans>Update from source</Trans>
+            </button>
+          )}
+          {onUnlinkFromSource !== undefined && (
+            <button type="button" className="hwlib__btn-link" onClick={onUnlinkFromSource}>
+              {sourceUnlinkLabel(sourceInfo.sourceName)}
+            </button>
+          )}
+        </div>
+      )}
       {/* Materials aren't "placed" as instances, so there's no count — same
           "in this model" wording as components, just without one. */}
       {isMaterial && inPalette && <div className="hwlib__inmodel"><Trans>In this model</Trans></div>}
@@ -407,6 +483,17 @@ export function LibraryDetailPane({
         {isMaterial && (
           <button type="button" className={btnClass('hwlib__btn-secondary')} onClick={onOpenAsDocument}>
             <Trans>Open as document</Trans>
+          </button>
+        )}
+        {canEdit && (
+          <button
+            type="button"
+            className={btnClass('hwlib__btn-secondary')}
+            data-testid="library-edit"
+            title={t`Open this item to change it. Saving updates the Library.`}
+            onClick={onEdit}
+          >
+            <Trans>Edit</Trans>
           </button>
         )}
       </div>
@@ -429,6 +516,10 @@ export function LibraryDetailPane({
       {deleteArmed && <DeleteConfirm onConfirm={onConfirmDelete} onCancel={onCancelDelete} name={item.displayName} />}
     </div>
   )
+}
+
+function sourceUnlinkLabel(name: string): string {
+  return tCore`Unlink from ${name}`
 }
 
 function DeleteConfirm({ onConfirm, onCancel, name }: { onConfirm: () => void; onCancel: () => void; name: string }) {

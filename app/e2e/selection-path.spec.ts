@@ -262,7 +262,7 @@ test.describe('selection path', () => {
     await expect(strip(page).locator('[data-state="below"]')).toHaveCount(0)
   })
 
-  test('at 1024 px the strip clears the view HUD and the measurement box', async ({ page }) => {
+  test('at 1024 px the strip clears the view die and the measurement box', async ({ page }) => {
     await page.setViewportSize({ width: 1024, height: 700 })
     const { s, ctx } = await setupScene(page)
     // Start a Line so the measurement box shows a live length, then select
@@ -278,16 +278,16 @@ test.describe('selection path', () => {
     await expect(box).toBeVisible()
 
     const stripBox = (await strip(page).boundingBox())!
-    const hudBox = (await page.locator('[data-testid="viewport-hud"]').boundingBox())!
+    const dieBox = (await page.locator('[data-testid="view-die"]').boundingBox())!
     const vcbBox = (await box.boundingBox())!
     const overlaps = (p: typeof stripBox, q: typeof stripBox) =>
       p.x < q.x + q.width && q.x < p.x + p.width && p.y < q.y + q.height && q.y < p.y + p.height
-    expect(overlaps(stripBox, hudBox)).toBe(false)
+    expect(overlaps(stripBox, dieBox)).toBe(false)
     expect(overlaps(stripBox, vcbBox)).toBe(false)
-    // Five crumbs do not fit the narrow band: the strip drops to a second row
-    // under the HUD chips.
+    // Five crumbs do not fit the narrow band: the strip drops to a second row,
+    // which still stops short of the die's column.
     await expect(strip(page)).toHaveAttribute('data-row', 'second')
-    expect(stripBox.y).toBeGreaterThanOrEqual(hudBox.y + hudBox.height)
+    expect(stripBox.x + stripBox.width).toBeLessThanOrEqual(dieBox.x)
   })
 
   test('at 1600 px the five-crumb path fits the top-center band', async ({ page }) => {

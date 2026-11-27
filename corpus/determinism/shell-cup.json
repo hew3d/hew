@@ -1,0 +1,17 @@
+{
+  "title": "A box hollowed into an open cup",
+  "from": "Shell: inward offset of every face with the top left open.",
+  "build": [
+    {"method": "hew.sketch.draw_rect", "as": "base", "params": {"plane": {"ground": true}, "corner_a": [0, 0, 0], "corner_b": ["100mm", "60mm", 0]}},
+    {"method": "hew.solid.extrude", "as": "box", "params": {"region": {"$ref": "base#/region_id"}, "distance": "50mm"}},
+    {
+      "method": "hew.solid.shell",
+      "as": "cup",
+      "params": {
+        "object": {"$ref": "box#/object_id"},
+        "open": [{"object": {"$ref": "box#/object_id"}, "at": ["50mm", "30mm", "50mm"]}],
+        "thickness": "3mm"
+      }
+    }
+  ]
+}

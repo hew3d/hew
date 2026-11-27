@@ -13,15 +13,19 @@
 //!   unknown-name/projection/format rejection) independent of any real
 //!   viewport or Settings window.
 //!
-//! All three are `Profile::App`-only (registry.rs's `Profile::grants`:
+//! All three are `Grant::app()`-only (grant.rs's `within_ceiling`:
 //! every `hew.view.*` command except `snapshot`) and `CommandClass::Solitary`
 //! with `mutates_document = false` — asserted directly here rather than
 //! only via the registry's own declarative tests, so a dispatch-level
 //! regression (not just a registry typo) would be caught.
 
-use api::{Connection, DispatchOutcome, Host, NoHost, Profile, Refusal, Request, RequestId, codes};
+use api::{Connection, DispatchOutcome, Grant, Host, NoHost, Refusal, Request, RequestId, codes};
 use kernel::Document;
 use serde_json::{Value, json};
+
+/// The registry every dispatch in this file runs against.
+static REGISTRY: std::sync::LazyLock<api::Registry> =
+    std::sync::LazyLock::new(api::Registry::protocol_1);
 
 // ------------------------------------------------------------- test host
 
@@ -68,6 +72,7 @@ fn req(id: i64, method: &str, params: Value) -> Request {
 
 fn hello(conn: &mut Connection, doc: &mut Document, host: &mut dyn Host) {
     let DispatchOutcome::Reply(r) = conn.dispatch(
+        &REGISTRY,
         doc,
         host,
         req(0, "hew.meta.hello", json!({ "protocol": 1 })),
@@ -79,7 +84,8 @@ fn hello(conn: &mut Connection, doc: &mut Document, host: &mut dyn Host) {
 
 fn hello_attach(conn: &mut Connection, doc: &mut Document, host: &mut dyn Host) {
     hello(conn, doc, host);
-    let DispatchOutcome::Reply(r) = conn.dispatch(doc, host, req(1, "hew.doc.attach", json!({})))
+    let DispatchOutcome::Reply(r) =
+        conn.dispatch(&REGISTRY, doc, host, req(1, "hew.doc.attach", json!({})))
     else {
         panic!("attach replies")
     };
@@ -94,7 +100,8 @@ fn call(
     method: &str,
     params: Value,
 ) -> api::Response {
-    let DispatchOutcome::Reply(r) = conn.dispatch(doc, host, req(id, method, params)) else {
+    let DispatchOutcome::Reply(r) = conn.dispatch(&REGISTRY, doc, host, req(id, method, params))
+    else {
         panic!("{method} replies")
     };
     r
@@ -134,7 +141,7 @@ fn call_err(
 }
 
 fn new_app_conn() -> Connection {
-    Connection::new(Profile::App, "test")
+    Connection::new(Grant::app(), "test")
 }
 
 // ------------------------------------------------------------------ registry
@@ -159,8 +166,8 @@ fn core_profile_withholds_all_three() {
     let reg = api::Registry::protocol_1();
     for name in ["hew.view.camera", "hew.view.zoom_extents", "hew.view.units"] {
         let cmd = reg.get(name).unwrap();
-        assert!(!Profile::Core.grants(cmd), "{name} must be app-only");
-        assert!(Profile::App.grants(cmd), "{name} must be app-granted");
+        assert!(!Grant::core().grants(cmd), "{name} must be app-only");
+        assert!(Grant::app().grants(cmd), "{name} must be app-granted");
     }
 }
 
@@ -456,7 +463,7 @@ fn units_requires_the_format_field() {
 
 #[test]
 fn core_profile_refuses_all_three_as_not_permitted() {
-    let mut conn = Connection::new(Profile::Core, "test");
+    let mut conn = Connection::new(Grant::core(), "test");
     let mut doc = Document::new();
     let mut host = FakeHost::default();
     hello_attach(&mut conn, &mut doc, &mut host);

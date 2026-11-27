@@ -10,7 +10,7 @@ interface Props {
   /** How many objects are shown. */
   count: number
   onShowEverything: () => void
-  /** CSS top offset; the default sits below the camera chips (Orbit, Top, Iso, Front). */
+  /** CSS top offset; the default sits below the selection-path strip's first row. */
   top?: string
   /** Width in px of a panel covering the viewport's right side (the Make Solid
    *  wizard); the bar centers in what is left. */

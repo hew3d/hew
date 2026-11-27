@@ -21,12 +21,15 @@ import { readFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
-import { TOOL_MENU_IDS } from './App'
+import { TOOL_MENU_IDS, DEFORM_MENU_IDS } from './App'
 import { TOOLS } from './tools/toolRegistry'
 import { dockVerbsFor } from './panels/dockLogic'
 import { paletteEntries } from './palette/registry'
 import { NATIVE_MENU_LABELS } from './i18n/nativeMenu'
 import { PSEUDO_LOCALE, SHIPPED_LOCALES } from './i18n/locales'
+import { NATIVE_ALIASES, NATIVE_COMMANDS, JS_FIRST, PINNED_NATIVE_CHORDS } from './keymap/nativeMenu'
+import { chordToAccelerator, parseChord } from './keymap/chord'
+import { actionOffered } from './curveActions'
 
 const MAIN_RS = resolve(
   dirname(fileURLToPath(import.meta.url)),
@@ -90,6 +93,18 @@ describe('native menu parity', () => {
       }
     }
     expect(missing, 'menu items built but never attached to a SubmenuBuilder chain').toEqual([])
+  })
+
+  it("Deform's four mode entries are each built, attached to the Tools menu, and dispatched", () => {
+    // Deform is one tool (`TOOL_MENU_IDS.Deform` is its Twist entry) with a
+    // radio item per mode; the other three are not in TOOL_MENU_IDS, so the
+    // checks above would never notice one going missing.
+    for (const [mode, id] of Object.entries(DEFORM_MENU_IDS)) {
+      const binding = new RegExp(`let\\s+(\\w+)\\s*=\\s*check_item\\([^;]*?"${id}"`, 's').exec(source)
+      expect(binding, `no check_item binding for Deform ${mode} (${id})`).not.toBeNull()
+      expect(source.includes(`.item(&${(binding as RegExpExecArray)[1]})`), `${id} is never attached`).toBe(true)
+      expect(new RegExp(`"${id}"\\s*=>\\s*"`).test(source), `${id} has no dispatch arm`).toBe(true)
+    }
   })
 
   it('offers no standalone Field of View item on the native menu (camera-playtest2.md §2 — removed, not hidden)', () => {
@@ -227,6 +242,98 @@ describe('Revert to Saved menu item parity', () => {
     expect(menuBarSource.includes('Revert to Saved')).toBe(true)
     expect(appSource.includes("case 'revert-to-saved'")).toBe(true)
     expect(appSource.includes("'file-revert'")).toBe(true)
+  })
+})
+
+/**
+
+ * True Curves organization (docs/design/true-curves-ui-organization.md): the
+ * Tools menu's Shape and Deform submenus and the Object menu's Smooth
+ * submenu and Soften Edges… must exist on the native menu exactly as on the
+ * web one — same members, same order, every item attached and dispatched.
+ */
+describe('native menu parity — Tools and Object menu organization', () => {
+  const source = readFileSync(MAIN_RS, 'utf8')
+
+  /** The `.item(&x)` / `.separator()` chain of the SubmenuBuilder bound to
+   *  `let <name> = SubmenuBuilder::with_id(handle, "<id>", ...)`, as variable names
+   *  with '-' for separators. */
+  function chainOf(variable: string): string[] {
+    const start = new RegExp(`let ${variable} =\\s*SubmenuBuilder::with_id\\(`).exec(source)?.index ?? -1
+    expect(start, `no SubmenuBuilder bound to ${variable}`).toBeGreaterThanOrEqual(0)
+    const end = source.indexOf('.build()?', start)
+    const chain = source.slice(start, end)
+    return [...chain.matchAll(/\.item\(&(\w+)\)|\.separator\(\)/g)].map((m) => m[1] ?? '-')
+  }
+
+  it('Tools menu: SketchUp order, with Shape and Deform as submenus', () => {
+    expect(chainOf('tools_menu')).toEqual([
+      'tool_select', 'tool_eraser', 'tool_paint', 'tool_position_texture', '-',
+      'tool_move', 'tool_rotate', 'tool_scale', 'tool_flip', '-',
+      'tool_pushpull', 'tool_follow_me', 'tool_offset', 'tool_fillet', 'tool_chamfer', '-',
+      'shape_menu', 'deform_menu', '-',
+      'tool_slice', 'tool_edit_vertex', '-',
+      'tool_tape_measure', 'tool_protractor', 'tool_dimension', 'tool_text', '-',
+      'tool_axes', 'tool_section_plane',
+    ])
+    expect(chainOf('shape_menu')).toEqual([
+      'tool_revolve', 'tool_loft', 'tool_shell', 'tool_project', '-', 'tool_path_array',
+    ])
+    expect(chainOf('deform_menu')).toEqual([
+      'tool_deform_twist', 'tool_deform_bend', 'tool_deform_taper', 'tool_deform_bend_path',
+    ])
+    expect(source).toContain('"submenu:shape"')
+    expect(source).toContain('"submenu:deform"')
+  })
+
+  it('Object menu: Smooth submenu and Soften Edges… come before Make Solid…', () => {
+    const object = chainOf('object_menu')
+    expect(object.slice(object.indexOf('edit_intersect'))).toEqual([
+      'edit_intersect', '-', 'object_smooth_menu', 'object_soften_edges', '-', 'object_make_solid', 'object_model_health',
+    ])
+    expect(chainOf('object_smooth_menu')).toEqual([
+      'object_smooth_off', 'object_smooth_1', 'object_smooth_2', 'object_smooth_3', '-', 'object_bake_smooth',
+    ])
+  })
+
+  it("the Smooth entries are check items (so the selection's level syncs) and dispatch the palette's action ids", () => {
+    const arms: Array<[string, string]> = [
+      ['object-smooth-off', 'smooth-off'],
+      ['object-smooth-1', 'smooth-1'],
+      ['object-smooth-2', 'smooth-2'],
+      ['object-smooth-3', 'smooth-3'],
+      ['object-bake-smooth', 'bake-smooth'],
+      ['object-soften-edges', 'soften-edges'],
+    ]
+    for (const [id, action] of arms) {
+      expect(new RegExp(`"${id}"\\s*=>\\s*"${action}"`).test(source), `${id} has no dispatch arm to ${action}`).toBe(true)
+    }
+    for (const id of ['object-smooth-off', 'object-smooth-1', 'object-smooth-2', 'object-smooth-3']) {
+      expect(new RegExp(`check_item\\([^;]*?"${id}"`, 's').test(source), `${id} is not a check item`).toBe(true)
+    }
+  })
+
+  it('App syncs the Smooth check marks and enabled state for those native ids', () => {
+    const appSource = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), './App.tsx'), 'utf8')
+    // The ids must be KEYS of the `enabled` map literal (a mention anywhere
+    // else in App.tsx, such as a comment or a dispatch case, must not count).
+    const enabledBody = /const enabled: Record<string, boolean> = \{([\s\S]*?)\n    \}\n/.exec(appSource)?.[1]
+    expect(enabledBody, 'App.tsx has no `enabled` map literal for sync_menu_state').toBeDefined()
+    for (const id of [
+      'object-smooth-off', 'object-smooth-1', 'object-smooth-2', 'object-smooth-3',
+      'object-bake-smooth', 'object-soften-edges',
+    ]) {
+      expect(
+        new RegExp(`^\\s*'${id}':\\s*menuGates\\?\\.\\w+`, 'm').test(enabledBody as string),
+        `${id} is not a key of the enabled map pushed by sync_menu_state`,
+      ).toBe(true)
+    }
+    // The four level ids are written to the `checked` map by one loop over
+    // exactly [0, 1, 2, 3]; dropping a level from the list drops its check.
+    expect(
+      /for \(const level of \[0, 1, 2, 3\]\) \{\s*checked\[`object-smooth-\$\{level === 0 \? 'off' : level\}`\]\s*=/.test(appSource),
+      'the Smooth levels (off, 1, 2, 3) are not all written into the checked map',
+    ).toBe(true)
   })
 })
 
@@ -484,8 +591,10 @@ describe('native menu labels come from the one table (docs/LOCALIZATION.md "Nati
   // `lbl!("…")` during construction; `labels.get("…")` or `current_menu_labels(…).get("…")` where
   // part of the menu is rebuilt at runtime (the Open Recent submenu) or a
   // shell-built window or dialog is titled.
+  // The update message boxes that stay native are built in updater.rs.
+  const labelSource = source + '\n' + readFileSync(resolve(dirname(MAIN_RS), 'updater.rs'), 'utf8')
   const rustKeys = new Set(
-    Array.from(source.matchAll(/(?:\blbl!|\b(?:labels|current_menu_labels\([^)]*\))\s*\.\s*get)\(\s*"([^"]+)"\s*\)/g), (m) => m[1]),
+    Array.from(labelSource.matchAll(/(?:\blbl!|\b(?:labels|current_menu_labels\([^)]*\))\s*\.\s*get)\(\s*"([^"]+)"\s*\)/g), (m) => m[1]),
   )
   const tableKeys = new Set(Object.keys(NATIVE_MENU_LABELS))
 
@@ -494,7 +603,7 @@ describe('native menu labels come from the one table (docs/LOCALIZATION.md "Nati
     expect(missing, 'add these to NATIVE_MENU_LABELS').toEqual([])
   })
 
-  it('every table entry is used by main.rs', () => {
+  it('every table entry is used by main.rs or updater.rs', () => {
     const unused = [...tableKeys].filter((k) => !rustKeys.has(k))
     expect(unused, 'remove these from NATIVE_MENU_LABELS or use them in main.rs').toEqual([])
   })
@@ -534,6 +643,28 @@ describe('native menu labels come from the one table (docs/LOCALIZATION.md "Nati
   })
 })
 
+describe('native menu labels with line breaks', () => {
+  // The generator reads the label table from source, where a template
+  // literal's `\n` is still two characters. Left undecoded it reached the
+  // native updater dialog as a literal backslash and "n" ("…installed.\n\n…").
+  it('decodes the escapes a template literal would', async () => {
+    const { decodeTemplateEscapes } = await import('../scripts/i18n-menus-lib.mjs')
+    expect(decodeTemplateEscapes('a\\nb\\n\\nc')).toBe('a\nb\n\nc')
+    expect(decodeTemplateEscapes('tab\\there \\u00e9 \\u{1F600} \\x41 \\` \\\\')).toBe('tab\there \u00e9 \u{1F600} A ` \\')
+  })
+
+  it('every committed label holds real newlines, never the escape text', async () => {
+    const { MENU_LOCALES_DIR } = await import('../scripts/i18n-menus-lib.mjs')
+    const labels: Record<string, string> = JSON.parse(
+      readFileSync(resolve(MENU_LOCALES_DIR, 'menu.en.json'), 'utf8'),
+    )
+    const escaped = Object.entries(labels).filter(([, v]) => /\\[nrt]/.test(v)).map(([k]) => k)
+    expect(escaped, 'labels still carrying a literal backslash escape').toEqual([])
+    expect(labels['updater:check-failed-body']).toContain('\n\n{error}')
+    expect(labels['updater:start-failed-body']).toContain('\n\n{error}')
+  })
+})
+
 /**
  * File ▸ Import Image… (Place Image): a GATED native item (disabled while a
  * component is open, pushed by sync_menu_state like Import…) right after
@@ -561,5 +692,191 @@ describe('Import Image menu item parity', () => {
     expect(paletteEntries().map((e) => e.id)).toContain('import-image')
     expect(appSource.includes("case 'import-image'")).toBe(true)
     expect(appSource.includes("'file-import-image': !componentFrameOpen")).toBe(true)
+  })
+})
+
+/**
+ * Linked copies: Unlink, Unlink all, Select all copies (Object menu) and
+ * Paste independent / Paste linked (Edit menu) are gated native items, each
+ * attached to a submenu and dispatching to the same action id the web menu,
+ * the palette, and (for the first three) the contextual dock use.
+ */
+describe('linked copy menu items parity', () => {
+  const source = readFileSync(MAIN_RS, 'utf8')
+  const menuBarSource = readFileSync(MENU_BAR_TSX, 'utf8')
+  const ids = [
+    'edit-unlink',
+    'edit-unlink-all',
+    'edit-select-all-copies',
+    'edit-link-identical-copies',
+    'edit-paste-independent',
+    'edit-paste-linked',
+  ]
+
+  it.each(ids)('%s is a gated native item, attached to a submenu, with a dispatch arm', (id) => {
+    const binding = new RegExp(`let\\s+(\\w+)\\s*=\\s*gated_item\\(\\s*handle,\\s*&mut \\w+,\\s*"${id}"`).exec(source)
+    expect(binding, `no gated_item binding found for ${id}`).not.toBeNull()
+    const variable = (binding as RegExpExecArray)[1]
+    expect(source.includes(`.item(&${variable})`), `${id} is built but never attached to a submenu`).toBe(true)
+    expect(new RegExp(`"${id}"\\s*=>\\s*"${id}"`).test(source), `${id} has no dispatch arm`).toBe(true)
+    // Disabled until the app's selection says otherwise.
+    expect(source.includes(`&${variable},`), `${id} is not in the initial disable list`).toBe(true)
+  })
+
+  it('the web menu and the palette offer the same actions', () => {
+    for (const id of ids) {
+      expect(menuBarSource.includes(`'${id}'`), `MenuBar lacks ${id}`).toBe(true)
+      expect(paletteEntries().map((e) => e.id)).toContain(id)
+      expect(NATIVE_MENU_LABELS[id], `no native label for ${id}`).toBeDefined()
+    }
+  })
+
+  it('the contextual dock offers Unlink and Unlink all for a linked copy', () => {
+    const verbs = dockVerbsFor('instance', { canGroup: false, canMakeComponent: true, canUnlink: true, canUnlinkAll: true }).map((v) => v.id)
+    expect(verbs).toEqual(expect.arrayContaining(['edit-unlink', 'edit-unlink-all']))
+  })
+})
+
+/**
+ * Lock (OW-1): Edit ▸ Lock and Edit ▸ Unlock ▸ Selected / All are gated
+ * native items (the Unlock pair in their own submenu), each dispatching to
+ * the action id the web menu, the palette and the contextual dock use. No
+ * accelerator and nothing in the status bar, by design.
+ */
+describe('Lock menu items parity', () => {
+  const source = readFileSync(MAIN_RS, 'utf8')
+  const menuBarSource = readFileSync(MENU_BAR_TSX, 'utf8')
+  const ids = ['edit-lock', 'edit-unlock-selected', 'edit-unlock-all']
+
+  it.each(ids)('%s is a gated native item, attached to a submenu, with a dispatch arm', (id) => {
+    const binding = new RegExp(`let\\s+(\\w+)\\s*=\\s*gated_item\\(\\s*handle,\\s*&mut \\w+,\\s*"${id}"`).exec(source)
+    expect(binding, `no gated_item binding found for ${id}`).not.toBeNull()
+    const variable = (binding as RegExpExecArray)[1]
+    expect(source.includes(`.item(&${variable})`), `${id} is built but never attached to a submenu`).toBe(true)
+    expect(new RegExp(`"${id}"\\s*=>\\s*"${id}"`).test(source), `${id} has no dispatch arm`).toBe(true)
+    expect(source.includes(`&${variable},`), `${id} is not in the initial disable list`).toBe(true)
+    // The shortcut policy: locking is deliberate, so no key.
+    expect(new RegExp(`"${id}",\\s*lbl!\\("${id}"\\),\\s*None,\\s*None`).test(source), `${id} carries an accelerator`).toBe(true)
+  })
+
+  it('the Unlock submenu holds Selected and All and sits in the Edit menu', () => {
+    expect(source).toMatch(/let\s+unlock_menu\s*=\s*SubmenuBuilder::with_id\(handle,\s*"submenu:unlock"/)
+    expect(source.includes('.item(&unlock_menu)')).toBe(true)
+    expect(NATIVE_MENU_LABELS['submenu:unlock']).toBeDefined()
+    const edit = source.slice(source.indexOf('let edit_menu = SubmenuBuilder'), source.indexOf('.build()?', source.indexOf('let edit_menu = SubmenuBuilder')))
+    expect(edit).toContain('.item(&edit_lock)')
+    expect(edit).toContain('.item(&unlock_menu)')
+  })
+
+  it('the web menu and the palette offer the same actions', () => {
+    for (const id of ids) {
+      expect(menuBarSource.includes(`'${id}'`), `MenuBar lacks ${id}`).toBe(true)
+      expect(paletteEntries().map((e) => e.id)).toContain(id)
+      expect(NATIVE_MENU_LABELS[id], `no native label for ${id}`).toBeDefined()
+      expect(NATIVE_COMMANDS.has(id), `${id} is not a native command`).toBe(true)
+    }
+  })
+
+  it('the app syncs the enabled state of every Lock item', () => {
+    const appSource = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), 'App.tsx'), 'utf8')
+    for (const id of ids) expect(appSource.includes(`'${id}':`), `App does not sync ${id}`).toBe(true)
+  })
+
+  it('the contextual dock offers Lock, or Unlock when everything selected is locked', () => {
+    const gates = { canGroup: false, canMakeComponent: false }
+    expect(dockVerbsFor('object', { ...gates, canLock: true }).map((v) => v.id)).toContain('edit-lock')
+    const locked = dockVerbsFor('object', { ...gates, canUnlock: true }).map((v) => v.id)
+    expect(locked[0]).toBe('edit-unlock-selected')
+    expect(locked).not.toContain('tool-pushpull')
+  })
+})
+
+/**
+ * Flip: the tool sits in the Tools menu beside Scale (covered by the tool
+ * parity checks above through TOOL_MENU_IDS), and Object ▸ Flip Along ▸
+ * Red / Green / Blue are gated native items in their own submenu, each
+ * dispatching to the action id the web menu and the palette use.
+ */
+describe('Flip Along menu items parity', () => {
+  const source = readFileSync(MAIN_RS, 'utf8')
+  const menuBarSource = readFileSync(MENU_BAR_TSX, 'utf8')
+  const ids = ['edit-flip-red', 'edit-flip-green', 'edit-flip-blue']
+
+  it.each(ids)('%s is a gated native item, attached to a submenu, with a dispatch arm', (id) => {
+    const binding = new RegExp(`let\\s+(\\w+)\\s*=\\s*gated_item\\(\\s*handle,\\s*&mut \\w+,\\s*"${id}"`).exec(source)
+    expect(binding, `no gated_item binding found for ${id}`).not.toBeNull()
+    const variable = (binding as RegExpExecArray)[1]
+    expect(source.includes(`.item(&${variable})`), `${id} is built but never attached to a submenu`).toBe(true)
+    expect(new RegExp(`"${id}"\\s*=>\\s*"${id}"`).test(source), `${id} has no dispatch arm`).toBe(true)
+    expect(source.includes(`&${variable},`), `${id} is not in the initial disable list`).toBe(true)
+  })
+
+  it('the Flip Along submenu is attached to the Object menu', () => {
+    expect(source).toMatch(/let\s+flip_along_menu\s*=\s*SubmenuBuilder::with_id\(handle,\s*"submenu:flip-along"/)
+    expect(source.includes('.item(&flip_along_menu)')).toBe(true)
+    expect(NATIVE_MENU_LABELS['submenu:flip-along']).toBeDefined()
+  })
+
+  it('the web menu and the palette offer the same actions', () => {
+    for (const id of ids) {
+      expect(menuBarSource.includes(`'${id}'`), `MenuBar lacks ${id}`).toBe(true)
+      expect(paletteEntries().map((e) => e.id)).toContain(id)
+      expect(NATIVE_MENU_LABELS[id], `no native label for ${id}`).toBeDefined()
+    }
+  })
+
+  it('the Flip tool has its native Tools item', () => {
+    expect(TOOL_MENU_IDS['Flip']).toBe('tool-flip')
+    expect(source).toMatch(/let\s+tool_flip\s*=\s*check_item\(/)
+    expect(source.includes('.item(&tool_flip)')).toBe(true)
+  })
+})
+
+describe('native menu ↔ keymap', () => {
+  const source = readFileSync(MAIN_RS, 'utf8')
+  const fnStart = source.indexOf('fn menu_action_for(')
+  const fnBody = source.slice(fnStart, source.indexOf('_ => return None', fnStart))
+  const arms = new Set([...fnBody.matchAll(/"[^"]+"\s*=>\s*"([^"]+)"/g)].map((m) => m[1]))
+
+  it('found menu_action_for (guards the extraction against a refactor)', () => {
+    expect(fnStart).toBeGreaterThan(0)
+    expect(arms.size).toBeGreaterThan(80)
+  })
+
+  it('NATIVE_COMMANDS is exactly the set of commands the native menu dispatches, less the Preview wall\'s', () => {
+    // The keymap leaves a chord to the native menu only for these commands;
+    // a drift either way would run a chord twice or not at all on macOS.
+    expect([...NATIVE_COMMANDS].sort()).toEqual([...arms].filter(actionOffered).sort())
+  })
+
+  it('every native alias names a command the menu dispatches', () => {
+    for (const nativeId of Object.values(NATIVE_ALIASES)) expect(arms).toContain(nativeId)
+  })
+
+  it('PINNED_NATIVE_CHORDS matches the fixed accelerators the shell builds for the JS_FIRST items', () => {
+    // The accelerator is the first string after the item's label, whether
+    // the item is built by gated_item, edit_item or accel(MenuItemBuilder…).
+    for (const id of JS_FIRST) {
+      const nativeId = /"([a-z-]+)" => "([a-z-]+)"/g
+      let native: string | undefined
+      for (const m of source.matchAll(nativeId)) if (m[2] === id) native = m[1]
+      expect(native, `no menu id dispatches ${id}`).toBeDefined()
+      const built = new RegExp(`lbl!\\("${native}"\\)\\)?,\\s*(?:Some\\()?"([^"]+)"`).exec(source)
+      const pinned = PINNED_NATIVE_CHORDS[id]
+      if (built === null) {
+        expect(pinned, `${id} has no fixed accelerator, so no pinned chord`).toBeUndefined()
+      } else {
+        expect(pinned, `${id} carries ${built[1]}`).toBeDefined()
+        const accel = chordToAccelerator(parseChord(pinned, true)!)
+        expect(accel).toBe(built[1])
+      }
+    }
+    for (const id of Object.keys(PINNED_NATIVE_CHORDS)) expect(JS_FIRST.has(id), id).toBe(true)
+  })
+
+  it('on_menu_event and set_menu_accelerators both go through menu_action_for', () => {
+    expect(/let Some\(action\) = menu_action_for\(id\) else/.test(source)).toBe(true)
+    expect(/fn set_menu_accelerators\(/.test(source)).toBe(true)
+    expect(/generate_handler!\[[\s\S]*?\bset_menu_accelerators\b/.test(source)).toBe(true)
   })
 })

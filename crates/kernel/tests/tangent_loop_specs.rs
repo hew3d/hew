@@ -45,6 +45,7 @@
 //! (6, tessellation, lives in `crates/tessellate`; `.skp` write and read in
 //! `crates/skp-export`; STL export in `crates/mesh-export`.)
 
+use kernel::trig;
 use std::f64::consts::PI;
 
 use kernel::topo::WatertightState;
@@ -53,7 +54,7 @@ use kernel::{
     Vec3, tol,
 };
 
-mod face_arrangement_support;
+use crate::face_arrangement_support;
 use face_arrangement_support::*;
 
 // ---------------------------------------------------------------- setup
@@ -67,15 +68,15 @@ fn segments_per_turn(radius: f64) -> usize {
     if ratio >= 1.0 {
         return 24;
     }
-    let exact = PI / (1.0 - ratio).acos();
+    let exact = PI / trig::acos(1.0 - ratio);
     (((exact / 4.0).ceil() * 4.0) as usize).clamp(24, 96)
 }
 
 /// The Circle tool's polygon (`circlePolygonFace`): vertex 0 at the rim,
 /// the rest counter-clockwise about `center`, in the wall's frame.
 fn tool_circle(w: &Wall, cx: f64, cy: f64, rim_x: f64, rim_y: f64) -> (Vec<Point3>, CurveGeom) {
-    let r = (rim_x - cx).hypot(rim_y - cy);
-    let start = (rim_y - cy).atan2(rim_x - cx);
+    let r = trig::hypot(rim_x - cx, rim_y - cy);
+    let start = trig::atan2(rim_y - cy, rim_x - cx);
     let n = segments_per_turn(r);
     (w.ring(cx, cy, r, n, start), w.circle_geom(cx, cy, r))
 }
@@ -472,7 +473,7 @@ fn two_circles_touching_on_the_ground_are_two_discs() {
         (0..24)
             .map(|i| {
                 let a = 2.0 * PI * f64::from(i) / 24.0;
-                p(cx + r * a.cos(), 1.0 + r * a.sin())
+                p(cx + r * trig::cos(a), 1.0 + r * trig::sin(a))
             })
             .collect()
     };
@@ -586,6 +587,132 @@ fn erasing_the_circle_merges_the_hole_back() {
         "the top is the plain square again (the rim vertex healed away)"
     );
     assert_eq!(w.doc.save(), bytes_before, "byte for byte the undrawn box");
+    assert_exact_history(&mut w.doc, &bytes0);
+}
+
+/// The tangent circle drawn over a rectangle imprint that clips its right
+/// side: the part of the disc left of the rectangle is a face in the
+/// parent's hole, and the run it shares with that hole is the arc from one
+/// clip point, around through the rim vertex where the hole touches the
+/// parent's outer loop, to the other. Returns the wall, the clipped disc,
+/// and the parent.
+fn tangent_circle_clipped_by_an_imprint() -> (Wall, FaceId, FaceId) {
+    let mut w = top_2x2();
+    let seed = w.face;
+    let rect = w.rect(1.25, 0.03, 0.55, 1.37);
+    draw_region(&mut w, seed, rect, None);
+    let (ring, g) = tangent_circle(&w);
+    let seed = face_at(&w, 0.2, 1.8);
+    w.draw_loop(seed, &ring, Some(g)).expect("the circle draws");
+    let disc = face_at(&w, 0.7, 0.5);
+    let parent = face_at(&w, 0.2, 1.8);
+    let obj = w.obj();
+    obj.validate().expect("valid");
+    let rim = w.at(1.0, 0.0);
+    let on = |l: kernel::LoopId| {
+        obj.loop_positions(l)
+            .any(|p| p.approx_eq(rim, tol::POINT_MERGE))
+    };
+    let pf = &obj.faces()[parent];
+    assert!(
+        on(pf.outer_loop),
+        "the rim vertex is on the parent's outline"
+    );
+    assert!(
+        pf.inner_loops.len() == 1 && on(pf.inner_loops[0]),
+        "the parent's one hole touches its outline at the rim vertex"
+    );
+    assert!(
+        on(obj.faces()[disc].outer_loop),
+        "the clipped disc passes it"
+    );
+    (w, disc, parent)
+}
+
+/// An edge of the arc the clipped disc shares with the parent's hole.
+fn arc_edge(obj: &Object, disc: FaceId, parent: FaceId) -> kernel::EdgeId {
+    obj.loop_half_edges(obj.faces()[disc].outer_loop)
+        .find(|&h| {
+            obj.half_edges()[h]
+                .twin
+                .is_some_and(|t| obj.loops()[obj.half_edges()[t].loop_id].face == parent)
+        })
+        .map(|h| obj.half_edges()[h].edge)
+        .expect("the disc shares its arc with the parent")
+}
+
+#[test]
+fn merging_a_clipped_tangent_disc_across_its_arc_undoes_and_redoes() {
+    // The run the merge dissolves passes through the rim vertex, which the
+    // parent's outline keeps. Its undo used to replay a single cut whose
+    // interior ran through that boundary vertex, which `split_face`
+    // refuses ("path point is not on the face").
+    let (mut w, disc, parent) = tangent_circle_clipped_by_an_imprint();
+    let bytes0 = w.doc.save();
+    let id = w.id;
+    let edge = arc_edge(w.obj(), disc, parent);
+    w.doc
+        .apply_object_op(
+            id,
+            KernelOp::MergeFaces {
+                edge,
+                keep_vertices: Vec::new(),
+            },
+        )
+        .expect("the disc merges into the parent");
+    let obj = w.obj();
+    obj.validate().expect("valid after the merge");
+    assert!(
+        !has_touching_loops(obj, &w.plane),
+        "the hole no longer touches the outline"
+    );
+    let rim = w.at(1.0, 0.0);
+    assert!(
+        obj.vertices()
+            .values()
+            .all(|v| !v.position.approx_eq(rim, tol::POINT_MERGE)),
+        "the rim vertex heals away, as erasing the whole circle heals it"
+    );
+    assert_exact_history(&mut w.doc, &bytes0);
+}
+
+#[test]
+fn erasing_a_clipped_tangent_disc_arc_agrees_with_the_merge() {
+    // The user's way to the same result: erase the arc's edges in one
+    // draft. It lands on the geometry the recorded merge gives, so neither
+    // leaves a scar the other heals.
+    let (mut w, disc, parent) = tangent_circle_clipped_by_an_imprint();
+    let obj = w.obj();
+    let arc: Vec<(Point3, Point3)> = obj
+        .loop_half_edges(obj.faces()[disc].outer_loop)
+        .filter(|&h| {
+            obj.half_edges()[h]
+                .twin
+                .is_some_and(|t| obj.loops()[obj.half_edges()[t].loop_id].face == parent)
+        })
+        .map(|h| obj.edge_endpoints(obj.half_edges()[h].edge).expect("live"))
+        .collect();
+    let mut merged = obj.clone();
+    merged
+        .merge_faces(arc_edge(obj, disc, parent))
+        .expect("merges");
+    let bytes0 = w.doc.save();
+    let (plane, id) = (w.plane, w.id);
+    let objs = plane_objects(&w.doc, plane, None, id);
+    w.doc
+        .draft(plane, None, &objs, "Erase", |sk| {
+            for &(a, b) in &arc {
+                let e = sk.edge_at_positions(a, b).expect("an arc edge in the lift");
+                sk.remove_edge(e)?;
+            }
+            Ok(())
+        })
+        .expect("the arc erases");
+    w.obj().validate().expect("valid after the erase");
+    assert!(
+        objects_equivalent(w.obj(), &merged),
+        "the erase and the merge give the same face"
+    );
     assert_exact_history(&mut w.doc, &bytes0);
 }
 
@@ -819,15 +946,15 @@ fn a_cut_around_a_hole_takes_a_second_hole_touching_it() {
     // quarter about the top's center, so the shared vertex meets the cut
     // region's boundary from every side.
     let r = 0.3;
-    let a2 = (-r + r * (PI / 6.0).cos(), r * (PI / 6.0).sin());
+    let a2 = (-r + r * trig::cos(PI / 6.0), r * trig::sin(PI / 6.0));
     for quarter in 0..4 {
         let turn = quarter as f64 * PI / 2.0;
         // Local frame: the first circle about (-r, 0), the second about
         // (r, 0), touching at the origin.
         let at = |x: f64, y: f64| {
             (
-                1.0 + x * turn.cos() - y * turn.sin(),
-                1.0 + x * turn.sin() + y * turn.cos(),
+                1.0 + x * trig::cos(turn) - y * trig::sin(turn),
+                1.0 + x * trig::sin(turn) + y * trig::cos(turn),
             )
         };
         for forward in [true, false] {
@@ -1224,7 +1351,7 @@ fn a_ground_region_with_a_touching_hole_refuses_extrusion_typed_but_drags_freely
     let mut ring: Vec<Point3> = (0..72)
         .map(|i| {
             let a = -std::f64::consts::FRAC_PI_2 + std::f64::consts::TAU * f64::from(i) / 72.0;
-            p(1.0 + 0.5 * a.cos(), 0.5 + 0.5 * a.sin())
+            p(1.0 + 0.5 * trig::cos(a), 0.5 + 0.5 * trig::sin(a))
         })
         .collect();
     ring[0] = p(1.0, 0.0);
@@ -1570,7 +1697,7 @@ fn an_older_file_with_a_ring_visiting_a_vertex_twice_loads_and_re_traces() {
     let mut ring: Vec<Point3> = (0..24)
         .map(|i| {
             let a = -std::f64::consts::FRAC_PI_2 + std::f64::consts::TAU * f64::from(i) / 24.0;
-            p(1.0 + 0.5 * a.cos(), 0.5 + 0.5 * a.sin())
+            p(1.0 + 0.5 * trig::cos(a), 0.5 + 0.5 * trig::sin(a))
         })
         .collect();
     ring[0] = p(1.0, 0.0);

@@ -29,8 +29,15 @@ import groupWorkSvg from '@material-symbols/svg-400/outlined/group_work.svg?raw'
 import deployedCodeSvg from '@material-symbols/svg-400/outlined/deployed_code.svg?raw'
 import contentCopySvg from '@material-symbols/svg-400/outlined/content_copy.svg?raw'
 import callSplitSvg from '@material-symbols/svg-400/outlined/call_split.svg?raw'
+import linkOffSvg from '@material-symbols/svg-400/outlined/link_off.svg?raw'
+import layersClearSvg from '@material-symbols/svg-400/outlined/layers_clear.svg?raw'
+import lockSvg from '@material-symbols/svg-400/outlined/lock.svg?raw'
+import lockOpenSvg from '@material-symbols/svg-400/outlined/lock_open.svg?raw'
 import textFieldsSvg from '@material-symbols/svg-400/outlined/text_fields.svg?raw'
 import bookmarkAddSvg from '@material-symbols/svg-400/outlined/bookmark_add.svg?raw'
+import joinSvg from '@material-symbols/svg-400/outlined/join.svg?raw'
+import joinLeftSvg from '@material-symbols/svg-400/outlined/join_left.svg?raw'
+import joinInnerSvg from '@material-symbols/svg-400/outlined/join_inner.svg?raw'
 import { deriveDockContext, dockVerbsFor, dockChipLabel, dockVerbLabel, isDockVerbEnabled, type DockContext, type DockGates, type DockVerb } from './dockLogic'
 import type { NodeRef } from './treeModel'
 
@@ -41,9 +48,17 @@ const NON_TOOL_ICON_SVG: Record<string, string> = {
   'edit-group': groupWorkSvg,
   'edit-make-component': deployedCodeSvg,
   'make-unique': contentCopySvg,
+  'edit-unlink': linkOffSvg,
+  'edit-unlink-all': layersClearSvg,
   'explode-instance': callSplitSvg,
+  'edit-lock': lockSvg,
+  'edit-unlock-selected': lockOpenSvg,
   'draw-3d-text': textFieldsSvg,
   'save-to-library': bookmarkAddSvg,
+  // Two overlapping circles: the whole, the left-only part, the shared lens.
+  'edit-union': joinSvg,
+  'edit-subtract': joinLeftSvg,
+  'edit-intersect': joinInnerSvg,
 }
 
 const CHIP_COLOR: Record<DockContext, string> = {
@@ -76,6 +91,7 @@ function DockItem({ verb, selected, disabled, onRun }: { verb: DockVerb; selecte
   return (
     <button
       type="button"
+      data-dock-verb={verb.id}
       aria-pressed={selected}
       aria-disabled={isDisabled}
       disabled={isDisabled}
@@ -116,7 +132,8 @@ function DockItem({ verb, selected, disabled, onRun }: { verb: DockVerb; selecte
 
 export interface ContextualDockProps {
   selectedIds: NodeRef[]
-  selectedGuide: bigint | null
+  /** How many guides and annotations the selection also holds. */
+  others?: number
   onRun: (id: string) => void
   /** Fade the dock out (opacity 0 + click-through) while the camera is being
    * dragged (spec: "Hidden during pure camera navigation... reappears
@@ -131,28 +148,28 @@ export interface ContextualDockProps {
    * nothing is selected (throttled/edge-detected in Viewport.tsx via
    * `SketchHoverGate`). Only consulted when the derived context is 'empty'
    * — an explicit selection's dock always wins, so this is ignored entirely
-   * the moment `selectedIds`/`selectedGuide` yield anything else. Swaps the
+   * the moment the selection yields anything else. Swaps the
    * empty-selection draw-tool row for the 'sketch' verb set (Push/Pull
    * primary) as a preview of what a click there would do. */
   hoveringSketchRegion?: boolean
   /** Selection-dependent applicability for the structural verbs (Group /
-   * Make Component) — derived in App.tsx from the same `menuGates` memo the
-   * Edit menu uses. Omitted (tests, storybook-style mounts) = ungated. */
+   * Make Component) and the booleans — derived in App.tsx from the same
+   * `menuGates` memo the Object menu uses. Omitted (tests, storybook-style mounts) = ungated. */
   gates?: DockGates
 }
 
 export function ContextualDock({
   selectedIds,
-  selectedGuide,
+  others = 0,
   onRun,
   hidden = false,
   activeToolId,
   hoveringSketchRegion = false,
   gates,
 }: ContextualDockProps) {
-  const baseContext = deriveDockContext(selectedIds, selectedGuide)
+  const baseContext = deriveDockContext(selectedIds, others)
   // Hover only ever promotes 'empty' -> 'sketch' — any other context (an
-  // actual selection, or null for a selected guide) is left untouched.
+  // actual selection, or null for guides or annotations alone) is left untouched.
   const hoverPreviewOnly = baseContext === 'empty' && hoveringSketchRegion
   const context = hoverPreviewOnly ? 'sketch' : baseContext
   if (context === null) return null
@@ -210,7 +227,7 @@ export function ContextualDock({
             whiteSpace: 'nowrap',
           }}
         >
-          {dockChipLabel(context)}
+          {dockChipLabel(context, gates?.presentedKind ?? (gates?.canUnlink === true ? (gates.linkedKind ?? 'object') : null))}
         </span>
       </div>
 

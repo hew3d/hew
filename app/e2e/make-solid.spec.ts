@@ -168,7 +168,7 @@ test('a flat panel with a hole: step by step, Add thickness 3 mm Centered, Ready
 test('Object ▸ Make Solid… opens the wizard; Escape closes it with no change', async ({ page }) => {
   await importOpenCube(page)
   await page.getByRole('dialog', { name: /import report/i }).getByRole('button', { name: 'OK' }).click()
-  const hash = await page.evaluate(() => window.__hew_test!.getStateHash())
+  const hash = await page.evaluate(() => window.__hew_test!.getModelStateHash())
 
   await chooseFromMenu(page, 'Object', 'Make Solid…')
   await expect(wizard(page)).toBeVisible()
@@ -177,7 +177,7 @@ test('Object ▸ Make Solid… opens the wizard; Escape closes it with no change
   await expect(wizard(page).getByRole('button', { name: 'Use recommended choices' })).toBeVisible()
   await page.keyboard.press('Escape')
   await expect(wizard(page)).toHaveCount(0)
-  expect(await page.evaluate(() => window.__hew_test!.getStateHash())).toBe(hash)
+  expect(await page.evaluate(() => window.__hew_test!.getModelStateHash())).toBe(hash)
   await expect(page.locator('[data-health-badge="open"]')).toHaveText('1 object · 1 not solid')
   // And the close button does the same.
   await chooseFromMenu(page, 'Object', 'Make Solid…')

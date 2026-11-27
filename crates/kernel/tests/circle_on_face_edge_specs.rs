@@ -42,10 +42,11 @@
 //! undo step that reopens byte-identical.
 
 use kernel::topo::WatertightState;
+use kernel::trig;
 use kernel::{CurveGeom, Document, Object, Point3, Vec3, tol};
 use proptest::prelude::*;
 
-mod face_arrangement_support;
+use crate::face_arrangement_support;
 use face_arrangement_support::*;
 
 const FACETS: usize = 24;
@@ -225,7 +226,7 @@ fn circle_with_its_rim_on_the_edge_crossing_it_splits_the_face_and_keeps_its_cla
     // The Circle tool's rim snapped On Edge at (19, 0) about (15, 3): a
     // 3-4-5 triangle, so the radius is 5 mm and vertex 0 is the rim. The
     // circle crosses the edge at the rim vertex and again mid-facet.
-    let phase = (-3.0f64).atan2(4.0);
+    let phase = trig::atan2(-3.0f64, 4.0);
     let (mut ring, g) = circle_mm(&w, 15.0, 3.0, 5.0, phase);
     assert!((ring[0] - w.at(19.0 * MM, 0.0)).length() < 1e-15);
     ring[0] = w.at(19.0 * MM, 0.0);
@@ -409,7 +410,7 @@ fn circle_tangent_at_a_reflex_corner_becomes_a_face_in_a_touching_hole() {
     let mut w = top_of_l();
     // About (7, 6) with radius 5: vertex 0 on the reflex corner (10, 10),
     // the rest inside the L.
-    let phase = 4.0f64.atan2(3.0);
+    let phase = trig::atan2(4.0f64, 3.0);
     let (mut ring, g) = circle_mm(&w, 7.0, 6.0, 5.0, phase);
     assert!((ring[0] - w.at(10.0 * MM, 10.0 * MM)).length() < 1e-15);
     ring[0] = w.at(10.0 * MM, 10.0 * MM);
@@ -421,7 +422,7 @@ fn circle_outside_touching_only_a_corner_is_a_free_circle_and_the_solid_is_untou
     let mut w = top_of_box();
     // About (-3, -4) with radius 5: vertex 0 on the corner (0, 0), the rest
     // outside the face.
-    let phase = 4.0f64.atan2(3.0);
+    let phase = trig::atan2(4.0f64, 3.0);
     let (mut ring, g) = circle_mm(&w, -3.0, -4.0, 5.0, phase);
     assert!((ring[0] - w.at(0.0, 0.0)).length() < 1e-15);
     ring[0] = w.at(0.0, 0.0);

@@ -67,6 +67,33 @@ export async function updateItemMeta(
   return update_item_meta(bytes, JSON.stringify(meta))
 }
 
+/** The item's bytes with its remote note (`hew.library` / `remote`, design
+ * 6.5) removed and everything else untouched. A document opened from a
+ * Library item drops the note, so saving it elsewhere does not make it
+ * look like the source's copy (design 7.2). */
+export async function withoutRemoteNote(bytes: Uint8Array): Promise<Uint8Array> {
+  await ready()
+  return update_item_meta(bytes, JSON.stringify({ remote: null }))
+}
+
+/** Document bytes that are about to be written as an ORDINARY document file
+ * (Save As, a `.hew` copy): the remote note a document carries after it was
+ * opened from a Library item is dropped, so the copy does not look like the
+ * source's item (design 7.2). Bytes with no note come back as they are, with
+ * no second load. Bytes whose manifest cannot be read carry no readable
+ * note and come back unchanged; stripping a note that IS present is not
+ * guarded, so that failure propagates. */
+export async function withoutRemoteNoteIfAny(bytes: Uint8Array): Promise<Uint8Array> {
+  let lib: Record<string, unknown> | undefined
+  try {
+    const summary = await readItemSummary(bytes)
+    lib = summary.doc_attrs?.['hew.library'] as Record<string, unknown> | undefined
+  } catch {
+    return bytes
+  }
+  return lib?.remote === undefined ? bytes : withoutRemoteNote(bytes)
+}
+
 /** One named zip entry of an item's bytes, verbatim — the on-demand fetch
  * for a material summary's `texture_asset` path. */
 export async function readItemAsset(bytes: Uint8Array, path: string): Promise<Uint8Array> {

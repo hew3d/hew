@@ -10,7 +10,7 @@
  * and this module needs to run under bare `node --test`.
  */
 
-import { UPLOAD_TOKEN_BYTES } from './constants.ts'
+import { UPLOAD_TOKEN_BYTES, FOLLOW_SECRET_BYTES } from './constants.ts'
 
 /** Base64url (RFC 4648 §5), no padding. */
 function toBase64Url(bytes: Uint8Array): string {
@@ -19,11 +19,22 @@ function toBase64Url(bytes: Uint8Array): string {
   return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
 }
 
-/** A fresh upload token — 32 random bytes, base64url. */
-export function generateUploadToken(): string {
-  const bytes = new Uint8Array(UPLOAD_TOKEN_BYTES)
+function randomBase64Url(byteCount: number): string {
+  const bytes = new Uint8Array(byteCount)
   crypto.getRandomValues(bytes)
   return toBase64Url(bytes)
+}
+
+/** A fresh upload token — 32 random bytes, base64url. */
+export function generateUploadToken(): string {
+  return randomBase64Url(UPLOAD_TOKEN_BYTES)
+}
+
+/** A fresh follow secret (docs/design/follow-a-report.md §4.1) — the same
+ *  shape as an upload token, from the same generator. Stored and compared
+ *  only as `hashToken`'s digest, exactly like the token. */
+export function generateFollowSecret(): string {
+  return randomBase64Url(FOLLOW_SECRET_BYTES)
 }
 
 /** The hex SHA-256 digest of `token` — what's actually stored and compared,

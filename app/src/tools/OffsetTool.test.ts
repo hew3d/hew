@@ -16,6 +16,11 @@ import type { Ray } from '../viewport/math'
 import { ctxOfPlane, keyToId } from './planeUnits'
 import { draftMock, type DraftLog } from './draftMock'
 import { planeUnitsMock, ringUnit, hexKey, type MockListing, type MockRegion } from './planeUnitsMock'
+import { SiblingPreviewMirror } from '../viewport/siblingPreview'
+import { isSessionGhost } from './transformPreview'
+import { PREVIEW_DETACHED_FALLBACK, PREVIEW_DRAW_JOINED_FALLBACK } from './previewTint'
+import type { LineSegments2 } from 'three/examples/jsm/lines/LineSegments2.js'
+import type { LineMaterial } from 'three/examples/jsm/lines/LineMaterial.js'
 
 /** Ray straight down at (x, y). */
 function rayAt(x: number, y: number): Ray {
@@ -108,9 +113,12 @@ function makeWasmScene(opts: {
   const dm = draftMock({ ctxObjects: opts.ctxObjects ?? (opts.facePick !== undefined ? [3n] : []) })
   const units = planeUnitsMock(opts.listings ?? { [CTX_GROUND]: GROUND_LISTING, [CTX_FACE]: FACE_LISTING, [CTX_GROUND_IN_42]: GROUND_LISTING })
   return {
+    // First, so this scene's own region picks override the mock's misses.
+    ...dm.members,
     draftLog: dm.log,
     history_generation: vi.fn(() => 1n),
     pick_face: vi.fn(() => opts.facePick),
+    session_stack: vi.fn(() => []),
     pick_sketch_region: vi.fn(() => opts.regionPick),
     pick_sketch_region_in_instance: vi.fn(() => opts.regionPickInInstance ?? opts.regionPick),
     pick_sketch_edge: vi.fn(() => opts.edgePick),
@@ -121,7 +129,6 @@ function makeWasmScene(opts: {
     instance_pose: vi.fn(() => instancePose),
     node_parent: vi.fn(() => opts.nodeParent),
     ...units,
-    ...dm.members,
   } as unknown as WasmScene & { draftLog: DraftLog }
 }
 
@@ -187,6 +194,20 @@ describe('OffsetTool — Path B (sketch region)', () => {
     expect(preview.children.length).toBeGreaterThan(0)
     // Nothing reaches the kernel until the commit click.
     expect(scene.draft_begin_ctx).not.toHaveBeenCalled()
+  })
+
+  it('the offset ghost takes the source color: blue for a free profile, orange for a face drawing', () => {
+    const ghostHex = (scene: WasmScene) => {
+      const { tool, preview } = makeTool(scene)
+      tool.onPointerDown(null, rayAt(1, 1))
+      tool.onPointerMove(null, rayAt(1, 0.5))
+      const line = preview.children[0] as LineSegments2
+      return (line.material as LineMaterial).color.getHex()
+    }
+    const free = ghostHex(makeWasmScene({ regionPick: makeRegionPick(9n, 7n) }))
+    const face = ghostHex(makeWasmScene({ facePick: makeFacePick(3n, 4n) }))
+    expect(free).toBe(new THREE.Color(PREVIEW_DETACHED_FALLBACK).getHex())
+    expect(face).toBe(new THREE.Color(PREVIEW_DRAW_JOINED_FALLBACK).getHex())
   })
 
   it('a collapsing distance draws no ghost but keeps the drag alive', () => {
@@ -566,6 +587,31 @@ describe('OffsetTool — typed distance (VCB)', () => {
   })
 })
 
+describe('OffsetTool — hover hint (Tool.hoverHint)', () => {
+  const RAY: Ray = { origin: [0.5, 0.5, 5], direction: [0, 0, -1] }
+  it('hovering a component member\'s face explains the refusal before the click, and the click toasts the same line as guidance', () => {
+    const scene = makeWasmScene({ facePick: makeFacePick(3n, 4n, 12n) })
+    const { tool, onToast } = makeTool(scene)
+    expect(tool.hoverHint()).toBeNull()
+    tool.onPointerMove(null, RAY)
+    expect(tool.hoverHint()).toContain('component')
+    expect(tool.statusHint()).toContain('component')
+    expect(onToast).not.toHaveBeenCalled()
+    tool.onPointerDown(null, RAY)
+    expect(String((onToast as ReturnType<typeof vi.fn>).mock.calls[0][0])).toContain('component')
+    expect((onToast as ReturnType<typeof vi.fn>).mock.calls[0][1]).toBe('EditContextHint')
+    tool.onPointerLeave()
+    expect(tool.hoverHint()).toBeNull()
+  })
+
+  it('a plain face hovers with no hint', () => {
+    const scene = makeWasmScene({ facePick: makeFacePick(3n, 4n) })
+    const { tool } = makeTool(scene)
+    tool.onPointerMove(null, RAY)
+    expect(tool.hoverHint()).toBeNull()
+  })
+})
+
 describe('OffsetTool — cancel and status hint', () => {
   it('Esc cancels the drag and clears the preview', () => {
     const regionPick = makeRegionPick(9n, 7n)
@@ -878,6 +924,21 @@ describe('OffsetTool — a clicked distance is exactly the displayed distance', 
     }
   })
 
+  it('a click on the line where two objects\' faces meet keeps the exact projected distance, like an edge', () => {
+    setLengthUnit('mm')
+    try {
+      const meetingLine: Snap['meetingLine'] = [
+        [1, -0.0123456, -1],
+        [1, -0.0123456, 1],
+      ]
+      const r = drag(makeSnap({ kind: 'on-intersection-line', x: 1, y: -0.0123456, z: 0, meetingLine }), -0.0123456)
+      expect(r.d).toBeCloseTo(0.0123456, 15)
+      expect(r.d).not.toBe(12.346 * 0.001)
+    } finally {
+      setLengthUnit(prev)
+    }
+  })
+
   it('a hard-snapped (endpoint) click keeps the exact projected distance', () => {
     setLengthUnit('mm')
     try {
@@ -887,5 +948,50 @@ describe('OffsetTool — a clicked distance is exactly the displayed distance', 
     } finally {
       setLengthUnit(prev)
     }
+  })
+})
+
+describe('OffsetTool — the offset loops are session geometry, mirrored onto sibling placements', () => {
+  it('the dragged loops are marked ghosts; the mirror shows one clone per loop per frame and clears with Esc', () => {
+    const regionPick = makeRegionPick(9n, 7n)
+    const scene = makeWasmScene({ regionPick })
+    const { tool, preview } = makeTool(scene)
+    const root = new THREE.Group()
+    const mirror = new SiblingPreviewMirror({ source: preview, root, frames: () => [1, 0, 0, 4, 0, 1, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 0, 1, 0, 7, 0, 0, 1, 0] })
+
+    tool.onPointerDown(null, rayAt(1, 1))
+    tool.onPointerMove(null, rayAt(1, 0.5))
+    const ghosts = preview.children.filter(isSessionGhost)
+    expect(ghosts.length).toBeGreaterThan(0)
+    expect(ghosts).toHaveLength(preview.children.length) // every loop, nothing else
+    mirror.sync()
+    expect(mirror.mirrorCount).toBe(2)
+    expect((root.children[0] as THREE.Group).children).toHaveLength(ghosts.length)
+
+    tool.onKey({ key: 'Escape', preventDefault: () => {} } as unknown as KeyboardEvent)
+    mirror.sync()
+    expect(mirror.mirrorCount).toBe(0)
+  })
+})
+
+// ── Lock (OW-1) ──
+describe('OffsetTool — a locked thing refuses with the Unlock toast', () => {
+  function locked(scene: WasmScene) {
+    return {
+      ...scene,
+      node_frozen: vi.fn((kind: number, id: bigint) => (kind === 0 && id === 3n ? { kind: 'object', id } : undefined)),
+      node_locked: vi.fn(() => true),
+      definition_usage: vi.fn(() => 1),
+    } as unknown as WasmScene
+  }
+
+  it('hover and click on a face of a locked object say Locked, with its target, and start nothing', () => {
+    const scene = locked(makeWasmScene({ facePick: makeFacePick(3n, 4n) }))
+    const { tool, onToast } = makeTool(scene)
+    tool.onPointerMove(makeSnap({ x: 0, y: 0, z: 0 }), rayAt(1, 1))
+    expect(tool.hoverHint()).toBe('Locked')
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), rayAt(1, 1))
+    expect(onToast).toHaveBeenCalledWith('Locked', 'LockedHint:object:3')
+    expect(tool.capturingInput()).toBe(false)
   })
 })

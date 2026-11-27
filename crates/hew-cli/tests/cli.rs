@@ -114,6 +114,7 @@ fn box_document() -> Document {
         section: None,
         view_style: None,
         extra: Default::default(),
+        geo: None,
     };
     doc.ingest(scene, Vec::new()).expect("ingest a plain box");
     doc
@@ -215,6 +216,60 @@ fn run_script_draws_and_extrudes_and_out_saves_one_object() {
         1,
         "the extrude produced exactly one solid"
     );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Hiding is kernel-served, so the headless host (a `core` grant, no
+/// window) hides an object, saves the flag with the document, and a
+/// reopened file lists it as hidden.
+#[test]
+fn hew_cli_dispatch_hides_an_object_without_a_window() {
+    let dir = scratch_dir("hide-headless");
+    let script_path = dir.join("script.json");
+    let out_path = dir.join("hidden.hew");
+    let script = serde_json::json!([
+        { "jsonrpc": "2.0", "id": 1, "method": "hew.meta.hello", "params": { "protocol": 1 } },
+        { "jsonrpc": "2.0", "id": 2, "method": "hew.doc.new", "params": {} },
+        { "jsonrpc": "2.0", "id": 3, "method": "hew.doc.transact", "params": { "commands": [
+            { "method": "hew.sketch.draw_rect", "as": "rect", "params": {
+                "plane": { "ground": true },
+                "corner_a": [0.0, 0.0, 0.0], "corner_b": [1.0, 1.0, 0.0] } },
+            { "method": "hew.solid.extrude", "params": {
+                "region": { "$ref": "rect#/region_id" }, "distance": 0.5 } },
+        ] } },
+        { "jsonrpc": "2.0", "id": 4, "method": "hew.query.scene", "params": {} },
+    ]);
+    std::fs::write(&script_path, serde_json::to_vec(&script).unwrap()).unwrap();
+    let outcome = hew_cli::run::run_script(&script_path, None, None);
+    assert_eq!(outcome.exit_code, 0, "{:?}", outcome.responses.last());
+    let id = outcome.responses[3]["result"]["tree"][0]["id"]
+        .as_str()
+        .expect("the box has an object id")
+        .to_string();
+
+    let mut script = script.as_array().unwrap().clone();
+    script.pop();
+    script.push(serde_json::json!(
+        { "jsonrpc": "2.0", "id": 5, "method": "hew.view.hide", "params": { "ids": [id] } }
+    ));
+    std::fs::write(&script_path, serde_json::to_vec(&script).unwrap()).unwrap();
+    let outcome = hew_cli::run::run_script(&script_path, Some(&out_path), None);
+    assert_eq!(
+        outcome.exit_code,
+        0,
+        "hide refused: {:?}",
+        outcome.responses.last()
+    );
+
+    let hidden = hew_cli::run::dispatch_file(&out_path, "hew.view.hidden", serde_json::json!({}));
+    let hidden = hidden.response.expect("hidden reply");
+    assert_eq!(
+        hidden["result"]["hidden"],
+        serde_json::json!([id]),
+        "{hidden}"
+    );
+    assert_eq!(hidden["result"]["isolated"], serde_json::Value::Null);
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -323,6 +378,42 @@ fn dispatch_file_read_only_command_does_not_rewrite_the_file() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A dry run changes nothing, so `dispatch --file` never saves after one:
+/// on a read-only file it answers the rehearsal and exits 0, where a save
+/// would fail.
+#[test]
+fn dispatch_file_dry_run_does_not_save_back() {
+    let dir = scratch_dir("dispatch-dry-run");
+    let path = dir.join("box.hew");
+    let original = box_document().save();
+    std::fs::write(&path, &original).unwrap();
+    let mut perms = std::fs::metadata(&path).unwrap().permissions();
+    perms.set_readonly(true);
+    std::fs::set_permissions(&path, perms.clone()).unwrap();
+
+    let outcome = hew_cli::run::dispatch_file(
+        &path,
+        "hew.doc.transact",
+        serde_json::json!({ "dry_run": true, "commands": [
+            { "method": "hew.sketch.draw_rect", "as": "p", "params": { "plane": { "ground": true }, "corner_a": [5, 5, 0], "corner_b": [6, 6, 0] } },
+            { "method": "hew.solid.extrude", "params": { "region": { "$ref": "p#/region_id" }, "distance": 1.0 } }
+        ] }),
+    );
+    #[allow(clippy::permissions_set_readonly_false)]
+    perms.set_readonly(false);
+    std::fs::set_permissions(&path, perms).unwrap();
+    assert_eq!(outcome.exit_code, 0, "response: {:?}", outcome.response);
+    let response = outcome.response.expect("a response");
+    assert_eq!(response["result"]["dry_run"], true, "{response}");
+    assert_eq!(
+        std::fs::read(&path).unwrap(),
+        original,
+        "the file is untouched"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // ------------------------------------------------------------------ export
 
 /// `CliHost::export_document("stl")` over a real box document: a
@@ -333,7 +424,7 @@ fn cli_host_exports_a_box_to_well_formed_binary_stl() {
     let doc = box_document();
     let mut host = CliHost::new();
     let bytes = host
-        .export_document(&doc, "stl", None, 0, None)
+        .export_document(&doc, "stl", None, 0, None, None, false, false)
         .expect("a solid box exports")
         .expect("no path given — bytes come back inline");
 
@@ -360,7 +451,16 @@ fn cli_host_export_with_a_path_writes_the_file_and_returns_no_bytes() {
     let mut host = CliHost::new();
 
     let result = host
-        .export_document(&doc, "stl", Some(out.to_str().unwrap()), 0, None)
+        .export_document(
+            &doc,
+            "stl",
+            Some(out.to_str().unwrap()),
+            0,
+            None,
+            None,
+            false,
+            false,
+        )
         .expect("export succeeds");
     assert!(
         result.is_none(),
@@ -379,7 +479,7 @@ fn cli_host_export_refuses_nothing_to_export_on_an_empty_document() {
     let doc = Document::new();
     let mut host = CliHost::new();
     let err = host
-        .export_document(&doc, "stl", None, 0, None)
+        .export_document(&doc, "stl", None, 0, None, None, false, false)
         .unwrap_err();
     assert_eq!(err.name, "nothing_to_export");
 }
@@ -417,7 +517,7 @@ fn dispatch_export_3mf_glb_and_usdz_match_a_direct_export_byte_for_byte() {
         let reloaded = Document::load(&std::fs::read(&path).unwrap()).expect("reloads");
         let mut host = CliHost::new();
         let direct_bytes = host
-            .export_document(&reloaded, format, None, 0, None)
+            .export_document(&reloaded, format, None, 0, None, None, false, false)
             .unwrap_or_else(|e| panic!("{format}: direct export succeeds: {e:?}"))
             .unwrap_or_else(|| panic!("{format}: bytes returned inline"));
 
@@ -437,13 +537,13 @@ fn dispatch_export_3mf_glb_and_usdz_match_a_direct_export_byte_for_byte() {
 /// file refuses `load_failed`.
 #[test]
 fn cli_host_reads_a_texture_path_for_material_create() {
-    use api::{Connection, DispatchOutcome, Profile, Request, RequestId};
+    use api::{Connection, DispatchOutcome, Grant, Request, RequestId};
     let dir = scratch_dir("texture");
     let file = dir.join("grain.jpg");
     let jpeg = [0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, b'J', b'F', b'I', b'F'];
     std::fs::write(&file, jpeg).unwrap();
 
-    let mut conn = Connection::new(Profile::Core, "t");
+    let mut conn = Connection::new(Grant::core(), "t");
     let mut doc = Document::new();
     let mut host = CliHost::new();
     let mut call = |id: i64, method: &str, params: serde_json::Value, doc: &mut Document| {
@@ -454,9 +554,9 @@ fn cli_host_reads_a_texture_path_for_material_create() {
             params: Some(params),
             document: None,
         };
-        match conn.dispatch(doc, &mut host, request) {
-            DispatchOutcome::Reply(r) => r,
-            DispatchOutcome::Dropped => unreachable!(),
+        match conn.dispatch(&api::Registry::protocol_1(), doc, &mut host, request) {
+            DispatchOutcome::Reply(r) | DispatchOutcome::DryRun(r) => r,
+            DispatchOutcome::Dropped | DispatchOutcome::Forward(_) => unreachable!(),
         }
     };
     call(
@@ -494,6 +594,105 @@ fn cli_host_reads_a_texture_path_for_material_create() {
         "load_failed"
     );
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ----------------------------------------------------------------- compute
+
+/// The headless host serves every `hew.compute.*` command and the dry run:
+/// nothing in either reaches the host, and the document is unchanged.
+#[test]
+fn cli_host_serves_compute_and_dry_runs() {
+    use api::{Connection, DispatchOutcome, Grant, Request, RequestId};
+    let mut conn = Connection::new(Grant::core(), "t");
+    let mut doc = Document::new();
+    let mut host = CliHost::new();
+    let mut call = |id: i64, method: &str, params: serde_json::Value, doc: &mut Document| {
+        let request = Request {
+            jsonrpc: "2.0".to_string(),
+            id: Some(RequestId::Number(id)),
+            method: method.to_string(),
+            params: Some(params),
+            document: None,
+        };
+        match conn.dispatch(&api::Registry::protocol_1(), doc, &mut host, request) {
+            DispatchOutcome::Reply(r) => (r, false),
+            DispatchOutcome::DryRun(r) => (r, true),
+            DispatchOutcome::Dropped | DispatchOutcome::Forward(_) => unreachable!(),
+        }
+    };
+    call(
+        1,
+        "hew.meta.hello",
+        serde_json::json!({"protocol": 1}),
+        &mut doc,
+    );
+    call(2, "hew.doc.new", serde_json::json!({}), &mut doc);
+    let (made, _) = call(
+        3,
+        "hew.doc.transact",
+        serde_json::json!({ "commands": [
+            { "method": "hew.sketch.draw_rect", "as": "p", "params": { "plane": { "ground": true }, "corner_a": [0, 0, 0], "corner_b": [1, 1, 0] } },
+            { "method": "hew.solid.extrude", "params": { "region": { "$ref": "p#/region_id" }, "distance": 1.0 } }
+        ] }),
+        &mut doc,
+    );
+    assert!(made.error.is_none(), "{:?}", made.error);
+    let id = made.result.unwrap()["results"][1]["object_id"].clone();
+    let before = doc.save();
+    let unit = serde_json::json!({ "box": { "min": [0, 0, 0], "max": [1, 1, 1] } });
+    for (method, params) in [
+        (
+            "hew.compute.measure",
+            serde_json::json!({ "solid": { "id": id } }),
+        ),
+        (
+            "hew.compute.boolean",
+            serde_json::json!({ "op": "intersect", "a": { "id": id }, "b": unit, "want": ["mesh", "topology", "measure", "shells"] }),
+        ),
+        (
+            "hew.compute.slice",
+            serde_json::json!({ "solid": unit, "plane": { "origin": [0.5, 0, 0], "normal": [1, 0, 0] } }),
+        ),
+        (
+            "hew.compute.shells",
+            serde_json::json!({ "solid": unit, "want_mesh": true }),
+        ),
+        (
+            "hew.compute.outline",
+            serde_json::json!({ "id": id, "which": "largest_face" }),
+        ),
+        (
+            "hew.compute.outline",
+            serde_json::json!({ "id": id, "which": "projection" }),
+        ),
+        (
+            "hew.compute.offset",
+            serde_json::json!({ "loops": [[[0, 0], [1, 0], [1, 1], [0, 1]]], "distance": 0.1 }),
+        ),
+    ] {
+        let (r, dry) = call(4, method, params, &mut doc);
+        assert!(r.error.is_none(), "{method}: {:?}", r.error);
+        assert!(!dry);
+    }
+    for method in ["hew.compute.project", "hew.compute.stretch"] {
+        let (r, _) = call(5, method, serde_json::json!({}), &mut doc);
+        assert_eq!(r.error.unwrap().data.unwrap()["refusal"], "unimplemented");
+    }
+    let (r, dry) = call(
+        6,
+        "hew.doc.transact",
+        serde_json::json!({ "dry_run": true, "commands": [
+            { "method": "hew.solid.subtract", "as": "cut", "params": { "a": id, "b": id } }
+        ] }),
+        &mut doc,
+    );
+    assert!(dry, "answered as a dry run");
+    assert_eq!(
+        r.error.unwrap().data.unwrap()["refusal"],
+        "degenerate_contact",
+        "the rehearsal refuses as the commit would"
+    );
+    assert_eq!(doc.save(), before, "nothing changed");
 }
 
 // ------------------------------------------------------------------ import
@@ -900,6 +1099,7 @@ fn snapshot_respects_user_hidden_state() {
         section: None,
         view_style: None,
         extra: Default::default(),
+        geo: None,
     };
     doc.ingest(scene, Vec::new()).expect("ingest two boxes");
     let ids = doc.visible_object_ids();
@@ -919,6 +1119,8 @@ fn snapshot_respects_user_hidden_state() {
         depth_bits: 8,
         include_normals: false,
         path: None,
+        selection: None,
+        background: softrender::BACKGROUND_RGBA,
     };
     let result = host.snapshot(&doc, &params).expect("renders");
     let public = |id: kernel::ObjectId| {
@@ -959,6 +1161,7 @@ fn snapshot_scene_renders_through_the_scenes_own_resolved_state() {
         section: None,
         view_style: None,
         extra: Default::default(),
+        geo: None,
     };
     doc.ingest(import, Vec::new()).expect("ingest two boxes");
     let ids = doc.visible_object_ids();
@@ -998,6 +1201,8 @@ fn snapshot_scene_renders_through_the_scenes_own_resolved_state() {
         depth_bits: 8,
         include_normals: false,
         path: None,
+        selection: None,
+        background: softrender::BACKGROUND_RGBA,
     };
     let result = host.snapshot(&doc, &params).expect("renders");
     let public = |id: kernel::ObjectId| {
@@ -1036,6 +1241,7 @@ fn snapshot_camera_only_scene_keeps_the_documents_live_hidden_state() {
         section: None,
         view_style: None,
         extra: Default::default(),
+        geo: None,
     };
     doc.ingest(import, Vec::new()).expect("ingest two boxes");
     let ids = doc.visible_object_ids();
@@ -1069,6 +1275,8 @@ fn snapshot_camera_only_scene_keeps_the_documents_live_hidden_state() {
         depth_bits: 8,
         include_normals: false,
         path: None,
+        selection: None,
+        background: softrender::BACKGROUND_RGBA,
     };
     let result = host.snapshot(&doc, &params).expect("renders");
     let public = |id: kernel::ObjectId| {
@@ -1100,6 +1308,7 @@ fn snapshot_scene_refuses_unknown_scene() {
         section: None,
         view_style: None,
         extra: Default::default(),
+        geo: None,
     };
     doc.ingest(import, Vec::new()).expect("ingest a box");
 
@@ -1115,6 +1324,8 @@ fn snapshot_scene_refuses_unknown_scene() {
         depth_bits: 8,
         include_normals: false,
         path: None,
+        selection: None,
+        background: softrender::BACKGROUND_RGBA,
     };
     let err = host.snapshot(&doc, &params).unwrap_err();
     assert_eq!(err.name, "unknown_scene");
@@ -1416,8 +1627,8 @@ fn library_save_list_insert_round_trips_geometry_through_a_real_library_folder()
 /// pass lands in its own sidecar file.
 #[test]
 fn snapshot_depth_and_normals_passes_inline_and_as_sidecars() {
-    use api::{Connection, DispatchOutcome, Profile, Request, RequestId};
-    let mut conn = Connection::new(Profile::Core, "t");
+    use api::{Connection, DispatchOutcome, Grant, Request, RequestId};
+    let mut conn = Connection::new(Grant::core(), "t");
     let mut doc = Document::new();
     let mut host = CliHost::new();
     let mut id = 0;
@@ -1434,9 +1645,9 @@ fn snapshot_depth_and_normals_passes_inline_and_as_sidecars() {
             params: Some(params),
             document: None,
         };
-        match conn.dispatch(doc, host, request) {
-            DispatchOutcome::Reply(r) => r,
-            DispatchOutcome::Dropped => unreachable!(),
+        match conn.dispatch(&api::Registry::protocol_1(), doc, host, request) {
+            DispatchOutcome::Reply(r) | DispatchOutcome::DryRun(r) => r,
+            DispatchOutcome::Dropped | DispatchOutcome::Forward(_) => unreachable!(),
         }
     };
     call(
@@ -1594,8 +1805,8 @@ fn skp_object_count(bytes: &[u8]) -> usize {
     doc.visible_object_ids().len()
 }
 
-fn container_of(bytes: &[u8]) -> skp_import::openskp::Container {
-    skp_import::openskp::detect_container(bytes)
+fn container_of(bytes: &[u8]) -> skp_import::skpwright::Container {
+    skp_import::skpwright::detect_container(bytes)
 }
 
 /// Open a `.skp`, edit, save back to the same path, reopen: the edit is
@@ -1705,41 +1916,100 @@ fn save_a_skp_as_hew_to_a_new_path() {
 }
 
 /// A `.hew` document saved to a `.skp` path writes the 2026 container; an
-/// explicit `skp2017` writes the 2017 one.
+/// explicit `skp3` to `skp8` or `skp2013` to `skp2020` writes that release of the stream
+/// container, which reopens with the box's one object.
 #[test]
 fn save_a_hew_document_as_each_skp_container() {
     let dir = scratch_dir("hew-as-skp");
     let hew = dir.join("model.hew");
     std::fs::write(&hew, box_document().save()).unwrap();
     let a = dir.join("a.skp");
-    let b = dir.join("b.skp");
-    let responses = run_calls(
-        &dir,
-        &[
-            (
-                "hew.doc.open",
-                serde_json::json!({ "path": hew.to_str().unwrap() }),
-            ),
-            (
-                "hew.doc.save",
-                serde_json::json!({ "path": a.to_str().unwrap() }),
-            ),
-            (
-                "hew.doc.save",
-                serde_json::json!({ "path": b.to_str().unwrap(), "format": "skp2017" }),
-            ),
-        ],
-    );
+    // Every stream release, by its wire name (`skp3`, `skp2017`).
+    let releases: Vec<(String, u8)> = api::SKP_STREAM_RELEASES
+        .iter()
+        .map(|&n| (format!("skp{}", api::skp_stream_year(n)), n))
+        .collect();
+    assert_eq!(releases.len(), 14);
+    let mut calls = vec![
+        (
+            "hew.doc.open",
+            serde_json::json!({ "path": hew.to_str().unwrap() }),
+        ),
+        (
+            "hew.doc.save",
+            serde_json::json!({ "path": a.to_str().unwrap() }),
+        ),
+    ];
+    for (format, _) in &releases {
+        calls.push((
+            "hew.doc.save",
+            serde_json::json!({
+                "path": dir.join(format!("{format}.skp")).to_str().unwrap(),
+                "format": format,
+            }),
+        ));
+    }
+    let responses = run_calls(&dir, &calls);
     assert!(
         responses.iter().all(|r| r.get("error").is_none()),
         "{responses:?}"
     );
-    use skp_import::openskp::Container;
-    assert_eq!(container_of(&std::fs::read(&a).unwrap()), Container::Zip);
-    assert_eq!(
-        container_of(&std::fs::read(&b).unwrap()),
-        Container::Carchive2017
-    );
+    use skp_import::skpwright::Container;
+    let zip = std::fs::read(&a).unwrap();
+    assert_eq!(container_of(&zip), Container::Zip);
+    assert_eq!(skp_object_count(&zip), 1);
+    for (format, number) in releases {
+        let bytes = std::fs::read(dir.join(format!("{format}.skp"))).unwrap();
+        assert_eq!(container_of(&bytes), Container::Stream, "{format}");
+        let model = skp_import::skpwright::Model::parse(&bytes).unwrap();
+        assert_eq!(
+            model.release().map(|r| r.number()),
+            Some(number),
+            "{format}"
+        );
+        assert_eq!(skp_object_count(&bytes), 1, "{format}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A file of release 2018 to 2020 opens, saves back to the same path in its
+/// own release, and the edit-free save still reads as the same box.
+#[test]
+fn a_stream_release_file_saves_back_in_its_own_release() {
+    let dir = scratch_dir("release-back");
+    let hew = dir.join("model.hew");
+    std::fs::write(&hew, box_document().save()).unwrap();
+    for (format, number) in [("skp2018", 18u8), ("skp2019", 19), ("skp2020", 20)] {
+        let path = dir.join(format!("{format}.skp"));
+        let p = path.to_str().unwrap();
+        let responses = run_calls(
+            &dir,
+            &[
+                (
+                    "hew.doc.open",
+                    serde_json::json!({ "path": hew.to_str().unwrap() }),
+                ),
+                (
+                    "hew.doc.save",
+                    serde_json::json!({ "path": p, "format": format }),
+                ),
+                ("hew.doc.open", serde_json::json!({ "path": p })),
+                ("hew.doc.save", serde_json::json!({})),
+            ],
+        );
+        assert!(
+            responses.iter().all(|r| r.get("error").is_none()),
+            "{format}: {responses:?}"
+        );
+        let bytes = std::fs::read(&path).unwrap();
+        let model = skp_import::skpwright::Model::parse(&bytes).unwrap();
+        assert_eq!(
+            model.release().map(|r| r.number()),
+            Some(number),
+            "{format}"
+        );
+        assert_eq!(skp_object_count(&bytes), 1, "{format}");
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -1783,6 +2053,50 @@ fn save_with_a_format_that_contradicts_the_extension_refuses() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// `compat` belongs to the 2021-and-later container: asked for a save that
+/// resolves to a `.hew` it is refused and nothing is written; an explicit
+/// `compat:false` is the same as absent.
+#[test]
+fn save_with_compat_on_a_non_container_target_refuses() {
+    let dir = scratch_dir("compat-refuse");
+    let hew = dir.join("model.hew");
+    let responses = run_calls(
+        &dir,
+        &[
+            (
+                "hew.doc.open",
+                serde_json::json!({ "path": skp_fixture("box.skp").to_str().unwrap() }),
+            ),
+            (
+                "hew.doc.save",
+                serde_json::json!({ "path": hew.to_str().unwrap(), "compat": true }),
+            ),
+        ],
+    );
+    assert_eq!(
+        last_refusal(&responses).as_deref(),
+        Some("format_mismatch"),
+        "{responses:?}"
+    );
+    assert!(!hew.exists(), "nothing was written");
+    let responses = run_calls(
+        &dir,
+        &[
+            (
+                "hew.doc.open",
+                serde_json::json!({ "path": skp_fixture("box.skp").to_str().unwrap() }),
+            ),
+            (
+                "hew.doc.save",
+                serde_json::json!({ "path": hew.to_str().unwrap(), "compat": false }),
+            ),
+        ],
+    );
+    assert_eq!(last_refusal(&responses), None, "{responses:?}");
+    assert!(hew.exists());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// `hew.doc.export` writes both SketchUp containers and never makes the
 /// export the document's file: a following bare save still refuses
 /// `path_required`.
@@ -1812,12 +2126,9 @@ fn export_writes_both_skp_formats_without_changing_the_working_file() {
             ("hew.doc.save", serde_json::json!({})),
         ],
     );
-    use skp_import::openskp::Container;
+    use skp_import::skpwright::Container;
     assert_eq!(container_of(&std::fs::read(&a).unwrap()), Container::Zip);
-    assert_eq!(
-        container_of(&std::fs::read(&b).unwrap()),
-        Container::Carchive2017
-    );
+    assert_eq!(container_of(&std::fs::read(&b).unwrap()), Container::Stream);
     assert_eq!(last_refusal(&responses).as_deref(), Some("path_required"));
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -1867,7 +2178,7 @@ fn skp_display_units_follow_the_app_save_rules_or_a_named_unit() {
     let model = dir.join("model.skp");
     std::fs::copy(skp_fixture("box.skp"), &model).unwrap();
     let unit = |p: &std::path::Path| {
-        skp_import::openskp::Model::parse(&std::fs::read(p).unwrap())
+        skp_import::skpwright::Model::parse(&std::fs::read(p).unwrap())
             .unwrap()
             .units
             .length_unit
@@ -1908,4 +2219,238 @@ fn skp_display_units_follow_the_app_save_rules_or_a_named_unit() {
     assert_eq!(unit(&model), own, "a save back keeps the file's own");
     assert_eq!(unit(&p("named.skp")), 3, "named over the file's own: cm");
     assert_eq!(unit(&p("new.skp")), 4, "a new file: meters");
+}
+
+/// `hew.view.line_drawing`'s `selection` through the real CLI host: with
+/// two boxes in the document, a drawing of one reports segments only from
+/// that one, and fewer than the whole document's.
+#[test]
+fn a_line_drawing_of_a_selection_reports_segments_only_from_it() {
+    use kernel::{EntityRef, NodeId, Plane, RenderRoot};
+    let mut doc = Document::new();
+    let ground = Plane::from_polygon(&[
+        Point3::new(0.0, 0.0, 0.0),
+        Point3::new(1.0, 0.0, 0.0),
+        Point3::new(0.0, 1.0, 0.0),
+    ])
+    .unwrap();
+    let mut objects = Vec::new();
+    for x0 in [0.0, 3.0] {
+        let s = doc.add_sketch(ground);
+        let sk = doc.sketch_mut(s).unwrap();
+        let c = [
+            Point3::new(x0, 0.0, 0.0),
+            Point3::new(x0 + 1.0, 0.0, 0.0),
+            Point3::new(x0 + 1.0, 1.0, 0.0),
+            Point3::new(x0, 1.0, 0.0),
+        ];
+        for k in 0..4 {
+            sk.add_segment(c[k], c[(k + 1) % 4]).unwrap();
+        }
+        let regions = doc.extrudable_regions(s).unwrap();
+        objects.push(doc.extrude_region(s, regions[0], 1.0).unwrap().0);
+    }
+    let public = |o| {
+        let e = EntityRef::Object(o);
+        api::ids::public_id(&e, doc.sid_of(&e).unwrap())
+    };
+    let mut host = CliHost::new();
+    let mut params = api::LineDrawingParams {
+        camera: None,
+        view: Some(api::StandardView::Iso),
+        scene: None,
+        include_hidden: false,
+        include_soft: false,
+        format: api::LineDrawingFormat::Segments,
+        scale: 1.0,
+        path: None,
+        selection: None,
+    };
+    let whole = host.line_drawing(&doc, &params).unwrap();
+    let occ = doc.occurrence_at(&[], NodeId::Object(objects[1])).unwrap();
+    params.selection = Some(vec![RenderRoot::Occurrence(occ)]);
+    let one = host.line_drawing(&doc, &params).unwrap();
+    assert!(one.count > 0 && one.count < whole.count);
+    let picked = public(objects[1]);
+    assert!(one.ids.iter().all(|id| *id == picked), "{:?}", one.ids);
+    assert!(whole.ids.contains(&public(objects[0])));
+    // A placement two entries reach is drawn once.
+    let occ = doc.occurrence_at(&[], NodeId::Object(objects[1])).unwrap();
+    params.selection = Some(vec![
+        RenderRoot::Occurrence(occ.clone()),
+        RenderRoot::Occurrence(occ),
+    ]);
+    let twice = host.line_drawing(&doc, &params).unwrap();
+    assert_eq!(twice.count, one.count);
+}
+
+// ------------------------------------------------ renderer move stability
+
+/// Two unit boxes, one at the origin and one three meters along x.
+fn two_boxes() -> (Document, Vec<kernel::ObjectId>) {
+    use kernel::Plane;
+    let mut doc = Document::new();
+    let ground = Plane::from_polygon(&[
+        Point3::new(0.0, 0.0, 0.0),
+        Point3::new(1.0, 0.0, 0.0),
+        Point3::new(0.0, 1.0, 0.0),
+    ])
+    .unwrap();
+    let mut objects = Vec::new();
+    for x0 in [0.0, 3.0] {
+        let s = doc.add_sketch(ground);
+        let sk = doc.sketch_mut(s).unwrap();
+        let c = [
+            Point3::new(x0, 0.0, 0.0),
+            Point3::new(x0 + 1.0, 0.0, 0.0),
+            Point3::new(x0 + 1.0, 1.0, 0.0),
+            Point3::new(x0, 1.0, 0.0),
+        ];
+        for k in 0..4 {
+            sk.add_segment(c[k], c[(k + 1) % 4]).unwrap();
+        }
+        let regions = doc.extrudable_regions(s).unwrap();
+        objects.push(doc.extrude_region(s, regions[0], 1.0).unwrap().0);
+    }
+    (doc, objects)
+}
+
+/// FNV-1a 64: a stable fingerprint for byte-exact pins.
+fn fnv64(bytes: &[u8]) -> u64 {
+    bytes.iter().fold(0xcbf2_9ce4_8422_2325, |h, b| {
+        (h ^ u64::from(*b)).wrapping_mul(0x0100_0000_01b3)
+    })
+}
+
+fn stability_snapshot_params() -> api::SnapshotParams {
+    api::SnapshotParams {
+        width: 128,
+        height: 128,
+        camera: None,
+        view: Some(api::StandardView::Iso),
+        scene: None,
+        include_ids: false,
+        include_depth: false,
+        depth_bits: 8,
+        include_normals: false,
+        path: None,
+        selection: None,
+        background: softrender::BACKGROUND_RGBA,
+    }
+}
+
+/// The scanlines (filter byte included) a PNG's IDAT inflates to.
+fn png_scanlines(png: &[u8]) -> Vec<u8> {
+    let mut i = 8;
+    let mut idat = Vec::new();
+    while i < png.len() {
+        let len = u32::from_be_bytes(png[i..i + 4].try_into().unwrap()) as usize;
+        if &png[i + 4..i + 8] == b"IDAT" {
+            idat.extend_from_slice(&png[i + 8..i + 8 + len]);
+        }
+        i += 12 + len;
+    }
+    miniz_oxide::inflate::decompress_to_vec_zlib(&idat).expect("inflates")
+}
+
+/// The renderer's output for a fixed document never changes by accident
+/// (it moved crates once; a pixel difference is a defect, not a re-pin).
+/// The pin is the decoded pixels, so a deflate-encoder version change does
+/// not trip it; the size bound only guards that the PNG stays compressed.
+#[test]
+fn snapshot_bytes_are_stable() {
+    let (doc, _) = two_boxes();
+    let r = CliHost::new()
+        .snapshot(&doc, &stability_snapshot_params())
+        .unwrap();
+    let raw = png_scanlines(&r.png);
+    assert_eq!(
+        (r.width, r.height, raw.len(), fnv64(&raw)),
+        PIN_SNAPSHOT_PIXELS
+    );
+    assert!(
+        r.png.len() < 4096,
+        "a flat-ish 128 x 128 PNG stays compressed: {} bytes",
+        r.png.len()
+    );
+}
+
+#[test]
+fn line_drawing_segments_are_stable() {
+    let (doc, _) = two_boxes();
+    let params = api::LineDrawingParams {
+        camera: None,
+        view: Some(api::StandardView::Iso),
+        scene: None,
+        include_hidden: true,
+        include_soft: false,
+        format: api::LineDrawingFormat::Segments,
+        scale: 1.0,
+        path: None,
+        selection: None,
+    };
+    let r = CliHost::new().line_drawing(&doc, &params).unwrap();
+    let text = format!("{:?}{:?}{:?}", r.segments, r.kinds, r.bounds);
+    assert_eq!((r.count, fnv64(text.as_bytes())), PIN_SEGMENTS);
+}
+
+const PIN_SNAPSHOT_PIXELS: (u32, u32, usize, u64) = (128, 128, 65664, 7410834696598770317);
+const PIN_SEGMENTS: (usize, u64) = (24, 15869532378070628210);
+
+/// A scene's own transition and delay are set through `hew.scenes.update`
+/// from a script, read back by `hew.scenes.list`, and saved in the file.
+#[test]
+fn run_script_sets_a_scenes_transition_and_delay() {
+    let dir = scratch_dir("scene-timing");
+    let script_path = dir.join("script.json");
+    let out_path = dir.join("model.hew");
+    let script = serde_json::json!([
+        { "jsonrpc": "2.0", "id": 1, "method": "hew.meta.hello", "params": { "protocol": 1 } },
+        { "jsonrpc": "2.0", "id": 2, "method": "hew.doc.new", "params": {} },
+        { "jsonrpc": "2.0", "id": 3, "method": "hew.scenes.add", "params": { "name": "A" } },
+        { "jsonrpc": "2.0", "id": 4, "method": "hew.scenes.list", "params": {} },
+    ]);
+    std::fs::write(&script_path, serde_json::to_vec(&script).unwrap()).unwrap();
+    let first = hew_cli::run::run_script(&script_path, None, None);
+    assert_eq!(first.exit_code, 0, "{:?}", first.responses.last());
+    let id = first.responses[2]["result"]["results"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let script = serde_json::json!([
+        { "jsonrpc": "2.0", "id": 1, "method": "hew.meta.hello", "params": { "protocol": 1 } },
+        { "jsonrpc": "2.0", "id": 2, "method": "hew.doc.new", "params": {} },
+        { "jsonrpc": "2.0", "id": 3, "method": "hew.scenes.add", "params": { "name": "A" } },
+        { "jsonrpc": "2.0", "id": 4, "method": "hew.scenes.update",
+          "params": { "id": id, "transition_s": 2.5, "delay_s": 1.0 } },
+        { "jsonrpc": "2.0", "id": 5, "method": "hew.scenes.list", "params": {} },
+    ]);
+    std::fs::write(&script_path, serde_json::to_vec(&script).unwrap()).unwrap();
+    let outcome = hew_cli::run::run_script(&script_path, Some(&out_path), None);
+    assert_eq!(outcome.exit_code, 0, "{:?}", outcome.responses.last());
+    let listed = &outcome.responses[4]["result"];
+    let scene = listed
+        .get("scenes")
+        .unwrap_or(&listed["results"][0]["scenes"])[0]
+        .clone();
+    assert_eq!(scene["transition_s"], 2.5);
+    assert_eq!(scene["delay_s"], 1.0);
+
+    let reloaded = Document::load(&std::fs::read(&out_path).unwrap()).unwrap();
+    assert_eq!(reloaded.scenes()[0].transition_s, Some(2.5));
+    assert_eq!(reloaded.scenes()[0].delay_s, Some(1.0));
+
+    // A negative time refuses and stops the script.
+    let script = serde_json::json!([
+        { "jsonrpc": "2.0", "id": 1, "method": "hew.meta.hello", "params": { "protocol": 1 } },
+        { "jsonrpc": "2.0", "id": 2, "method": "hew.doc.new", "params": {} },
+        { "jsonrpc": "2.0", "id": 3, "method": "hew.scenes.add", "params": { "name": "A" } },
+        { "jsonrpc": "2.0", "id": 4, "method": "hew.scenes.update",
+          "params": { "id": id, "delay_s": -1.0 } },
+    ]);
+    std::fs::write(&script_path, serde_json::to_vec(&script).unwrap()).unwrap();
+    let bad = hew_cli::run::run_script(&script_path, None, None);
+    assert_ne!(bad.exit_code, 0);
+    let _ = std::fs::remove_dir_all(&dir);
 }

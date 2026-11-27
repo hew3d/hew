@@ -1,15 +1,20 @@
-import { useEffect, useState, useCallback, useRef, useMemo } from 'react'
+import { noteDroppedFor } from './library/openPathInLibrary'
+import { Fragment, useEffect, useState, useCallback, useRef, useMemo, useSyncExternalStore } from 'react'
+import { useSelectionViews } from './useSelectionViews'
+import { useClearSelectionOnDrawTool } from './useClearSelectionOnDrawTool'
 import { i18n } from '@lingui/core'
 import { ph, plural, t } from '@lingui/core/macro'
 import { Trans, useLingui } from '@lingui/react/macro'
 import { historyLabel } from './i18n/historyLabels'
-import { isComposingKey, shortcutLetter } from './input/keyboard'
+import { useKeymap, useKeymapDispatch } from './keymap/useKeymap'
+import { isComposingKey } from './input/keyboard'
+import { currentKeymap, defaultKeymapBindings, isRecordingChord, shortcutLabel, subscribeKeymap } from './keymap/keymap'
+import { startNativeMenuSync } from './keymap/nativeMenu'
 import { flushSync } from 'react-dom'
 import { loadKernel, type Scene } from './wasm/loader'
 import Viewport, {
   type ViewportApi,
   type InferenceInfo,
-  type StandardView,
   type RescaleConfirmInfo,
   type FlyState,
 } from './viewport/Viewport'
@@ -17,9 +22,11 @@ import { toggledRenderMode, type RenderMode } from './viewport/SceneRenderer'
 import { InferenceTooltip } from './viewport/InferenceTooltip'
 import { AnnotationEditor } from './viewport/AnnotationEditor'
 import { SnapDot } from './viewport/SnapDot'
+import { createInferenceStore, useInferenceInfo, type InferenceStore } from './viewport/inferenceStore'
 import { MeasurementBox } from './viewport/MeasurementBox'
-import { ViewportHUD } from './viewport/ViewportHUD'
-import { DocumentTree } from './panels/DocumentTree'
+import { ViewDie } from './viewport/ViewDie'
+import { GeoReferenceInfo } from './panels/GeoReferenceInfo'
+import { DocumentTree, type LinkedCopyActions } from './panels/DocumentTree'
 import { MaterialPalette } from './panels/MaterialPalette'
 import { MenuBar } from './panels/MenuBar'
 import { CAMERA_HANDOFF_TOOL_NAMES } from './panels/cameraHandoffTools'
@@ -27,7 +34,8 @@ import { TitleBar } from './TitleBar'
 import { isCoarsePointer, isLinux, isMac, isWindows } from './platform'
 import { forwardToTextField, isTextFieldFocused, pasteTextIntoFocusedField } from './clipboard/textFieldPaste'
 import { nextPaint } from './paint'
-import { beginOpenAttempt, clearOpenAttempt, forgetSettledFailure, openAttemptFailed } from './log/failedOpen'
+import { BUSY_REFUSED } from './busyCard'
+import { beginOpenAttempt, clearOpenAttempt, forgetSettledFailure, noteHandedBackOpen, openAttemptFailed } from './log/failedOpen'
 import { getPanicCapture, recordKernelStop } from './log/panicCapture'
 import { kernelMemoryBytes } from './wasm/kernelMemory'
 import { formatBytes } from './log/reportBundle'
@@ -48,13 +56,21 @@ interface OpenStepProgress {
 import { TagsPanel } from './panels/TagsPanel'
 import { ComponentsPanel, PurgeUnusedButton } from './panels/ComponentsPanel'
 import { ConfirmDialog } from './panels/ConfirmDialog'
+import { BusyNotice } from './panels/BusyNotice'
 import { ScenesPanel, ScenesAddButton, useSceneRenameState } from './panels/ScenesPanel'
 import { ObjectInfoPanel } from './panels/ObjectInfoPanel'
 import { TraySection } from './panels/TraySection'
 import { ChangesPanel } from './panels/ChangesPanel'
 import { ModelHealthPanel, selectionObjectIds } from './panels/ModelHealthPanel'
+import { bakeSmooth, setSmoothLevel, smoothDenseToasts, smoothLevels, smoothRefusal } from './panels/smoothActions'
+import { ACTION_TOAST_MS, toastActionFor, type ToastAction } from './toastActions'
+import { anyLocked, allLockableNodes, isLocked, isLockToastCode, gateSelection, leftBehindMessage, lockHintFor, parseLockedHintCode, lockToastSteps } from './lock/lockModel'
+import { lockedAmong, setNodesLocked, unlockedAmong } from './lock/lockActions'
+import { leaveBehind, refuseIfLocked, toastLocked } from './lock/lockGate'
+import { HISTORY_TRIM_NOTE_MS, HISTORY_TRIM_TOOLTIP, historyTrimNote, takeHistoryTrim } from './historyTrim'
 import { FloatingWindow } from './panels/FloatingWindow'
 import { MakeSolidWizard } from './panels/MakeSolidWizard'
+import { MakeSolidSketches, selectedSketchIds } from './panels/MakeSolidSketches'
 import { BADGE_TOOLTIP_LIST, MENU, badgeText, importLogSplit, type WizardScope } from './health/healthCopy'
 import { IsolationBar } from './viewport/IsolationBar'
 import type { IsolationTarget } from './viewport/isolation'
@@ -64,28 +80,56 @@ import { parseHistoryEntries } from './panels/changesModel'
 import { ToolRail } from './panels/ToolRail'
 import { TrayHideRow, TrayShowTab } from './panels/TrayToggle'
 import { ContextualDock } from './panels/ContextualDock'
-import { nextSelection, mergeSelection, type SelectMode, canBoolean as canBooleanHelper, canBooleanInComponent, canMakeComponent, canPlaceInstance, canExplodeInstance, canMakeUnique, canGroup as canGroupHelper, canUngroup as canUngroupHelper, nodeEq, nodeKey, nodeKindToNumber, nodeRefFromJs, resolveLabel, entityLabel, buildTreeIndexMap, pruneDeadSelection, structuralSelection, isSketchScopedKind, makeLabelFor, stripTagSuffix, type NodeRef } from './panels/treeModel'
+import { nextSelection, mergeSelection, withNodes, isNodeItem, type SelItem, type SelectMode, canBoolean as canBooleanHelper, canBooleanInComponent, canMakeComponent, canPlaceInstance, canExplodeInstance, canMakeUnique, canGroup as canGroupHelper, canUngroup as canUngroupHelper, nodeEq, nodeKey, nodeKindToNumber, nodeRefFromJs, resolveLabel, entityLabel, buildTreeIndexMap, linkedSetKind, pruneDeadSelection, structuralSelection, isSketchScopedKind, makeLabelFor, placementLabel, stripTagSuffix, type NodeRef } from './panels/treeModel'
 import { SelectionPathStrip } from './panels/SelectionPathStrip'
 import { buildSelectionPath, frameClickAction, hoverLine, type HitLeaf } from './panels/selectionPath'
 import { tagPathKey } from './panels/tagModel'
 import { LogPanel } from './log/LogPanel'
 import * as LogStore from './log/LogStore'
 import { installTestHarness, type PrintRecorder } from './test/harness'
-import { installLiveBridge, type LiveOpOutcome, type LiveOpRunner } from './api/liveBridge'
+import {
+  installLiveBridge,
+  type EnterOutcome,
+  type EnterRefusal,
+  type LiveBridgeDeps,
+  type LiveOpOutcome,
+  type LiveOpRunner,
+} from './api/liveBridge'
+import { uiContextJson, uiIsolationJson, uiSelectionJson } from './api/viewMirror'
+import { pumpEvents } from './api/eventPump'
 import { install as installConsoleCapture, restore as restoreConsoleCapture } from './log/consoleCapture'
 import { MATERIAL_SENTINEL } from './tools/PaintTool'
-import { outlinerDrawing, resolveDraft, setKernelHidden, type OutlinerDrawing, type PlaneUnitsScene } from './tools/planeUnits'
-import { makeFileHost, isTauri, FileReadError, type DocFormat, type ExportFileType, type FileHost, type FileRef, type ImportReport, type ImportPick, type OpenPick } from './io/fileHost'
+import { EDIT_CONTEXT_HINT_CODE } from './tools/faceDraw'
+import { getToolStageLabel, subscribeToolStageLabel } from './tools/stageLabel'
 import {
-  SAVE_PANEL_FORMATS,
+  setFilletProfile,
+  getFilletSettings,
+  subscribeFilletSettings,
+  getFilletMeasurementLabelOverride,
+  subscribeFilletMeasurementLabel,
+  profileSizeLabel,
+} from './tools/filletSettings'
+import { panelsForTool } from './tools/toolPanels'
+import { outlinerDrawing, resolveDraft, setKernelHidden, type OutlinerDrawing, type PlaneUnitsScene } from './tools/planeUnits'
+import { setDeformMode, getDeformMode, subscribeDeformMode } from './tools/deformMode'
+import { runToolAction } from './tools/toolActions'
+import { smoothLevelFor } from './curveActions'
+import { makeFileHost, isTauri, FileReadError, UnsupportedFileError, type DocFormat, type ExportFileType, type FileHost, type FileRef, type ImportReport, type ImportPick, type OpenPick } from './io/fileHost'
+import {
+  panelIdFor,
+  exportPanelIdFor,
+  savePanelFormats,
+  saveCompatFrom,
   exportChoiceFrom,
   exportPanelFormats,
   hasNativeSavePanel,
   pickSaveTarget,
+  isSkpExportFormat,
   saveFormatFrom,
   type ExportFormat as PanelExportFormat,
+  type SkpExportFormat,
 } from './io/savePanel'
-import { isSkpFormat, nameForFormat, normalizeDocFormat, saveFormatForPath, skpTarget } from './io/docFormat'
+import { isSkpFormat, nameForFormat, normalizeDocFormat, saveFormatForPath, skpTarget, takesCompat } from './io/docFormat'
 import {
   INITIAL_SESSION,
   deriveTitle,
@@ -101,6 +145,7 @@ import {
   afterImport,
   afterRecovery,
   type DocSessionState,
+  libraryItemTitle,
 } from './io/documentSession'
 import { nextRelativeTimeBoundary } from './io/relativeTime'
 import { makeRecoveryStore, shouldPromptRecovery, type RecoveryListing, type RecoverySnapshot, type RecoveryMeta } from './io/recoveryStore'
@@ -108,13 +153,13 @@ import { loadHewBytes, isPanicError, isSceneEmpty, seedHiddenKeysFromRegistry, s
 import { writeShellModeOverride } from './shop/shellMode'
 import { listRecents, recordRecent, type RecentEntry } from './io/recents'
 import { ImportReportDialog } from './panels/ImportReportDialog'
-import { SaveFormatDialog } from './panels/SaveFormatDialog'
+import { SaveFormatDialog, type SaveFormatAnswer } from './panels/SaveFormatDialog'
 import { SkpLossNotice, type SkpLossNoticeData } from './panels/SkpLossNotice'
-import { ImportingOverlay, type OpenProgress, ensureSpinnerKeyframes } from './panels/ImportingOverlay'
+import { BusyOverlay, ImportingOverlay, type OpenProgress, ensureSpinnerKeyframes } from './panels/ImportingOverlay'
 import { RecoveryDialog } from './panels/RecoveryDialog'
 import { WelcomeScreen, type SampleEntry } from './panels/WelcomeScreen'
 import { getShowWelcome, setShowWelcome } from './settings/welcomeScreen'
-import { getLengthUnit, setLengthUnit, homeFramingScale, subscribe as subscribeLengthUnit, type LengthFormat } from './settings/units'
+import { formatLength, getLengthUnit, setLengthUnit, homeFramingScale, subscribe as subscribeLengthUnit, type LengthFormat } from './settings/units'
 import { StlExportDialog } from './panels/StlExportDialog'
 import { StlUnitsDialog } from './panels/StlUnitsDialog'
 import { RescaleConfirmDialog } from './panels/RescaleConfirmDialog'
@@ -137,26 +182,47 @@ import type { TagReveal } from './panels/TagsPanel'
 import { LibraryDialog } from './panels/LibraryDialog'
 import { SaveToLibraryPopover } from './panels/SaveToLibraryPopover'
 import { libraryStore } from './io/libraryStore'
+import { useLibraryEditRegistration } from './library/editRegistration'
 import { buildItemGhost } from './library/ghostBuilder'
-import { readItemSummary, renderItemThumbnail, sha256Hex } from './library/itemFiles'
+import { readItemSummary, renderItemThumbnail, sha256Hex, withoutRemoteNote, withoutRemoteNoteIfAny } from './library/itemFiles'
 import { loadThumbnails as loadSceneThumbnails, saveThumbnails as saveSceneThumbnails } from './scenes/sceneThumbnails'
-import { buildLibraryItem } from './library/libraryModel'
+import {
+  buildLibraryItem,
+  builtInProfileItem,
+  metaForEditSave,
+  metaForLibrarySave,
+  metaForProfileReplace,
+} from './library/libraryModel'
+import { builtInFilletProfile, builtInItemBytes, bundledProfiles, chainFirstFix, chainItemBytes, profileShapeOfBytes, shapeProfile } from './library/profiles'
+import { selectionChain } from './library/profileSelection'
+import { useProfileSections } from './library/useProfileSections'
 import { itemFileName } from './library/fileNaming'
-import type { LibraryCategory, LibraryItem } from './library/types'
+import type { LibraryCategory, LibraryItem, LibraryItemMeta } from './library/types'
 import type { LibraryPlacement } from './tools/LibraryPlaceTool'
 import { parseInsertResult } from './tools/LibraryPlaceTool'
+import { childPopupOpen } from './settingsEscape'
+import { alreadyHereToast, clipboardDrawing, copiedToast, cutTargets, isCopyableDrawing, nothingToCopyToast, pastedDrawingRefs } from './clipboard/drawingClipboard'
 import { readImageInfo, pictureName, isPictureFileName } from './tools/imageInfo'
 import {
   getClipboard,
   hasClipboardContent,
   setClipboardBytes,
   refreshClipboardFromShell,
+  repointLinkSource,
+  type LinkSource,
 } from './clipboard/modelClipboard'
+import { resolveLinkSource, pasteLinked, planPaste } from './clipboard/linkedPaste'
+import { getCopiesLinked, subscribeCopiesLinked } from './settings/editing'
+import { routeBooleanMany } from './viewport/placementBoolean'
+import { CutScopeStrip } from './panels/CutScopeStrip'
+import { findLookAlikes, linkSimilar, linkSimilarMessage, linkSimilarScope, countLookAlikes, restrictToSelection } from './linkSimilar'
+import { useLookAlikeGroups } from './useLookAlikeGroups'
+import { blockedWhileEditing, promoteForSave, undoPromotionIfUnmoved, linkGates, linkedPlacementOf, wrapperPlacementOf, isLinkedSet, isWrapperPlacement, unlinkCopy, unlinkAllCopies, makeUniqueCopy, promoteToComponent, renameLinkedCopy } from './linkedCopies'
 import { SettingsWindow } from './settings/SettingsWindow'
 import { FluentSettingsPage } from './settings/FluentSettingsPage'
 import { getDebugMode, subscribe as subscribeDebugMode } from './settings/debugMode'
 import { getTrayLayout, setTrayLayout, subscribe as subscribeTrayLayout } from './settings/trayLayout'
-import { getMeasurementsPosition, subscribeMeasurementsPosition } from './settings/view'
+import { getMeasurementsPosition, subscribeMeasurementsPosition, getShowPartAxes, setShowPartAxes, subscribeShowPartAxes } from './settings/view'
 import { useViewSetting } from './settings/useViewSetting'
 import { getSceneTransitions, setSceneTransitions, subscribe as subscribeSceneTransitions } from './settings/sceneTransitions'
 import { useScenesController } from './scenes/useScenesController'
@@ -165,11 +231,53 @@ import type { SceneSource } from './print/printJob'
 import * as diagnosticLog from './log/diagnosticLog'
 import * as inputRecorder from './recording/inputRecorder'
 import { ReportBugDialog } from './panels/ReportBugDialog'
-import { TOOLS, toolLabel, type ToolName } from './tools/toolRegistry'
+import { SentReportsDialog } from './panels/SentReportsDialog'
+import { FollowNoticeBar, useFollowedReports } from './panels/FollowNoticeBar'
+import { LibraryUpdateBar } from './panels/LibraryUpdateBar'
+import { LibraryUpdateReview } from './panels/LibraryUpdateReview'
+import { useLibraryLinks } from './library/useLibraryLinks'
+import { defaultSourcesBinding } from './library/sourcesDeps'
+import {
+  canUpdateLibraryFrom,
+  needsLibraryConfirm,
+  libraryConfirmKind,
+  isItemRoot,
+  itemStates,
+  outcomeToast,
+  parseUpdateOutcome,
+  updateCount,
+  type LibraryLink,
+  type UpdateOutcome,
+} from './library/libraryUpdates'
+import { useCheckLibraryUpdates } from './settings/libraryUpdates'
+import { UpdateReadyBar } from './updater/UpdateReadyBar'
+import { getFollowHost, totalUnread } from './io/followHost'
+import { startWebLaunchCheck } from './io/webFollowHost'
+import { actionAllowed, behaviorEnabled, loaderEnabled, previewBuild } from './preview'
+import { loadPluginHost } from './preview/loaderRoots'
+import { PREVIEW_TAG } from './preview/copy'
+import { TOOLS, isToolAction, toolLabel, usableTool, type ToolName } from './tools/toolRegistry'
 
 /** Autosave tick interval (ms). Exported as a test seam (App.autosave.test.tsx
  *  drives fake timers by this exact value rather than hardcoding it). */
 export const AUTOSAVE_INTERVAL_MS = 12000
+
+/** Operands drawn with at least this many triangles get the busy card
+ *  before a boolean: a dense scan takes seconds to combine. */
+export const LARGE_BOOLEAN_TRIANGLES = 100_000
+/** The busy card's words for a boolean of kind `op` (0 Union, 1 Subtract, 2 Intersect). */
+function booleanBusyLabel(op: number): string {
+  switch (op) {
+    case 0:
+      return t`Combining…`
+    case 1:
+      return t`Subtracting…`
+    case 2:
+      return t`Intersecting…`
+    default:
+      return t`Working…`
+  }
+}
 /** Right-tray width: default/bounds (px) + localStorage persistence key.
  *  Default is sized so typical nested tag/outliner labels fit untruncated. */
 const TRAY_WIDTH_DEFAULT = 304
@@ -215,6 +323,17 @@ interface Toast {
    * `updateToast` schedules its own short auto-dismiss once a patch turns
    * this back to false. */
   sticky?: boolean
+  /** Guidance rather than a warning (`EDIT_CONTEXT_HINT_CODE`: "double-click
+   * it to edit the component"): drawn in the accent tint, larger, and kept
+   * up longer, so the way in is not missed at the bottom of the window. */
+  emphasis?: boolean
+  /** Buttons on the toast (the DegenerateInput toast offers Model Health; a
+   * locked hint offers Unlock and Make Unique). */
+  actions?: ToastAction[]
+  /** Stays up until the person dismisses it (a click). For an error they
+   * must be able to read, such as a failed import or open: the ordinary
+   * 4 s toast can vanish before a long reason is read. */
+  persistent?: boolean
 }
 
 let toastCounter = 0
@@ -228,6 +347,15 @@ const DRAW_TOOLS: ReadonlySet<string> = new Set(['Line', 'Rectangle', 'Circle', 
 /** Tool name → native menu item id, for the macOS menu's radio checks.
  * Exported for the native-menu parity test (`nativeMenuParity.test.ts`):
  * every id here must exist as a real item in the Tauri shell's menu. */
+/** Deform's four mode entries on the native menu, keyed by mode. They are
+ * radio items like the tools: only the running mode is checked. */
+export const DEFORM_MENU_IDS: Record<string, string> = {
+  'twist': 'tool-deform-twist',
+  'bend': 'tool-deform-bend',
+  'taper': 'tool-deform-taper',
+  'bend-to-path': 'tool-deform-bend-path',
+}
+
 export const TOOL_MENU_IDS: Record<string, string> = {
   Select: 'tool-select',
   Rectangle: 'draw-rectangle',
@@ -237,12 +365,23 @@ export const TOOL_MENU_IDS: Record<string, string> = {
   Line: 'draw-line',
   'Push/Pull': 'tool-pushpull',
   'Follow Me': 'tool-follow-me',
+  Revolve: 'tool-revolve',
+  Loft: 'tool-loft',
+  // Deform's menu item is its Twist entry; the four mode entries below it
+  // (Twist, Bend, Taper, Bend to Path) all open the one tool.
+  Deform: 'tool-deform-twist',
   Offset: 'tool-offset',
+  Fillet: 'tool-fillet',
+  'Array along Path': 'tool-path-array',
+  Shell: 'tool-shell',
+  Project: 'tool-project',
+  Eraser: 'tool-eraser',
   Paint: 'tool-paint',
   'Position Texture': 'tool-position-texture',
   Move: 'tool-move',
   Rotate: 'tool-rotate',
   Scale: 'tool-scale',
+  Flip: 'tool-flip',
   'Tape Measure': 'tool-tape-measure',
   Dimension: 'tool-dimension',
   Protractor: 'tool-protractor',
@@ -278,6 +417,8 @@ const OPEN_FILE_LABELS = {
 interface LoadedFile {
   name: string
   label: string
+  /** The file's path on the desktop, which `document_opened` reports. */
+  path?: string
 }
 
 /** Kernel memory this close to the 4 GiB a wasm32 kernel can address, when
@@ -334,6 +475,13 @@ function noteOpenFailure(what: string, err: unknown, file: { name: string; bytes
   }
 }
 /* oxlint-enable lingui/no-unlocalized-strings */
+
+/** True when a kernel call failed with an ordinary typed refusal: the kernel
+ *  is alive and the document untouched. A wasm trap or a captured panic means
+ *  the kernel is gone. */
+function isKernelRefusal(err: unknown): boolean {
+  return getPanicCapture() === null && !(err instanceof WebAssembly.RuntimeError)
+}
 
 /** Extract the filename from an absolute path (cross-platform / or \). */
 function basenameOf(path: string): string {
@@ -451,6 +599,29 @@ async function focusExistingWindowFor(path: string): Promise<boolean> {
   }
 }
 
+/** What to do about a drawing that cannot be a profile. */
+function profileRedrawHint(): string {
+  return t`Draw one open line or arc that runs from one side to the other without doubling back.`
+}
+
+/** The snap dot and tooltip chip. They re-render per pointer move; keeping
+ *  the subscription here keeps `App` itself out of that loop. */
+function InferenceOverlays({ store, detailFor }: {
+  store: InferenceStore
+  detailFor: (object: bigint | undefined, instance: bigint | undefined) => ReturnType<typeof hoverLine> | null
+}) {
+  const info = useInferenceInfo(store)
+  const object = info?.object
+  const instance = info?.instance
+  const detail = useMemo(() => detailFor(object, instance), [detailFor, object, instance])
+  return (
+    <>
+      <SnapDot info={info} />
+      <InferenceTooltip info={info} detail={detail} />
+    </>
+  )
+}
+
 export default function App() {
   const { t, i18n: activeI18n } = useLingui()
   /** Tray section titles: the heading text AND the key `toggleSection` uses
@@ -468,6 +639,16 @@ export default function App() {
   const [error, setError] = useState<string | null>(null)
   // oxlint-disable-next-line lingui/no-unlocalized-strings -- ToolName identifier
   const [toolName, setToolName] = useState<string>('Select')
+  /** The Fillet tool's sticky profile, for its measurement label. */
+  const filletSettings = useSyncExternalStore(subscribeFilletSettings, getFilletSettings, getFilletSettings)
+  // A tool's stage can rename its value (the Arc tool's "Bulge").
+  const toolStageLabel = useSyncExternalStore(subscribeToolStageLabel, getToolStageLabel, getToolStageLabel)
+  // A held grip names its own value ("Stop", "Position", "Radius").
+  const filletGripLabel = useSyncExternalStore(
+    subscribeFilletMeasurementLabel,
+    getFilletMeasurementLabelOverride,
+    getFilletMeasurementLabelOverride,
+  )
   /** Live stage-aware guidance from the active tool (Tool.statusHint);
    *  null = fall back to the palette's static tool description. */
   const [toolStageHint, setToolStageHint] = useState<string | null>(null)
@@ -479,7 +660,13 @@ export default function App() {
   /** Precision snapping (the Ctrl/⌘+Alt chord held) — modal state, so it
    * gets a status-bar chip rather than living only in the viewport. */
   const [precisionSnap, setPrecisionSnap] = useState(false)
-  const [snapKind, setSnapKind] = useState<string | null>(null)
+  /** Undo steps kept by the last undo-memory trim (historyTrim.ts), shown
+   * as a status-bar note for a while; null when there is no note. */
+  const [historyTrimKept, setHistoryTrimKept] = useState<number | null>(null)
+  const historyTrimTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  useEffect(() => () => {
+    if (historyTrimTimerRef.current !== null) clearTimeout(historyTrimTimerRef.current)
+  }, [])
   const [measurement, setMeasurement] = useState<string>('')
   /** True when `measurement` is a finished Tape Measure reading kept on
    *  screen for reference (tape-measure-rework part 1) rather than a live
@@ -487,13 +674,22 @@ export default function App() {
    *  this stays false for them. */
   const [measurementFrozen, setMeasurementFrozen] = useState(false)
   /** Live inference-cursor info for the tooltip chip. */
-  const [inferenceInfo, setInferenceInfo] = useState<InferenceInfo | null>(null)
+  const [inferenceStore] = useState(createInferenceStore)
+  const setInferenceInfo = inferenceStore.set
   const [toasts, setToasts] = useState<Toast[]>([])
   /** Per-object watertight map (bigint key) */
   const [watertightMap, setWatertightMap] = useState<Map<bigint, boolean>>(new Map())
   /** Tool driven from toolbar clicks */
   // oxlint-disable-next-line lingui/no-unlocalized-strings -- ToolName identifier
-  const [activeTool, setActiveTool] = useState<ToolName>('Select')
+  const [activeTool, setActiveToolState] = useState<ToolName>('Select')
+  /** Every write to `activeTool` goes through the Preview wall: a tool this
+   * build withholds becomes Select (src/preview), so no path (a library
+   * action, a stale id, a restored state) can arm it. */
+  const setActiveTool = useCallback((next: ToolName | ((prev: ToolName) => ToolName)) => {
+    setActiveToolState((prev) => usableTool(typeof next === 'function' ? next(prev) : next))
+  }, [])
+  /** Which Deform mode (Twist, Bend, Taper, Bend to Path) the next or the running Deform tool is in. */
+  const deformMode = useSyncExternalStore(subscribeDeformMode, getDeformMode)
   /** Bumped on every EXPLICIT camera-tool selection (menu/native
    * menu/keyboard) — see `activateTool` below. Forces Viewport to re-apply
    * the tool even when `name` is unchanged from `activeTool`'s current
@@ -507,11 +703,12 @@ export default function App() {
    * re-application of an explicit reselect, not to paper over any drift. */
   const [toolActivationSeq, setToolActivationSeq] = useState(0)
   /** The one entry point every camera-tool selection (Camera menu, native
-   * menu, keyboard shortcut, the ViewportHUD orbit button) should go
+   * menu, keyboard shortcut) should go
    * through — see `toolActivationSeq`'s doc comment. Scoped to the camera
-   * group: forcing every tool to re-apply on a same-name reselect would
-   * also reset in-progress non-camera gestures (e.g. a multi-click Line
-   * chain), which nothing here calls for. */
+   * group: forcing every tool to re-apply on a same-name reselect from a
+   * menu or the rail would also reset in-progress non-camera gestures (e.g.
+   * a multi-click Line chain). Only a tool's keyboard shortcut does that,
+   * on purpose (the keymap dispatcher's `run` below). */
   const activateTool = useCallback((name: ToolName) => {
     setActiveTool(name)
     if (CAMERA_HANDOFF_TOOL_NAMES.has(name)) setToolActivationSeq((s) => s + 1)
@@ -532,15 +729,31 @@ export default function App() {
 
   /** Sticky banner: true once a kernel panic / borrow-lock is detected */
   const [kernelPanicked, setKernelPanicked] = useState(false)
-  /** Selected nodes (ordered; index 0 = primary). */
-  const [selectedIds, setSelectedIds] = useState<NodeRef[]>([])
-  /** Selected construction guide, mutually exclusive with node
-   * selection. Deleted via the same Edit ▸ Delete / Delete-key path as nodes. */
-  const [selectedGuide, setSelectedGuide] = useState<bigint | null>(null)
-  /** Selected dimension/leader-text annotation, mutually exclusive with node
-   * and guide selection (docs/design/dimensions-text.md). Deleted via the
-   * same Edit ▸ Delete / Delete-key path. */
-  const [selectedAnnotation, setSelectedAnnotation] = useState<bigint | null>(null)
+  /** The selection: one ordered list in pick order (index 0 = primary)
+   * mixing nodes, construction guides and annotations in any count
+   * (`SelItem`). Everything else reads the per-kind views below. */
+  const [selection, setSelection] = useState<SelItem[]>([])
+  const {
+    /** Selected nodes, in pick order. */
+    nodes: selectedIds,
+    /** Selected construction guides, in pick order. */
+    guides: selectedGuides,
+    /** Selected dimension/leader-text annotations, in pick order
+     * (docs/design/dimensions-text.md). */
+    annotations: selectedAnnotations,
+  } = useSelectionViews(selection)
+  /** The guide or the annotation when it is the whole selection: what keeps
+   * its own Object Info panel and its own single-entity commands. */
+  const loneGuide = selection.length === 1 && selection[0].kind === 'guide' ? selection[0].id : null
+  const loneAnnotation = selection.length === 1 && selection[0].kind === 'annotation' ? selection[0].id : null
+  // The whole selection, readable inside stable callbacks.
+  const selectionRef = useRef(selection)
+  selectionRef.current = selection
+  // Live mirrors for the test harness (read at call time).
+  const selectedGuidesLive = useRef<bigint[]>([])
+  selectedGuidesLive.current = selectedGuides
+  const selectedAnnotationsLive = useRef<bigint[]>([])
+  selectedAnnotationsLive.current = selectedAnnotations
   /** Session-only hidden node set (keyed by nodeKey). Cleared on load/new. */
   const [hiddenKeys, setHiddenKeys] = useState<Set<string>>(new Set())
   /** Whether Paste/Paste In Place have something to work with — gates the
@@ -565,7 +778,7 @@ export default function App() {
    *  Empty = nothing pushed past the session stack (or top level, if no
    *  session is open either). A group NodeRef is never pushed here anymore
    *  — a group entry always opens a session instead (`sessionStack` below). */
-  const [activeContext, setActiveContext] = useState<NodeRef[]>([])
+  const [activeContext, setActiveContextState] = useState<NodeRef[]>([])
   /** The open kernel session stack, outermost first — mirrors the
    *  viewport's own belief (`ViewportApi.sessionStack`), pushed up via
    *  `onSessionChange` on open, close, and every undo/redo resync. Each
@@ -609,6 +822,9 @@ export default function App() {
   // so material #1 of document B collides with the cached handle of material
   // #1 of document A (audit q-web-robustness).
   const [docGeneration, setDocGeneration] = useState(0)
+  // The clipboard's link check reads the generation of the moment, not the closure's.
+  const docGenerationRef = useRef(0)
+  docGenerationRef.current = docGeneration
   /** Currently selected material id for the Paint tool. */
   const [currentMaterialId, setCurrentMaterialId] = useState<bigint>(MATERIAL_SENTINEL)
   // Picking a material makes it current AND activates the Paint tool, so the
@@ -659,18 +875,34 @@ export default function App() {
   /** The Make Solid wizard: null when closed, else where it was opened from
    *  (the last import, the selection with its object ids, or the whole model). */
   const [makeSolid, setMakeSolid] = useState<{ scope: WizardScope; objectIds: bigint[]; nonce: number } | null>(null)
+  /** Make Solid on a selection of sketches (wireframe faces §6): the second
+   *  input of Object ▸ Make Solid…; null when closed. */
+  const [makeSolidSketches, setMakeSolidSketches] = useState<{ sketchIds: bigint[]; nonce: number } | null>(null)
   /** The sides of the viewport the Model Health window covers (zeros while
    *  it is closed). */
   const [healthCover, setHealthCover] = useState({ left: 0, right: 0 })
   // Framing an isolated item fits it beside the wizard and the Model Health
   // window, not under them.
   useEffect(() => {
-    const wizard = makeSolid !== null ? fixWizardWidth : 0
+    const wizard = makeSolid !== null || makeSolidSketches !== null ? fixWizardWidth : 0
     viewportApi.current?.setFramingInset?.(Math.max(wizard, healthCover.right), healthCover.left)
-  }, [makeSolid, fixWizardWidth, healthCover])
+  }, [makeSolid, makeSolidSketches, fixWizardWidth, healthCover])
   const openMakeSolid = useCallback((scope: WizardScope, objectIds: bigint[] = []) => {
+    setMakeSolidSketches(null)
     setMakeSolid((prev) => ({ scope, objectIds, nonce: (prev?.nonce ?? 0) + 1 }))
   }, [])
+  const openMakeSolidSketches = useCallback((sketchIds: bigint[]) => {
+    setMakeSolid(null)
+    setMakeSolidSketches((prev) => ({ sketchIds, nonce: (prev?.nonce ?? 0) + 1 }))
+  }, [])
+  // The window is about the selection it opened on: a different one closes
+  // it (and with it the overlay it drew).
+  const sketchSelectionRef = useRef(selectedIds)
+  useEffect(() => {
+    if (sketchSelectionRef.current === selectedIds) return
+    sketchSelectionRef.current = selectedIds
+    setMakeSolidSketches(null)
+  }, [selectedIds])
   /** Bumped on every request to open Model Health, to bring its window
    * forward (the window takes focus). */
   const [healthFocusNonce, setHealthFocusNonce] = useState(0)
@@ -696,6 +928,9 @@ export default function App() {
   const toggleXray = useCallback(() => setRenderMode((m) => toggledRenderMode(m, 'xray')), [])
   const toggleWireframe = useCallback(() => setRenderMode((m) => toggledRenderMode(m, 'wireframe')), [])
   const [showGuides, setShowGuides] = useState(true)
+  /** View ▸ Tangent Edges: thin lines on fillet rails and other tangent
+   * joints. Default off; not captured by Scenes. */
+  const [tangentEdgesVisible, setTangentEdgesVisible] = useState(false)
   /** Camera ▸ Parallel Projection checkbox state (docs/design/camera.md §1)
    * — a RENDER CACHE of the rig's own truth, mirroring showAxes/showGrid's
    * pattern but populated from Viewport's `onProjectionChange` callback
@@ -715,6 +950,7 @@ export default function App() {
   })
   /** Settings modal visibility — web fallback only (Tauri opens a real OS window). */
   const [showSettingsModal, setShowSettingsModal] = useState(false)
+  const settingsDialogRef = useRef<HTMLDivElement | null>(null)
   // Windows desktop settings surface (Fluent in-app page; see openSettings).
   const [showFluentSettings, setShowFluentSettings] = useState(false)
   /** Command palette visibility (⌘/ / Ctrl+/). */
@@ -748,7 +984,7 @@ export default function App() {
   const [skpNotice, setSkpNotice] = useState<SkpLossNoticeData | null>(null)
   /** Save As format dialog: the format pre-selected, plus the resolver of
    * the promise `promptSaveFormat` hands the Save As flow; null = closed. */
-  const [saveFormatPrompt, setSaveFormatPrompt] = useState<{ initial: DocFormat } | null>(null)
+  const [saveFormatPrompt, setSaveFormatPrompt] = useState<{ initial: DocFormat; compat: boolean } | null>(null)
   /** True while import_dae is running (blocks main thread). */
   const [isImporting, setIsImporting] = useState(false)
   /** How far a `.skp` open has come (the overlay's bar); null while an
@@ -756,6 +992,40 @@ export default function App() {
   const [openProgress, setOpenProgress] = useState<OpenProgress | null>(null)
   /** Display name of the file being imported (shown in the overlay). */
   const [importingName, setImportingName] = useState('')
+  /** The busy card's line while a long edit runs (`runBusy`), else null. */
+  const [busyNote, setBusyNote] = useState<string | null>(null)
+  /** Show the busy card, let it paint, then run `work` — a long synchronous
+   *  edit holds the main thread, so the card must be on screen first. */
+  const busyRef = useRef(false)
+  const runBusy = useCallback((message: string, work: () => void): boolean => {
+    // One at a time, and no keys while the card paints: a second command or
+    // an Undo in those frames would run against objects the first consumes.
+    // A refused one is the caller's to tell (false).
+    if (busyRef.current) return false
+    busyRef.current = true
+    // Keys pressed while the work freezes the main thread queue up and
+    // fire once it returns, so the listener outlives the work and drops
+    // every key stamped before the work ended.
+    let endedAt = Infinity
+    const swallow = (ev: KeyboardEvent) => {
+      if (ev.timeStamp > endedAt) return
+      ev.preventDefault()
+      ev.stopImmediatePropagation()
+    }
+    window.addEventListener('keydown', swallow, true)
+    flushSync(() => setBusyNote(message))
+    void nextPaint().then(() => {
+      try {
+        work()
+      } finally {
+        endedAt = performance.now()
+        window.setTimeout(() => window.removeEventListener('keydown', swallow, true), 100)
+        busyRef.current = false
+        setBusyNote(null)
+      }
+    })
+    return true
+  }, [])
   /** STL units-chooser modal: the picked file's name, or null when closed. */
   const [pendingStlImport, setPendingStlImport] = useState<{ name: string } | null>(null)
   /** Tape Measure "resize the model?" confirmation (design tool-parity §3,
@@ -911,6 +1181,20 @@ export default function App() {
 
   // Stable ref to the Scene for undo/redo button state queries
   const sceneRef = useRef<Scene | null>(null)
+  /** The in-context entries, always current: `activeContext` above is the
+   *  render copy. Every change goes through `setActiveContext`, which keeps
+   *  this and the Scene's mirror (`Scene.set_ui_context`) in step in the
+   *  same synchronous call — so a bus-driven entry (`hew.view.enter`) whose
+   *  session opens and fallback push both land in one call stack reports
+   *  them in ONE `context_changed`, not a stack event now and a fallback
+   *  event a render later. */
+  const activeContextRef = useRef<NodeRef[]>([])
+  const setActiveContext = useCallback((next: NodeRef[] | ((prev: NodeRef[]) => NodeRef[])) => {
+    const value = typeof next === 'function' ? next(activeContextRef.current) : next
+    activeContextRef.current = value
+    setActiveContextState(value)
+    sceneRef.current?.set_ui_context(uiContextJson(value))
+  }, [])
   // Bytes of a fresh blank scene, captured once after kernel load, used for New.
   const blankBytesRef = useRef<Uint8Array | null>(null)
   // Stable file host instance.
@@ -940,8 +1224,12 @@ export default function App() {
   // The one-time `.skp` loss notice has been shown for the current document
   // (reset on every document load — Open / New — never on save).
   const skpNoticeShownRef = useRef(false)
+  // The document's file is revision 17 of the 2021-and-later container (or was
+  // last saved with "avoid features older SketchUp versions cannot open"): a
+  // save keeps to it. Set by an open and by Save As; false for anything else.
+  const skpCompatRef = useRef(false)
   // Resolver for the Save As format dialog's promise (see promptSaveFormat).
-  const saveFormatResolveRef = useRef<((format: DocFormat | null) => void) | null>(null)
+  const saveFormatResolveRef = useRef<((answer: SaveFormatAnswer | null) => void) | null>(null)
   // `.skp` source persistence for crash recovery: the source (100+ MB) is
   // written to the recovery store only when it changes, tracked by a
   // generation counter bumped wherever `Scene` replaces it (a load clears it,
@@ -965,6 +1253,73 @@ export default function App() {
   // trigger "the current save flow" without a forward reference.
   const saveDocumentRef = useRef<() => Promise<boolean>>(async () => false)
   const saveAsDocumentRef = useRef<() => Promise<boolean>>(async () => false)
+  // The Library item this window is editing in place, when it is (Library ▸
+  // Edit, or on the desktop any open of a file inside the Library folder):
+  // Save then writes the item through the Library, restamping its prints,
+  // instead of an ordinary file save. `ref` is the document's own file ref;
+  // a binding whose ref is no longer the current one (New, an import, Save
+  // As) is stale and ignored. Mirrored in state for the window title.
+  type LibraryEditBinding = { fileName: string; id: string; name: string; ref: FileRef }
+  const libraryEditRef = useRef<LibraryEditBinding | null>(null)
+  // `bindLibraryItemForPath`, defined below the open paths that call it.
+  const bindLibraryItemRef = useRef<(path: string, bytes: Uint8Array, ref: FileRef, announce: boolean) => Promise<void>>(async () => {})
+  // Counts document loads, so an answer that lands after another load is dropped.
+  const loadSeqRef = useRef(0)
+  const [libraryEdit, setLibraryEditState] = useState<LibraryEditBinding | null>(null)
+  // Desktop: tell the shell which item this window edits, so a source update skips it.
+  useLibraryEditRegistration(isTauri && libraryEdit !== null ? libraryEdit.fileName : null)
+  // Web: releases the Web Lock that keeps a second tab off the same item.
+  const libraryEditLockRef = useRef<(() => void) | null>(null)
+  // Web: this tab was opened by Library ▸ Edit (`?libraryEdit=`), so it must
+  // not offer another window's crash snapshot or the welcome screen over the item.
+  const libraryEditBootingRef = useRef(!isTauri && typeof location !== 'undefined' && new URLSearchParams(location.search).has('libraryEdit'))
+  // The item this window edits is gone from the Library: the question waiting
+  // on an answer (true = save it back as an item, false = leave it).
+  const [libraryItemGone, setLibraryItemGone] = useState<{ name: string; resolve: (saveBack: boolean) => void } | null>(null)
+  const libraryItemGoneName = libraryItemGone?.name ?? ''
+  const setLibraryEdit = useCallback((v: LibraryEditBinding | null) => {
+    libraryEditRef.current = v
+    setLibraryEditState(v)
+    if (v === null) {
+      libraryEditLockRef.current?.()
+      libraryEditLockRef.current = null
+    }
+  }, [])
+  // The item's name in the Library right now, re-read at the moment of use
+  // (it may have been renamed since this window opened); the name the
+  // window loaded when the Library cannot be read.
+  const currentLibraryItemName = useCallback(async (binding: LibraryEditBinding): Promise<string> => {
+    try {
+      const bytes = await libraryStore().read(binding.fileName)
+      const summary = await readItemSummary(bytes)
+      return buildLibraryItem({ fileName: binding.fileName, size: bytes.length, mtimeMs: 0 }, summary, '').displayName
+    } catch {
+      return binding.name
+    }
+  }, [])
+  // Keep the window title on that name: when the window is looked at again,
+  // and whenever the Library changes.
+  useEffect(() => {
+    if (libraryEdit === null) return
+    const binding = libraryEdit
+    let cancelled = false
+    const refresh = () => {
+      void currentLibraryItemName(binding).then((name) => {
+        if (cancelled || libraryEditRef.current !== binding || name === binding.name) return
+        setLibraryEdit({ ...binding, name })
+      })
+    }
+    refresh()
+    window.addEventListener('focus', refresh)
+    const unsubscribe = libraryStore().subscribe(refresh)
+    return () => {
+      cancelled = true
+      window.removeEventListener('focus', refresh)
+      unsubscribe()
+    }
+  }, [libraryEdit, currentLibraryItemName, setLibraryEdit])
+  // Save to Library's thumbnail pass is defined far below the save path.
+  const renderAndWriteThumbnailRef = useRef<(toastId: number, name: string, bytes: Uint8Array, updated?: boolean) => void>(() => {})
   // Stable recovery-store instance (autosave / crash recovery).
   const recoveryStoreRef = useRef(makeRecoveryStore())
   // pushUnionHidden is defined further down (it depends on `state`); reach it
@@ -1087,6 +1442,9 @@ export default function App() {
   // above). `useScenesController` reads the singleton directly for the tween
   // duration; this is only the menu/palette checkmark's own render cache.
   const measurementsPosition = useViewSetting(getMeasurementsPosition, subscribeMeasurementsPosition)
+  const copiesLinked = useViewSetting(getCopiesLinked, subscribeCopiesLinked)
+  /** View ▸ Part Axes: an app-wide setting kept in localStorage and synced across windows (settings/view.ts). */
+  const showPartAxes = useViewSetting(getShowPartAxes, subscribeShowPartAxes)
   const [sceneTransitionsOn, setSceneTransitionsOn] = useState(() => getSceneTransitions())
   useEffect(() => subscribeSceneTransitions(setSceneTransitionsOn), [])
 
@@ -1154,6 +1512,12 @@ export default function App() {
     const scene = sceneRef.current
     const session = docSessionRef.current
     if (scene === null || !session.dirty || !dirtySinceAutosaveRef.current) return
+    // A plugin command holds the document: snapshot it once the command
+    // has ended (or been cancelled), not halfway through.
+    if (scene.busy()) {
+      armAutosaveTick()
+      return
+    }
     // `Scene.save()` is transparent to an open explode session (it
     // serializes as-if-closed), so autosave needs no special-casing here.
     // Crash-recovered documents should reopen at the last view too —
@@ -1258,6 +1622,10 @@ export default function App() {
   // handoff has been consumed, or the dialog races the open and can appear
   // over, then replace, a document the user explicitly double-clicked.)
 
+  // The Library item this window is editing, while its binding is current.
+  const libraryEditingName = libraryEdit !== null && libraryEdit.ref === docSession.currentRef ? libraryEdit.name : undefined
+  const shownDocumentName = libraryEditingName !== undefined ? libraryItemTitle(libraryEditingName) : documentName(docSession)
+
   // Update document.title whenever session state changes. Under Tauri, also
   // push the title to the shell via `set_window_title` — the in-app MenuBar
   // no longer renders a title for the native case, so the title now lives
@@ -1266,14 +1634,18 @@ export default function App() {
   // the Window-menu entry for this window tracks its document name and
   // dirty mark live.
   useEffect(() => {
-    const title = deriveTitle(docSession)
+    const title = deriveTitle(docSession, libraryEditingName)
     document.title = title
     if (isTauri) {
+      // A preview build says so in the native window title too (English, like
+      // the rest of the Preview surfaces): the one cue a native title bar can
+      // carry. The web tab keeps the plain title; its menu bar has the mark.
+      const windowTitle = previewBuild ? `${title} · ${PREVIEW_TAG}` : title
       import('@tauri-apps/api/core').then(({ invoke }) => {
-        invoke('set_window_title', { title }).catch(() => { /* ignore */ })
+        invoke('set_window_title', { title: windowTitle }).catch(() => { /* ignore */ })
       }).catch(() => { /* ignore */ })
     }
-  }, [docSession, activeI18n.locale])
+  }, [docSession, libraryEditingName, activeI18n.locale])
   // Tell the shell which file this window has open (`DocumentPaths` in
   // main.rs) so opening the same path again focuses this window instead of
   // minting a second one. A Tauri FileRef handle is the absolute path; a
@@ -1309,6 +1681,30 @@ export default function App() {
     }).catch(() => { /* ignore */ })
   }, [docSession.dirty])
 
+  // Tell the shell this document's persistent id (`document_id`, minted
+  // by the first save) — the live API's `hew.meta.documents`
+  // `document_id`. A save awaits it once the file has landed, before the
+  // save reports success, so a client that saves and then lists documents
+  // sees the id; it is also re-read after every session change (open,
+  // New, close) and right after a copy or a phone share mints one. Only a
+  // change is reported.
+  const lastReportedDocumentIdRef = useRef<string | null | undefined>(undefined)
+  const reportDocumentId = useCallback(async (): Promise<void> => {
+    if (!isTauri) return
+    const scene = sceneRef.current
+    if (scene === null) return
+    const id = scene.document_id() ?? null
+    if (lastReportedDocumentIdRef.current === id) return
+    lastReportedDocumentIdRef.current = id
+    try {
+      const { invoke } = await import('@tauri-apps/api/core')
+      await invoke('set_document_id', { id })
+    } catch { /* older shell — ignore */ }
+  }, [])
+  useEffect(() => {
+    void reportDocumentId()
+  }, [docSession, reportDocumentId])
+
   // Warn before unload when there are unsaved changes. (The "also clear
   // the recovery snapshot on a CLEAN unload" half of this lives further
   // down, right after `clearRecoverySnapshot` is defined — referencing it
@@ -1326,7 +1722,7 @@ export default function App() {
     return () => window.removeEventListener('beforeunload', handler)
   }, [docSession.dirty])
 
-  const handleStatusChange = useCallback((name: string, kind: string | null) => {
+  const handleStatusChange = useCallback((name: string) => {
     // LibraryPlaceTool (viewport-level one-shot, armed imperatively via
     // armLibraryPlacement rather than the rail's switchToolRef path) reports
     // its real internal name here on every pointer move — 'LibraryPlace' is
@@ -1336,7 +1732,6 @@ export default function App() {
     // rail's own `activeTool` state, which armLibraryPlacement never changes.
     // oxlint-disable-next-line lingui/no-unlocalized-strings -- ToolName identifiers
     setToolName(name === 'LibraryPlace' || name === 'PlaceImage' ? 'Select' : name)
-    setSnapKind(kind)
   }, [])
 
   const handleMeasurement = useCallback((text: string, frozen = false) => {
@@ -1348,18 +1743,45 @@ export default function App() {
     setInferenceInfo(info)
   }, [])
 
-  const handleSceneChange = useCallback((wtMap: Map<bigint, boolean>) => {
+  // Objects already told their Smooth surface is off (once per object).
+  const smoothDenseWarnedRef = useRef(new Set<bigint>())
+
+  const handleSceneChange = useCallback((wtMap: Map<bigint, boolean>, touchedObjectIds?: readonly bigint[]) => {
     setWatertightMap(new Map(wtMap))
+    // A committed edit that names the objects it touched: say so once if one
+    // of them is smoothed and its surface can no longer be drawn. Only the
+    // touched objects are read, never the whole document.
+    const scene = sceneRef.current
+    if (scene !== null) {
+      // On a dense model the kernel may have let the oldest undo steps go
+      // to stay under its memory budget: say so once in the status bar.
+      const kept = takeHistoryTrim(scene)
+      if (kept !== null) {
+        setHistoryTrimKept(kept)
+        if (historyTrimTimerRef.current !== null) clearTimeout(historyTrimTimerRef.current)
+        historyTrimTimerRef.current = setTimeout(() => {
+          historyTrimTimerRef.current = null
+          setHistoryTrimKept(null)
+        }, HISTORY_TRIM_NOTE_MS)
+      }
+      // A commit names the objects it touched; a refresh that names none
+      // (an undo, a boolean) checks every smoothed object instead, a short
+      // list the kernel keeps.
+      const complete = touchedObjectIds === undefined
+      const ids = touchedObjectIds ?? Array.from(scene.smoothed_object_ids())
+      if (ids.length > 0 || complete) {
+        for (const t of smoothDenseToasts(scene, ids, smoothDenseWarnedRef.current, complete)) {
+          handleToastRef.current(t.message, t.code)
+        }
+      }
+    }
   }, [])
 
   const handleSelect = useCallback((node: NodeRef | null, mode: SelectMode) => {
     // Every route to a selection starts without a hit leaf; the viewport
     // click and the crumb click set it again right after this returns.
     setPathHit(null)
-    // Node, guide, and annotation selection are mutually exclusive.
-    setSelectedGuide(null)
-    setSelectedAnnotation(null)
-    setSelectedIds((cur) => nextSelection(cur, node, mode))
+    setSelection((cur) => nextSelection<SelItem>(cur, node, mode))
   }, [])
 
   /** The viewport's own Select click: the plain selection change, plus the
@@ -1377,14 +1799,12 @@ export default function App() {
       snap !== null && snap.object !== undefined ? { object: snap.object, instance: snap.instance } : null
   }, [])
 
-  /** Lift a multi-node selection (marquee, Select All, Invert Selection)
-   * from the viewport. `mode` is the Select tool's modifier matrix
-   * (`selectModeFor`): replace / toggle / add / subtract — see
-   * `mergeSelection`. */
-  const handleSelectMany = useCallback((nodes: NodeRef[], mode: SelectMode) => {
-    setSelectedGuide(null)
-    setSelectedAnnotation(null)
-    setSelectedIds((cur) => mergeSelection(cur, nodes, mode))
+  /** Lift a multi-entry selection (marquee, Select All, Invert Selection,
+   * a bus `hew.selection.set`) from the viewport. `mode` is the Select
+   * tool's modifier matrix (`selectModeFor`): replace / toggle / add /
+   * subtract — see `mergeSelection`. */
+  const handleSelectMany = useCallback((items: SelItem[], mode: SelectMode) => {
+    setSelection((cur) => mergeSelection(cur, items, mode))
   }, [])
 
   /** The Outliner's row click: its modifier reading is a list's (Shift or
@@ -1396,11 +1816,9 @@ export default function App() {
   )
 
   /** Edit ▸ Select None (⇧⌘A / Ctrl+Shift+A): clear every kind of selection
-   * — nodes, guide, annotation — without touching the editing context. */
+   * — nodes, guides, annotations — without touching the editing context. */
   const handleSelectNone = useCallback(() => {
-    setSelectedGuide(null)
-    setSelectedAnnotation(null)
-    setSelectedIds([])
+    setSelection([])
   }, [])
 
   /** Replace the selection outright (Object Info's "(N instances)" click). */
@@ -1421,6 +1839,13 @@ export default function App() {
     setShowModelHealth(true)
     setHealthFocusNonce((n) => n + 1)
   }, [])
+
+  // The DegenerateInput toast (below) reaches Model Health through this ref.
+  const openModelHealthRef = useRef(openModelHealth)
+  // Buttons for a locked hint's toast (assigned each render, beside the
+  // handlers it calls; handleToast below reads it).
+  const lockToastActionsRef = useRef<(code: string | undefined) => ToastAction[] | undefined>(() => undefined)
+  openModelHealthRef.current = openModelHealth
 
   // The viewport draws ONE health overlay. The Model Health panel and the
   // Make Solid wizard both ask for one; while the wizard has something
@@ -1472,6 +1897,14 @@ export default function App() {
     },
     [syncKernelHidden, handleWizardOverlay],
   )
+  /** The viewport's isolation targets changed: mirror them into the Scene,
+   *  where the bus's `hew.view.hidden` reads them. */
+  const handleIsolationTargetsChange = useCallback((targets: IsolationTarget[] | null) => {
+    const scene = sceneRef.current
+    if (scene === null) return
+    scene.set_ui_isolation(uiIsolationJson(targets))
+    pumpEvents(scene)
+  }, [])
   const handleIsolate = useCallback(
     (targets: IsolationTarget[], opts?: { frame?: boolean }) => {
       panelOwnsIsolationRef.current = false
@@ -1480,6 +1913,8 @@ export default function App() {
     },
     [syncKernelHidden],
   )
+  const handleIsolateRef = useRef(handleIsolate)
+  handleIsolateRef.current = handleIsolate
   /** Model Health isolates its own row: the wizard's overlay and selection
    *  give way, and the panel's overlay draws. */
   const handlePanelIsolate = useCallback(
@@ -1527,19 +1962,32 @@ export default function App() {
     [openModelHealth],
   )
 
-  /** Lift a guide pick from the viewport; clears node/annotation selection. */
-  const handleSelectGuide = useCallback((id: bigint | null) => {
-    setSelectedGuide(id)
-    setSelectedAnnotation(null)
-    if (id !== null) setSelectedIds([])
+  /** Lift a guide pick from the viewport, combined with the selection as
+   * `mode` says (a plain click replaces it). `null` deselects every guide
+   * and keeps the rest. */
+  const handleSelectGuide = useCallback((id: bigint | null, mode: SelectMode = 'replace') => {
+    setSelection((cur) => {
+      if (id !== null) return nextSelection<SelItem>(cur, { kind: 'guide', id }, mode)
+      const kept = cur.filter((s) => s.kind !== 'guide')
+      return kept.length === cur.length ? cur : kept
+    })
   }, [])
 
-  /** Lift an annotation pick from the viewport; clears node/guide selection. */
-  const handleSelectAnnotation = useCallback((id: bigint | null) => {
-    setSelectedAnnotation(id)
-    setSelectedGuide(null)
-    if (id !== null) setSelectedIds([])
+  /** Lift an annotation pick from the viewport, as `handleSelectGuide` does
+   * for a guide (docs/design/dimensions-text.md). */
+  const handleSelectAnnotation = useCallback((id: bigint | null, mode: SelectMode = 'replace') => {
+    setSelection((cur) => {
+      if (id !== null) return nextSelection<SelItem>(cur, { kind: 'annotation', id }, mode)
+      const kept = cur.filter((s) => s.kind !== 'annotation')
+      return kept.length === cur.length ? cur : kept
+    })
   }, [])
+  // The live bridge (installed once) reaches the selection handlers through
+  // refs, like the Outliner eye's `handleToggleHiddenRef`.
+  const handleSelectManyRef = useRef(handleSelectMany)
+  handleSelectManyRef.current = handleSelectMany
+  const handleSelectNoneRef = useRef(handleSelectNone)
+  handleSelectNoneRef.current = handleSelectNone
 
   /** The in-viewport annotation text editor's pending target — either an
    * existing annotation being edited (`id` set, double-click) or a
@@ -1586,7 +2034,7 @@ export default function App() {
    *  buried behind session frames that aren't open yet. */
   const handleEnterContext = useCallback((node: NodeRef) => {
     setActiveContext((prev) => [...prev, node])
-    setSelectedIds([node])
+    setSelection([node])
   }, [])
 
   const handleExitContext = useCallback(() => {
@@ -1595,7 +2043,7 @@ export default function App() {
     // that poses it. Never carry that scoped handle back to the parent level,
     // where Delete/transform commands would otherwise retain a route to
     // geometry that is no longer visibly selected.
-    setSelectedIds([])
+    setSelection([])
   }, [])
 
   /** Clear the whole OBJECT-context path (never the session stack) — the
@@ -1606,7 +2054,7 @@ export default function App() {
    *  wins). */
   const handleExitAllContexts = useCallback(() => {
     setActiveContext([])
-    setSelectedIds([])
+    setSelection([])
   }, [])
 
   /**
@@ -1629,12 +2077,12 @@ export default function App() {
    *  as ordinary call-time state, INSTEAD of diffing inside a
    *  `setSessionStack` updater. An updater runs at React's reconciliation
    *  time, not synchronously when `handleSessionChange` is called — so a
-   *  `setSelectedIds([])` written inside one used to land on a LATER render
-   *  pass, after `enterNode`'s own trailing `setSelectedIds([target])` (a
+   *  `setSelection([])` written inside one used to land on a LATER render
+   *  pass, after `enterNode`'s own trailing `setSelection([target])` (a
    *  plain call-time setState in the same synchronous call stack) had
    *  already resolved, silently clobbering it. Doing the diff and every
    *  clear here at call time, before `setSessionStack` even runs, restores
-   *  ordinary call-order semantics: whichever `setSelectedIds` call happens
+   *  ordinary call-order semantics: whichever `setSelection` call happens
    *  LAST in the synchronous stack wins, so `enterNode`'s final selection
    *  sticks. */
   const prevSessionStackRef = useRef<{ node: NodeRef; label: string }[]>([])
@@ -1646,11 +2094,7 @@ export default function App() {
       const innermostChanged = prevInnermost === null || nextInnermost === null
         ? prevInnermost !== nextInnermost
         : !nodeEq(prevInnermost, nextInnermost)
-      if (innermostChanged) {
-        setSelectedIds([])
-        setSelectedGuide(null)
-        setSelectedAnnotation(null)
-      }
+      if (innermostChanged) setSelection([])
       // Tape Measure scoped-rescale invalidation (finding 5,
       // group-session.md): the confirmation dialog captured a specific
       // innermost frame at arm time. Undo/redo (Ctrl/Cmd+Z and the native
@@ -1691,10 +2135,12 @@ export default function App() {
    * non-contiguous breadcrumbs like "Model → Object 1" for a nested object
    * with no Group shown.
    */
-  const enterNode = useCallback((target: NodeRef) => {
+  const enterNode = useCallback((target: NodeRef, opts?: { keepFallback?: boolean }): EnterOutcome => {
     const scene = sceneRef.current
     const api = viewportApi.current
-    if (scene === null || api === null) return
+    if (scene === null || api === null) {
+      return { refused: { name: 'enter_refused', detail: { code: 'window_not_ready' } } }
+    }
     // An armed gesture owns this click, same as Escape's own refusal
     // posture (finding 3, adversarial review): re-homing session state out
     // from under a mid-flight Move/Rotate/PushPull/draw gesture would either
@@ -1702,11 +2148,27 @@ export default function App() {
     // silently retarget the gesture's eventual commit via the shallower
     // EditContext this would push. Silently ignore, no toast — exactly what
     // Escape does when `toolHasArmedGesture` is true.
-    if (api.hasArmedGesture()) return
+    if (api.hasArmedGesture()) return { refused: { name: 'gesture_in_progress' } }
     if (isSketchScopedKind(target.kind)) {
       // No kernel NodeId / container chain — select-only, same as today.
-      setSelectedIds([target])
-      return
+      setSelection([target])
+      return { ok: true }
+    }
+    // A locked thing (or a shape also used inside a locked group) is not
+    // opened for editing, from the Outliner and the path strip as from the
+    // viewport: say so, with Unlock (OW-1). Nothing is half-entered.
+    const locked = lockHintFor(scene, target, { shape: true })
+    if (locked !== null) {
+      handleToastRef.current(locked.message, locked.code)
+      // `indirect` is set only when the lock is on a group that holds a shape
+      // this node shares; the explanation then says to make it unique. A lock
+      // on the node itself or a group above it is not indirect.
+      return {
+        refused: {
+          name: 'locked_node',
+          ...(parseLockedHintCode(locked.code)?.indirect === true ? { detail: { indirect: true } } : {}),
+        },
+      }
     }
 
     // Build the root→leaf container chain by walking node_parent upward,
@@ -1754,14 +2216,26 @@ export default function App() {
       nodeEq(openStack[common], framesChain[common])
     ) common++
 
-    setActiveContext([])
+    // A later step of a bus path keeps the fallback entries the earlier
+    // steps pushed: the path's instances that could not take a session stay
+    // in the chain, so the window ends inside the leaf with them beneath it.
+    // Only when the frames above them stay open, though; closing a session
+    // drops the context tail that sat inside it.
+    if (opts?.keepFallback !== true || openStack.length > common) setActiveContext([])
     for (let i = openStack.length; i > common; i--) {
       api.runCloseInnermostSession()
+    }
+    // A frame the window declines does not stop the walk (a person sees the
+    // same toasts and the same selection as ever); the first refusal is
+    // what a bus caller is told.
+    const refusals: EnterRefusal[] = []
+    const note = (outcome: EnterOutcome | undefined): void => {
+      if (outcome !== undefined && 'refused' in outcome) refusals.push(outcome.refused)
     }
     for (let i = common; i < framesChain.length; i++) {
       const frame = framesChain[i]
       if (frame.kind === 'group') {
-        api.runOpenGroupSession(frame.id)
+        note(api.runOpenGroupSession(frame.id))
       } else if (frame.kind === 'instance') {
         // Fallback-aware: silently pushes the instance as a K1/K2 context
         // via the SAME `onEnterContext` callback wiring the viewport's own
@@ -1769,15 +2243,56 @@ export default function App() {
         // session for this instance" — identical behavior reaching a
         // component frame through the Outliner/dock instead of a direct
         // viewport double-click.
-        api.runOpenExplodeSessionOrFallback(frame.id, frame)
+        note(api.runOpenExplodeSessionOrFallback(frame.id, frame))
       }
     }
     if (objectLeaf !== null) {
       setActiveContext((prev) => [...prev, objectLeaf])
     }
-    setSelectedIds([target])
+    setSelection([target])
+    return refusals.length === 0 ? { ok: true } : { refused: refusals[0] }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  /** Where the window stands (open session frames, in-context entries,
+   *  selection, history depth), and a function that puts it back: the bus's
+   *  `hew.view.enter` takes one before its steps and calls it when a step is
+   *  declined, so a refused entry leaves nothing behind. Opening or closing
+   *  a session is a history step, so the steps the walk took are taken back
+   *  with the app's own Undo (which also puts the frames back the way an
+   *  ordinary Undo does); whatever that leaves different (frames, context,
+   *  selection) is then set explicitly. */
+  const snapshotEntry = useCallback((): (() => boolean) => {
+    const scene = sceneRef.current
+    const undoBefore = scene?.undo_depth() ?? 0
+    const stack = viewportApi.current?.sessionStack() ?? []
+    const context = [...activeContextRef.current]
+    const selection = [...selectionRef.current]
+    return () => {
+      const api = viewportApi.current
+      if (api === null) return false
+      for (let added = (scene?.undo_depth() ?? 0) - undoBefore; added > 0 && scene?.can_scene_undo() === true; added--) {
+        api.runUndo()
+      }
+      const now = api.sessionStack()
+      let common = 0
+      while (common < now.length && common < stack.length && nodeEq(now[common], stack[common])) common++
+      for (let i = now.length; i > common; i--) api.runCloseInnermostSession()
+      for (let i = common; i < stack.length; i++) {
+        const frame = stack[i]
+        if (frame.kind === 'group') api.runOpenGroupSession(frame.id)
+        else if (frame.kind === 'instance') api.runOpenExplodeSession(frame.id)
+      }
+      setActiveContext(context)
+      setSelection(selection)
+      // Whether the frames are where they were; a later step may still differ.
+      const after = api.sessionStack()
+      return after.length === stack.length && after.every((f, i) => nodeEq(f, stack[i]))
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+  const snapshotEntryRef = useRef(snapshotEntry)
+  snapshotEntryRef.current = snapshotEntry
 
   /** Breadcrumb crumb click at combined depth `depth` (0 = outermost
    *  session frame … sessionStack.length + activeContext.length - 1 = the
@@ -1794,16 +2309,25 @@ export default function App() {
     // mid-gesture could re-home geometry the gesture still holds stale
     // handles into. Silently ignore, no toast.
     if (api?.hasArmedGesture()) return
-    const stackLen = sessionStack.length
+    // The synchronous ref, not the render copy: bus frames can land before
+    // the render that follows a session change.
+    const stackLen = prevSessionStackRef.current.length
     if (depth < stackLen) {
       setActiveContext([])
-      setSelectedIds([])
+      setSelection([])
       for (let i = stackLen; i > depth; i--) api?.runCloseInnermostSession()
     } else {
       setActiveContext((prev) => prev.slice(0, depth - stackLen))
-      setSelectedIds([])
+      setSelection([])
     }
-  }, [sessionStack])
+  }, [])
+
+  // The live bridge (installed once) reaches the entry convergence and the
+  // breadcrumb truncation through refs, like the selection handlers.
+  const enterNodeRef = useRef(enterNode)
+  enterNodeRef.current = enterNode
+  const setPathDepthRef = useRef(handleSetPathDepth)
+  setPathDepthRef.current = handleSetPathDepth
 
   /** The root "Model" breadcrumb crumb: exit everything — every open
    *  session frame, innermost-first, plus the object-context tail. */
@@ -1813,9 +2337,9 @@ export default function App() {
     // (finding 3) — the Model crumb is a close path too.
     if (api?.hasArmedGesture()) return
     setActiveContext([])
-    setSelectedIds([])
-    for (let i = sessionStack.length; i > 0; i--) api?.runCloseInnermostSession()
-  }, [sessionStack])
+    setSelection([])
+    for (let i = prevSessionStackRef.current.length; i > 0; i--) api?.runCloseInnermostSession()
+  }, [])
 
   // ---------------------------------------------------------------- scenes
   // The Scenes controller (docs/design/scenes.md §5): entries, active Scene,
@@ -1839,6 +2363,9 @@ export default function App() {
     // so this is a non-undoable-dirty reason, not a plain `afterMutation`.
     setDocSession((s) => markNonUndoableDirty(s, NON_UNDOABLE_REASON.scenesEdited, Date.now()))
     armAutosaveTick()
+    // A Scene edit records no history entry; `scenes_changed` is how a
+    // subscriber hears of it.
+    if (sceneRef.current !== null) pumpEvents(sceneRef.current)
   }, [armAutosaveTick])
   const scenesToast = useCallback((message: string) => handleToastRef.current?.(message), [])
   // A Scene's view style lands in the viewport the way a loaded
@@ -1851,6 +2378,8 @@ export default function App() {
     scene: state?.scene ?? null,
     viewportApi,
     docRev,
+    hiddenKeys,
+    hiddenTagPaths,
     display: scenesDisplay,
     setDisplay: scenesSetDisplay,
     setViewStyle: scenesSetViewStyle,
@@ -1899,6 +2428,28 @@ export default function App() {
   }, [])
 
   // Bump the tree's revision; trim stale context path entries; mark dirty.
+  /** Drop dead or hidden entries from the selection (see
+   *  pruneDeadSelection). Runs after every document change, and after a tag
+   *  is hidden: a guide or annotation on it can no longer be selected. */
+  const pruneSelection = useCallback(() => {
+    setSelection((sel) => {
+      const scene = sceneRef.current
+      if (scene === null) return sel
+      const deepest = activeContext.length > 0
+        ? activeContext[activeContext.length - 1]
+        : undefined
+      if (deepest?.kind !== 'instance') return pruneDeadSelection(scene, sel)
+      const component = scene.instance_def(deepest.id)
+      if (component === undefined) return pruneDeadSelection(scene, sel)
+      return pruneDeadSelection(
+        scene,
+        sel,
+        Array.from(scene.component_member_objects(component)),
+        Array.from(scene.component_member_sketches(component)),
+      )
+    })
+  }, [activeContext])
+
   // Every scene mutation flows through here via Viewport's handleSceneRefresh.
   // (The first-sketch auto-zoom that used to fire here was removed by
   // maintainer decision: the welcome screen's unit choice already sets a
@@ -1918,22 +2469,7 @@ export default function App() {
     // consuming operands, extrusions consuming sketches — so they all
     // reconcile at this one choke point. pruneDeadSelection returns the
     // same array when nothing died, so this setState is a no-op then.
-    setSelectedIds((sel) => {
-      const scene = sceneRef.current
-      if (scene === null) return sel
-      const deepest = activeContext.length > 0
-        ? activeContext[activeContext.length - 1]
-        : undefined
-      if (deepest?.kind !== 'instance') return pruneDeadSelection(scene, sel)
-      const component = scene.instance_def(deepest.id)
-      if (component === undefined) return pruneDeadSelection(scene, sel)
-      return pruneDeadSelection(
-        scene,
-        sel,
-        Array.from(scene.component_member_objects(component)),
-        Array.from(scene.component_member_sketches(component)),
-      )
-    })
+    pruneSelection()
     // Recompute dirty on any mutation — but NOT during programmatic loads
     // (suppressDirtyRef is true while applyLoadedBytes calls notifyLoaded).
     // `atSavedMark` is the kernel's own answer (Lane C): this is the single
@@ -1946,7 +2482,10 @@ export default function App() {
       setDocSession((s) => afterMutation(s, Date.now(), atSavedMark))
       armAutosaveTick()
     }
-  }, [activeContext, trimContextPath, armAutosaveTick])
+    // Every commit, undo, and redo reconciles here: subscribers hear of it
+    // (docs/agents/HEW_API.md §4.5).
+    if (sceneRef.current !== null) pumpEvents(sceneRef.current)
+  }, [activeContext, trimContextPath, armAutosaveTick, pruneSelection])
 
   /** Re-tessellate + re-render after a kernel mutation committed OUTSIDE a
    *  tool — a tray panel calling a `Scene` method directly (material/
@@ -2018,14 +2557,69 @@ export default function App() {
   // same way selectedIdsRef is.
   const hiddenKeysRef = useRef(hiddenKeys)
   hiddenKeysRef.current = hiddenKeys
+  // The hidden tag paths, read the same way. Both refs are also written the
+  // moment the hidden state is re-read from the document
+  // (`reseedHiddenStateFromScene`), so a reconcile in the same tick — a bus
+  // hide's re-seed then reconcile — works from the fresh sets, never the
+  // last render's.
+  const hiddenTagPathsRef = useRef(hiddenTagPaths)
+  hiddenTagPathsRef.current = hiddenTagPaths
   const handleToggleHiddenRef = useRef<(node: NodeRef) => void>(() => {})
   // applyLoadedBytes is defined further down (it depends on later state setters);
   // the harness installs once on mount, so reach it through a ref (kept current
   // below, beside that definition) like reconcileRef.
   const applyLoadedBytesRef = useRef<((bytes: Uint8Array, file?: LoadedFile) => boolean) | null>(null)
+  // The desktop half of `--live` (docs/agents/HEW_API.md §11.2) and the test
+  // harness's `apiDispatch` apply a dispatch through the same deps.
+  const liveOpRef = useRef<LiveOpRunner | null>(null)
+  // `pushCameraStateToScene` is defined further up the component; the
+  // bridge (installed once) reaches it through this ref.
+  const pushCameraStateRef = useRef<(scene: Scene) => void>(() => {})
+  const liveBridgeDepsRef = useRef<LiveBridgeDeps | null>(null)
+  liveBridgeDepsRef.current ??= {
+    pushCameraState: (scene) => pushCameraStateRef.current(scene),
+    runOp: (op, args) =>
+      liveOpRef.current !== null
+        ? liveOpRef.current(op, args)
+        // oxlint-disable-next-line lingui/no-unlocalized-strings -- live-API refusal text, English (developer surface)
+        : Promise.resolve({ ok: false, refusal: 'window_not_ready', message: 'the window is still starting' }),
+    getScene: () => sceneRef.current,
+    getViewportApi: () => viewportApi.current,
+    reconcile: () => reconcileRef.current(),
+    // A live `hew.scenes.apply` drives the SAME activation path the Scenes
+    // tray uses (docs/design/scenes.md §7): the kernel state is already
+    // written by the time the directive arrives; this syncs panels, the
+    // renderer, and the camera exactly as a row click would.
+    activateScene: (sid) => scenesRef.current.activate(sid),
+    reconcileVisibility: () => reconcileVisibilityRef.current(),
+    // A live `hew.library.insert` of a material item: dirty for the same
+    // reason as the Library's own "Add to palette".
+    markLibraryMaterialsDirty: () => {
+      setDocSession((s) => markNonUndoableDirty(s, NON_UNDOABLE_REASON.libraryMaterials, Date.now()))
+      armAutosaveTick()
+    },
+    reseedViewState: () => {
+      const scene = sceneRef.current
+      if (scene !== null) reseedHiddenStateRef.current(scene)
+    },
+    // A bus `hew.selection.set`/`clear`: the merged selection, applied
+    // through the app's own selection handlers.
+    selectMany: (nodes, mode) => handleSelectManyRef.current(nodes, mode),
+    selectNone: () => handleSelectNoneRef.current(),
+    // A bus isolation is nobody's panel's: Model Health closing must not
+    // end it (`handleIsolate` hands ownership back to the app).
+    isolate: (targets, opts) => handleIsolateRef.current(targets, opts),
+    // A bus `hew.view.enter`/`exit`/`exit_all` drives the Outliner's own
+    // entry convergence and the breadcrumb's own truncation.
+    enterNode: (node, opts) => enterNodeRef.current(node, opts),
+    snapshotEntry: () => snapshotEntryRef.current(),
+    setPathDepth: (depth) => setPathDepthRef.current(depth),
+    contextDepth: () => prevSessionStackRef.current.length + activeContextRef.current.length,
+  }
   useEffect(() => {
     if (!(import.meta.env.DEV || import.meta.env.VITE_HEW_TEST === '1')) return
     return installTestHarness({
+      liveBridge: liveBridgeDepsRef.current ?? undefined,
       getScene: () => sceneRef.current,
       getViewportApi: () => viewportApi.current,
       isolate: (targets) => {
@@ -2037,13 +2631,11 @@ export default function App() {
       clearIsolation: () => handleClearIsolation(),
       reconcile: () => reconcileRef.current(),
       getSelection: () => selectedIdsRef.current,
+      getSelectedGuides: () => selectedGuidesLive.current,
+      getSelectedAnnotations: () => selectedAnnotationsLive.current,
       setSelectedObjects: (ids) =>
-        setSelectedIds(ids.map((id) => ({ kind: 'object' as const, id }))),
-      setSelection: (nodes) => {
-        setSelectedGuide(null)
-        setSelectedAnnotation(null)
-        setSelectedIds(nodes)
-      },
+        setSelection(ids.map((id) => ({ kind: 'object' as const, id }))),
+      setSelection: (items) => setSelection(items),
       loadBytes: (bytes) => applyLoadedBytesRef.current?.(bytes) ?? false,
       toggleTagPath: (path) => toggleTagPathRef.current(path),
       deleteTag: (path) => deleteTagRef.current(path),
@@ -2053,6 +2645,10 @@ export default function App() {
       setPrintRecorder: (r) => {
         printRecorderRef.current = r
       },
+      reseedViewState: () => {
+        const scene = sceneRef.current
+        if (scene !== null) reseedHiddenStateRef.current(scene)
+      },
     })
   }, [])
 
@@ -2060,40 +2656,64 @@ export default function App() {
   // shell's local-socket JSON-RPC frames to this document's own live
   // Scene, exactly like installTestHarness above — a no-op outside Tauri
   // (isTauri gate lives inside installLiveBridge itself).
-  const liveOpRef = useRef<LiveOpRunner | null>(null)
-  // `pushCameraStateToScene` is defined further up the component; the
-  // bridge (installed once) reaches it through this ref.
-  const pushCameraStateRef = useRef<(scene: Scene) => void>(() => {})
   useEffect(() => {
     pushCameraStateRef.current = pushCameraStateToScene
   }, [pushCameraStateToScene])
   useEffect(() => {
-    return installLiveBridge({
-      pushCameraState: (scene) => pushCameraStateRef.current(scene),
-      runOp: (op, args) =>
-        liveOpRef.current !== null
-          ? liveOpRef.current(op, args)
-          // oxlint-disable-next-line lingui/no-unlocalized-strings -- live-API refusal text, English (developer surface)
-          : Promise.resolve({ ok: false, refusal: 'window_not_ready', message: 'the window is still starting' }),
-      getScene: () => sceneRef.current,
-      getViewportApi: () => viewportApi.current,
-      reconcile: () => reconcileRef.current(),
-      // A live `hew.scenes.apply` drives the SAME activation path the Scenes
-      // tray uses (docs/design/scenes.md §7): the kernel state is already
-      // written by the time the directive arrives; this syncs panels, the
-      // renderer, and the camera exactly as a row click would.
-      activateScene: (sid) => scenesRef.current.activate(sid),
-      reconcileVisibility: () => reconcileVisibilityRef.current(),
-      // A live `hew.library.insert` of a material item: dirty for the same
-      // reason as the Library's own "Add to palette".
-      markLibraryMaterialsDirty: () => {
-        setDocSession((s) => markNonUndoableDirty(s, NON_UNDOABLE_REASON.libraryMaterials, Date.now()))
-        armAutosaveTick()
-      },
-    })
-  }, [armAutosaveTick])
+    const deps = liveBridgeDepsRef.current
+    if (deps === null) return
+    return installLiveBridge(deps)
+  }, [])
 
-  const handleToast = useCallback((message: string, code?: string) => {
+  // The plugin host of this window (a Preview feature): only while the
+  // Plugins switch is on, and only once the document's Scene exists. A
+  // production build has no host to load (`loadPluginHost` is null).
+  useEffect(() => {
+    const deps = liveBridgeDepsRef.current
+    if (state?.scene === undefined || deps === null || loadPluginHost === null || !loaderEnabled('plugins')) return
+    let stop: (() => void) | null = null
+    let cancelled = false
+    loadPluginHost()
+      .then((start) => {
+        if (!cancelled) stop = start({ bridge: deps, toast: (message) => handleToastRef.current(message) })
+      })
+      .catch((err: unknown) => LogStore.log.error('plugins', `The plugin host did not start: ${String(err)}`))
+    return () => {
+      cancelled = true
+      stop?.()
+    }
+  }, [state?.scene])
+
+  // The bus reads the selection and the active tool from the Scene
+  // (docs/agents/HEW_API.md §7, "Selection and view state"): mirror both
+  // whenever they change, and pump, so `selection_changed` and
+  // `tool_changed` reach subscribers.
+  useEffect(() => {
+    const scene = state?.scene
+    if (scene === undefined) return
+    scene.set_ui_selection(uiSelectionJson(selection))
+    pumpEvents(scene)
+  }, [state?.scene, selection])
+  // The in-context entries: `setActiveContext` already mirrors every change
+  // into the Scene; this re-seeds a replaced Scene and pumps, so
+  // `context_changed` reaches subscribers when the user's own clicks (not a
+  // bus entry, which the bridge pumps) moved the entries.
+  useEffect(() => {
+    const scene = state?.scene
+    if (scene === undefined) return
+    // From the ref: a bus entry that landed after this render committed
+    // must not be overwritten by the render copy.
+    scene.set_ui_context(uiContextJson(activeContextRef.current))
+    pumpEvents(scene)
+  }, [state?.scene, activeContext])
+  useEffect(() => {
+    const scene = state?.scene
+    if (scene === undefined) return
+    scene.note_tool_changed(activeTool)
+    pumpEvents(scene)
+  }, [state?.scene, activeTool])
+
+  const handleToast = useCallback((message: string, code?: string, opts?: { persistent?: boolean }) => {
     // Severity lives beside the copy table in kernelErrors.ts (one source; a
     // new code gets its level where it gets its message).
     const isError = code !== undefined && isErrorLevelCode(code)
@@ -2106,17 +2726,77 @@ export default function App() {
     }
 
     const id = ++toastCounter
-    setToasts((prev) => [...prev, { id, message, code, isError }])
+    const emphasis = code === EDIT_CONTEXT_HINT_CODE
+    // A boolean refused for a zero-area face points at the repair: the
+    // selection is the operands, so Model Health lists them.
+    const modelHealth = toastActionFor(code, (view) => openModelHealthRef.current(view))
+    // A locked hint (or the kernel's own locked refusal) offers the way out.
+    const actions = modelHealth !== undefined ? [modelHealth] : lockToastActionsRef.current(code)
+    const persistent = opts?.persistent === true
+    // Never two lock toasts: a new one replaces the old. Nor two identical
+    // ordinary toasts (the same words and code) stacked from a repeated action.
+    const isLockToast = isLockToastCode(code)
+    setToasts((prev) => [
+      ...prev.filter((x) => (isLockToast ? !isLockToastCode(x.code) : !(x.sticky !== true && x.message === message && x.code === code))),
+      { id, message, code, isError, emphasis, actions, persistent },
+    ])
+    if (persistent) return
     setTimeout(() => {
       setToasts((prev) => prev.filter((t) => t.id !== id))
-    }, 4000)
+    }, actions !== undefined ? ACTION_TOAST_MS : emphasis ? 7000 : 4000)
   }, [])
   const handleToastRef = useRef(handleToast)
   handleToastRef.current = handleToast
 
+  // A lock changes the color of a selected thing's edges and nothing else the
+  // renderer reads, so every document change (Lock, Unlock, undo, redo, Make
+  // Unique) re-colors the selection.
+  useEffect(() => {
+    viewportApi.current?.refreshSelectionColors?.()
+  }, [docRev])
+
+  // A failed open's persistent error toast — except while a new window is
+  // running the open handed to it by another window (`open_in_new_window`):
+  // there the failure is held back so the startup handoff can pass it to
+  // the opener and close this empty window (`window_open_refused`). `refusal`
+  // is false for a kernel that died (a trap or panic): that window keeps its
+  // crash screen, so the toast shows here as ever.
+  const deferOpenFailureRef = useRef(false)
+  const deferredOpenFailureRef = useRef<{ message: string; code: string | null } | null>(null)
+  const toastOpenFailure = useCallback((message: string, refusal: boolean, code?: string | null) => {
+    if (deferOpenFailureRef.current && refusal) {
+      deferredOpenFailureRef.current = { message, code: code ?? null }
+      return
+    }
+    handleToast(message, undefined, { persistent: true })
+  }, [handleToast])
+
   const dismissToast = useCallback((id: number) => {
     setToasts((prev) => prev.filter((t) => t.id !== id))
   }, [])
+
+  // A lock toast goes away on a press anywhere outside it (the press still
+  // does what it normally does: this only listens, in the capture phase, and
+  // never stops the event) and on Escape (also only listening, so a tool's own
+  // Escape still runs).
+  const lockToastUp = toasts.some((x) => isLockToastCode(x.code))
+  useEffect(() => {
+    if (!lockToastUp) return
+    const dismissLock = () => setToasts((prev) => prev.filter((x) => !isLockToastCode(x.code)))
+    const onPointerDown = (e: PointerEvent) => {
+      if (e.target instanceof Element && e.target.closest('[data-lock-toast]') !== null) return
+      dismissLock()
+    }
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') dismissLock()
+    }
+    window.addEventListener('pointerdown', onPointerDown, true)
+    window.addEventListener('keydown', onKeyDown)
+    return () => {
+      window.removeEventListener('pointerdown', onPointerDown, true)
+      window.removeEventListener('keydown', onKeyDown)
+    }
+  }, [lockToastUp])
 
   // A sticky, updatable toast — the Library save flow's "Rendering
   // thumbnail…" → "Saved" progression. Bypasses handleToast's LogStore/
@@ -2180,8 +2860,23 @@ export default function App() {
     setReportBugOpen(true)
   }, [])
 
-  // Whether this desktop build carries the auto-updater (package-manager
-  // builds compile it out — see the shell's `updater` feature). The in-app
+  // Help ▸ Sent Reports… (docs/design/follow-a-report.md §2.2). `id` selects a
+  // report first (the notice bar's View with exactly one report).
+  const [sentReports, setSentReports] = useState<{ id: string | null } | null>(null)
+  const handleSentReports = useCallback((id: string | null = null) => {
+    setSentReports({ id })
+  }, [])
+  const followedReports = useFollowedReports()
+  const sentReportsNew = totalUnread(followedReports)
+  // The web build checks followed reports once per launch (the desktop shell
+  // does its own); a no-op when this build has nothing to follow.
+  useEffect(() => {
+    if (isTauri) return
+    return startWebLaunchCheck(getFollowHost())
+  }, [])
+
+  // Whether this desktop build carries the update check (every build we ship
+  // does — see the shell's `updater` feature). The in-app
   // menu bar (Windows/Linux) shows "Check for Updates" only when true; macOS
   // reaches it through the native menu instead. Stays false on the web build,
   // where the invoke simply never resolves.
@@ -2315,14 +3010,15 @@ export default function App() {
       labelFor,
       memberName,
       draftOwner,
+      isLinkedCopy: (id) => isWrapperPlacement(scene, id),
     })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pathLabels, sessionStack, activeContext, selectedIds, pathHit, sessionMembers])
 
   /** The hover tip's second line for the object under the cursor (Select tool
    *  only — the viewport forwards `object` solely then). */
-  const hoverDetail = useMemo(() => {
-    if (pathLabels === null || inferenceInfo === null || inferenceInfo.object === undefined) return null
+  const hoverDetailFor = useCallback((inferenceObject: bigint | undefined, inferenceInstance: bigint | undefined) => {
+    if (pathLabels === null || (inferenceObject === undefined && inferenceInstance === undefined)) return null
     // An open session frame erases its direct members' parent links, so a
     // member under the cursor names the innermost frame as its parent.
     const frame = sessionStack.length > 0 ? sessionStack[sessionStack.length - 1].node : null
@@ -2335,10 +3031,11 @@ export default function App() {
       sessionStack.some((f) => f.node.kind === 'instance' && f.node.id === id) ||
       activeContext.some((n) => n.kind === 'instance' && n.id === id)
     return hoverLine(
-      { object: inferenceInfo.object, instance: inferenceInfo.instance },
+      { object: inferenceObject, instance: inferenceInstance },
       parentOf, pathLabels.labelFor, pathLabels.memberName, isOpenInstance,
+      (id) => isWrapperPlacement(pathLabels.scene, id),
     )
-  }, [pathLabels, inferenceInfo?.object, inferenceInfo?.instance, sessionStack, activeContext, sessionMembers])
+  }, [pathLabels, sessionStack, activeContext, sessionMembers])
 
   /** A strip crumb click: the selection becomes that node, nothing else
    *  changes. The hit leaf stays paired with it so the crumbs below survive. */
@@ -2374,6 +3071,13 @@ export default function App() {
     const leaves = Array.from(state.scene.node_leaf_objects(kind, deepest.id))
     return new Set(leaves)
   }, [activeContext, state])
+
+  // Link identical copies: objects that are the same shape as another. One
+  // whole-model read (a signature per loose Object) once the document has
+  // settled, off the render path and skipped for a very large model; the
+  // selection only narrows it.
+  const lookAlikeGroups = useLookAlikeGroups(state?.scene, docRev, componentFrameOpen)
+  const canLinkSimilarNow = restrictToSelection(lookAlikeGroups, selectedIds).length > 0
 
   // Selection-dependent command availability — one derivation shared by the
   // render-body handlers, the native Edit menu (sync_menu_state), and the
@@ -2441,14 +3145,61 @@ export default function App() {
     // while a component frame is open. `componentFrameOpen` itself is the
     // top-level derived const (shared with the import/3D-Text gates and the
     // native menu sync below).
+    // Object ▸ Smooth / Soften Edges…: enabled with one or more solids in
+    // the selection; the check mark follows the shared level (none when the
+    // selection mixes levels).
+    let smoothObjects: bigint[] = []
+    let smoothLevel: number | null = null
+    // Soften Edges… lives in Object Info's Smooth section, which renders only
+    // for direct solid Object nodes (groups and instances show no angle
+    // field), so its gate does not expand the selection the way canSmooth does.
+    let canSoften = false
+    try {
+      canSoften = selectedIds.some((n) => n.kind === 'object' && scene.object_solid(n.id))
+    } catch {
+      canSoften = false
+    }
+    try {
+      smoothObjects = selectionObjectIds(scene, selectedIds)
+      const levels = smoothLevels(scene, smoothObjects)
+      if (levels.length > 0 && levels.every((l) => l === levels[0])) smoothLevel = levels[0]
+    } catch {
+      smoothObjects = []
+    }
+    // Any placement of a linked wrapper reads as a plain Object or Group, a
+    // set of one included: Place Copy and Make Unique speak of components.
+    // Explode stays for a real linked set only; an Object has no Explode.
+    const wrapperSelection = wrapperPlacementOf(scene, selectedIds) !== null
+    const linkedSelection = wrapperSelection
+    const wrapperOfOne = wrapperSelection && linkedPlacementOf(scene, selectedIds) === null
+    // Lock (OW-1): Lock needs something unlocked selected, Unlock ▸ Selected
+    // something locked, Unlock ▸ All anything locked anywhere. A component
+    // open for editing refuses Lock (the kernel's ExplodeSessionScope) but
+    // not Unlock: "unlocking stays allowed".
+    let canLock = false
+    let canUnlock = false
+    let canUnlockAll = false
+    try {
+      canLock = !componentFrameOpen && unlockedAmong(scene, selectedIds).length > 0
+      canUnlock = lockedAmong(scene, selectedIds).length > 0
+      canUnlockAll = anyLocked(scene)
+    } catch {
+      canLock = canUnlock = canUnlockAll = false
+    }
     return {
+      canLock,
+      canUnlock,
+      canUnlockAll,
       booleanOperands,
+      canSmooth: smoothObjects.length > 0,
+      canSoften,
+      smoothLevel,
       // Same top-level rule the kernel enforces (GroupedOperand): a nested
       // node picked in the Outliner must not light the commands up only to
       // be refused on commit. Editing INSIDE a component instance's own
       // definition (component-edit-parity.md phase A2) is the one exception:
-      // two selected members of that SAME definition may boolean together
-      // via `boolean_in_component`, checked with `canBooleanInComponent`.
+      // two or more selected members of that SAME definition may boolean
+      // together via `boolean_in_component_many`, checked with `canBooleanInComponent`.
       canBoolean:
         activeContext.length === 0
           ? canBooleanHelper(selectedIds, parentOf, isBooleanOperand)
@@ -2460,9 +3211,18 @@ export default function App() {
       canUngroup: !hasSketch && canUngroupHelper(selectedIds),
       canMakeComponent:
         !componentFrameOpen && activeContext.length === 0 && canMakeComponent(selectedIds, parentOf),
-      canPlaceCopy: !componentFrameOpen && canPlaceInstance(selectedIds),
-      canExplode: canExplodeInstance(selectedIds),
-      canMakeUnique: canMakeUnique(selectedIds),
+      // A linked copy has its own copy actions; Make Unique and Place Copy speak of components.
+      canPlaceCopy: !componentFrameOpen && canPlaceInstance(selectedIds) && !linkedSelection,
+      canExplode: canExplodeInstance(selectedIds) && !wrapperOfOne,
+      canMakeUnique: canMakeUnique(selectedIds) && !linkedSelection,
+      // Object ▸ Flip Along: anything that can move can flip (solids,
+      // groups, placements, and drawing).
+      canFlip: selectedIds.some(
+        (n) => n.kind === 'object' || n.kind === 'group' || n.kind === 'instance' || isSketchScopedKind(n.kind),
+      ),
+      // Linked copies: Unlink / Unlink all / Make component (promote) on one
+      // placement of a linked set, not while a component is open for editing.
+      ...linkGates(scene, selectedIds, componentFrameOpen),
       // Object ▸ Save Selection to Library… — the dock's Save to Library
       // verb's gate (one object, group, or instance, on a platform with a
       // library backend), so the command survives the dock being hidden.
@@ -2470,12 +3230,11 @@ export default function App() {
         libraryStore().available() &&
         selectedIds.length === 1 &&
         (selectedIds[0].kind === 'object' || selectedIds[0].kind === 'group' || selectedIds[0].kind === 'instance'),
-      // Copy/Cut (Lane D): at least one STRUCTURAL node selected — a
-      // sketch-only selection still refuses with a toast (doCopy), but the
-      // command doesn't even light up for one, matching every other
-      // selection-gated command's posture.
+      // Copy/Cut (Lane D, and drawing since v1.5 decisions D3): at least
+      // one node a Copy can take — a structural node, a drawn shape, or a
+      // whole sketch. (The name predates drawing on the clipboard.)
       hasStructuralSelection: selectedIds.some(
-        (n) => n.kind === 'object' || n.kind === 'group' || n.kind === 'instance',
+        (n) => n.kind === 'object' || n.kind === 'group' || n.kind === 'instance' || isCopyableDrawing(n),
       ),
       // Paste/Paste In Place: whether this window's clipboard cache has
       // anything (kept fresh on focus — see the `clipboardAvailable` effect).
@@ -2485,15 +3244,10 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state, selectedIds, activeContext, docRev, sessionStack, clipboardAvailable])
 
-  // Choosing a Draw tool at top level clears the selection: the user is
-  // about to create geometry, so a still-selected object/group/component
-  // would pin the contextual dock (and Object Info) to stale context.
-  // In-context (edit-mode) selections are the drawing target and are kept.
-  useEffect(() => {
-    if (!DRAW_TOOLS.has(activeTool)) return
-    if (activeContext.length > 0) return
-    setSelectedIds((cur) => (cur.length > 0 ? [] : cur))
-  }, [activeTool, activeContext])
+  // Choosing a Draw tool at top level clears the selection (see the hook).
+  useClearSelectionOnDrawTool(activeTool, DRAW_TOOLS, activeContext.length > 0, () =>
+    setSelection((cur) => (cur.length > 0 ? [] : cur)),
+  )
 
   // ---------------------------------------------------------------- palette: dynamic Model entries
   // Object/group/component/tag names as searchable palette entries. Selecting
@@ -2512,13 +3266,13 @@ export default function App() {
     const indexOf = (kind: NodeRef['kind'], id: bigint) =>
       treeIndex.get(nodeKey({ kind, id })) ?? 0
 
-    const pushNode = (kind: NodeRef['kind'], id: bigint, label: string) => {
+    const pushNode = (kind: NodeRef['kind'], id: bigint, label: string, linkedKind: 'object' | 'group' | false = false) => {
       entries.push({
         id: `jump-node:${kind}:${id}`,
         label:
-          kind === 'object'
+          kind === 'object' || linkedKind === 'object'
             ? t({ comment: 'Command palette entry that jumps to a named object', message: `Object: ${label}` })
-            : kind === 'group'
+            : kind === 'group' || linkedKind === 'group'
               ? t({ comment: 'Command palette entry that jumps to a named group', message: `Group: ${label}` })
               : t({ comment: 'Command palette entry that jumps to a named component instance', message: `Component: ${label}` }),
         description: t`Select it and reveal it in the Outliner.`,
@@ -2534,9 +3288,7 @@ export default function App() {
       pushNode('group', id, resolveLabel(scene.group_name(id), undefined, 'group', indexOf('group', id)))
     })
     Array.from(scene.instance_ids()).forEach((id) => {
-      const def = scene.instance_def(id)
-      const defName = def !== undefined ? scene.component_name(def) : undefined
-      pushNode('instance', id, resolveLabel(scene.instance_name(id), defName, 'instance', indexOf('instance', id)))
+      pushNode('instance', id, placementLabel(scene, id, indexOf('instance', id)), scene.is_linked(id) ? linkedSetKind(scene, scene.instance_def(id) ?? 0n) : false)
     })
 
     // Unique tag paths across all nodes (same walk the Tags panel does).
@@ -2612,11 +3364,78 @@ export default function App() {
     }
   }, [showTray])
 
+  // ---------------------------------------------------------------- document lifecycle events
+  // Tells the Scene a lifecycle step for its next event drain
+  // (docs/agents/HEW_API.md §4.5): `document_will_save`, `_saved`,
+  // `_opened`, `_closed`. The path is the file's on the desktop (a web
+  // file handle has none to give); the caller pumps.
+  const noteDocumentEvent = useCallback(
+    (kind: 'will_save' | 'saved' | 'opened' | 'closed', title: string, ref: FileRef | null, format?: string) => {
+      const scene = sceneRef.current
+      if (scene === null) return
+      const path = typeof ref?.handle === 'string' ? ref.handle : undefined
+      scene.note_document_event(kind, title, path, format)
+    },
+    [],
+  )
+
+  // The display units live in Settings, not the document: mirror them into
+  // the Scene (what a live `.skp` export opens in, and `units_changed`).
+  useEffect(() => {
+    const scene = state?.scene
+    if (scene === undefined) return
+    const mirror = (): void => {
+      scene.set_display_units(getLengthUnit())
+      pumpEvents(scene)
+    }
+    mirror()
+    return subscribeLengthUnit(mirror)
+  }, [state?.scene])
+
+  // The page going away closes its document, for anyone still listening.
+  useEffect(() => {
+    const onPageHide = (event: PageTransitionEvent): void => {
+      // A page kept for the back/forward cache comes back as it was: nothing
+      // closed. Only a page that is really going away closes its document.
+      if (event.persisted) return
+      const scene = sceneRef.current
+      if (scene === null) return
+      noteDocumentEvent('closed', documentName(docSessionRef.current), docSessionRef.current.currentRef)
+      pumpEvents(scene)
+    }
+    window.addEventListener('pagehide', onPageHide)
+    return () => window.removeEventListener('pagehide', onPageHide)
+  }, [noteDocumentEvent])
+
   // ---------------------------------------------------------------- shared reset helper
   // Used by New, Open — loads bytes into the scene and resets all UI state.
-  const applyLoadedBytes = useCallback((bytes: Uint8Array, file?: LoadedFile, opts?: { keepCamera?: boolean }): boolean => {
+  // Seeds the app's hidden-state mirrors (hidden nodes, hidden tag paths)
+  // from the document's own registries, and with `push` sends them to the
+  // renderer and the kernel's pick/snap exclusion. What a load does, and
+  // what an aborted plugin command needs: its abort restores the whole
+  // document, view state included (docs/agents/PLUGINS.md "Compounds").
+  const reseedHiddenStateFromScene = useCallback(
+    (scene: Scene, push = true): { keys: Set<string>; tagPaths: Set<string> } => {
+      const keys = seedHiddenKeysFromRegistry(scene)
+      setHiddenKeys(keys)
+      hiddenKeysRef.current = keys
+      const tagPaths = seedHiddenTagPathsFromRegistry(scene)
+      setHiddenTagPaths(tagPaths)
+      hiddenTagPathsRef.current = tagPaths
+      if (push) pushUnionHiddenRef.current(keys, tagPaths)
+      return { keys, tagPaths }
+    },
+    [],
+  )
+  const reseedHiddenStateRef = useRef(reseedHiddenStateFromScene)
+  reseedHiddenStateRef.current = reseedHiddenStateFromScene
+
+  const applyLoadedBytes = useCallback((bytes: Uint8Array, file?: LoadedFile, opts?: { keepCamera?: boolean; announce?: boolean }): boolean => {
     const scene = sceneRef.current
     if (scene === null) return false
+    profileSourceRef.current = null
+    loadSeqRef.current += 1
+    setLibraryEdit(null)
     // Revert to Saved reloads the document under the person's feet: the view
     // stays where it is, over the camera the file was saved with.
     const keptCamera = opts?.keepCamera === true ? viewportApi.current?.getCameraState() : undefined
@@ -2627,7 +3446,9 @@ export default function App() {
       if (loaded.panicked) {
         setKernelPanicked(true)
       }
-      handleToast(friendlyErrorText(loaded.error))
+      // A file that would not open keeps its reason on screen until dismissed.
+      if (file !== undefined) toastOpenFailure(friendlyErrorText(loaded.error), !loaded.panicked, parseKernelErrorCode(loaded.error))
+      else handleToast(friendlyErrorText(loaded.error))
       return false
     }
     // Scene.load reuses the WASM Scene handle. A pending Save of the prior
@@ -2639,6 +3460,18 @@ export default function App() {
     // the other ordering: a load that lands while the startup-handoff effect
     // is still awaiting its recovery check must also veto the offer it makes
     // at the end (the state setters alone can't — the later one wins).
+    // A document replaced in place: subscribers hear the old one closed
+    // and the new one opened (the reset follows in the same drain).
+    if (documentLoadedRef.current) noteDocumentEvent('closed', documentName(docSessionRef.current), docSessionRef.current.currentRef)
+    // A `.skp` open loads a blank first and announces the real document
+    // itself once the import finishes (`announce: false`).
+    if (opts?.announce !== false) {
+      noteDocumentEvent(
+        'opened',
+        file?.name ?? documentName(afterOpen(null, 0)),
+        file?.path === undefined ? null : { name: file.name, format: 'hew', handle: file.path },
+      )
+    }
     documentLoadedRef.current = true
     if (file !== undefined) clearOpenAttempt()
     else forgetSettledFailure()
@@ -2646,13 +3479,14 @@ export default function App() {
     // the one-time `.skp` loss notice is due again (never reset on save).
     skpSourceGenRef.current += 1
     skpNoticeShownRef.current = false
+    skpCompatRef.current = false
     setSkpNotice(null)
     setDocGeneration((g) => g + 1)
     // A new document starts in normal rendering. Revert keeps the window as
     // it is, so it keeps the person's render mode too.
     if (opts?.keepCamera !== true) setRenderMode('shaded')
     setWelcomeOpen(false)
-    setSelectedIds([])
+    setSelection([])
     setActiveContext([])
     // The wasm handle is reused and mutated in place across New/Open, so
     // the Scenes controller must be told explicitly that this is a new
@@ -2664,10 +3498,7 @@ export default function App() {
     // hidden .skp layers/nodes (or a re-opened .hew with tags/nodes previously
     // hidden via the eye toggle) must come up hidden on first render, not
     // visible.
-    const seededHiddenKeys = seedHiddenKeysFromRegistry(scene)
-    setHiddenKeys(seededHiddenKeys)
-    const seededHiddenTagPaths = seedHiddenTagPathsFromRegistry(scene)
-    setHiddenTagPaths(seededHiddenTagPaths)
+    const { keys: seededHiddenKeys, tagPaths: seededHiddenTagPaths } = reseedHiddenStateFromScene(scene, false)
     // Also clear the renderer's hidden set: it keys by dense ids that the new
     // document reuses, so stale ids would silently hide (and un-pick) unrelated
     // objects after a load. (No-op if the viewport isn't mounted yet.)
@@ -2754,8 +3585,9 @@ export default function App() {
         /* best-effort — placeholders are fine */
       }
     })()
+    pumpEvents(scene)
     return true
-  }, [handleToast])
+  }, [handleToast, toastOpenFailure, reseedHiddenStateFromScene, noteDocumentEvent, setLibraryEdit])
   // Keep the harness's Open path ( __hew_test.load) pointed at the latest
   // applyLoadedBytes closure.
   applyLoadedBytesRef.current = applyLoadedBytes
@@ -3034,7 +3866,7 @@ export default function App() {
       // A wasm trap mid-import (an out-of-memory abort on a model too big
       // for the browser kernel) hands the page to the crash screen inside
       // noteOpenFailure; the toast below is for ordinary refusals.
-      handleToast(t`Import failed: ${ph({ reason: friendlyErrorText(err) })}`)
+      handleToast(t`Import failed: ${ph({ reason: friendlyErrorText(err) })}`, undefined, { persistent: true })
       // The blank-document replace above already committed (applyLoadedBytes
       // mutates the live scene directly, with no rollback), even though the
       // import into it just failed — the live scene really is blank now.
@@ -3064,11 +3896,7 @@ export default function App() {
     // document, so hidden-by-default tags/nodes (e.g. a hidden .skp layer or
     // hidden group/component) only show up now that scene.import_* has
     // registered them.
-    const seededHiddenKeys = seedHiddenKeysFromRegistry(scene)
-    setHiddenKeys(seededHiddenKeys)
-    const seededHiddenTagPaths = seedHiddenTagPathsFromRegistry(scene)
-    setHiddenTagPaths(seededHiddenTagPaths)
-    pushUnionHiddenRef.current(seededHiddenKeys, seededHiddenTagPaths)
+    reseedHiddenStateFromScene(scene)
 
     // Commit the session state.
     //
@@ -3084,7 +3912,7 @@ export default function App() {
       pick.kind === 'gltf' ? 'glTF' : pick.kind === 'skp' ? 'SKP' : pick.kind === 'stl' ? 'STL' : 'DAE'
     LogStore.log.info('app', `Imported ${fmt}: ${report.objects_created} objects (${importLogSplit(report.health.solids, report.health.flat_sheets + report.health.bent_sheets + report.health.cappable + report.health.holes + report.health.mixed + report.health.non_manifold)})`)
     requestAnimationFrame(() => { viewportApi.current?.zoomExtents() })
-  }, [handleToast, applyLoadedBytes, clearRecoverySnapshot, promptStlUnits])
+  }, [handleToast, applyLoadedBytes, clearRecoverySnapshot, promptStlUnits, reseedHiddenStateFromScene])
 
   // The ONE open-skp path: every route that opens a `.skp` as the document's
   // OWN file (File ▸ Open, Open Recent, drag-drop, argv / single-instance /
@@ -3144,15 +3972,15 @@ export default function App() {
       step = scene.open_skp_begin(pick.bytes) as OpenStepProgress
     } catch (err: unknown) {
       noteOpenFailure('SKP open', err, pick)
-      handleToast(t`Open failed: ${ph({ reason: friendlyErrorText(err) })}`)
+      toastOpenFailure(t`Open failed: ${ph({ reason: friendlyErrorText(err) })}`, isKernelRefusal(err), parseKernelErrorCode(err))
       settle()
       return false
     }
 
-    let report: ImportReport & { container: string }
+    let report: ImportReport & { container: string; compat?: boolean }
     try {
       const discardsUnsaved = docSessionRef.current.dirty
-      if (!applyLoadedBytes(blank, undefined, { keepCamera: opts?.keepCamera })) {
+      if (!applyLoadedBytes(blank, undefined, { keepCamera: opts?.keepCamera, announce: false })) {
         clearOpenAttempt()
         settle()
         return false
@@ -3165,7 +3993,7 @@ export default function App() {
         await nextPaint()
         step = scene.open_skp_step(OPEN_STEP_BUDGET_MS) as OpenStepProgress
       }
-      report = step.report as ImportReport & { container: string }
+      report = step.report as ImportReport & { container: string; compat?: boolean }
       flushSync(() => setOpenProgress({ phase: 'view', done: 0, total: 1 }))
       await nextPaint()
       // The file IS this state: its import actions are on the undo stack, but
@@ -3176,11 +4004,13 @@ export default function App() {
       clearOpenAttempt()
     } catch (err: unknown) {
       noteOpenFailure('SKP open', err, pick)
-      handleToast(t`Open failed: ${ph({ reason: friendlyErrorText(err) })}`)
+      toastOpenFailure(t`Open failed: ${ph({ reason: friendlyErrorText(err) })}`, isKernelRefusal(err), parseKernelErrorCode(err))
       // The blank load committed even though the open failed: reflect a fresh
       // untitled document so the next Save can never write to a stale file
       // (same reasoning as runImportPick's catch).
       setDocSession(afterOpen(null, Date.now()))
+      noteDocumentEvent('opened', documentName(afterOpen(null, 0)), null)
+      pumpEvents(scene)
       settle()
       return false
     }
@@ -3195,14 +4025,14 @@ export default function App() {
       suppressDirtyRef.current = false
       settle()
     }
-    const seededHiddenKeys = seedHiddenKeysFromRegistry(scene)
-    setHiddenKeys(seededHiddenKeys)
-    const seededHiddenTagPaths = seedHiddenTagPathsFromRegistry(scene)
-    setHiddenTagPaths(seededHiddenTagPaths)
-    pushUnionHiddenRef.current(seededHiddenKeys, seededHiddenTagPaths)
+    reseedHiddenStateFromScene(scene)
 
     const format = normalizeDocFormat(report.container)
+    skpCompatRef.current = report.compat === true
     setDocSession(afterOpen({ name: pick.name, format, handle: pick.handle ?? null }, Date.now()))
+    // The import is done: announce the real document, not the blank.
+    noteDocumentEvent('opened', pick.name, { name: pick.name, format, handle: pick.handle ?? null })
+    pumpEvents(scene)
     if (opts?.silentReport !== true) setImportReport(report)
     const kernelMemory = kernelMemoryBytes()
     LogStore.log.info('app', `Opened SKP: ${report.objects_created} objects (${importLogSplit(report.health.solids, report.health.flat_sheets + report.health.bent_sheets + report.health.cappable + report.health.holes + report.health.mixed + report.health.non_manifold)})${kernelMemory === null ? '' : `; kernel memory ${formatBytes(kernelMemory)}`}`)
@@ -3222,7 +4052,7 @@ export default function App() {
       void recordRecent(pick.bytes, pick.name, 'open', undefined, undefined, undefined, format)
     }
     return true
-  }, [handleToast, applyLoadedBytes, clearRecoverySnapshot])
+  }, [handleToast, toastOpenFailure, applyLoadedBytes, clearRecoverySnapshot, reseedHiddenStateFromScene, noteDocumentEvent])
 
   // The unified Open dialog: ONE picker accepting `.hew` plus every import
   // format, dispatching on the extension the user picked (see
@@ -3256,7 +4086,11 @@ export default function App() {
       try {
         pick = await fileHostRef.current.openAny()
       } catch (err: unknown) {
-        handleToast(t`Open failed: ${ph({ reason: friendlyErrorText(err) })}`)
+        if (err instanceof UnsupportedFileError) {
+          handleToast(t`Hew cannot open this kind of file.`)
+          return
+        }
+        handleToast(t`Open failed: ${ph({ reason: friendlyErrorText(err) })}`, undefined, { persistent: true })
         return
       }
       if (pick === null) return // user cancelled — current document unchanged
@@ -3289,14 +4123,21 @@ export default function App() {
 
       if (pick.kind === 'hew') {
         const discardsUnsaved = docSessionRef.current.dirty
-        const ok = applyLoadedBytes(pick.bytes, { name: pick.name, label: OPEN_FILE_LABELS.hew })
+        const ok = applyLoadedBytes(pick.bytes, {
+          name: pick.name,
+          label: OPEN_FILE_LABELS.hew,
+          path: typeof pick.handle === 'string' ? pick.handle : undefined,
+        })
         if (!ok) return
-        setDocSession(afterOpen({ name: pick.name, format: 'hew', handle: pick.handle }, Date.now()))
+        const openedRef: FileRef = { name: pick.name, format: 'hew', handle: pick.handle }
+        setDocSession(afterOpen(openedRef, Date.now()))
         if (discardsUnsaved) void clearRecoverySnapshot()
         if (isTauri && typeof pick.handle === 'string') {
           import('@tauri-apps/api/core').then(({ invoke }) =>
             invoke('push_recent', { path: pick.handle as string })
           ).catch(() => { /* ignore */ })
+          // A file inside the Library folder is the Library item itself.
+          await bindLibraryItemRef.current(pick.handle, pick.bytes, openedRef, true)
         } else if (!isTauri) {
           // Web build only — the Tauri desktop shell has its own path-based
           // recents (push_recent above); this is the IndexedDB-backed shelf
@@ -3371,7 +4212,11 @@ export default function App() {
       try {
         pick = await fileHostRef.current.openForImport()
       } catch (err: unknown) {
-        handleToast(t`Import failed: ${ph({ reason: friendlyErrorText(err) })}`)
+        if (err instanceof UnsupportedFileError) {
+          handleToast(t`Hew cannot open this kind of file.`)
+          return
+        }
+        handleToast(t`Import failed: ${ph({ reason: friendlyErrorText(err) })}`, undefined, { persistent: true })
         return
       }
       if (pick === null) return // user cancelled — current document unchanged
@@ -3471,10 +4316,10 @@ export default function App() {
   /** Show the non-blocking "the SketchUp file can't hold everything exactly"
    * notice for a Save / Save As — at most once per document (the flag resets
    * on every document load, never on save; later saves are silent). */
-  const noteSkpSimplified = useCallback((simplified: string[]) => {
-    if (simplified.length === 0 || skpNoticeShownRef.current) return
+  const noteSkpSimplified = useCallback((simplified: string[], writerNotes: string[] = [], always = false) => {
+    if ((simplified.length === 0 && writerNotes.length === 0) || (skpNoticeShownRef.current && !always)) return
     skpNoticeShownRef.current = true
-    setSkpNotice({ simplified, offerHewCopy: true })
+    setSkpNotice({ simplified, writerNotes, offerHewCopy: true })
   }, [])
 
   // Both return a promise resolving `true` iff the write actually landed —
@@ -3486,6 +4331,8 @@ export default function App() {
   /** Why the last `saveToRef` failed — the live API reports it to its client. */
   // oxlint-disable-next-line lingui/no-unlocalized-strings -- live-API refusal text, English
   const lastSaveErrorRef = useRef('the document could not be saved')
+  // oxlint-disable-next-line lingui/no-unlocalized-strings -- live-API refusal text, English
+  const DOC_CHANGED_BEFORE_SAVE = 'the document changed before it could be saved'
   // Serialize document writes in capture order. Without this, a slow Save A
   // can finish after a newer Save B and overwrite B's current bytes on disk.
   // A failed/cancelled write still releases the queue for the next attempt.
@@ -3505,16 +4352,67 @@ export default function App() {
    * file's own (the API's `units`); absent, a save back keeps the file's
    * units and a new file takes the app's. */
   const saveToRef = useCallback(
-    async (ref: FileRef | null, units?: string): Promise<boolean> => {
+    async (ref: FileRef | null, units?: string, compatArg?: boolean): Promise<boolean> => {
       const scene = sceneRef.current
       if (scene === null) return false
       if (ref === null) return saveAsDocumentRef.current()
+      // A window editing a Library item writes the item through the Library.
+      let libEdit = libraryEditRef.current !== null && libraryEditRef.current.ref === ref && ref === docSessionRef.current.currentRef ? libraryEditRef.current : null
+      if (libEdit !== null && isTauri && typeof ref.handle === 'string') {
+        // The Library folder may have moved since this window opened.
+        const generation = docGenerationRef.current
+        const now = await libraryStore().nameForPath(ref.handle)
+        if (docGenerationRef.current !== generation || sceneRef.current !== scene) {
+          lastSaveErrorRef.current = DOC_CHANGED_BEFORE_SAVE
+          handleToast(t`Save was canceled because the document changed. Try saving again.`)
+          return false
+        }
+        if (now !== null && now !== libEdit.fileName) {
+          setLibraryEdit(null)
+          libEdit = null
+        }
+      }
+      if (libEdit !== null) {
+        // Saving must not quietly recreate an item that was deleted elsewhere.
+        const generation = docGenerationRef.current
+        const editName = libEdit.name
+        let gone: boolean
+        try {
+          gone = !(await libraryStore().list()).some((f) => f.fileName === libEdit!.fileName)
+        } catch {
+          gone = false
+        }
+        if (docGenerationRef.current !== generation || sceneRef.current !== scene) {
+          lastSaveErrorRef.current = DOC_CHANGED_BEFORE_SAVE
+          handleToast(t`Save was canceled because the document changed. Try saving again.`)
+          return false
+        }
+        if (gone) {
+          const saveBack = await new Promise<boolean>((resolve) => setLibraryItemGone({ name: editName, resolve }))
+          if (!saveBack) {
+            // oxlint-disable-next-line lingui/no-unlocalized-strings -- live-API refusal text, English
+            lastSaveErrorRef.current = 'the Library item was deleted, and saving it back was declined'
+            return false
+          }
+          if (docGenerationRef.current !== generation || sceneRef.current !== scene) {
+            lastSaveErrorRef.current = DOC_CHANGED_BEFORE_SAVE
+            handleToast(t`Save was canceled because the document changed. Try saving again.`)
+            return false
+          }
+        }
+      }
       // `Scene.save()` is transparent to an open explode session — it
       // serializes as-if-closed, so saving mid-session needs no special
       // handling here (the session, and its dimming/scoping, is untouched).
       pushCameraStateToScene(scene)
-      const generationAtSave = documentGenerationRef.current
       const identityAtSave = documentIdentityRef.current
+      // The first save mints the document's persistent id (a `.skp` save
+      // inside `save_skp`); a canceled save leaves it on the document.
+      // (An item file never carries one: it is a separate document.)
+      if (libEdit === null) scene.ensure_document_id()
+      const docGenerationAtMeta = docGenerationRef.current
+      noteDocumentEvent('will_save', documentName(docSessionRef.current), ref, ref.format)
+      pumpEvents(scene)
       try {
         // A `.skp` file saves in its own container — NEVER the `.hew` bytes
         // (they would corrupt the file). `save_skp` builds on the file the
@@ -3522,21 +4420,76 @@ export default function App() {
         // next save only once it is on disk (`commit_skp_save` below).
         let bytes: Uint8Array
         let simplified: string[] = []
+        let writerNotes: string[] = []
+        // Recorded in `skpCompatRef` only once the write lands.
+        let savedCompat: boolean | null = null
         const skp = isSkpFormat(ref.format)
+        // The change generation is read right before the document is
+        // serialized, and nothing awaits between the two: an edit made
+        // during any later step is not in these bytes.
+        let generationAtSave: number
+        // An ordinary file still has a step to wait for once serialized.
+        let stripping: Promise<Uint8Array> | null = null
         if (skp) {
-          const out = scene.save_skp(skpTarget(ref.format), units ?? getLengthUnit(), units !== undefined) as SkpWrite
+          generationAtSave = documentGenerationRef.current
+          const compat = takesCompat(ref.format) && (compatArg ?? skpCompatRef.current)
+          const out = scene.save_skp(skpTarget(ref.format), units ?? getLengthUnit(), units !== undefined, compat) as SkpWrite
+          savedCompat = compat
           bytes = out.bytes
           simplified = out.simplified
+          writerNotes = out.writer_notes
+        } else if (libEdit !== null) {
+          // Closes open sessions, merges the item's `hew.library` keys and
+          // restamps its prints, so other documents see it as newer. A plain
+          // `save()` would leave the old prints behind.
+          // The Library's metadata as it is NOW wins over what this window
+          // loaded: a rename or keyword made meanwhile must survive.
+          let current: unknown
+          try {
+            const now = await libraryStore().read(libEdit.fileName)
+            current = (await readItemSummary(now)).doc_attrs?.['hew.library']
+          } catch {
+            current = undefined // the item is gone (saved back on request): this window's own
+          }
+          if (docGenerationRef.current !== docGenerationAtMeta || sceneRef.current !== scene) {
+            lastSaveErrorRef.current = DOC_CHANGED_BEFORE_SAVE
+            handleToast(t`Save was canceled because the document changed. Try saving again.`)
+            return false
+          }
+          generationAtSave = documentGenerationRef.current
+          bytes = new Uint8Array(scene.extract_document_item(JSON.stringify(metaForEditSave(current, new Date().toISOString()))))
         } else {
-          bytes = new Uint8Array(scene.save())
+          // An ordinary document file never carries a Library item's remote note.
+          generationAtSave = documentGenerationRef.current
+          stripping = withoutRemoteNoteIfAny(new Uint8Array(scene.save()))
+          // Reported by the queued write, which may not have started yet.
+          stripping.catch(() => {})
+          bytes = new Uint8Array()
         }
-        const newRef = await queueDocumentWrite(() => fileHostRef.current.save(bytes, ref))
+        // Queued before any further await, so writes land in capture order.
+        const newRef = await queueDocumentWrite(async () => {
+          if (stripping !== null) bytes = await stripping
+          if (libEdit !== null) {
+            await libraryStore().write(libEdit.fileName, bytes)
+            return ref
+          }
+          return fileHostRef.current.save(bytes, ref)
+        })
         if (newRef === null) return false // user cancelled
+        // A written Library item gets a current thumbnail and "Saved" time,
+        // whatever this window holds by now.
+        const refreshItemThumbnail = async (): Promise<void> => {
+          if (libEdit === null) return
+          const itemName = await currentLibraryItemName(libEdit)
+          renderAndWriteThumbnailRef.current(pushStickyToast(t`Rendering thumbnail for "${itemName}"…`), itemName, bytes, true)
+        }
         if (sceneRef.current !== scene || documentIdentityRef.current !== identityAtSave) {
           // oxlint-disable-next-line lingui/no-unlocalized-strings -- live API refusal text, English
           lastSaveErrorRef.current = 'the document changed during save; save again'
+          await refreshItemThumbnail()
           return false
         }
+        if (savedCompat !== null) skpCompatRef.current = savedCompat
         // The document is now bound to `newRef`: a `.skp` takes the written
         // file as the source of its next save; a `.hew` has none.
         if (skp) scene.commit_skp_save()
@@ -3551,16 +4504,20 @@ export default function App() {
           lastSaveErrorRef.current = 'the document changed during save; save again'
         }
         setDocSession((prev) => afterSave(newRef, Date.now(), atSavedMark, prev))
+        await reportDocumentId()
+        noteDocumentEvent('saved', newRef.name, newRef, newRef.format)
+        pumpEvents(scene)
         LogStore.log.info('app', `Saved: ${newRef.name}`)
         // The work is now safely on disk — drop the autosave snapshot.
         if (atSavedMark) void clearRecoverySnapshot()
-        if (isTauri && typeof newRef.handle === 'string') {
+        if (libEdit === null && isTauri && typeof newRef.handle === 'string') {
           import('@tauri-apps/api/core').then(({ invoke }) =>
             invoke('push_recent', { path: newRef.handle as string })
           ).catch(() => { /* ignore */ })
         }
         if (newRef.format === 'hew') persistSceneThumbnails(bytes)
-        noteSkpSimplified(simplified)
+        noteSkpSimplified(simplified, writerNotes)
+        await refreshItemThumbnail()
         return atSavedMark
       } catch (err: unknown) {
         lastSaveErrorRef.current = friendlyErrorText(err)
@@ -3568,7 +4525,7 @@ export default function App() {
         return false
       }
     },
-    [handleToast, clearRecoverySnapshot, pushCameraStateToScene, noteSkpSimplified, queueDocumentWrite],
+    [handleToast, toastOpenFailure, clearRecoverySnapshot, pushCameraStateToScene, noteSkpSimplified, noteDocumentEvent, reportDocumentId, setLibraryEdit, pushStickyToast, DOC_CHANGED_BEFORE_SAVE, currentLibraryItemName, queueDocumentWrite],
   )
 
   const saveDocument = useCallback(
@@ -3578,20 +4535,20 @@ export default function App() {
 
   // Save As's in-app format choice (the native picker follows it). Resolves
   // with the chosen format, or null when the dialog is canceled.
-  const promptSaveFormat = useCallback((initial: DocFormat): Promise<DocFormat | null> => {
+  const promptSaveFormat = useCallback((initial: DocFormat, initialCompat: boolean): Promise<SaveFormatAnswer | null> => {
     return new Promise((resolve) => {
       // Defense in depth: fail a still-open prompt cleanly before taking
       // over the resolver slot.
       if (saveFormatResolveRef.current !== null) saveFormatResolveRef.current(null)
       saveFormatResolveRef.current = resolve
-      setSaveFormatPrompt({ initial })
+      setSaveFormatPrompt({ initial, compat: initialCompat })
     })
   }, [])
-  const settleSaveFormat = useCallback((format: DocFormat | null) => {
+  const settleSaveFormat = useCallback((answer: SaveFormatAnswer | null) => {
     const resolve = saveFormatResolveRef.current
     saveFormatResolveRef.current = null
     setSaveFormatPrompt(null)
-    resolve?.(format)
+    resolve?.(answer)
   }, [])
 
   const saveAsDocument = useCallback(async (): Promise<boolean> => {
@@ -3601,59 +4558,79 @@ export default function App() {
     // format list, with the path), from the in-app step in the browser.
     const initial = docSession.currentRef?.format ?? 'hew'
     let format: DocFormat
+    let compat = false
     let target: string | null = null
     if (hasNativeSavePanel() && fileHostRef.current.writeTo !== undefined) {
       try {
         const name = nameForFormat(documentName(docSessionRef.current), initial)
-        const pick = await pickSaveTarget(t`Save As`, name, SAVE_PANEL_FORMATS, initial)
+        const pick = await pickSaveTarget(t`Save As`, name, savePanelFormats(initial, skpCompatRef.current), panelIdFor(initial))
         if (pick === null) return false // panel canceled
         format = saveFormatFrom(pick)
+        compat = saveCompatFrom(pick)
         target = pick.path
       } catch (err: unknown) {
         handleToast(t`Save As failed: ${ph({ reason: friendlyErrorText(err) })}`)
         return false
       }
     } else {
-      const chosen = await promptSaveFormat(initial)
+      const chosen = await promptSaveFormat(initial, skpCompatRef.current)
       if (chosen === null) return false // dialog canceled
-      format = chosen
+      format = chosen.format
+      compat = takesCompat(chosen.format) && chosen.compat
     }
     pushCameraStateToScene(scene)
-    const generationAtSave = documentGenerationRef.current
     const identityAtSave = documentIdentityRef.current
+    scene.ensure_document_id()
     // When saving an imported model (currentRef=null, importedName set), suggest
     // the imported filename so the user sees a sensible default in the Save As
     // dialog — its known extension (.skp/.dae/…) swapped for the chosen
     // format's, never stacked (`Model.skp` suggests `Model.hew`).
     const suggestedName = nameForFormat(documentName(docSessionRef.current), format)
+    noteDocumentEvent('will_save', documentName(docSessionRef.current), null, format)
+    pumpEvents(scene)
     try {
+      // Read right before serialization (see `saveToRef`).
+      const generationAtSave = documentGenerationRef.current
+      let stripping: Promise<Uint8Array> | null = null
       // `save_skp` builds on the document's source (if any) and stages the
       // written file as the next source; a canceled picker or failed write
       // never commits it, so the source moves only once the write landed.
-      let bytes: Uint8Array
+      let bytes: Uint8Array = new Uint8Array()
       let simplified: string[] = []
+      let writerNotes: string[] = []
       if (isSkpFormat(format)) {
-        const out = scene.save_skp(skpTarget(format), getLengthUnit()) as SkpWrite
+        const out = scene.save_skp(skpTarget(format), getLengthUnit(), undefined, compat) as SkpWrite
         bytes = out.bytes
         simplified = out.simplified
+        writerNotes = out.writer_notes
       } else {
-        bytes = new Uint8Array(scene.save())
+        // Save As makes an ordinary document: the note of the Library item
+        // this one was opened from stays behind (design 7.2).
+        stripping = withoutRemoteNoteIfAny(new Uint8Array(scene.save()))
+        stripping.catch(() => {})
       }
       const host = fileHostRef.current
-      const newRef = await queueDocumentWrite(() =>
-        target !== null && host.writeTo !== undefined
+      const newRef = await queueDocumentWrite(async () => {
+        if (stripping !== null) bytes = await stripping
+        return target !== null && host.writeTo !== undefined
           ? host.writeTo(target, bytes, format)
           : host.saveAs(bytes, suggestedName, format)
-      )
+      })
       if (newRef === null) return false // user cancelled
       if (sceneRef.current !== scene || documentIdentityRef.current !== identityAtSave) return false
       // The document is now bound to `newRef`: a `.skp` takes the written
       // file as the source of its next save; a `.hew` has none.
       if (isSkpFormat(format)) scene.commit_skp_save()
       else scene.set_skp_source(undefined)
+      skpCompatRef.current = compat
       skpSourceGenRef.current += 1
       const atSavedMark = markSavedIfUnmoved(scene, generationAtSave, documentGenerationRef.current)
       setDocSession((prev) => afterSave(newRef, Date.now(), atSavedMark, prev))
+      // A copy saved elsewhere is an ordinary document, not the Library item.
+      setLibraryEdit(null)
+      await reportDocumentId()
+      noteDocumentEvent('saved', newRef.name, newRef, newRef.format)
+      pumpEvents(scene)
       LogStore.log.info('app', `Saved as: ${newRef.name}`)
       // The work is now safely on disk — drop the autosave snapshot.
       if (atSavedMark) void clearRecoverySnapshot()
@@ -3663,13 +4640,14 @@ export default function App() {
         ).catch(() => { /* ignore */ })
       }
       if (format === 'hew') persistSceneThumbnails(bytes)
-      noteSkpSimplified(simplified)
+      // A deliberate choice of format: what it drops is listed every time.
+      noteSkpSimplified(simplified, writerNotes, true)
       return atSavedMark
     } catch (err: unknown) {
       handleToast(t`Save As failed: ${ph({ reason: friendlyErrorText(err) })}`)
       return false
     }
-  }, [docSession.currentRef, handleToast, clearRecoverySnapshot, pushCameraStateToScene, promptSaveFormat, noteSkpSimplified, queueDocumentWrite])
+  }, [docSession.currentRef, handleToast, clearRecoverySnapshot, pushCameraStateToScene, promptSaveFormat, noteSkpSimplified, noteDocumentEvent, reportDocumentId, queueDocumentWrite])
 
   // The loss notice's "Save a .hew copy": write the document as `.hew`
   // through the Save As picker WITHOUT rebinding — `currentRef` (and the
@@ -3678,9 +4656,11 @@ export default function App() {
     const scene = sceneRef.current
     if (scene === null) return
     pushCameraStateToScene(scene)
-    const bytes = new Uint8Array(scene.save())
+    scene.ensure_document_id()
+    void reportDocumentId()
     const suggestedName = nameForFormat(documentName(docSessionRef.current), 'hew')
     try {
+      const bytes = await withoutRemoteNoteIfAny(new Uint8Array(scene.save()))
       const copy = await fileHostRef.current.saveAs(bytes, suggestedName, 'hew')
       if (copy !== null) {
         setSkpNotice(null)
@@ -3690,8 +4670,57 @@ export default function App() {
     } catch (err: unknown) {
       handleToast(t`Save a .hew copy failed: ${ph({ reason: friendlyErrorText(err) })}`)
     }
-  }, [handleToast, pushCameraStateToScene])
+  }, [handleToast, pushCameraStateToScene, reportDocumentId])
 
+  /** Desktop: when `path` is a file inside the Library folder and its bytes
+   * carry a Library id, bind this window to that item so Save writes through
+   * the Library. Used by an open by path and by crash-recovery adoption, so a
+   * recovered item is never saved as a plain document over its Library file.
+   * Called right after the load; a later load drops the binding. */
+  const bindLibraryItemForPath = useCallback(
+    async (path: string, bytes: Uint8Array, ref: FileRef, announce: boolean): Promise<void> => {
+      const scene = sceneRef.current
+      const seq = loadSeqRef.current
+      let libraryName: string | null
+      try {
+        libraryName = await libraryStore().nameForPath(path)
+      } catch {
+        return
+      }
+      if (libraryName === null || sceneRef.current !== scene || loadSeqRef.current !== seq) return
+      try {
+        const summary = await readItemSummary(bytes)
+        const item = buildLibraryItem({ fileName: libraryName, size: bytes.length, mtimeMs: 0 }, summary, '')
+        // A file with no `hew.library` id is an ordinary document.
+        if (item.meta.id !== undefined && loadSeqRef.current === seq) {
+          setLibraryEdit({ fileName: libraryName, id: item.meta.id, name: item.displayName, ref })
+          if (announce) {
+            const itemName = item.displayName
+            handleToast(t`Editing "${itemName}" from the Library. Saving updates the Library.`)
+          }
+        }
+      } catch {
+        /* unreadable summary: an ordinary document */
+      }
+    },
+    [handleToast, setLibraryEdit],
+  )
+  bindLibraryItemRef.current = bindLibraryItemForPath
+  /** A Library item's bytes without its remote note, for opening it as an
+   * ordinary document (design 7.2). When that cannot be done the open fails
+   * the way any open does (a refusal toast), and `null` comes back: the
+   * document is never opened with the note. */
+  const withoutNoteOrReport = useCallback(
+    async (bytes: Uint8Array): Promise<Uint8Array | null> => {
+      try {
+        return await withoutRemoteNote(bytes)
+      } catch (err) {
+        toastOpenFailure(t`Open failed: ${ph({ reason: friendlyErrorText(err) })}`, isKernelRefusal(err), parseKernelErrorCode(err))
+        return null
+      }
+    },
+    [toastOpenFailure],
+  )
   // ---------------------------------------------------------------- open by path (Tauri only)
   // Reads the file at `path` and applies it to the CURRENT window
   // unconditionally — no pristine check, no discard guard. Callers must have
@@ -3720,11 +4749,16 @@ export default function App() {
         const buf = await invoke<ArrayBuffer>('read_file', { path })
         const bytes = new Uint8Array(buf)
         const discardsUnsaved = docSessionRef.current.dirty
-        if (applyLoadedBytes(bytes, { name: basenameOf(path), label: OPEN_FILE_LABELS.hew })) {
+        // A Library item opened as a document gives up its remote note (design 7.2).
+        const opened = (await noteDroppedFor(path, (p) => libraryStore().nameForPath(p))) ? await withoutNoteOrReport(bytes) : bytes
+        if (opened !== null && applyLoadedBytes(opened, { name: basenameOf(path), label: OPEN_FILE_LABELS.hew, path })) {
           landed = true
-          setDocSession(afterOpen({ name: basenameOf(path), format: 'hew', handle: path }, Date.now()))
+          const openedRef: FileRef = { name: basenameOf(path), format: 'hew', handle: path }
+          setDocSession(afterOpen(openedRef, Date.now()))
           if (discardsUnsaved) void clearRecoverySnapshot()
           invoke('push_recent', { path }).catch(() => { /* ignore */ })
+          // A file inside the Library folder is the Library item itself.
+          await bindLibraryItemForPath(path, bytes, openedRef, true)
         }
       } finally {
         if (!landed) {
@@ -3755,10 +4789,19 @@ export default function App() {
     const buf = await invoke<ArrayBuffer>('read_file', { path })
     const bytes = new Uint8Array(buf)
     const { resolveImportPickFromPath } = await import('./io/tauriFileHost')
-    const pick = await resolveImportPickFromPath(path, bytes)
+    let pick: ImportPick
+    try {
+      pick = await resolveImportPickFromPath(path, bytes)
+    } catch (err: unknown) {
+      if (!(err instanceof UnsupportedFileError)) throw err
+      // Through the open-failure path, so a window opened only to show this
+      // file hands the refusal back to its opener and closes.
+      toastOpenFailure(t`Hew cannot open this kind of file.`, true)
+      return false
+    }
     await runImportPick(scene, pick)
     return true
-  }, [applyLoadedBytes, clearRecoverySnapshot, runImportPick, runOpenSkp])
+  }, [applyLoadedBytes, clearRecoverySnapshot, runImportPick, runOpenSkp, toastOpenFailure, bindLibraryItemForPath, withoutNoteOrReport])
 
   // File ▸ Revert to Saved, after its confirmation (and the live API's
   // `hew.doc.revert`, which asks none): read the saved file again, load it
@@ -3821,14 +4864,23 @@ export default function App() {
       return { ok: false, message, shown: true }
     }
     let landed: boolean
+    const editing = libraryEditRef.current
     if (isSkpFormat(ref.format)) {
       if (skpOpenStepsRef.current) {
         return { ok: false, message: t`Another file is still opening; try again in a moment.` }
       }
       landed = await runOpenSkp(scene, { name: ref.name, bytes, handle: ref.handle }, { keepCamera: true, silentReport: true })
     } else {
-      landed = applyLoadedBytes(bytes, { name: ref.name, label: OPEN_FILE_LABELS.hew }, { keepCamera: true })
-      if (landed) setDocSession(afterOpen(ref, Date.now()))
+      landed = applyLoadedBytes(
+        bytes,
+        { name: ref.name, label: OPEN_FILE_LABELS.hew, path: typeof ref.handle === 'string' ? ref.handle : undefined },
+        { keepCamera: true },
+      )
+      if (landed) {
+        setDocSession(afterOpen(ref, Date.now()))
+        // The same file again: still the Library item being edited.
+        if (editing !== null && editing.ref === ref) setLibraryEdit(editing)
+      }
     }
     if (!landed) return { ok: false, message: t`The saved file could not be loaded.`, shown: true }
     // The unsaved work this replaced is gone: so is its crash snapshot.
@@ -3843,7 +4895,7 @@ export default function App() {
     }
     handleToast(t`Reverted to the saved file.`)
     return { ok: true }
-  }, [applyLoadedBytes, runOpenSkp, clearRecoverySnapshot, handleToast, t])
+  }, [applyLoadedBytes, runOpenSkp, clearRecoverySnapshot, handleToast, setLibraryEdit, t])
 
   // Tauri-only. The entry point for every "open this path" gesture that can
   // land on a window the user may already be working in: native/in-app "Open
@@ -3876,15 +4928,16 @@ export default function App() {
         const { invoke } = await import('@tauri-apps/api/core')
         const buf = await invoke<ArrayBuffer>('read_file', { path })
         const bytes = new Uint8Array(buf)
-        const ok = applyLoadedBytes(bytes, { name: basenameOf(path), label: OPEN_FILE_LABELS.hew })
+        // A Library item opened as a copy gives up its remote note (design 7.2, decision 36).
+        const ok = applyLoadedBytes(await withoutRemoteNote(bytes), { name: basenameOf(path), label: OPEN_FILE_LABELS.hew })
         if (ok) setDocSession(afterImport(name ?? t`Library Item`, Date.now()))
       } catch (err) {
-        handleToast(
-          t`Couldn't open the library item: ${ph({ reason: err instanceof Error ? err.message : String(err) })}`,
-        )
+        const message = t`Couldn't open the library item: ${ph({ reason: err instanceof Error ? err.message : String(err) })}`
+        if (deferOpenFailureRef.current) toastOpenFailure(message, isKernelRefusal(err), parseKernelErrorCode(err))
+        else handleToast(message)
       }
     },
-    [applyLoadedBytes, handleToast],
+    [applyLoadedBytes, handleToast, toastOpenFailure],
   )
   const openLibraryCopyRef = useRef(openLibraryCopy)
   useEffect(() => { openLibraryCopyRef.current = openLibraryCopy }, [openLibraryCopy])
@@ -3930,7 +4983,7 @@ export default function App() {
   // "clicking did nothing" is the worst outcome for a welcome-screen row.
   const openRecent = useCallback((path: string) => {
     openPath(path).catch(() => {
-      handleToast(t`Couldn't open ${ph({ fileName: basenameOf(path) })} — the file may have been moved or deleted.`)
+      handleToast(t`Couldn't open ${ph({ fileName: basenameOf(path) })} — the file may have been moved or deleted.`, undefined, { persistent: true })
     })
   }, [openPath, handleToast])
 
@@ -4015,19 +5068,36 @@ export default function App() {
     // original file; bumping the generation re-writes it under this window's
     // own slot on the next autosave.
     scene.set_skp_source(snapshot.source ?? undefined)
+    // `applyLoadedBytes` reset the revision-17 choice; it is recomputed from
+    // the recovered source, whose revision is the file's own.
+    const SceneClass = scene.constructor as unknown as { skp_container_compat(b: Uint8Array): boolean }
+    skpCompatRef.current =
+      snapshot.source !== null &&
+      takesCompat(normalizeDocFormat(meta.format)) &&
+      SceneClass.skp_container_compat(snapshot.source)
     skpSourceGenRef.current += 1
-    setDocSession(afterRecovery(
-      meta.path !== null ? { name: meta.name, format: normalizeDocFormat(meta.format), handle: meta.path } : null,
-      meta.path !== null ? undefined : meta.name,
-      meta.savedAt,
-    ))
+    const recoveredRef: FileRef | null =
+      meta.path !== null ? { name: meta.name, format: normalizeDocFormat(meta.format), handle: meta.path } : null
+    setDocSession(afterRecovery(recoveredRef, meta.path !== null ? undefined : meta.name, meta.savedAt))
+    // Recovering a Library item's own file keeps it the Library item: a Save
+    // must go through the Library, never write a plain document over the file.
+    if (isTauri && recoveredRef !== null && meta.path !== null && normalizeDocFormat(meta.format) === 'hew') {
+      void bindLibraryItemForPath(meta.path, snapshot.bytes, recoveredRef, false)
+    }
     // The recovered document still only exists in the recovery snapshot —
     // claim() re-homed it to this window's own slot (the next autosave tick
     // refreshes it in place); arm the tick so it will actually fire if
     // nothing else changes.
     armAutosaveTick()
+    if (snapshot.pathWithheld === true) {
+      handleToastRef.current(
+        t`Hew can’t save over the original file after this recovery. Save will ask you where to put it.`,
+        undefined,
+        { persistent: true },
+      )
+    }
     return true
-  }, [applyLoadedBytes, armAutosaveTick])
+  }, [applyLoadedBytes, armAutosaveTick, bindLibraryItemForPath])
   const adoptSnapshotRef = useRef(adoptSnapshot)
   useEffect(() => { adoptSnapshotRef.current = adoptSnapshot }, [adoptSnapshot])
 
@@ -4070,18 +5140,27 @@ export default function App() {
     setRecoveryPrompt(null)
   }, [recoveryPrompt, adoptSnapshot])
 
+  // Declining recovery (Discard or Esc) is a fresh launch: the Welcome screen
+  // the recovery prompt pre-empted is offered now, unless the user turned it
+  // off or a document loaded in the meantime (KB-39).
+  const offerWelcomeAfterDecline = useCallback(() => {
+    if (getShowWelcome() && !documentLoadedRef.current) setWelcomeOpen(true)
+  }, [])
+
   const handleDiscardRecovery = useCallback(() => {
     // The dialog listed every snapshot, so this is an informed Discard All —
     // per-window saves use clear(), which drops only that window's own slot.
     recoveryStoreRef.current.discardAll().catch(() => { /* ignore */ })
     setRecoveryPrompt(null)
-  }, [])
+    offerWelcomeAfterDecline()
+  }, [offerWelcomeAfterDecline])
 
   // Escape closes the prompt WITHOUT clearing — the snapshot survives and is
   // re-offered next launch, so an accidental keypress can't lose work.
   const handleDismissRecovery = useCallback(() => {
     setRecoveryPrompt(null)
-  }, [])
+    offerWelcomeAfterDecline()
+  }, [offerWelcomeAfterDecline])
 
   // ---------------------------------------------------------------- undo/redo for Edit menu
   // Tag-visibility resync is NOT called here: it hangs off the viewport's
@@ -4110,6 +5189,10 @@ export default function App() {
   }, [])
 
   // ---------------------------------------------------------------- glTF export
+  /** "Export cages instead" (a Smooth object's cage, not its smooth surface),
+   *  chosen in the Export dialog or panel and held across the solid-gating
+   *  confirmation step. */
+  const exportCagesRef = useRef<boolean | undefined>(undefined)
   const exportGltf = useCallback(async () => {
     const api = viewportApi.current
     if (api === null) {
@@ -4118,7 +5201,7 @@ export default function App() {
     }
     let bytes: Uint8Array | null
     try {
-      bytes = await api.exportGlb()
+      bytes = await api.exportGlb(exportCagesRef.current)
     } catch (err: unknown) {
       handleToast(t`Export failed: ${ph({ reason: friendlyErrorText(err) })}`)
       return
@@ -4158,7 +5241,7 @@ export default function App() {
     }
     let bytes: Uint8Array | null
     try {
-      bytes = await api.exportUsdz()
+      bytes = await api.exportUsdz(exportCagesRef.current)
     } catch (err: unknown) {
       handleToast(t`Export failed: ${ph({ reason: friendlyErrorText(err) })}`)
       return
@@ -4208,7 +5291,7 @@ export default function App() {
     }
     let bytes: Uint8Array | null
     try {
-      bytes = await api.exportStl(stlSegmentsRef.current)
+      bytes = await api.exportStl(stlSegmentsRef.current, exportCagesRef.current)
     } catch (err: unknown) {
       handleToast(t`Export failed: ${ph({ reason: friendlyErrorText(err) })}`)
       return
@@ -4244,7 +5327,7 @@ export default function App() {
     }
     let bytes: Uint8Array | null
     try {
-      bytes = await api.export3mf()
+      bytes = await api.export3mf(exportCagesRef.current)
     } catch (err: unknown) {
       handleToast(t`Export failed: ${ph({ reason: friendlyErrorText(err) })}`)
       return
@@ -4304,11 +5387,15 @@ export default function App() {
     const scene = sceneRef.current
     if (scene === null) return null
     pushCameraStateToScene(scene)
+    // A shared document carries its id, so Shop Mode's per-document state
+    // keys on the same identity as this one.
+    scene.ensure_document_id()
+    void reportDocumentId()
     const bytes = new Uint8Array(scene.save())
     // Always `.hew` bytes (a `.skp` document included), named `<base>.hew`.
     const name = nameForFormat(documentName(docSessionRef.current), 'hew')
     return { bytes, name }
-  }, [pushCameraStateToScene])
+  }, [pushCameraStateToScene, reportDocumentId])
 
   // File ▸ Open on Phone… is disabled on an empty document (nothing worth
   // sharing) — re-derived on every `docRev` bump (the same "something in
@@ -4382,8 +5469,35 @@ export default function App() {
   const [saveToLibraryTarget, setSaveToLibraryTarget] = useState<
     | { kind: 'selection'; nodeKinds: Uint8Array; nodeIds: BigUint64Array; defaultName: string }
     | { kind: 'document'; defaultName: string }
+    | {
+        /** A profile item (Fillet's More shapes menu, a built-in's copy, or an
+         *  edited profile document). `build` makes the item bytes for the
+         *  `hew.library` metadata the save mints. */
+        kind: 'profile'
+        defaultName: string
+        build: (meta: Record<string, unknown>) => Promise<Uint8Array | null> | Uint8Array | null
+        rows: Array<{ label: string; value: string }>
+        /** The item an edited profile was opened from, to overwrite. */
+        replace?: { fileName: string; id: string; name: string; meta: LibraryItemMeta }
+      }
     | null
   >(null)
+  /** The profile item this window's document was opened from ("Open for
+   *  editing"), for Library ▸ Save's "Replace" offer. Cleared on any load. */
+  const profileSourceRef = useRef<{ fileName: string; id: string; name: string; meta: LibraryItemMeta } | null>(null)
+
+  /** The linked copy being promoted to a component (Make component), awaiting
+   * its name. `null` = prompt closed. */
+  /** A Subtract waiting for the scope strip's answer ("Cut all N copies" or "Only this one"). */
+  const [cutScope, setCutScope] = useState<{ op: number; nodes: NodeRef[]; copies: number } | null>(null)
+  // The strip belongs to the selection it was opened for.
+  // It also goes when the document changes under it (undo, redo, any edit),
+  // since the copy count it quotes may no longer be true.
+  useEffect(() => {
+    setCutScope(null)
+  }, [selectedIds, docRev])
+
+  const [promoteTarget, setPromoteTarget] = useState<{ instance: bigint; defaultName: string } | null>(null)
 
   /** Lightweight per-item summary for the command palette's dynamic 'Library'
    * group (frame 1e) — NOT the full `LibraryItem` the dialog builds (no
@@ -4457,9 +5571,14 @@ export default function App() {
   // desktop shell this opens/focuses the REAL native Library window (the
   // Settings-window pattern, resizable); the web build keeps its in-app
   // modal.
+  const libraryRefreshRef = useRef<() => void>(() => {})
   const openLibraryEntry = useCallback(() => {
     if (isTauri) {
       void import('@tauri-apps/api/core').then(({ invoke }) => invoke('open_library_window'))
+      // The Library is its own window there, so this document's panel
+      // state never changes: ask for the check an opening panel gets, which
+      // is when a change made to the folder by hand is noticed.
+      libraryRefreshRef.current()
     } else {
       setShowLibrary((v) => !v)
     }
@@ -4477,6 +5596,138 @@ export default function App() {
     // scene identity.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [state, docRev])
+
+  // Library updates (v1.5 OW-2): where every part that came from the Library
+  // stands against the item in the Library now. Checked after a document
+  // opens, when the Library changes, and when the Library or the Components
+  // panel opens (see useLibraryLinks); Settings ▸ Folders turns the automatic
+  // checks and the bar off (a panel or the Save popover still checks).
+  const checkLibraryUpdates = useCheckLibraryUpdates()
+  // Placement counts are scoped to an open session, so while one is open the
+  // last answer from outside it stands.
+  const hasLibraryPlacements = Object.keys(libraryPlacements).length > 0
+  const hadLibraryPlacementsRef = useRef(hasLibraryPlacements)
+  if (sessionStack.length === 0) hadLibraryPlacementsRef.current = hasLibraryPlacements
+  const libLinks = useLibraryLinks({
+    scene: state?.scene ?? null,
+    docRev,
+    docGeneration,
+    enabled: checkLibraryUpdates,
+    sessionOpen: sessionStack.length > 0,
+    openedKey: (showLibrary ? 1 : 0) + (showComponents ? 2 : 0),
+    hasLinks: hasLibraryPlacements || (sessionStack.length > 0 && hadLibraryPlacementsRef.current),
+  })
+  libraryRefreshRef.current = () => void libLinks.refreshNow()
+  const libraryItemStates = useMemo(() => itemStates(libLinks.links), [libLinks.links])
+  const [libraryReviewOpen, setLibraryReviewOpen] = useState(false)
+  const [libraryOutcome, setLibraryOutcome] = useState<{ outcome: UpdateOutcome; links: LibraryLink[] } | null>(null)
+  const libraryReviewOpenRef = useRef(false)
+  libraryReviewOpenRef.current = libraryReviewOpen
+  /** Open Review fresh: no outcome from an earlier update is shown in it. */
+  const openLibraryReview = useCallback(() => {
+    setLibraryOutcome(null)
+    setLibraryReviewOpen(true)
+  }, [])
+  const [libraryUpdateBusy, setLibraryUpdateBusy] = useState(false)
+  const librarySessionOpenRef = useRef(false)
+  librarySessionOpenRef.current = sessionStack.length > 0
+
+  /** Update parts from the Library: the named definitions, or every part the
+   *  Library has newer. One kernel step ("Update from Library"); a part the
+   *  kernel refuses is skipped and named, the rest go through. */
+  const handleLibraryUpdate = useCallback(
+    async (request: { definitions: string[] } | { all: true }): Promise<void> => {
+      const scene = sceneRef.current
+      if (scene === null || libraryUpdateBusy) return
+      setLibraryUpdateBusy(true)
+      try {
+        const before = libLinks.links
+        const wanted =
+          'all' in request
+            ? before.filter((l) => l.state === 'library_newer')
+            : before.filter((l) => request.definitions.includes(l.definition))
+        const items = await libLinks.readItems(wanted.map((l) => l.item))
+        // The document changed while the files were read: do nothing rather than guess.
+        if (sceneRef.current !== scene) return
+        let outcome: UpdateOutcome | null
+        try {
+          // While a group or component is open the kernel's own "all" sees
+          // only what the session shows (nothing): name the parts instead, so
+          // it refuses each one it cannot touch and Review says which.
+          const asked =
+            'all' in request && librarySessionOpenRef.current
+              ? { definitions: wanted.map((l) => l.definition) }
+              : request
+          outcome = parseUpdateOutcome(scene.update_definitions_from_items({ ...asked, items }))
+        } catch (err) {
+          const code = parseKernelErrorCode(err)
+          handleToast(kernelErrorMessage(code ?? 'Unknown', err instanceof Error ? err.message : String(err)), code ?? undefined)
+          return
+        }
+        viewportApi.current?.refreshScene()
+        setDocRev((r) => r + 1)
+        if (outcome === null) return
+        // The Review list shows what the last update did; one that left
+        // nothing behind and was not run from the list leaves no old
+        // outcome to show later.
+        const showOutcome = outcome.skipped.length > 0 || libraryReviewOpenRef.current
+        setLibraryOutcome(showOutcome ? { outcome, links: before } : null)
+        // Skipped parts are named in the Review list, which opens to say so.
+        if (outcome.skipped.length > 0) setLibraryReviewOpen(true)
+        handleToast(outcomeToast(outcome, before))
+        void libLinks.refreshNow()
+      } finally {
+        setLibraryUpdateBusy(false)
+      }
+    },
+    // libLinks is rebuilt each render; its members read refs, so the latest links are what matter.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [libLinks.links, libLinks.readItems, libLinks.refreshNow, libraryUpdateBusy, handleToast],
+  )
+
+  /** Update in Library: the Save popover's lead action, offered when the one
+   *  selected part came from a Library item this model has changed. */
+  const libraryUpdateOffer = useMemo(() => {
+    const scene = state?.scene
+    const target = saveToLibraryTarget
+    if (scene == null || target === null || target.kind !== 'selection') return null
+    if (target.nodeIds.length !== 1 || target.nodeKinds[0] !== 2) return null
+    const def = scene.instance_def(target.nodeIds[0]!)
+    if (def === undefined) return null
+    const link = libLinks.byDefinition.get(def.toString())
+    if (link === undefined || !canUpdateLibraryFrom(link.state)) return null
+    const ref = libLinks.itemRef(link.item)
+    if (ref === undefined) return null
+    // Only the item's root part can stand for the item: a part nested in it
+    // (the Leg of a Table that was exploded) carries the Table's id, and
+    // saving it over the item would replace the whole Table with one leg.
+    if (!isItemRoot(link, ref.rootSid)) return null
+    // A linked copy cannot stand for an item: the extract would carry its
+    // "linked" mark into the Library file, and saving it the usual way makes
+    // it a component first (renaming and unlinking it). The popover says so.
+    // The same holds for a wrapper left with one copy, which reads as a plain
+    // Object but still carries the mark; only the wording differs.
+    if (isWrapperPlacement(scene, target.nodeIds[0]!)) {
+      return { linkedCopy: true as const, linkedSet: isLinkedSet(scene, target.nodeIds[0]!), itemName: ref.name }
+    }
+    return {
+      linkedCopy: false as const,
+      itemId: link.item,
+      itemName: ref.name,
+      fileName: ref.fileName,
+      meta: ref.meta,
+      confirm: needsLibraryConfirm(link.state),
+      confirmKind: libraryConfirmKind(link.state),
+    }
+  }, [state, saveToLibraryTarget, libLinks])
+
+  // The Save to Library popover opening always asks (even with the setting off),
+  // so "Update in Library" is offered from an answer that is current.
+  const saveToLibraryOpen = saveToLibraryTarget !== null
+  const refreshLibraryLinks = libLinks.refreshNow
+  useEffect(() => {
+    if (saveToLibraryOpen) void refreshLibraryLinks()
+  }, [saveToLibraryOpen, refreshLibraryLinks])
 
   const paletteLibraryEntries = useMemo((): PaletteEntry[] => {
     return libraryIndex.map((entry): PaletteEntry => {
@@ -4514,11 +5765,7 @@ export default function App() {
       const index = sharedTreeIndex?.get(nodeKey(node)) ?? 0
       if (node.kind === 'object') return resolveLabel(scene.object_name(node.id), undefined, 'object', index)
       if (node.kind === 'group') return resolveLabel(scene.group_name(node.id), undefined, 'group', index)
-      if (node.kind === 'instance') {
-        const def = scene.instance_def(node.id)
-        const defName = def !== undefined ? scene.component_name(def) : undefined
-        return resolveLabel(scene.instance_name(node.id), defName, 'instance', index)
-      }
+      if (node.kind === 'instance') return placementLabel(scene, node.id, index)
       return t`Item`
     },
     [state, sharedTreeIndex, t],
@@ -4528,7 +5775,7 @@ export default function App() {
    * "Rendering…" spinner to a "Saved" checkmark either way — a thumbnail
    * that fails to render is an honest no-thumbnail item (see
    * `renderItemThumbnail`'s doc comment), not a failed save. */
-  const renderAndWriteThumbnail = useCallback((toastId: number, name: string, bytes: Uint8Array) => {
+  const renderAndWriteThumbnail = useCallback((toastId: number, name: string, bytes: Uint8Array, updated = false) => {
     void (async () => {
       try {
         const hash = await sha256Hex(bytes)
@@ -4537,10 +5784,15 @@ export default function App() {
       } catch {
         // Best effort — the item itself already saved successfully.
       } finally {
-        updateToast(toastId, { message: t`Saved "${name}" to library`, state: 'done', sticky: false })
+        updateToast(toastId, {
+          message: updated ? t`Updated "${name}" in the Library` : t`Saved "${name}" to library`,
+          state: 'done',
+          sticky: false,
+        })
       }
     })()
   }, [updateToast])
+  renderAndWriteThumbnailRef.current = renderAndWriteThumbnail
 
   /** Commits the SaveToLibraryPopover's chosen name: extracts the selection
    * or whole document as item bytes, writes it under a collision-proofed
@@ -4549,43 +5801,170 @@ export default function App() {
    * toast. Kernel refusals (an open component session, …) route through
    * kernelErrors.ts like every other call site. */
   const handleSaveToLibraryCommit = useCallback(
-    (name: string) => {
+    (
+      name: string,
+      opts?: {
+        replace?: boolean
+        /** Update in Library: write over this item, keeping its id and the
+         *  name, keywords, collection and category the Library has now. */
+        update?: { id: string; fileName: string; meta: Record<string, unknown> }
+      },
+    ) => {
       const target = saveToLibraryTarget
       setSaveToLibraryTarget(null)
       const scene = sceneRef.current
       if (scene === null || target === null) return
-      const id = crypto.randomUUID()
-      const meta = {
-        id,
-        name,
-        category: target.kind === 'document' ? 'model' : 'component',
-        savedAt: new Date().toISOString(),
-        sourceDoc: documentName(docSessionRef.current),
+      if (target.kind === 'profile') {
+        // A profile item: no thumbnail pass (the Library renders one from
+        // its shape), no source stamping (nothing in the model came from it).
+        void (async () => {
+          const replacing = opts?.replace === true && target.replace !== undefined ? target.replace : null
+          const id = replacing?.id ?? crypto.randomUUID()
+          // The item's metadata as the Library holds it NOW, not as it was
+          // when the profile was opened: only its remote note is carried over.
+          let current: unknown
+          if (replacing !== null) {
+            try {
+              current = (await readItemSummary(await libraryStore().read(replacing.fileName))).doc_attrs?.['hew.library']
+            } catch {
+              current = undefined // the item is gone: it is written back as a plain profile
+            }
+          }
+          let bytes: Uint8Array | null
+          try {
+            bytes = await target.build(
+              metaForProfileReplace(
+                {
+                  id,
+                  name,
+                  category: 'profile',
+                  savedAt: new Date().toISOString(),
+                  sourceDoc: documentName(docSessionRef.current),
+                },
+                current,
+              ),
+            )
+          } catch (err) {
+            const code = parseKernelErrorCode(err)
+            handleToast(kernelErrorMessage(code ?? 'Unknown', err instanceof Error ? err.message : String(err)), code ?? undefined)
+            return
+          }
+          const redrawHint = profileRedrawHint()
+          const replacingName = replacing?.name ?? ''
+          if (bytes === null) {
+            // oxlint-disable-next-line lingui/no-unlocalized-strings -- kernel error code
+            handleToast(t`This drawing isn't a profile Hew can use. ${redrawHint}`, 'InvalidProfile')
+            return
+          }
+          // Only a shape the Fillet tool can read is worth keeping: a drawing
+          // that is not one (a chain that doubles back, say) must not take
+          // the place of a good saved profile, or become a blank one.
+          let readable: boolean
+          try {
+            readable = (await profileShapeOfBytes(bytes, { strict: true })) !== null
+          } catch {
+            // Not a verdict on the drawing: the check itself could not run.
+            handleToast(
+              replacing !== null
+                ? t`Hew couldn't check this drawing, so "${replacingName}" was left as it was. Try again; if it keeps happening, use Report Bug.`
+                : t`Hew couldn't check this drawing, so nothing was saved. Try again; if it keeps happening, use Report Bug.`,
+            )
+            return
+          }
+          if (!readable) {
+            handleToast(
+              replacing !== null
+                ? t`This drawing isn't a profile Hew can use, so "${replacingName}" was left as it was. ${redrawHint}`
+                : t`This drawing isn't a profile Hew can use, so nothing was saved. ${redrawHint}`,
+            )
+            return
+          }
+          const fileName = replacing?.fileName ?? itemFileName(name, id, 'profile')
+          try {
+            await libraryStore().write(fileName, bytes)
+          } catch (err) {
+            const reason = err instanceof Error ? err.message : String(err)
+            handleToast(t`Save profile failed: ${reason}`)
+            return
+          }
+          handleToast(replacing !== null ? t`Replaced profile "${name}".` : t`Saved profile "${name}".`)
+        })()
+        return
       }
+      const updating = opts?.update
+      const id = updating?.id ?? crypto.randomUUID()
+      const meta = metaForLibrarySave(
+        {
+          id,
+          name,
+          category: updating?.meta.category ?? (target.kind === 'document' ? 'model' : 'component'),
+          savedAt: new Date().toISOString(),
+          sourceDoc: documentName(docSessionRef.current),
+        },
+        updating?.meta,
+      )
       let bytes: Uint8Array
+      let promotedAt: bigint | null = null
       try {
-        bytes =
+        const extract = (): Uint8Array =>
           target.kind === 'document'
             ? scene.extract_document_item(JSON.stringify(meta))
             : scene.extract_item(target.nodeKinds, target.nodeIds, true, name, JSON.stringify(meta))
+        // A linked set has no name of its own and a Library item needs one,
+        // so saving it makes it a named component, but only if the save
+        // goes through: a failed extract takes the promotion back.
+        const linked =
+          target.kind === 'selection' && target.nodeIds.length === 1 && target.nodeKinds[0] === 2
+            ? wrapperPlacementOf(scene, [{ kind: 'instance', id: target.nodeIds[0] }])
+            : null
+        if (linked !== null && updating !== undefined) {
+          // Never reached from the popover (it does not offer the update for a
+          // linked copy): an extract would carry the "linked" mark into the
+          // item, and promoting would silently rename and unlink the set.
+          handleToast(
+            isLinkedSet(scene, linked.instance)
+              ? t`This part is a linked copy. Make it a component, or unlink it, before updating “${name}” in the Library.`
+              : t`Make this part a component before updating “${name}” in the Library.`,
+          )
+          return
+        }
+        if (linked !== null) {
+          try {
+            const saved = promoteForSave(scene, linked.instance, name, extract)
+            bytes = saved.value
+            promotedAt = saved.promotedAt
+          } finally {
+            viewportApi.current?.refreshScene()
+            setDocRev((r) => r + 1)
+          }
+        } else {
+          bytes = extract()
+        }
       } catch (err) {
         const code = parseKernelErrorCode(err)
         const rawMsg = err instanceof Error ? err.message : String(err)
         handleToast(kernelErrorMessage(code ?? 'Unknown', rawMsg), code ?? undefined)
         return
       }
-      const fileName = itemFileName(name, id, target.kind === 'document' ? 'model' : 'component')
+      const fileName = updating?.fileName ?? itemFileName(name, id, target.kind === 'document' ? 'model' : 'component')
       // The stamp below runs after an await — if the user replaced the
       // document meanwhile (File ▸ New/Open), the captured node handles
       // could resolve against RECYCLED slots in the new document and stamp
-      // the wrong entities (adversarial review). The session object's
-      // identity changes exactly on document replacement, so capture it
-      // now and bail if it moved.
+      // the wrong entities (adversarial review). The document generation
+      // changes exactly on document replacement (the session object also
+      // changes on a clean-to-dirty flip, which a promoted save causes), so
+      // capture it now and bail if it moved.
+      const generationAtSave = docGenerationRef.current
       const sessionAtSave = docSessionRef.current
       void (async () => {
         try {
           await libraryStore().write(fileName, bytes)
         } catch (err) {
+          // The item never landed, so the set should not stay promoted.
+          if (promotedAt !== null && undoPromotionIfUnmoved(scene, promotedAt)) {
+            viewportApi.current?.refreshScene()
+            setDocRev((r) => r + 1)
+          }
           handleToast(t`Save to Library failed: ${ph({ reason: err instanceof Error ? err.message : String(err) })}`)
           return
         }
@@ -4595,11 +5974,13 @@ export default function App() {
         // immediately and a re-insert reuses the existing definition
         // (playtest finding). Selection items only: a whole-document model
         // item has no meaningful in-model selection to mark.
-        if (target.kind !== 'document' && docSessionRef.current === sessionAtSave) {
+        if (target.kind !== 'document' && docGenerationRef.current === generationAtSave) {
           let stamped = false
           try {
-            // Capture cleanliness BEFORE the stamp dirties the session.
-            const wasClean = !docSessionRef.current.dirty
+            // Capture cleanliness BEFORE the stamp dirties the session. A
+            // save that promoted a linked set made a real, undoable edit,
+            // so the stamp is not the only change: take the ordinary path.
+            const wasClean = promotedAt === null && !docSessionRef.current.dirty
             const ref = docSessionRef.current.currentRef
             const hash = await sha256Hex(bytes)
             const summary = await readItemSummary(bytes)
@@ -4639,6 +6020,7 @@ export default function App() {
             if (writeThrough) {
               // Camera-state parity with every other save path.
               pushCameraStateToScene(scene)
+              scene.ensure_document_id()
               const docBytes = new Uint8Array(scene.save())
               const generationAtWrite = documentGenerationRef.current
               const newRef = await queueDocumentWrite(() => fileHostRef.current.save(docBytes, ref))
@@ -4683,11 +6065,20 @@ export default function App() {
           }
         }
         const toastId = pushStickyToast(t`Rendering thumbnail for "${name}"…`)
-        renderAndWriteThumbnail(toastId, name, bytes)
+        renderAndWriteThumbnail(toastId, name, bytes, updating !== undefined)
       })()
     },
     [saveToLibraryTarget, handleToast, pushStickyToast, renderAndWriteThumbnail, pushCameraStateToScene, armAutosaveTick, queueDocumentWrite],
   )
+
+  /** Update in Library: write the selected part over the item it came from,
+   *  keeping the item's id, name, keywords, collection and category as the
+   *  Library has them now. Not an undo step, like any Save to Library. */
+  const handleUpdateInLibrary = (offer: Extract<NonNullable<typeof libraryUpdateOffer>, { linkedCopy: false }>): void => {
+    handleSaveToLibraryCommit(offer.itemName, {
+      update: { id: offer.itemId, fileName: offer.fileName, meta: { ...offer.meta } },
+    })
+  }
 
   /** MaterialPalette's "Save to Library" button — no thumbnail render (a
    * pure-material item has nothing to render; `renderItemThumbnail` would
@@ -4729,9 +6120,19 @@ export default function App() {
     [handleToast],
   )
 
+  /** A window editing a Library item is no place to insert one: the item
+   * would land in the very file being edited. Says so and answers true. */
+  const refuseInsertIntoLibraryEdit = useCallback((): boolean => {
+    const editing = libraryEditRef.current
+    if (editing === null || editing.ref !== docSessionRef.current.currentRef) return false
+    handleToast(t`This window is editing a Library item. Switch to a model window to insert it.`)
+    return true
+  }, [handleToast])
+
   const onLibraryInsert = useCallback(
     (item: LibraryItem, bytes: Uint8Array) => {
       setShowLibrary(false)
+      if (refuseInsertIntoLibraryEdit()) return
       void (async () => {
         let ghost: Awaited<ReturnType<typeof buildItemGhost>>
         try {
@@ -4758,7 +6159,7 @@ export default function App() {
         )
       })()
     },
-    [handleToast],
+    [handleToast, refuseInsertIntoLibraryEdit],
   )
 
   // Open as Document: reuses THIS window only when it's pristine (same rule
@@ -4778,8 +6179,17 @@ export default function App() {
         if (scene === null) return
         const pristine = isPristineDocument(docSessionRef.current, scene)
         if (pristine) {
-          const ok = applyLoadedBytes(bytes, { name: `${item.displayName}.hew`, label: OPEN_FILE_LABELS.hew })
-          if (ok) setDocSession(afterImport(item.displayName, Date.now()))
+          const opened = await withoutNoteOrReport(bytes)
+          if (opened === null) return
+          const ok = applyLoadedBytes(opened, { name: `${item.displayName}.hew`, label: OPEN_FILE_LABELS.hew })
+          if (ok) {
+            setDocSession(afterImport(item.displayName, Date.now()))
+            // An edited profile can replace the item it came from (and keeps its note).
+            profileSourceRef.current =
+              item.category === 'profile'
+                ? { fileName: item.file.fileName, id: item.meta.id ?? '', name: item.displayName, meta: item.meta }
+                : null
+          }
           return
         }
         const cantRoute = () =>
@@ -4805,8 +6215,152 @@ export default function App() {
         }
       })()
     },
-    [applyLoadedBytes, handleToast],
+    [applyLoadedBytes, handleToast, withoutNoteOrReport],
   )
+
+  // Library ▸ Edit: open the Library's own file for editing. The desktop
+  // routes the item's real path through the ordinary open (focus the window
+  // that has it, else this one when pristine, else a new window). The web
+  // opens it here when this tab is pristine, else in a new tab, so the model
+  // that uses the part stays open. A window editing an item saves it back
+  // through the Library (`saveToRef`).
+  const openLibraryItemForEdit = useCallback(
+    async (fileName: string) => {
+      const scene = sceneRef.current
+      if (scene === null) return
+      // Web Lock: a second tab on the same item says so and loads nothing.
+      let release: (() => void) | null = null
+      const locks = typeof navigator !== 'undefined' ? navigator.locks : undefined
+      if (locks !== undefined) {
+        const got = await new Promise<(() => void) | null>((resolve) => {
+          locks
+            .request(`hew-library-edit:${fileName}`, { ifAvailable: true }, (lock) => {
+              if (lock === null) {
+                resolve(null)
+                return null
+              }
+              return new Promise<void>((done) => resolve(() => done()))
+            })
+            .catch(() => resolve(() => {}))
+        })
+        if (got === null) {
+          // The item's own name when it reads; the file's name otherwise.
+          let label = fileName.replace(/^.*\//, '').replace(/\.hew$/i, '')
+          try {
+            const bytes = await libraryStore().read(fileName)
+            label = buildLibraryItem({ fileName, size: bytes.length, mtimeMs: 0 }, await readItemSummary(bytes), '').displayName
+          } catch {
+            /* keep the file's name */
+          }
+          handleToast(t`"${label}" is already open for editing in another tab.`)
+          return
+        }
+        release = got
+      }
+      let bytes: Uint8Array
+      try {
+        bytes = await libraryStore().read(fileName)
+      } catch (err) {
+        release?.()
+        handleToast(t`Couldn't read library item: ${ph({ reason: err instanceof Error ? err.message : String(err) })}`)
+        return
+      }
+      let item: LibraryItem
+      try {
+        const summary = await readItemSummary(bytes)
+        item = buildLibraryItem({ fileName, size: bytes.length, mtimeMs: 0 }, summary, '')
+      } catch (err) {
+        release?.()
+        handleToast(t`Couldn't read library item: ${ph({ reason: err instanceof Error ? err.message : String(err) })}`)
+        return
+      }
+      if (item.meta.id === undefined) {
+        // No Library id: Save would take the ordinary path and never update the Library.
+        release?.()
+        const itemName = item.displayName
+        handleToast(t`"${itemName}" can't be edited in place because it has no Library identity. Use Open as document, then Save to Library.`)
+        return
+      }
+      const name = `${item.displayName}.hew`
+      if (!applyLoadedBytes(bytes, { name, label: OPEN_FILE_LABELS.hew })) {
+        release?.()
+        return
+      }
+      const openedRef: FileRef = { name, format: 'hew', handle: null }
+      setDocSession(afterOpen(openedRef, Date.now()))
+      // After the load, which clears any earlier binding (and its lock).
+      setLibraryEdit({ fileName, id: item.meta.id, name: item.displayName, ref: openedRef })
+      libraryEditLockRef.current = release
+      const itemName = item.displayName
+      handleToast(t`Editing "${itemName}" from the Library. Saving updates the Library.`)
+    },
+    [applyLoadedBytes, handleToast, setLibraryEdit],
+  )
+
+  const onLibraryEdit = useCallback(
+    (item: LibraryItem) => {
+      const editing = libraryEditRef.current
+      if (editing !== null && editing.fileName === item.file.fileName && editing.ref === docSessionRef.current.currentRef) {
+        setShowLibrary(false)
+        const itemName = item.displayName
+        handleToast(t`You're already editing "${itemName}".`)
+        return
+      }
+      if (item.meta.id === undefined) {
+        const itemName = item.displayName
+        handleToast(t`"${itemName}" can't be edited in place because it has no Library identity. Use Open as document, then Save to Library.`)
+        return
+      }
+      if (isTauri) {
+        setShowLibrary(false)
+        void (async () => {
+          const path = await libraryStore().itemPath(item.file.fileName)
+          if (path === null) {
+            const itemName = item.displayName
+            handleToast(t`Couldn't open "${itemName}" for editing: its file is no longer in the Library.`)
+            return
+          }
+          await openPathRef.current(path)
+        })()
+        return
+      }
+      const scene = sceneRef.current
+      if (scene === null) return
+      if (!isPristineDocument(docSessionRef.current, scene)) {
+        // Opened inside the click, before any await, so the browser allows it.
+        // oxlint-disable-next-line lingui/no-unlocalized-strings -- a URL, not copy
+        const opened = window.open(`${location.pathname}?libraryEdit=${encodeURIComponent(item.file.fileName)}`, '_blank')
+        if (opened === null) {
+          // The Library stays open so the click can be repeated.
+          handleToast(t`Your browser blocked the new tab. Allow pop-ups for this site, or save your model first so Edit can open the item in this tab.`)
+        }
+        return
+      }
+      setShowLibrary(false)
+      void openLibraryItemForEdit(item.file.fileName)
+    },
+    [handleToast, openLibraryItemForEdit],
+  )
+
+  // Web: a tab opened by Library ▸ Edit boots with the item named in the URL.
+  const libraryEditBootRef = useRef(false)
+  useEffect(() => {
+    if (isTauri || state?.scene == null || libraryEditBootRef.current) return
+    libraryEditBootRef.current = true
+    const params = new URLSearchParams(location.search)
+    const wanted = params.get('libraryEdit')
+    if (wanted === null) return
+    params.delete('libraryEdit')
+    const rest = params.toString()
+    history.replaceState(null, '', `${location.pathname}${rest === '' ? '' : `?${rest}`}${location.hash}`)
+    if (wanted.includes('..') || !/^(?:(?:Components|Materials|Models)\/)?[^/\\:]+\.hew$/i.test(wanted)) {
+      libraryEditBootingRef.current = false
+      return
+    }
+    void openLibraryItemForEdit(wanted).finally(() => {
+      libraryEditBootingRef.current = false
+    })
+  }, [state, openLibraryItemForEdit])
 
   const onLibraryPaintWith = useCallback(
     (_item: LibraryItem, bytes: Uint8Array) => {
@@ -4862,6 +6416,113 @@ export default function App() {
     },
     [handleToast, handleDocumentChanged],
   )
+
+  /** Library ▸ Use on a profile: arm the Fillet tool with it. */
+  const onLibraryUseProfile = useCallback(
+    (item: LibraryItem, bytes: Uint8Array | null) => {
+      void (async () => {
+        let profile: ReturnType<typeof shapeProfile> | null = null
+        if (bytes === null) {
+          profile = await builtInFilletProfile(item.file.fileName)
+        } else {
+          const parsed = await profileShapeOfBytes(bytes)
+          if (parsed !== null) profile = shapeProfile(item.meta.id ?? item.file.fileName, item.displayName, parsed.shape)
+        }
+        if (profile === null) {
+          // oxlint-disable-next-line lingui/no-unlocalized-strings -- kernel error code and empty detail
+          handleToast(kernelErrorMessage('InvalidProfile', ''), 'InvalidProfile')
+          return
+        }
+        setFilletProfile(profile)
+        setShowLibrary(false)
+        setActiveTool('Fillet')
+      })()
+    },
+    [handleToast],
+  )
+
+  /** The "Detected width" row of a profile save prompt, from the bytes it
+   *  would write. */
+  const profileWidthRows = useCallback(async (bytes: Uint8Array | null): Promise<Array<{ label: string; value: string }>> => {
+    const parsed = bytes === null ? null : await profileShapeOfBytes(bytes)
+    return parsed === null ? [] : [{ label: t`Detected width`, value: formatLength(parsed.width) }]
+  }, [t])
+
+  /** Library ▸ Save a copy on a built-in profile, and the Fillet card's
+   *  "Save profile…" with a built-in chosen. */
+  const openSaveBuiltInCopy = useCallback(
+    (id: string, name: string) => {
+      void (async () => {
+        const build = (meta: Record<string, unknown>) => builtInItemBytes(id, meta)
+        const preview = await build({ id: 'preview', name, category: 'profile' })
+        setSaveToLibraryTarget({
+          kind: 'profile',
+          defaultName: `${name} copy`,
+          build,
+          rows: await profileWidthRows(preview),
+        })
+      })()
+    },
+    [profileWidthRows],
+  )
+  const onLibrarySaveProfileCopy = useCallback(
+    (item: LibraryItem) => {
+      setShowLibrary(false)
+      openSaveBuiltInCopy(item.file.fileName, item.displayName)
+    },
+    [openSaveBuiltInCopy],
+  )
+
+  /** The Fillet card's "Save profile…" (under More shapes): the selected drawn chain, else a
+   *  copy of the built-in profile that is current. */
+  const openSaveProfile = useCallback(() => {
+    const scene = sceneRef.current
+    if (scene === null) return
+    const chain = selectionChain(scene, selectedIds)
+    if (chain !== null) {
+      const fix = chainFirstFix(chain.segments)
+      if (fix !== null) {
+        handleToast(fix)
+        return
+      }
+      void (async () => {
+        const build = (meta: Record<string, unknown>) => chainItemBytes(chain.segments, chain.normal, meta)
+        const preview = await build({ id: 'preview', name: 'Profile', category: 'profile' })
+        if (preview === null) {
+          const redrawHint = profileRedrawHint()
+          // oxlint-disable-next-line lingui/no-unlocalized-strings -- kernel error code
+          handleToast(t`This drawing isn't a profile Hew can use. ${redrawHint}`, 'InvalidProfile')
+          return
+        }
+        setSaveToLibraryTarget({
+          kind: 'profile',
+          defaultName: t`My profile`,
+          build,
+          rows: await profileWidthRows(preview),
+        })
+      })()
+      return
+    }
+    const current = getFilletSettings().profile
+    if (current.kind === 'shape' && current.id.startsWith('builtin:')) {
+      openSaveBuiltInCopy(current.id, current.name)
+      return
+    }
+    handleToast(t`Select a drawn open line or arc first, then save it as a profile.`)
+  }, [selectedIds, handleToast, openSaveBuiltInCopy, profileWidthRows])
+
+  const profileCanSave = useMemo(() => {
+    const scene = sceneRef.current
+    const current = filletSettings.profile
+    if (current.kind === 'shape' && current.id.startsWith('builtin:')) return true
+    return scene !== null && selectedIds.length > 0 && selectionChain(scene, selectedIds) !== null
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedIds, filletSettings.profile, docRev])
+  const profileSections = useProfileSections({
+    active: activeTool === 'Fillet' && behaviorEnabled('fillet-profiles'),
+    canSave: profileCanSave,
+    onSave: openSaveProfile,
+  })
 
   const libraryMaterialInPalette = useCallback(
     async (bytes: Uint8Array): Promise<boolean> => {
@@ -4933,12 +6594,12 @@ export default function App() {
     }
   }, [docSession.currentRef, docSession.importedName, handleToast])
 
-  // SketchUp export (`.skp`, the 2026 container or the 2017 format): a copy
+  // SketchUp export (`.skp`, the 2026 container or a 2017 to 2020 release): a copy
   // written out through `Scene.export_skp`, which leaves the document's own
   // `.skp` source alone. Whatever the file could not hold exactly is listed
   // in the same notice a `.skp` Save shows — every time (an export is a
   // deliberate act, not a recurring save), and with no "Save a .hew copy".
-  const exportSkp = useCallback(async (format: 'skp' | 'skp2017') => {
+  const exportSkp = useCallback(async (format: SkpExportFormat, compat = false) => {
     const scene = sceneRef.current
     if (scene === null) {
       handleToast(t`Export failed: viewport not ready.`)
@@ -4948,7 +6609,7 @@ export default function App() {
     try {
       pushCameraStateToScene(scene)
       // The dialog's `skp` is the 2026 container (the wasm target's name).
-      out = scene.export_skp(format === 'skp2017' ? 'skp2017' : 'skp2026', getLengthUnit()) as SkpWrite
+      out = scene.export_skp(format === 'skp' ? 'skp2026' : format, getLengthUnit(), format === 'skp' && compat) as SkpWrite
     } catch (err: unknown) {
       handleToast(t`Export failed: ${ph({ reason: friendlyErrorText(err) })}`)
       return
@@ -4963,17 +6624,20 @@ export default function App() {
       if (exportedTo !== null) {
         handleToast(t`Exported SketchUp file.`)
         LogStore.log.info('app', `Exported ${format} (${out.bytes.length} bytes)`)
-        if (out.simplified.length > 0) setSkpNotice({ simplified: out.simplified, offerHewCopy: false })
+        if (out.simplified.length > 0 || out.writer_notes.length > 0) {
+          setSkpNotice({ simplified: out.simplified, writerNotes: out.writer_notes, offerHewCopy: false })
+        }
       }
     } catch (err: unknown) {
       handleToast(t`Export failed: ${ph({ reason: friendlyErrorText(err) })}`)
     }
   }, [handleToast, pushCameraStateToScene])
 
-  const handleExportFormat = useCallback((format: ExportFormat, stlSegmentsPerTurn: number, svg?: SvgExportOptions) => {
+  const handleExportFormat = useCallback((format: ExportFormat, stlSegmentsPerTurn: number, svg?: SvgExportOptions, skpCompat = false, cages?: boolean) => {
     setExportDialogOpen(false)
-    if (format === 'skp' || format === 'skp2017') {
-      void exportSkp(format)
+    exportCagesRef.current = cages === true && behaviorEnabled('export-cages') ? true : undefined
+    if (isSkpExportFormat(format)) {
+      void exportSkp(format, skpCompat)
     } else if (format === 'glb') {
       void exportGltf()
     } else if (format === 'usdz') {
@@ -4996,16 +6660,16 @@ export default function App() {
     exportTargetRef.current = null
     const unit = getLengthUnit()
     const initial = lastExportFormatRef.current
-    const extension = initial === 'skp2017' ? 'skp' : initial
+    const extension = isSkpExportFormat(initial) ? 'skp' : initial
     const name = `${documentBaseName(docSessionRef.current)}.${extension}`
     try {
-      const pick = await pickSaveTarget(t`Export`, name, exportPanelFormats(unit), initial)
+      const pick = await pickSaveTarget(t`Export`, name, exportPanelFormats(unit, initial, skpCompatRef.current, sceneRef.current?.has_smoothed_objects() === true), exportPanelIdFor(initial))
       if (pick === null) return
       const choice = exportChoiceFrom(pick, unit)
       if (choice === null) return
       lastExportFormatRef.current = choice.format
       exportTargetRef.current = pick.path
-      handleExportFormat(choice.format, choice.stlSegmentsPerTurn, choice.svg)
+      handleExportFormat(choice.format, choice.stlSegmentsPerTurn, choice.svg, choice.skpCompat, choice.cages)
     } catch (err: unknown) {
       handleToast(t`Export failed: ${ph({ reason: friendlyErrorText(err) })}`)
     }
@@ -5036,6 +6700,24 @@ export default function App() {
     }
     setShowSettingsModal(true)
   }, [])
+
+  // Esc closes the web Settings modal (KB-16), captured before the global
+  // keydown handlers so it cannot also cancel a tool underneath. A Controls
+  // pane that is recording a shortcut keeps its own Escape.
+  useEffect(() => {
+    if (!showSettingsModal) return
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (isComposingKey(e) || e.key !== 'Escape') return
+      if (isRecordingChord()) return
+      // An open child popup/dialog takes this Escape first.
+      if (childPopupOpen(settingsDialogRef.current)) return
+      e.preventDefault()
+      e.stopPropagation()
+      setShowSettingsModal(false)
+    }
+    window.addEventListener('keydown', onKeyDown, true)
+    return () => window.removeEventListener('keydown', onKeyDown, true)
+  }, [showSettingsModal])
 
   // ---------------------------------------------------------------- stable refs for Tauri event listeners
   // These refs always track the latest callbacks so Tauri event handlers
@@ -5074,6 +6756,12 @@ export default function App() {
   /* oxlint-disable lingui/no-unlocalized-strings -- live-API refusal messages are a developer surface, English */
   useEffect(() => {
     liveOpRef.current = async (op, args): Promise<LiveOpOutcome> => {
+      // A plugin command holds the document: saving would write it half
+      // done, and open, revert, and close would replace it under the
+      // command (docs/agents/PLUGINS.md "Compounds").
+      if ((op === 'save' || op === 'open' || op === 'revert' || op === 'close') && sceneRef.current?.busy()) {
+        return { ok: false, refusal: 'document_busy', message: 'a plugin command is running on this document' }
+      }
       if (op === 'save') {
         // `hew.doc.save`: a named path saves (and rebinds) there; none
         // re-saves in place (the shell only asks when the document has a file).
@@ -5101,6 +6789,15 @@ export default function App() {
         if (ref === null) {
           return { ok: false, refusal: 'save_failed', message: 'the document has no file to save to' }
         }
+        // `compat` is for the 2021-and-later container only; an explicit
+        // `compat:false` is the same as absent (a revision-17 file stays so).
+        if (args.compat === true && ref !== null && !takesCompat(ref.format)) {
+          return {
+            ok: false,
+            refusal: 'format_mismatch',
+            message: '`compat` applies to the 2021-and-later container (format "skp")',
+          }
+        }
         if (args.copy === true) {
           // Save a copy: write the bytes, change nothing about this document
           // (no rebinding to the file, no clean mark, no new SketchUp source:
@@ -5109,9 +6806,13 @@ export default function App() {
           if (scene === null) return { ok: false, refusal: 'save_failed', message: 'not ready' }
           pushCameraStateToScene(scene)
           try {
+            // A copy carries the document's id (minted here if this is the
+            // first write; `save_skp` mints its own).
+            if (!isSkpFormat(ref.format)) scene.ensure_document_id()
             const bytes = isSkpFormat(ref.format)
-              ? (scene.save_skp(skpTarget(ref.format), units ?? getLengthUnit(), units !== undefined) as SkpWrite).bytes
+              ? (scene.save_skp(skpTarget(ref.format), units ?? getLengthUnit(), units !== undefined, takesCompat(ref.format) && (args.compat === true || (args.format === undefined && skpCompatRef.current))) as SkpWrite).bytes
               : new Uint8Array(scene.save())
+            void reportDocumentId()
             await fileHostRef.current.save(bytes, ref)
             return { ok: true }
           } catch (err) {
@@ -5123,7 +6824,7 @@ export default function App() {
           }
         }
         lastSaveErrorRef.current = 'the document could not be saved'
-        const saved = await saveToRef(ref, units)
+        const saved = await saveToRef(ref, units, args.compat === true ? true : args.format !== undefined ? false : undefined)
         return saved
           ? { ok: true }
           : { ok: false, refusal: 'save_failed', message: lastSaveErrorRef.current }
@@ -5178,7 +6879,7 @@ export default function App() {
       }
       return { ok: false, refusal: 'host_capability_missing', message: `unknown operation ${op}` }
     }
-  }, [openPathInPlace, clearRecoverySnapshot, saveToRef, docSession.currentRef, pushCameraStateToScene, revertToSaved])
+  }, [openPathInPlace, clearRecoverySnapshot, saveToRef, docSession.currentRef, pushCameraStateToScene, revertToSaved, reportDocumentId])
   /* oxlint-enable lingui/no-unlocalized-strings */
 
   // ---------------------------------------------------------------- native menu-action dispatch
@@ -5188,31 +6889,82 @@ export default function App() {
   // re-running a []-deps effect — so a switch captured inside that effect would
   // be frozen at its first-mount version and silently drop any case added later
   // (e.g. a newly-added pane toggle). Routing through this ref keeps it current.
-  // Whole-node delete: deletes every currently-selected node
-  // (Object/Group/Instance) and clears the selection. Shared by the Edit ▸
+  // Delete: deletes everything selected (nodes, guides, annotations) as one
+  // Undo step and clears the selection. Shared by the Edit ▸
   // Delete menu item and the Delete/Backspace key handler below — both
   // dispatch through `menuActionRef.current('edit-delete')` so this always
   // sees the current `selectedIds` (the ref is reassigned fresh every render;
   // see the Fast-Refresh note above `menuActionRef`).
   const deleteSelection = () => {
-    // A selected guide/annotation deletes via the same path; mutually
-    // exclusive with node selection.
-    if (selectedGuide !== null) {
-      viewportApi.current?.runDeleteGuide(selectedGuide)
-      setSelectedGuide(null)
+    // A lone guide or annotation deletes through its own call, whose Undo
+    // step is named by its kind.
+    if (loneGuide !== null) {
+      viewportApi.current?.runDeleteGuide(loneGuide)
+    } else if (loneAnnotation !== null) {
+      viewportApi.current?.runDeleteAnnotation(loneAnnotation)
+    } else if (selection.length > 0) {
+      // Locked items are left behind: the delete runs on the rest (OW-1).
+      // Guides and annotations carry no lock and always go.
+      const scene = sceneRef.current
+      const go = scene === null || selectedIds.length === 0
+        ? selectedIds
+        : (leaveBehind(scene, selectedIds, handleToast, { descendants: true }) ?? [])
+      if (go.length === 0 && selectedGuides.length === 0 && selectedAnnotations.length === 0) return
+      viewportApi.current?.runDelete(go, selectedGuides, selectedAnnotations)
+      setSelection(selectedIds.filter((n) => !go.some((c) => nodeEq(c, n))))
       setDocRev((r) => r + 1)
       return
-    }
-    if (selectedAnnotation !== null) {
-      viewportApi.current?.runDeleteAnnotation(selectedAnnotation)
-      setSelectedAnnotation(null)
-      setDocRev((r) => r + 1)
+    } else {
       return
     }
-    if (selectedIds.length === 0) return
-    viewportApi.current?.runDelete(selectedIds)
-    setSelectedIds([])
+    setSelection([])
     setDocRev((r) => r + 1)
+  }
+
+  /** Palette: Smooth Off / 1 / 2 / 3 and Bake Smooth on the selected objects
+   *  (the same calls Object Info's Smooth row makes). */
+  const smoothSelection = (what: number | 'bake') => {
+    const scene = sceneRef.current
+    if (scene === null) return
+    const ids = selectionObjectIds(scene, selectedIds)
+    if (ids.length === 0) {
+      handleToast(t`Select an object first.`)
+      return
+    }
+    try {
+      if (what === 'bake') {
+        if (bakeSmooth(scene, ids) === 0) {
+          handleToast(t`Nothing selected is smooth. Set a Smooth level first.`)
+          setMenuSyncTick((t) => t + 1)
+          return
+        }
+      } else {
+        setSmoothLevel(scene, ids, what)
+      }
+    } catch (err) {
+      const level = typeof what === 'number' ? what : Math.max(0, ...ids.map((id) => scene.smooth_level(id)))
+      const r = smoothRefusal(err, level)
+      handleToast(r.message, r.code)
+      // muda already toggled the clicked native check item; re-push the real
+      // state so the refused level does not stay checked beside the true one.
+      setMenuSyncTick((t) => t + 1)
+      return
+    }
+    refreshAfterPanelMutation()
+  }
+
+  /** Object ▸ Soften Edges…: bring up Object Info and put the cursor in its
+   *  angle field, so the menu and the panel share one prompt. */
+  const revealSoftenAngle = () => {
+    if (menuGates?.canSoften !== true) return
+    setShowObjectInfo(true)
+    showTray()
+    // The field mounts once the pane opens; focus it on the next frame.
+    requestAnimationFrame(() => {
+      const field = document.querySelector<HTMLInputElement>('[data-soften-angle]')
+      field?.focus()
+      field?.select()
+    })
   }
 
   // ── Copy / Cut / Paste / Paste In Place (Lane D) ─────────────────────────
@@ -5226,51 +6978,86 @@ export default function App() {
   const isStructuralNode = (n: NodeRef): boolean =>
     n.kind === 'object' || n.kind === 'group' || n.kind === 'instance'
 
-  const SKETCH_COPY_TOAST = t`Sketch geometry can't be copied yet — use Move with Option/Alt held`
-
-  /** Copy: `extract_item` (unwrapped — a copied plain box stays a plain box,
-   *  unlike Save to Library's component wrap) of the selection's structural
-   *  subset, then store it. Returns the copied nodes on success (so Cut can
-   *  delete exactly what was actually captured) or `null` on refusal/error —
-   *  Cut must NOT delete anything when this fails, or the geometry is lost
-   *  with no backup on the clipboard. */
-  const doCopy = (): NodeRef[] | null => {
-    const structural = selectedIds.filter(isStructuralNode)
-    if (structural.length === 0) {
-      if (selectedIds.length > 0) handleToast(SKETCH_COPY_TOAST)
-      return null
-    }
+  /** Copy: `extract_clipboard` of the selection — its structural nodes
+   *  (unwrapped, unlike Save to Library's component wrap: a copied plain box
+   *  stays a plain box) and its drawing (v1.5 decisions D3: drawn shapes at
+   *  the granularity Move uses, whole sketches, detached shapes by their
+   *  islands), then store it. Returns what was copied on success (so Cut
+   *  deletes exactly what was captured) or `null` on refusal/error — Cut
+   *  must NOT delete anything when this fails, or the geometry is lost with
+   *  no backup on the clipboard. */
+  const doCopy = (source: readonly NodeRef[] = selectedIds): NodeRef[] | null => {
     const scene = sceneRef.current
     if (scene === null) return null
-    const sel = structuralSelection(structural)
-    if (sel === null) return null // unreachable — every entry is already structural
+    const structural = source.filter(isStructuralNode)
+    const drawing = source.filter(isCopyableDrawing)
+    let named: { json: string; shapes: number }
+    try {
+      named = clipboardDrawing(scene, [...structural, ...drawing])
+    } catch {
+      named = { json: '[]', shapes: 0 }
+    }
+    if (structural.length === 0 && named.shapes === 0) {
+      if (source.length > 0) handleToast(nothingToCopyToast())
+      return null
+    }
+    const sel = structuralSelection(structural) ?? { kinds: new Uint8Array(0), ids: new BigUint64Array(0) }
     let bytes: Uint8Array
     try {
-      bytes = scene.extract_item(sel.kinds, sel.ids, false, undefined, undefined)
+      // The window nonce makes this a CLIPBOARD copy: the kernel stamps
+      // every definition the copy carries with where it came from, so a
+      // paste back into this same document (handlePaste passes the same
+      // nonce) places the ORIGINAL definition — a linked instance, as
+      // Move+copy makes — instead of minting an unlinked duplicate. The
+      // scene composes its document epoch in, so a copy taken before
+      // File ▸ Open/New in this window never links into the new document.
+      bytes = scene.extract_clipboard(sel.kinds, sel.ids, named.json, clipboardSourceIdRef.current)
     } catch (err) {
       const code = parseKernelErrorCode(err)
       const rawMsg = err instanceof Error ? err.message : String(err)
       handleToast(kernelErrorMessage(code ?? 'Unknown', rawMsg), code ?? undefined)
       return null
     }
-    const kinds = [...new Set(structural.map((n) => n.kind))]
+    const kinds = [...new Set(structural.map((n) => n.kind as string))]
+    if (named.shapes > 0) kinds.push('drawing')
     // Paste In Place's affine (see ClipboardContent.placementAffine): the
     // kernel's own reconstruction of this exact selection's original world
-    // position — `Scene.extract_item_placement` runs the SAME logic
-    // `extract_item` used above (crates/kernel's `extract_placement`/
-    // `visible_world_bottom_center`), covering BOTH the identity-axes
+    // position — `Scene.extract_clipboard_placement` runs the SAME logic
+    // `extract_clipboard` used above (crates/kernel's
+    // `extract_placement_with_drawing`/`visible_world_bottom_center`, which
+    // count the copied drawing too), covering BOTH the identity-axes
     // re-origin case and the moved-axes case, so this can never drift from
-    // what extract_item actually did (hidden-descendant selections
-    // included) and Paste In Place never has to special-case either axes
-    // state itself. `undefined` (no visible content) falls back to `null`.
-    const placement = scene.extract_item_placement(sel.kinds, sel.ids)
+    // what the copy actually did and Paste In Place never has to
+    // special-case either axes state itself. `undefined` (no visible
+    // content) falls back to `null`.
+    let placement: Float64Array | number[] | undefined
+    try {
+      placement = scene.extract_clipboard_placement(sel.kinds, sel.ids, named.json)
+    } catch {
+      placement = undefined
+    }
     const placementAffine = placement === undefined ? null : Array.from(placement)
-    const copiedCount = structural.length
-    void setClipboardBytes(bytes, structural.length, kinds, clipboardSourceIdRef.current, placementAffine).then(() => {
+    const objects = structural.length
+    const shapes = named.shapes
+    // Where the copy came from, so a paste back into this document can link
+    // (see clipboard/linkedPaste.ts). A copy that carries drawing has none:
+    // a linked paste places only the copied nodes, so it would drop the
+    // shapes; the plain paste draws them (and still places the original
+    // definitions through the window nonce).
+    const linkSource: LinkSource | null =
+      shapes > 0
+        ? null
+        : {
+            documentId: scene.ensure_document_id(),
+            nonce: clipboardSourceIdRef.current,
+            generation: docGenerationRef.current,
+            nodes: structural.map((n) => ({ kind: n.kind as 'object' | 'group' | 'instance', id: n.id })),
+          }
+    void setClipboardBytes(bytes, objects + shapes, kinds, clipboardSourceIdRef.current, placementAffine, linkSource, shapes).then(() => {
       setClipboardAvailable(true)
-      handleToast(plural(copiedCount, { one: 'Copied # object', other: 'Copied # objects' }))
+      handleToast(copiedToast(objects, shapes))
     })
-    return structural
+    return shapes > 0 ? [...structural, ...drawing] : structural
   }
 
   const handleCopy = () => {
@@ -5278,10 +7065,19 @@ export default function App() {
   }
 
   const handleCut = () => {
-    const copied = doCopy()
+    const scene = sceneRef.current
+    // Copying a locked thing is allowed; deleting it is not, so Cut leaves
+    // locked items in place (OW-1) and puts only what it removes on the
+    // clipboard: a paste must never bring back a copy of what stayed.
+    const kept = scene === null ? selectedIds : leaveBehind(scene, selectedIds, handleToast, { descendants: true })
+    if (kept === null) return
+    const copied = doCopy(kept)
     if (copied === null) return
-    viewportApi.current?.runDelete(copied)
-    setSelectedIds((cur) => cur.filter((n) => !copied.some((c) => nodeEq(c, n))))
+    // Delete exactly what the copy carried (a picked edge's whole shape).
+    const go = scene === null ? copied : cutTargets(scene, copied)
+    viewportApi.current?.runDelete(go, [], [], { cut: true })
+    // Only nodes were copied: guides and annotations stay, still selected.
+    setSelection((cur) => cur.filter((n) => !isNodeItem(n) || !go.some((c) => nodeEq(c, n))))
     setDocRev((r) => r + 1)
   }
 
@@ -5289,7 +7085,7 @@ export default function App() {
    *  gesture). Both resolve the clipboard the same way: this window's own
    *  cache first, else a fresh pull from the shared Tauri shell state (a
    *  cross-window paste with nothing copied locally yet). */
-  const handlePaste = (inPlace: boolean) => {
+  const handlePaste = (inPlace: boolean, mode: 'default' | 'independent' | 'linked' = 'default') => {
     void (async () => {
       // ALWAYS await a fresh pull before reading — never trust the local
       // cache outright. Under Tauri, the focus-triggered refresh effect
@@ -5306,7 +7102,39 @@ export default function App() {
       const scene = sceneRef.current
       if (scene === null) return
 
+      // A linked paste: same document, same window, every copied node still
+      // live. The preference picks the default; the menu can force either.
+      const plan = planPaste(
+        mode,
+        getCopiesLinked(),
+        resolveLinkSource(scene, content.linkSource, clipboardSourceIdRef.current, docGenerationRef.current),
+        clipboardSourceIdRef.current,
+      )
+      if (plan.kind === 'refuse') {
+        // Asked for a link and none is possible: say so instead of quietly
+        // pasting something else.
+        handleToast(t`This can't be pasted linked: the original isn't in this model any more, or this copy came from another model. Use Paste independent instead.`)
+        return
+      }
+      const linkNodes = plan.kind === 'linked' ? plan.nodes : null
+      // An independent paste must not link back to the originals either:
+      // without the window's origin the kernel makes its own definitions.
+      const pasteOrigin = plan.kind === 'plain' ? plan.origin : clipboardSourceIdRef.current
+
       if (inPlace) {
+        if (linkNodes !== null) {
+          try {
+            const { result, sources } = pasteLinked(scene, linkNodes, content.placementAffine, new Float64Array(content.placementAffine ?? [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0]))
+            repointLinkSource(content, sources)
+            viewportApi.current?.refreshScene()
+            setSelection(result.rootIds.map((id) => ({ kind: 'instance' as const, id })))
+          } catch (err) {
+            const code = parseKernelErrorCode(err)
+            const rawMsg = err instanceof Error ? err.message : String(err)
+            handleToast(kernelErrorMessage(code ?? 'Unknown', rawMsg), code ?? undefined)
+          }
+          return
+        }
         // The kernel-computed reconstruction affine — see
         // `ClipboardContent.placementAffine`'s doc comment for why a bare
         // identity affine would NOT overlap the original in EITHER axes
@@ -5317,7 +7145,13 @@ export default function App() {
         )
         let raw: unknown
         try {
-          raw = scene.insert_item(content.bytes, affine, content.sourceId, content.contentHash)
+          raw = scene.insert_item(
+            content.bytes,
+            affine,
+            content.sourceId,
+            content.contentHash,
+            pasteOrigin,
+          )
         } catch (err) {
           const code = parseKernelErrorCode(err)
           const rawMsg = err instanceof Error ? err.message : String(err)
@@ -5325,6 +7159,12 @@ export default function App() {
           return
         }
         const result = parseInsertResult(raw)
+        // Paste In Place right after Copy draws the drawing exactly over
+        // itself: the kernel recorded no step, and nothing moved.
+        if (result.drawingUnchanged && result.rootIds.length === 0) {
+          handleToast(alreadyHereToast())
+          return
+        }
         // Additive kernel mutation made outside a tool — refreshScene is the
         // harness's own choke point for exactly this (re-tessellate +
         // reconcile + docRev, see ViewportApi.refreshScene's doc comment).
@@ -5333,17 +7173,30 @@ export default function App() {
           kind: k === 0 ? 'object' as const : k === 1 ? 'group' as const : 'instance' as const,
           id: result.rootIds[i],
         }))
-        setSelectedGuide(null)
-        setSelectedAnnotation(null)
-        setSelectedIds(refs)
+        // The pasted drawing, found again by geometry (v1.5 decisions D3).
+        refs.push(...pastedDrawingRefs(scene, result.drawn))
+        setSelection(refs)
         return
       }
 
       // Cursor placement: arm the same one-shot LibraryPlaceTool the Library
       // browser uses, with a ghost built straight from the clipboard bytes.
+      //
+      // A linked paste places the LIVE definition, which may have been
+      // edited since Copy, so the ghost (and the bounds the snap and the
+      // origin cue use) come from the kernel's preview of what the paste
+      // will place. No preview (nothing links, or it cannot be built)
+      // means the copy-time bytes already are the paste.
+      let previewBytes = content.bytes
+      try {
+        const live = pasteOrigin === undefined ? undefined : scene.clipboard_paste_preview(content.bytes, pasteOrigin)
+        if (live !== undefined) previewBytes = live
+      } catch {
+        // Fall back to the copy-time bytes; the placement itself decides.
+      }
       let ghost: Awaited<ReturnType<typeof buildItemGhost>>
       try {
-        ghost = await buildItemGhost(content.bytes)
+        ghost = await buildItemGhost(previewBytes)
       } catch (err) {
         handleToast(t`Couldn't preview the paste: ${ph({ reason: err instanceof Error ? err.message : String(err) })}`)
         return
@@ -5352,16 +7205,51 @@ export default function App() {
         bytes: content.bytes,
         sourceId: content.sourceId,
         contentHash: content.contentHash,
-        displayName: t`Pasted objects`,
+        // The paste half of the clipboard link (see doCopy): the same
+        // window nonce, so an instance copied from THIS document places
+        // its original definition rather than an unlinked copy.
+        origin: pasteOrigin,
+        displayName: content.kinds.length === 1 && content.kinds[0] === 'drawing' ? t`Pasted shapes` : t`Pasted objects`,
         ghost: ghost.group,
         bboxMin: ghost.bboxMin,
         bboxMax: ghost.bboxMax,
+        linkedCommit:
+          linkNodes === null
+            ? undefined
+            : (affine) => {
+                // The source may have gone while the ghost was up.
+                const nodes = resolveLinkSource(scene, content.linkSource, clipboardSourceIdRef.current, docGenerationRef.current)
+                if (nodes === null) return null
+                const { result, sources } = pasteLinked(scene, nodes, content.placementAffine, affine)
+                // Recorded on the clipboard this ghost came from, which may
+                // no longer be the current one.
+                repointLinkSource(content, sources)
+                return result
+              },
       })
     })()
   }
 
   const menuActionRef = useRef<(payload: string) => void>(() => {})
   menuActionRef.current = (payload: string) => {
+    // The Preview wall (src/preview): a command this build withholds is
+    // dropped here, wherever it came from (the native menu, a keymap chord,
+    // the palette, the dock, a saved binding).
+    if (!actionAllowed(payload)) return
+    // A plugin command holds the document (docs/agents/PLUGINS.md
+    // "Compounds"): only window focus, settings, updates, and help run.
+    // The palette's actions come through here too.
+    if (
+      sceneRef.current?.busy() &&
+      !(
+        payload.startsWith('win-focus:') ||
+        payload === 'app-settings' ||
+        payload === 'app-check-updates' ||
+        payload.startsWith('help-')
+      )
+    ) {
+      return
+    }
     // Palette "jump" entries (dynamic Model group) carry their target in the
     // id. Nodes: select + reveal in the Outliner/Object Info (the tree
     // scrolls its primary selection into view). Tags: reveal + flash in the
@@ -5370,9 +7258,7 @@ export default function App() {
       const [, kindStr, idStr] = payload.split(':')
       const kind = kindStr as NodeRef['kind']
       if ((kind === 'object' || kind === 'group' || kind === 'instance') && /^\d+$/.test(idStr)) {
-        setSelectedGuide(null)
-        setSelectedAnnotation(null)
-        setSelectedIds([{ kind, id: BigInt(idStr) }])
+        setSelection([{ kind, id: BigInt(idStr) }])
         setShowModelInfo(true)
         setShowObjectInfo(true)
         showTray()
@@ -5427,6 +7313,7 @@ export default function App() {
           if (ids.length > 0) handleToast(t`Added "${ph({ name: entry.displayName })}" to palette.`)
           return
         }
+        if (refuseInsertIntoLibraryEdit()) return
         const displayName = entry?.displayName ?? fileName
         let ghost: Awaited<ReturnType<typeof buildItemGhost>>
         try {
@@ -5487,6 +7374,9 @@ export default function App() {
       case 'edit-select-all':
         // oxlint-disable-next-line lingui/no-unlocalized-strings -- editing command name
         if (forwardToTextField('selectAll')) break
+        // The welcome screen is modal: on the macOS desktop AppKit runs the
+        // native Select All key equivalent before the page can swallow it.
+        if (welcomeOpenRef.current) break
         viewportApi.current?.selectAll()
         break
       // Select None / Invert Selection have no text-field analog: like
@@ -5495,7 +7385,7 @@ export default function App() {
       // does nothing rather than changing the scene selection out from
       // under an in-progress rename.
       case 'edit-select-none':
-        if (isTextFieldFocused()) break
+        if (isTextFieldFocused() || welcomeOpenRef.current) break
         handleSelectNone()
         break
       case 'edit-invert-selection':
@@ -5503,6 +7393,17 @@ export default function App() {
         viewportApi.current?.invertSelection()
         break
       case 'edit-delete': deleteSelection(); break
+      // Object ▸ Smooth levels: curveActions.ts says which level each id sets.
+      case 'smooth-off':
+      case 'smooth-1':
+      case 'smooth-2':
+      case 'smooth-3': {
+        const level = smoothLevelFor(payload)
+        if (level !== undefined) smoothSelection(level)
+        break
+      }
+      case 'bake-smooth': smoothSelection('bake'); break
+      case 'soften-edges': revealSoftenAngle(); break
       case 'edit-copy':
         if (forwardToTextField('copy')) break
         handleCopy()
@@ -5529,6 +7430,14 @@ export default function App() {
         if (isTextFieldFocused()) break
         handlePaste(true)
         break
+      case 'edit-paste-independent':
+        if (isTextFieldFocused()) break
+        handlePaste(false, 'independent')
+        break
+      case 'edit-paste-linked':
+        if (isTextFieldFocused()) break
+        handlePaste(false, 'linked')
+        break
       case 'close':
         // Trigger the beforeunload / close-guard path by emitting the
         // Tauri window close request — handled by the close guard effect.
@@ -5538,35 +7447,53 @@ export default function App() {
         break
       // Tool activations from native menu
       /* oxlint-disable lingui/no-unlocalized-strings -- ToolName identifiers, not copy */
-      case 'tool-select':    setActiveTool('Select'); break
-      case 'tool-rectangle': setActiveTool('Rectangle'); break
-      case 'tool-circle':    setActiveTool('Circle'); break
-      case 'tool-polygon':   setActiveTool('Polygon'); break
-      case 'tool-arc':       setActiveTool('Arc'); break
-      case 'tool-line':      setActiveTool('Line'); break
-      case 'tool-pushpull':  setActiveTool('Push/Pull'); break
-      case 'tool-follow-me': setActiveTool('Follow Me'); break
-      case 'tool-offset':    setActiveTool('Offset'); break
-      case 'tool-paint':     setActiveTool('Paint'); break
-      case 'tool-position-texture': setActiveTool('Position Texture'); break
-      case 'tool-move':      setActiveTool('Move'); break
-      case 'tool-rotate':    setActiveTool('Rotate'); break
-      case 'tool-scale':     setActiveTool('Scale'); break
-      case 'tool-tape-measure': setActiveTool('Tape Measure'); break
-      case 'tool-dimension': setActiveTool('Dimension'); break
-      case 'tool-protractor': setActiveTool('Protractor'); break
-      case 'tool-slice':     setActiveTool('Slice'); break
-      case 'tool-section-plane': setActiveTool('Section Plane'); break
-      case 'tool-edit-vertex': setActiveTool('Edit Vertex'); break
-      case 'tool-axes':        setActiveTool('Drawing Axes'); break
-      case 'tool-text':      setActiveTool('Text'); break
-      case 'tool-orbit':     activateTool('Orbit'); break
-      case 'tool-pan':       activateTool('Pan'); break
-      case 'tool-zoom':      activateTool('Zoom'); break
-      case 'tool-position-camera': activateTool('Position Camera'); break
-      case 'tool-walk':      activateTool('Walk'); break
-      case 'tool-look-around': activateTool('Look Around'); break
-      case 'tool-zoom-window': activateTool('Zoom Window'); break
+      case 'tool-select':
+      case 'tool-rectangle':
+      case 'tool-circle':
+      case 'tool-polygon':
+      case 'tool-arc':
+      case 'tool-line':
+      case 'tool-pushpull':
+      case 'tool-follow-me':
+      case 'tool-revolve':
+      case 'tool-loft':
+      case 'tool-skin':
+      case 'tool-deform-twist':
+      case 'tool-deform-bend':
+      case 'tool-deform-taper':
+      case 'tool-deform-bend-path':
+      case 'tool-offset':
+      case 'tool-fillet':
+      case 'tool-chamfer':
+      case 'tool-path-array':
+      case 'tool-shell':
+      case 'tool-project':
+      case 'tool-eraser':
+      case 'tool-paint':
+      case 'tool-position-texture':
+      case 'tool-move':
+      case 'tool-rotate':
+      case 'tool-scale':
+      case 'tool-flip':
+      case 'tool-tape-measure':
+      case 'tool-dimension':
+      case 'tool-protractor':
+      case 'tool-slice':
+      case 'tool-section-plane':
+      case 'tool-edit-vertex':
+      case 'tool-axes':
+      case 'tool-text':
+      case 'tool-orbit':
+      case 'tool-pan':
+      case 'tool-zoom':
+      case 'tool-position-camera':
+      case 'tool-walk':
+      case 'tool-look-around':
+      case 'tool-zoom-window':
+        // Every tool command: the table in tools/toolActions.ts says which tool
+        // it opens and what mode it sets first.
+        runToolAction(payload, activateTool)
+        break
       /* oxlint-enable lingui/no-unlocalized-strings */
       case 'toggle-parallel-projection': viewportApi.current?.toggleProjection(); break
       // Camera ▸ Fly (docs/design/fly-navigation.md §10): the LATCHED fly
@@ -5585,11 +7512,13 @@ export default function App() {
       case 'toggle-dock':         toggleDock(); break
       case 'toggle-debug-log':    setShowDebugLog((v) => !v); break
       case 'toggle-axes':         setShowAxes((v) => !v); break
+      case 'toggle-part-axes':    setShowPartAxes(!getShowPartAxes()); break
       case 'reset-axes':         viewportApi.current?.resetAxes(); break
       case 'toggle-grid':         setShowGrid((v) => !v); break
       case 'toggle-xray':         toggleXray(); break
       case 'toggle-wireframe':    toggleWireframe(); break
       case 'toggle-guides':       setShowGuides((v) => !v); break
+      case 'toggle-tangent-edges': setTangentEdgesVisible((v) => !v); break
       case 'toggle-section-active': viewportApi.current?.toggleSectionActive(); break
       case 'edit-delete-guides':  viewportApi.current?.deleteAllGuides(); break
       case 'zoom-extents':        handleZoomExtentsRef.current(); break
@@ -5600,8 +7529,10 @@ export default function App() {
       case 'view-left':           viewportApi.current?.setStandardView('left'); break
       case 'view-right':          viewportApi.current?.setStandardView('right'); break
       case 'view-iso':            viewportApi.current?.setStandardView('iso'); break
+      case 'view-home':           viewportApi.current?.goHomeView(); break
       case 'open-settings':       openSettingsRef.current(); break
       case 'report-bug': handleReportBug(); break
+      case 'sent-reports': handleSentReports(); break
       case 'open-guide': handleOpenGuide(); break
       case 'open-library':   openLibraryEntry(); break
       case 'toggle-library': openLibraryEntry(); break
@@ -5611,7 +7542,11 @@ export default function App() {
         // selected, else the whole model.
         const scene = sceneRef.current
         const ids = scene === null ? [] : selectionObjectIds(scene, selectedIds)
+        // A selection of sketches is the second input; one that also holds
+        // Objects keeps today's behavior (the Objects' wizard).
+        const sketches = selectedSketchIds(selectedIds, scene ?? undefined)
         if (ids.length > 0) openMakeSolid('selection', ids)
+        else if (sketches.length > 0) openMakeSolidSketches(sketches)
         else openMakeSolid('model')
         break
       }
@@ -5636,9 +7571,38 @@ export default function App() {
         })
         break
       }
-      case 'save-to-library-doc':
-        setSaveToLibraryTarget({ kind: 'document', defaultName: documentName(docSession) })
+      case 'save-to-library-doc': {
+        // A document that is just one drawn open chain saves as a profile
+        // item, and offers to replace the one it was opened from.
+        const defaultName = documentName(docSession)
+        const scene = sceneRef.current
+        void (async () => {
+          let asProfile: Uint8Array | null = null
+          // Profiles belong to the Fillet preview (the Preview wall): without
+          // it a drawn chain saves as an ordinary model.
+          if (scene !== null && behaviorEnabled('fillet-profiles')) {
+            try {
+              const bytes = scene.extract_document_item(JSON.stringify({ category: 'profile' }))
+              if ((await readItemSummary(bytes)).profile_chain_only) asProfile = bytes
+            } catch {
+              /* not a profile; the ordinary model save follows */
+            }
+          }
+          if (scene === null || asProfile === null) {
+            setSaveToLibraryTarget({ kind: 'document', defaultName })
+            return
+          }
+          const source = profileSourceRef.current
+          setSaveToLibraryTarget({
+            kind: 'profile',
+            defaultName: source?.name ?? defaultName,
+            build: (meta) => scene.extract_document_item(JSON.stringify(meta)),
+            rows: await profileWidthRows(asProfile),
+            replace: source !== null && source.id !== '' ? source : undefined,
+          })
+        })()
         break
+      }
       case 'open-palette':        openPalette(); break
       // Contextual dock only — these need the current selection, not
       // just a bare trigger, so unlike every case above they aren't also
@@ -5670,6 +7634,16 @@ export default function App() {
       case 'edit-place-copy': handlePlaceInstance(); break
       case 'edit-explode': handleExplodeInstance(); break
       case 'edit-make-unique': handleMakeUnique(); break
+      case 'edit-link-identical-copies': handleLinkSimilar('menu'); break
+      case 'edit-unlink': handleUnlink(false); break
+      case 'edit-unlink-all': handleUnlink(true); break
+      case 'edit-select-all-copies': handleSelectAllCopies(); break
+      case 'edit-lock': handleLock(); break
+      case 'edit-unlock-selected': handleUnlock(false); break
+      case 'edit-unlock-all': handleUnlock(true); break
+      case 'edit-flip-red': handleFlipAlong(0); break
+      case 'edit-flip-green': handleFlipAlong(1); break
+      case 'edit-flip-blue': handleFlipAlong(2); break
       case 'edit-union': handleBoolean(0); break
       case 'edit-subtract': handleBoolean(1); break
       case 'edit-intersect': handleBoolean(2); break
@@ -5716,15 +7690,23 @@ export default function App() {
   const libraryBridgeRef = useRef({
     onLibraryInsert,
     onLibraryOpenAsDocument,
+    onLibraryEdit,
     onLibraryPaintWith,
     onLibraryAddToPalette,
+    onLibraryUseProfile,
+    onLibrarySaveProfileCopy,
+    openLibraryReview,
     handleToast,
   })
   libraryBridgeRef.current = {
     onLibraryInsert,
     onLibraryOpenAsDocument,
+    onLibraryEdit,
     onLibraryPaintWith,
     onLibraryAddToPalette,
+    onLibraryUseProfile,
+    onLibrarySaveProfileCopy,
+    openLibraryReview,
     handleToast,
   }
   useEffect(() => {
@@ -5741,8 +7723,21 @@ export default function App() {
           } catch {
             return
           }
+          if (payload.action === 'review') {
+            bridge.openLibraryReview()
+            return
+          }
           const fileName = payload.fileName
           if (fileName === undefined) return
+          // A built-in profile is not a file: it is read from the kernel.
+          if (fileName.startsWith('builtin:')) {
+            const bundled = (await bundledProfiles()).find((p) => p.id === fileName)
+            if (bundled === undefined) return
+            const item = builtInProfileItem(bundled.id, bundled.name)
+            if (payload.action === 'use-profile') bridge.onLibraryUseProfile(item, null)
+            else if (payload.action === 'save-copy') bridge.onLibrarySaveProfileCopy(item)
+            return
+          }
           const store = libraryStore()
           if (!store.available()) return
           try {
@@ -5762,8 +7757,10 @@ export default function App() {
             const action = payload.action
             if (action === 'insert') bridge.onLibraryInsert(item, bytes)
             else if (action === 'open') bridge.onLibraryOpenAsDocument(item, bytes)
+            else if (action === 'edit') bridge.onLibraryEdit(item)
             else if (action === 'paint') bridge.onLibraryPaintWith(item, bytes)
             else if (action === 'add-palette') bridge.onLibraryAddToPalette(item, bytes)
+            else if (action === 'use-profile') bridge.onLibraryUseProfile(item, bytes)
           } catch (err) {
             bridge.handleToast(
               t`Couldn't read library item: ${ph({ reason: err instanceof Error ? err.message : String(err) })}`,
@@ -5799,7 +7796,7 @@ export default function App() {
         // active one's into the Library (adversarial review).
         void import('@tauri-apps/api/core').then(({ invoke }) =>
           invoke('library_push_placements', {
-            payload: JSON.stringify({ placements: libraryPlacements, paletteHashes }),
+            payload: JSON.stringify({ placements: libraryPlacements, linkStates: libraryItemStates, paletteHashes }),
           }),
         ).catch(() => { /* the Library window may simply not exist */ })
       }
@@ -5816,7 +7813,7 @@ export default function App() {
       cancelled = true
       unlisteners.forEach((u) => u())
     }
-  }, [libraryPlacements])
+  }, [libraryPlacements, libraryItemStates])
 
   // ---------------------------------------------------------------- menu-open-path listener (Tauri only)
   // Emitted by Rust when a recent-file menu item is clicked, or when a file
@@ -5891,6 +7888,40 @@ export default function App() {
     return () => { cancelled = true; unlisten?.() }
   }, [])
 
+  // ---------------------------------------------------------------- window-open-refused listener (Tauri only)
+  // A window this one asked for (`open_in_new_window`) could not open the
+  // file and has closed itself, handing the error back (KB-9). Show it
+  // persistently here, and keep the file for Help ▸ Report Bug: the new
+  // window's copy of the bytes went with it, so read them again from the
+  // path (approved when it was picked; `read_file` checks the path, not the
+  // window).
+  useEffect(() => {
+    if (!isTauri) return
+    let unlisten: (() => void) | undefined
+    let cancelled = false
+    import('@tauri-apps/api/webviewWindow').then(({ getCurrentWebviewWindow }) => {
+      return getCurrentWebviewWindow().listen<{ path: string; message: string }>('window-open-refused', (event) => {
+        const { path, message } = event.payload
+        handleToastRef.current(message, undefined, { persistent: true })
+        void noteHandedBackOpen(
+          {
+            name: basenameOf(path),
+            label: /\.skp$/i.test(path) ? OPEN_FILE_LABELS.skp : OPEN_FILE_LABELS.hew,
+            error: message,
+          },
+          async () => {
+            const { invoke } = await import('@tauri-apps/api/core')
+            return new Uint8Array(await invoke<ArrayBuffer>('read_file', { path }))
+          },
+        )
+      })
+    }).then((fn) => {
+      if (cancelled) { fn(); return }
+      unlisten = fn
+    }).catch(() => { /* not in Tauri, or registration failed */ })
+    return () => { cancelled = true; unlisten?.() }
+  }, [])
+
   const focusWindow = useCallback((label: string) => {
     import('@tauri-apps/api/core')
       .then(({ invoke }) => invoke('focus_window', { label }))
@@ -5948,16 +7979,42 @@ export default function App() {
             return
           }
           if (windowOpen != null) {
-            if (windowOpen.as_copy) {
-              // Library "Open as Document": COPY semantics, matching the
-              // pristine route exactly — the document is import-shaped
-              // (Save always prompts), never path-bound to the library
-              // item, and the library path never enters recents (whose
-              // launch-time seeding grants WRITE approval — the round-3
-              // review's silent-overwrite path).
-              await openLibraryCopyRef.current(windowOpen.path, windowOpen.name)
-            } else {
-              await openPathRef.current(windowOpen.path)
+            // This window was made for the open: hold back a refusal's
+            // toast, and if the open is refused hand it to the window that
+            // asked for it and close this empty one (KB-9).
+            deferOpenFailureRef.current = true
+            deferredOpenFailureRef.current = null
+            try {
+              if (windowOpen.as_copy) {
+                // Library "Open as Document": COPY semantics, matching the
+                // pristine route exactly — the document is import-shaped
+                // (Save always prompts), never path-bound to the library
+                // item, and the library path never enters recents (whose
+                // launch-time seeding grants WRITE approval — the round-3
+                // review's silent-overwrite path).
+                await openLibraryCopyRef.current(windowOpen.path, windowOpen.name)
+              } else {
+                await openPathRef.current(windowOpen.path)
+              }
+            } finally {
+              deferOpenFailureRef.current = false
+            }
+            const refused = deferredOpenFailureRef.current as { message: string; code: string | null } | null
+            deferredOpenFailureRef.current = null
+            if (refused !== null) {
+              let handedBack = false
+              try {
+                handedBack = await invoke<boolean>('window_open_refused', {
+                  path: windowOpen.path,
+                  asCopy: windowOpen.as_copy,
+                  name: windowOpen.name,
+                  message: refused.message,
+                  code: refused.code,
+                })
+              } catch {
+                /* older shell — show it here */
+              }
+              if (!handedBack) handleToastRef.current(refused.message, undefined, { persistent: true })
             }
             return
           }
@@ -5973,7 +8030,7 @@ export default function App() {
       }
       try {
         const listings = await recoveryStoreRef.current.list()
-        if (shouldPromptRecovery(docSessionRef.current, listings)) {
+        if (!libraryEditBootingRef.current && shouldPromptRecovery(docSessionRef.current, listings)) {
           setRecoveryPrompt(listings)
           return
         }
@@ -5983,7 +8040,7 @@ export default function App() {
       // Bare launch confirmed: nothing pending, nothing to recover, primary
       // window. Offer the welcome screen (unless the user turned it off, or
       // a live file-open landed while the recovery check above was in flight).
-      if (getShowWelcome() && !documentLoadedRef.current) setWelcomeOpen(true)
+      if (getShowWelcome() && !documentLoadedRef.current && !libraryEditBootingRef.current) setWelcomeOpen(true)
     })()
   }, [state]) // runs once, after the kernel is ready; handlers accessed via refs
 
@@ -5999,17 +8056,38 @@ export default function App() {
     if (!isTauri) return
     let unlisten: (() => void) | undefined
     let cancelled = false
+    // A close request while this guard's own prompt is already up (a second
+    // click on the close button, or an update restart reaching a window
+    // whose prompt the person opened by hand) is dropped: replacing the
+    // prompt would answer the first one Cancel on the person's behalf, and
+    // that Cancel would stop the restart. The person's answer to the prompt
+    // that is up settles both.
+    let promptUp = false
     import('@tauri-apps/api/window').then(({ getCurrentWindow }) => {
       const win = getCurrentWindow()
       return win.onCloseRequested(async (event) => {
         // Always prevent the default close; we decide explicitly below.
         event.preventDefault()
+        if (promptUp) return
         if (docSessionRef.current.dirty) {
           // In-app UnsavedChangesDialog (Lane C) replaces the native `ask`
           // — its Save runs the current save flow and only resolves 'save'
           // on an actual successful write.
-          const decision = await requestUnsavedChangesDecision()
-          if (decision === 'cancel') return // keep the window open
+          promptUp = true
+          let decision: UnsavedChangesDecision
+          try {
+            decision = await requestUnsavedChangesDecision()
+          } finally {
+            promptUp = false
+          }
+          if (decision === 'cancel') {
+            // Keep the window open. An update restart closing every window
+            // (updater.rs, "Restart") waits on this one: Cancel stops it.
+            import('@tauri-apps/api/core')
+              .then(({ invoke }) => invoke('close_cancelled'))
+              .catch(() => { /* no restart running, or no updater */ })
+            return
+          }
           // 'save' means the dialog's Save already wrote the file.
         }
         // Whether the document was already clean (no prompt needed) or
@@ -6079,307 +8157,49 @@ export default function App() {
   }, []) // openPath accessed via openPathRef — no dep needed
 
   // ---------------------------------------------------------------- global keyboard shortcuts
+  // Every command shortcut — tools, File/Edit/Window commands, scenes, the
+  // palette, Delete and the clipboard keys — runs through the keymap
+  // (keymap/), which the person can change in Settings ▸ Controls. The
+  // dispatcher keeps the guards the old hand-written handlers applied: IME
+  // composition, the modal welcome screen, focused text fields, a tool typing
+  // a measurement, open dialogs, and the macOS native menu's own
+  // accelerators (keymap/dispatch.ts).
+  // Re-render on a keymap change (Settings ▸ Controls, possibly in another
+  // window) so the rail's palette chip and every shortcut shown stay true.
+  useKeymap()
+  // macOS desktop: keep the native menu's accelerators equal to the keymap.
   useEffect(() => {
-    // On macOS Tauri the native menu bar owns every MODIFIER shortcut
-    // (Cmd-combos) — the JS handler must not double-fire those. But the
-    // bare-letter tool shortcuts below have no native accelerator on macOS
-    // (a native bare-letter accelerator would fire even while typing), so
-    // they are handled here on EVERY platform — this is what makes the
-    // shortcuts the tool rail advertises (C for Circle, B for Paint, …)
-    // actually work on macOS. Windows/Linux Tauri and the web build use
-    // this handler for everything.
-    const nativeMenuOwnsModCombos = isTauri && isMac
-
-    const onKeyDown = (ev: KeyboardEvent) => {
-      // An input method composing (Japanese, Chinese, Korean) owns every
-      // keystroke until it commits; none of them are commands
-      // (docs/LOCALIZATION.md "Keyboard and input methods").
-      if (isComposingKey(ev)) return
-      const isMod = ev.metaKey || ev.ctrlKey
-
-      // The welcome screen is modal: its overlay blocks pointer events but
-      // not the keyboard, so app shortcuts must not fire behind it (a stray
-      // 'r' silently switching tools, Ctrl+K stacking the palette invisibly
-      // underneath the higher-z overlay). Mod-combos are still swallowed so
-      // the browser doesn't act on them either (Ctrl+S "save page").
-      if (welcomeOpenRef.current) {
-        if (isMod && !nativeMenuOwnsModCombos) ev.preventDefault()
-        return
-      }
-
-      // Don't fire shortcuts while typing in an input/textarea
-      const target = ev.target as HTMLElement
-      const isTyping = target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable
-
-      // A tool mid-measurement-entry (VCB typed buffer) owns the keyboard:
-      // letters may be unit suffixes ("1cm", "5' 2-1/4\""), not tool switches.
-      // Per-key: a tool may own only some keys (Move's armed array window
-      // takes digits/x/*// but never Space — Space always resets to Select).
-      const toolIsTyping = viewportApi.current?.isCapturingInput?.(ev.key) ?? false
-
-      // Option/Alt combos are not bare letters: with physical-key dispatch
-      // `ev.code` would still read KeyL under Option+L.
-      if (!isMod && !ev.altKey && !isTyping && !toolIsTyping) {
-        // Space → Select (no modifier required; guard against typing contexts).
-        if (ev.key === ' ') {
-          ev.preventDefault()
-          setActiveTool('Select')
-          return
-        }
-        // SketchUp-for-Windows bare-letter tool shortcuts — the
-        // letter-keyed tools from `tools/toolRegistry.ts`'s `winKey`s. Real
-        // SketchUp reserves these as unmodified keys; Hew's other tools
-        // (Protractor/Slice/Edit Vertex/camera) keep their existing
-        // Ctrl-combo shortcuts below instead — the design spec doesn't cover
-        // bare letters for them.
-        // The PHYSICAL key: SketchUp's bare-letter shortcuts are key
-        // positions, so they hold on any layout and with an IME active
-        // (where `ev.key` would be a full-width or composed character).
-        const key = shortcutLetter(ev)
-        // Bare ⇧L opens the Library (the design mock's own binding) — safe
-        // here specifically because this whole block is already gated on
-        // `!isTyping` (a focused input/textarea never reaches it), unlike a
-        // native accelerator, which would fire regardless of focus (see
-        // main.rs's win-library comment for why the NATIVE menu instead
-        // advertises ⇧⌘L). Checked before the bare 'l' -> Line binding below,
-        // since Shift capitalizes `ev.key` the same way either binding's
-        // lowercase comparison would match.
-        if (key === 'l' && ev.shiftKey) { ev.preventDefault(); openLibraryEntry(); return }
-        /* oxlint-disable lingui/no-unlocalized-strings -- ToolName identifiers, not copy */
-        if (key === 'l' && !ev.shiftKey) { ev.preventDefault(); setActiveTool('Line'); return }
-        if (key === 'r') { ev.preventDefault(); setActiveTool('Rectangle'); return }
-        if (key === 'c') { ev.preventDefault(); setActiveTool('Circle'); return }
-        if (key === 'a') { ev.preventDefault(); setActiveTool('Arc'); return }
-        if (key === 'p') { ev.preventDefault(); setActiveTool('Push/Pull'); return }
-        if (key === 'f') { ev.preventDefault(); setActiveTool('Offset'); return }
-        if (key === 'm') { ev.preventDefault(); setActiveTool('Move'); return }
-        if (key === 'q') { ev.preventDefault(); setActiveTool('Rotate'); return }
-        if (key === 's') { ev.preventDefault(); setActiveTool('Scale'); return }
-        if (key === 't') { ev.preventDefault(); setActiveTool('Tape Measure'); return }
-        if (key === 'b') { ev.preventDefault(); setActiveTool('Paint'); return }
-        // Camera tools: SketchUp's real O / H / Z — replaces the old
-        // Ctrl+B / Ctrl+R / Ctrl+\ Hew inventions so the rail, the menus,
-        // and actual dispatch all advertise the same keys.
-        if (key === 'o') { ev.preventDefault(); activateTool('Orbit'); return }
-        if (key === 'h') { ev.preventDefault(); activateTool('Pan'); return }
-        if (key === 'z') { ev.preventDefault(); activateTool('Zoom'); return }
-        /* oxlint-enable lingui/no-unlocalized-strings */
-        // Scenes: Page Down/Up = Next/Previous (docs/design/scenes.md §5,
-        // SketchUp's own default). Unmodified — no native-menu accelerator
-        // conflict, so this fires identically on web and desktop.
-        if (ev.key === 'PageDown') { ev.preventDefault(); scenesRef.current.next(); return }
-        if (ev.key === 'PageUp') { ev.preventDefault(); scenesRef.current.previous(); return }
-      }
-
-      // (Delete/Backspace handled by a dedicated always-on effect below.)
-
-      if (!isMod) return
-      if (isTyping) return
-      // macOS Tauri: the native menu's accelerators own all Cmd-combos.
-      if (nativeMenuOwnsModCombos) return
-
-      if (ev.key === 'p' && !ev.shiftKey && !ev.altKey) {
-        ev.preventDefault()
-        setPrintDialogOpen(true)
-        return
-      }
-      if (ev.key === 's' && !ev.shiftKey) {
-        ev.preventDefault()
-        saveDocument()
-        return
-      }
-      if (ev.key === 's' && ev.shiftKey) {
-        ev.preventDefault()
-        saveAsDocument()
-        return
-      }
-      if (ev.key.toLowerCase() === 'o' && !ev.shiftKey) {
-        ev.preventDefault()
-        openDocument()
-        return
-      }
-      if (ev.key === 'n') {
-        ev.preventDefault()
-        newDocument()
-        return
-      }
-      // Group / Ungroup. The in-app Edit menu has always advertised these
-      // accelerators, but nothing dispatched them outside the macOS native
-      // menu — the shortcut was display-only on Windows/Linux/web. Route
-      // through the same menuActionRef dispatch the menu items use; the
-      // handlers no-op on an ineligible selection, matching a disabled item.
-      if (ev.key.toLowerCase() === 'g') {
-        ev.preventDefault()
-        menuActionRef.current(ev.shiftKey ? 'edit-ungroup' : 'edit-group')
-        return
-      }
-      // (Camera tools moved from Ctrl+B/R/\ to SketchUp's bare O / H / Z in
-      //  — see the bare-letter block above.)
-      // Window pane toggles. Note: with Shift held, ev.key is the UPPERCASE
-      // letter, so compare case-insensitively (else these never fire).
-      if (ev.key.toLowerCase() === 'i' && ev.shiftKey) {
-        ev.preventDefault()
-        toggleSection(setShowModelInfo, trayTitle.outliner)
-        return
-      }
-      if (ev.key.toLowerCase() === 'c' && ev.shiftKey) {
-        ev.preventDefault()
-        toggleSection(setShowMaterials, trayTitle.materials)
-        return
-      }
-      if (ev.key.toLowerCase() === 'm' && ev.shiftKey) {
-        ev.preventDefault()
-        toggleSection(setShowComponents, trayTitle.components)
-        return
-      }
-      if (ev.key.toLowerCase() === 't' && ev.shiftKey) {
-        ev.preventDefault()
-        toggleSection(setShowTags, trayTitle.tags)
-        return
-      }
-      if (ev.key.toLowerCase() === 'o' && ev.shiftKey) {
-        ev.preventDefault()
-        toggleSection(setShowObjectInfo, trayTitle.objectInfo)
-        return
-      }
-      if (ev.key.toLowerCase() === 'l' && ev.shiftKey) {
-        ev.preventDefault()
-        openLibraryEntry()
-        return
-      }
-      if (ev.key === ',') {
-        ev.preventDefault()
-        openSettingsRef.current()
-        return
-      }
-      // Command palette — Cmd/Ctrl+`/` on every platform and both shells.
-      // The palette is app chrome, not a tool, so it doesn't answer to the
-      // SketchUp key scheme the tools follow; `/` is the one key free of that
-      // scheme on all of them, which is what lets a single binding be true
-      // everywhere. On the macOS desktop this branch never runs (the native
-      // menu owns mod-combos there) — main.rs binds the same Cmd+`/`.
-      if (ev.key === '/' && !ev.shiftKey) {
-        ev.preventDefault()
-        openPalette()
-        return
-      }
-      // Ctrl+K stays as an unadvertised alias for the muscle memory of
-      // everyone who used it before `/` became the documented key. Not bound
-      // on the macOS desktop, where Cmd+K is Rectangle's classic SketchUp
-      // accelerator and keeps that job.
-      if (ev.key.toLowerCase() === 'k' && !ev.shiftKey) {
-        ev.preventDefault()
-        openPalette()
-        return
-      }
-    }
-    window.addEventListener('keydown', onKeyDown)
-    return () => window.removeEventListener('keydown', onKeyDown)
-  }, [saveDocument, saveAsDocument, openDocument, newDocument, toggleSection])
-
-  // Delete / Backspace → delete the current selection (guides).
-  // Registered SEPARATELY from the global-shortcut effect above because that one
-  // is disabled under Tauri (the native menu owns accelerators) — but Edit ▸
-  // Delete's key must be handled in JS on BOTH web and desktop: on macOS the
-  // native item shows ⌫ yet WebKit hands the keydown to the page first, and on
-  // Windows/Linux the item has no accelerator at all (a native bare
-  // Delete/Backspace there would bypass the typing guard and collide with the
-  // tools' VCB Backspace — see main.rs's comment by `edit_delete`). It deletes
-  // from any tool; only a tool mid-VCB entry (isCapturingInput) keeps Backspace
-  // for the typed buffer.
-  useEffect(() => {
-    const onDeleteKey = (ev: KeyboardEvent) => {
-      if (isComposingKey(ev)) return
-      if (ev.key !== 'Delete' && ev.key !== 'Backspace') return
-      const target = ev.target as HTMLElement
-      const isTyping =
-        target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable
-      if (isTyping) return // let the focused field edit text normally
-      // ALWAYS swallow Delete/Backspace outside text fields: the webview
-      // otherwise treats Backspace as "navigate back", which silently wedges
-      // the whole app until restart.
-      ev.preventDefault()
-      // …but never delete anything from behind the modal welcome screen.
-      if (welcomeOpenRef.current) return
-      // Delete the current selection — from ANY tool and however it was selected
-      // (viewport or Object list), NOT just the Select tool. The one exception
-      // is a tool mid-VCB entry (e.g. typing a Move distance), where Backspace
-      // must edit the typed buffer instead; the Viewport routes the key to that
-      // tool and reports it here via isCapturingInput so we don't also delete.
-      if (!(viewportApi.current?.isCapturingInput?.(ev.key) ?? false)) {
-        menuActionRef.current('edit-delete')
-      }
-    }
-    window.addEventListener('keydown', onDeleteKey)
-    return () => window.removeEventListener('keydown', onDeleteKey)
+    if (!(isTauri && isMac)) return
+    return startNativeMenuSync({
+      isMac,
+      defaults: defaultKeymapBindings(),
+      current: () => currentKeymap().bindings,
+      subscribe: subscribeKeymap,
+      invoke: (accelerators) =>
+        import('@tauri-apps/api/core').then(({ invoke }) =>
+          invoke<string[]>('set_menu_accelerators', { accelerators }),
+        ),
+    })
   }, [])
-
-  // Cmd/Ctrl+A → Select All. Like Delete above, this is handled in JS on
-  // BOTH web and desktop: the native menu item deliberately carries no
-  // accelerator, because a native CmdOrCtrl+A fires even while typing in a
-  // text field and would hijack select-all-text into a scene-wide selection.
-  // Here a focused text field keeps the browser's own select-all.
-  // ⇧⌘A / Ctrl+Shift+A → Select None (SketchUp's macOS binding; its Windows
-  // Ctrl+T is a browser-reserved new-tab key, so the Shift chord is the one
-  // that works in the web app and the desktop shell alike). Same handler,
-  // same typing guard: a focused text field keeps the key.
-  useEffect(() => {
-    const onSelectAllKey = (ev: KeyboardEvent) => {
-      if (isComposingKey(ev)) return
-      if (!(ev.metaKey || ev.ctrlKey) || ev.altKey) return
-      if (ev.key.toLowerCase() !== 'a') return
-      // Modal welcome screen: swallow (no scene select-all, no page-wide
-      // text selection of the app behind the overlay).
-      if (welcomeOpenRef.current) { ev.preventDefault(); return }
-      const target = ev.target as HTMLElement
-      const isTyping =
-        target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable
-      if (isTyping) return // let the focused field select its own text
-      ev.preventDefault()
-      menuActionRef.current(ev.shiftKey ? 'edit-select-none' : 'edit-select-all')
-    }
-    window.addEventListener('keydown', onSelectAllKey)
-    return () => window.removeEventListener('keydown', onSelectAllKey)
-  }, [])
-
-  // Cmd/Ctrl+C / +X / +V / Shift+Cmd/Ctrl+V → Copy / Cut / Paste / Paste In
-  // Place. Same posture as Delete/Select All above: handled in JS on BOTH
-  // web and desktop. The native macOS items show these keys, but WebKit
-  // still hands the keydown to the page (and a focused text field's own
-  // copy/cut/paste) before the menu fires; on Windows/Linux the items carry
-  // no accelerator at all, because a native CmdOrCtrl+C/X/V there fires even
-  // while typing in a text field or renaming a node, hijacking the OS's own
-  // text clipboard — see main.rs's comment by `edit_delete`. A focused text
-  // field keeps the browser's own copy/cut/paste.
-  // Shift+Cmd/Ctrl+C is Toggle Materials (MenuBar/main.rs) — never claimed
-  // here.
-  useEffect(() => {
-    const onClipboardKey = (ev: KeyboardEvent) => {
-      if (isComposingKey(ev)) return
-      if (!(ev.metaKey || ev.ctrlKey) || ev.altKey) return
-      const key = ev.key.toLowerCase()
-      if (key !== 'c' && key !== 'x' && key !== 'v') return
-      if (welcomeOpenRef.current) return // let the modal alone; no scene action underneath it
-      const target = ev.target as HTMLElement
-      const isTyping =
-        target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable
-      if (isTyping) return // let the focused field's own copy/cut/paste run
-      if (key === 'c') {
-        if (ev.shiftKey) return // Shift+Cmd/Ctrl+C is Toggle Materials
-        ev.preventDefault()
-        menuActionRef.current('edit-copy')
-      } else if (key === 'x') {
-        if (ev.shiftKey) return
-        ev.preventDefault()
-        menuActionRef.current('edit-cut')
-      } else {
-        ev.preventDefault()
-        menuActionRef.current(ev.shiftKey ? 'edit-paste-in-place' : 'edit-paste')
-      }
-    }
-    window.addEventListener('keydown', onClipboardKey)
-    return () => window.removeEventListener('keydown', onClipboardKey)
-  }, [])
+  useKeymapDispatch({
+    isMac,
+    nativeMenu: isTauri && isMac,
+    run: (id) => {
+      // A plugin command holds the document (docs/agents/PLUGINS.md
+      // "Compounds"): no shortcut acts on it, a tool's key included. The
+      // chord was already swallowed, so the browser does not act on it
+      // either.
+      if (sceneRef.current?.busy()) return
+      // A tool's key restarts the tool even when it is already active
+      // (SketchUp's habit): it drops a sticky idle plane lock or a half-made
+      // gesture. A tool mid-measurement keeps its letters through
+      // `toolCapturesKey`, so this never cuts a typed entry short.
+      if (isToolAction(id)) setToolActivationSeq((s) => s + 1)
+      menuActionRef.current(id)
+    },
+    welcomeOpen: () => welcomeOpenRef.current,
+    toolCapturesKey: (key) => viewportApi.current?.isCapturingInput?.(key) ?? false,
+  })
 
   // Mirror the View ▸ Axes / Grid / Guides toggles into the viewport. The
   // viewport API ref is populated once the viewport mounts; all default to
@@ -6387,12 +8207,20 @@ export default function App() {
   useEffect(() => {
     viewportApi.current?.setAxesVisible(showAxes)
     // A document with a view style records the choice (a save back to its
-    // `.skp` writes it); one without keeps none.
-    sceneRef.current?.set_view_style_axes(showAxes)
+    // `.skp` writes it); one without keeps none. While a plugin command
+    // holds the document the kernel refuses the write (DocumentBusy); the
+    // viewport still follows the toggle.
+    try {
+      sceneRef.current?.set_view_style_axes(showAxes)
+    } catch (err) {
+      if (!String(err).startsWith('DocumentBusy')) throw err
+    }
   }, [showAxes])
   useEffect(() => { viewportApi.current?.setGridVisible(showGrid) }, [showGrid])
+  useEffect(() => { viewportApi.current?.setPartAxesVisible(showPartAxes) }, [showPartAxes])
   useEffect(() => { viewportApi.current?.setRenderMode(renderMode) }, [renderMode])
   useEffect(() => { viewportApi.current?.setGuidesVisible(showGuides) }, [showGuides])
+  useEffect(() => { viewportApi.current?.setTangentEdgesVisible(tangentEdgesVisible) }, [tangentEdgesVisible])
 
   // Undo/redo availability (queried from scene each render for menu state)
   const canUndo = sceneRef.current?.can_scene_undo() ?? false
@@ -6413,6 +8241,9 @@ export default function App() {
   // without this, switching from a window with a selection to one without
   // left the old window's check marks and Edit gates on the menu.
   const [menuFocusTick, setMenuFocusTick] = useState(0)
+  // Bumped when an action is refused after the native menu already toggled
+  // its check item (Smooth levels), so the effect below re-pushes the truth.
+  const [menuSyncTick, setMenuSyncTick] = useState(0)
   useEffect(() => {
     if (!isTauri || !isMac) return
     let unlisten: (() => void) | undefined
@@ -6428,10 +8259,12 @@ export default function App() {
     if (!isTauri || !isMac) return
     const checked: Record<string, boolean> = {
       'view-axes': showAxes,
+      'view-part-axes': showPartAxes,
       'view-grid': showGrid,
       'view-xray': xrayOn,
       'view-wireframe': wireframeOn,
       'view-guides': showGuides,
+      'view-tangent-edges': tangentEdgesVisible,
       'view-section-plane': sectionPlaneMenuState.checked,
       // Sections read "on screen", as in the web MenuBar (see its props).
       'win-model-info': showModelInfo && !trayCollapsed,
@@ -6453,18 +8286,44 @@ export default function App() {
     for (const [tool, id] of Object.entries(TOOL_MENU_IDS)) {
       checked[id] = tool === activeTool
     }
+    // Deform's four modes are four radio items: only the running mode checks.
+    for (const [mode, id] of Object.entries(DEFORM_MENU_IDS)) {
+      checked[id] = activeTool === 'Deform' && deformMode === mode
+    }
+    // Object ▸ Smooth ▸ Off / 1 / 2 / 3: the selection's shared level.
+    for (const level of [0, 1, 2, 3]) {
+      checked[`object-smooth-${level === 0 ? 'off' : level}`] = menuGates?.smoothLevel === level
+    }
     const enabled: Record<string, boolean> = {
-      'edit-delete': selectedIds.length > 0 || selectedGuide !== null || selectedAnnotation !== null,
+      'edit-delete': selection.length > 0,
       'edit-group': menuGates?.canGroup ?? false,
       'edit-ungroup': menuGates?.canUngroup ?? false,
-      'edit-make-component': menuGates?.canMakeComponent ?? false,
+      'edit-make-component': (menuGates?.canMakeComponent ?? false) || (menuGates?.canPromote ?? false),
       'edit-place-copy': menuGates?.canPlaceCopy ?? false,
       'edit-save-selection-to-library': menuGates?.canSaveSelectionToLibrary ?? false,
       'edit-explode': menuGates?.canExplode ?? false,
       'edit-make-unique': menuGates?.canMakeUnique ?? false,
+      'edit-link-identical-copies': canLinkSimilarNow,
+      'edit-unlink': menuGates?.canUnlink ?? false,
+      'edit-unlink-all': menuGates?.canUnlinkAll ?? false,
+      'edit-select-all-copies': menuGates?.canUnlinkAll ?? false,
+      'edit-lock': menuGates?.canLock ?? false,
+      'edit-unlock-selected': menuGates?.canUnlock ?? false,
+      'edit-unlock-all': menuGates?.canUnlockAll ?? false,
+      'edit-flip-red': menuGates?.canFlip ?? false,
+      'edit-flip-green': menuGates?.canFlip ?? false,
+      'edit-flip-blue': menuGates?.canFlip ?? false,
+      'edit-paste-independent': menuGates?.clipboardHasContent ?? false,
+      'edit-paste-linked': (menuGates?.clipboardHasContent ?? false) && !copiesLinked,
       'edit-union': menuGates?.canBoolean ?? false,
       'edit-subtract': menuGates?.canBoolean ?? false,
       'edit-intersect': menuGates?.canBoolean ?? false,
+      'object-smooth-off': menuGates?.canSmooth ?? false,
+      'object-smooth-1': menuGates?.canSmooth ?? false,
+      'object-smooth-2': menuGates?.canSmooth ?? false,
+      'object-smooth-3': menuGates?.canSmooth ?? false,
+      'object-bake-smooth': menuGates?.canSmooth ?? false,
+      'object-soften-edges': menuGates?.canSoften ?? false,
       'edit-cut': menuGates?.hasStructuralSelection ?? false,
       'edit-copy': menuGates?.hasStructuralSelection ?? false,
       'edit-paste': menuGates?.clipboardHasContent ?? false,
@@ -6497,11 +8356,14 @@ export default function App() {
       .catch(() => { /* shell without the command (older build) — ignore */ })
   }, [
     activeTool,
+    deformMode,
     showAxes,
+    showPartAxes,
     showGrid,
     xrayOn,
     wireframeOn,
     showGuides,
+    tangentEdgesVisible,
     sectionPlaneMenuState,
     showModelInfo,
     showMaterials,
@@ -6516,10 +8378,10 @@ export default function App() {
     showDebugLog,
     showLibrary,
     selectedIds,
-    selectedGuide,
-    selectedAnnotation,
+    selection,
     menuGates,
     menuFocusTick,
+    menuSyncTick,
     parallelProjection,
     fly.mode,
     componentFrameOpen,
@@ -6697,7 +8559,9 @@ export default function App() {
     sceneRef.current?.set_tag_hidden(path.join('/'), nowHidden)
     setHiddenTagPaths(next)
     pushUnionHidden(hiddenKeys, next)
-  }, [hiddenTagPaths, hiddenKeys, pushUnionHidden])
+    // A guide or annotation now on a hidden tag leaves the selection.
+    pruneSelection()
+  }, [hiddenTagPaths, hiddenKeys, pushUnionHidden, pruneSelection])
   toggleTagPathRef.current = handleToggleTagPath
 
   // Re-seed hiddenTagPaths from the document's registry and re-push the
@@ -6725,13 +8589,18 @@ export default function App() {
   const reconcileVisibility = useCallback(() => {
     const scene = sceneRef.current
     if (scene === null) return
+    // The latest sets, not this render's: a re-seed earlier in the same tick
+    // (a bus hide) has already replaced them.
+    const keys = hiddenKeysRef.current
+    const tagPaths = hiddenTagPathsRef.current
     const seeded = seedHiddenTagPathsFromRegistry(scene)
-    if (seeded.size === 0 && hiddenTagPaths.size === 0 && hiddenKeys.size === 0) return
-    if (seeded.size !== hiddenTagPaths.size || [...seeded].some((p) => !hiddenTagPaths.has(p))) {
+    if (seeded.size === 0 && tagPaths.size === 0 && keys.size === 0) return
+    if (seeded.size !== tagPaths.size || [...seeded].some((p) => !tagPaths.has(p))) {
       setHiddenTagPaths(seeded)
+      hiddenTagPathsRef.current = seeded
     }
-    pushUnionHidden(hiddenKeys, seeded, { onlyIfChanged: true })
-  }, [hiddenKeys, hiddenTagPaths, pushUnionHidden])
+    pushUnionHidden(keys, seeded, { onlyIfChanged: true })
+  }, [pushUnionHidden])
   reconcileVisibilityRef.current = reconcileVisibility
 
   const handleObjectInfoTagsChanged = useCallback(() => {
@@ -6980,12 +8849,26 @@ export default function App() {
   const canPlace = menuGates?.canPlaceCopy ?? false
   const canExplode = menuGates?.canExplode ?? false
   const canUnique = menuGates?.canMakeUnique ?? false
-  const handleBoolean = (op: number) => {
-    // Re-check the full gate (the accelerator path dispatches here
-    // unconditionally, like handleGroup): exactly two operands, each a plain
-    // solid or a group, at the top level.
-    if (!(menuGates?.canBoolean ?? false)) return
-    const result = viewportApi.current?.runBoolean(op, booleanOperands[0], booleanOperands[1])
+  const runBooleanScoped = (op: number, nodes: NodeRef[], scope: 'all' | 'one') => {
+    // Another long change holds the busy card: say so instead of nothing.
+    if (busyRef.current) {
+      handleToast(i18n._(BUSY_REFUSED))
+      return
+    }
+    // A large boolean runs behind the busy card, the one card Mend's long
+    // changes use too.
+    if ((viewportApi.current?.operandTriangles?.(nodes) ?? 0) >= LARGE_BOOLEAN_TRIANGLES) {
+      if (!runBusy(booleanBusyLabel(op), () => finishBoolean(op, nodes, scope))) handleToast(i18n._(BUSY_REFUSED))
+      return
+    }
+    finishBoolean(op, nodes, scope)
+  }
+
+  const finishBoolean = (op: number, nodes: NodeRef[], scope: 'all' | 'one') => {
+    // `scope` is passed only when the strip chose "Only this one", so a plain
+    // run keeps the two-argument call.
+    const api = viewportApi.current
+    const result = scope === 'one' ? api?.runBoolean(op, nodes, scope) : api?.runBoolean(op, nodes)
     if (result === 'mutated-failed') {
       // The retried boolean failed AFTER auto-explode already committed
       // real mutations (make_unique/explode_instance/group_nodes) —
@@ -6995,9 +8878,31 @@ export default function App() {
       // status must still be re-derived from the document.
       setDocRev((r) => r + 1)
     } else if (result != null) {
-      setSelectedIds([result])
+      setSelection((cur) => withNodes(cur, [result]))
       setDocRev((r) => r + 1)
     }
+  }
+
+  const handleBoolean = (op: number) => {
+    // Re-check the full gate (the accelerator path dispatches here
+    // unconditionally, like handleGroup): two or more operands, each a plain
+    // solid, a group or an instance, at the top level, passed in selection
+    // order so the first selected is what a Subtract keeps.
+    if (!(menuGates?.canBoolean ?? false)) return
+    const scene0 = sceneRef.current
+    // A boolean needs every operand: a locked one refuses it whole.
+    if (scene0 !== null && refuseIfLocked(scene0, booleanOperands, handleToast, { descendants: true })) return
+    // Cutting a part that has other linked copies: ask how far the cut
+    // reaches first (the strip above the status bar). Everything else runs.
+    if (scene0 !== null && routeBooleanMany(op, booleanOperands, (id) => scene0.is_linked(id)) === 'through-placement') {
+      const def = scene0.instance_def(booleanOperands[0].id)
+      const copies = def !== undefined ? scene0.definition_usage(def) : 1
+      if (copies > 1) {
+        setCutScope({ op, nodes: booleanOperands, copies })
+        return
+      }
+    }
+    runBooleanScoped(op, booleanOperands, 'all')
   }
 
   const handleGroup = () => {
@@ -7007,9 +8912,29 @@ export default function App() {
     // Without this a single selected node becomes a silent 1-member group
     // (the kernel accepts any non-empty sibling list).
     if (!(menuGates?.canGroup ?? false)) return
-    const newGroupId = viewportApi.current?.runGroup(selectedIds)
+    // Locked items are left behind; grouping what is left needs two or more.
+    const scene = sceneRef.current
+    let go: NodeRef[] = selectedIds
+    if (scene !== null) {
+      const outcome = gateSelection(scene, selectedIds, { descendants: true })
+      if (outcome.kind === 'refused') {
+        toastLocked(handleToast, outcome.node, outcome.block)
+        return
+      }
+      go = outcome.go
+      if (outcome.kind === 'left-behind') {
+        // Say so plainly when too little is left to group: no silent no-op.
+        handleToast(
+          go.length < 2
+            ? `${leftBehindMessage(scene, outcome.left)} ${t`Grouping needs two or more, so nothing was grouped.`}`
+            : leftBehindMessage(scene, outcome.left),
+        )
+      }
+    }
+    if (go.length < 2) return
+    const newGroupId = viewportApi.current?.runGroup(go)
     if (newGroupId != null) {
-      setSelectedIds([{ kind: 'group', id: newGroupId }])
+      setSelection((cur) => withNodes(cur, [{ kind: 'group', id: newGroupId }]))
       setDocRev((r) => r + 1)
     }
   }
@@ -7026,36 +8951,129 @@ export default function App() {
     if (ok === true) {
       // Moving a node into (or out of) a hidden group hides (or shows) it.
       reconcileVisibility()
-      setSelectedIds(nodes)
+      setSelection(nodes)
       setDocRev((r) => r + 1)
     }
   }
 
   const handleUngroup = () => {
     if (selectedIds.length === 1 && selectedIds[0].kind === 'group') {
+      const scene = sceneRef.current
+      if (scene !== null && refuseIfLocked(scene, selectedIds, handleToast, { descendants: true })) return
       viewportApi.current?.runUngroup(selectedIds[0].id)
-      setSelectedIds([])
+      setSelection((cur) => withNodes(cur, []))
       setDocRev((r) => r + 1)
     }
   }
 
   const handleMakeComponent = () => {
+    // One placement of a linked set: Make component is the promote — the
+    // set becomes a named component. Ask for the name first.
+    const scene = sceneRef.current
+    // Make Component needs every operand: a locked one refuses it whole.
+    if (scene !== null && refuseIfLocked(scene, selectedIds, handleToast, { descendants: true })) return
+    const linked = scene !== null && !componentFrameOpen ? wrapperPlacementOf(scene, selectedIds) : null
+    if (linked !== null) {
+      setPromoteTarget({ instance: linked.instance, defaultName: linkedLabelOf(linked.instance) })
+      return
+    }
     // Same re-check handleGroup does: dispatchers without a disabled state
     // (dock verbs are hidden, but keyboard/palette paths aren't) must not
     // hand the kernel an ineligible selection.
     if (!(menuGates?.canMakeComponent ?? false)) return
     const instanceId = viewportApi.current?.runMakeComponent(selectedIds)
     if (instanceId != null) {
-      setSelectedIds([{ kind: 'instance', id: instanceId }])
+      setSelection((cur) => withNodes(cur, [{ kind: 'instance', id: instanceId }]))
       setDocRev((r) => r + 1)
     }
+  }
+
+  /** Runs a linked-copy scene operation: a typed refusal is a toast, never a silent no-op. */
+  const runLinkedOp = (op: (scene: NonNullable<typeof sceneRef.current>) => void): boolean => {
+    const scene = sceneRef.current
+    if (scene === null) return false
+    try {
+      op(scene)
+    } catch (err) {
+      const code = parseKernelErrorCode(err)
+      const rawMsg = err instanceof Error ? err.message : String(err)
+      handleToast(kernelErrorMessage(code ?? 'Unknown', rawMsg), code ?? undefined)
+      return false
+    }
+    viewportApi.current?.refreshScene()
+    setDocRev((r) => r + 1)
+    return true
+  }
+
+  /** Unlink this copy (or every copy). The copy becomes a new Object/Group, so
+   *  the selection moves to what it became. `node` is the Outliner row the action came from; the Edit menu and dock
+   *  act on the selection. */
+  const handleUnlink = (all: boolean, node?: NodeRef) => {
+    if (blockedWhileEditing(componentFrameOpen, handleToast)) return
+    const scene = sceneRef.current
+    const linked = scene !== null ? linkedPlacementOf(scene, node !== undefined ? [node] : selectedIds) : null
+    if (linked === null || (all && linked.topLevel.length < 2)) return
+    let made: NodeRef[] = []
+    const ok = runLinkedOp((s) => {
+      made = all ? unlinkAllCopies(s, linked.instance) : unlinkCopy(s, linked.instance)
+    })
+    if (ok && made.length > 0) setSelection((cur) => withNodes(cur, made))
+  }
+
+  /** Edit ▸ Link identical copies: over the selected Objects (two or more),
+   *  else the whole model; the Model Health button always over the whole
+   *  model, as its count is. One undo step; the status line says what
+   *  happened. */
+  const handleLinkSimilar = (origin: 'menu' | 'model-health') => {
+    if (blockedWhileEditing(componentFrameOpen, handleToast)) return
+    const scene = sceneRef.current
+    if (scene === null) return
+    let message = ''
+    // Joining needs every operand free: a locked Object in a look-alike
+    // group refuses the whole link (no merged lock state exists).
+    const groups = findLookAlikes(scene, linkSimilarScope(origin, selectedIds))
+    const operands = groups.flatMap((g) => g.members.map((m) => ({ kind: 'object' as const, id: m.object })))
+    if (refuseIfLocked(scene, operands, handleToast)) return
+    const ok = runLinkedOp((s) => {
+      message = linkSimilarMessage(linkSimilar(s, groups))
+    })
+    if (ok) handleToast(message)
+  }
+
+  const handleSelectAllCopies = (node?: NodeRef) => {
+    const scene = sceneRef.current
+    const linked = scene !== null ? linkedPlacementOf(scene, node !== undefined ? [node] : selectedIds) : null
+    if (scene === null || linked === null) return
+    setSelection(linked.topLevel.map((id) => ({ kind: 'instance' as const, id })))
+  }
+
+  /** Outliner row actions for a linked copy (the row's "Copies" menu). */
+  const linkedRowActions: LinkedCopyActions = {
+    onUnlink: (node) => handleUnlink(false, node),
+    onUnlinkAll: (node) => handleUnlink(true, node),
+    onSelectCopies: (node) => handleSelectAllCopies(node),
+    onMakeComponent: (node) => {
+      if (blockedWhileEditing(componentFrameOpen, handleToast)) return
+      if (node.kind === 'instance') setPromoteTarget({ instance: node.id, defaultName: linkedLabelOf(node.id) })
+    },
+    onRename: (node, name) => {
+      if (blockedWhileEditing(componentFrameOpen, handleToast)) return
+      if (node.kind === 'instance' && name.trim() !== linkedLabelOf(node.id)) runLinkedOp((s) => renameLinkedCopy(s, node.id, name))
+    },
+  }
+
+  /** The label a linked copy shows in the Outliner (also the default name for Make component). */
+  const linkedLabelOf = (instance: bigint): string => {
+    const scene = sceneRef.current
+    if (scene === null) return entityLabel('object', null)
+    return placementLabel(scene, instance, sharedTreeIndex?.get(nodeKey({ kind: 'instance', id: instance })) ?? 0)
   }
 
   const handlePlaceInstance = () => {
     if (selectedIds.length === 1 && selectedIds[0].kind === 'instance') {
       const newId = viewportApi.current?.runPlaceInstance(selectedIds[0].id)
       if (newId != null) {
-        setSelectedIds([{ kind: 'instance', id: newId }])
+        setSelection((cur) => withNodes(cur, [{ kind: 'instance', id: newId }]))
         setDocRev((r) => r + 1)
       }
     }
@@ -7063,15 +9081,29 @@ export default function App() {
 
   const handleExplodeInstance = () => {
     if (selectedIds.length === 1 && selectedIds[0].kind === 'instance') {
+      const scene = sceneRef.current
+      if (scene !== null && refuseIfLocked(scene, selectedIds, handleToast, { descendants: true })) return
       const objectIds = viewportApi.current?.runExplodeInstance(selectedIds[0].id)
       if (objectIds != null && objectIds.length > 0) {
-        setSelectedIds(objectIds.map((id) => ({ kind: 'object' as const, id })))
+        setSelection((cur) => withNodes(cur, objectIds.map((id) => ({ kind: 'object' as const, id }))))
         setDocRev((r) => r + 1)
       } else if (objectIds != null) {
-        setSelectedIds([])
+        setSelection((cur) => withNodes(cur, []))
         setDocRev((r) => r + 1)
       }
     }
+  }
+
+  /** Object ▸ Flip Along ▸ Red/Green/Blue: mirror the selection in place
+   *  across the plane through its center whose normal is that axis. The
+   *  copy toggle does not apply; the Flip tool makes copies. */
+  const handleFlipAlong = (axis: 0 | 1 | 2) => {
+    if (!(menuGates?.canFlip ?? false)) return
+    // Locked items are left behind: the flip runs on the rest.
+    const scene = sceneRef.current
+    const go = scene === null ? [...selectedIds] : leaveBehind(scene, selectedIds, handleToast, { descendants: true })
+    if (go === null) return
+    if (viewportApi.current?.runFlipAlong?.(go, axis) != null) setDocRev((r) => r + 1)
   }
 
   const handleMakeUnique = () => {
@@ -7079,9 +9111,107 @@ export default function App() {
       const kept = viewportApi.current?.runMakeUnique(selectedIds[0].id)
       if (kept != null) {
         // Keep the same instance selected — its id is unchanged.
+        viewportApi.current?.refreshSelectionColors?.()
         setDocRev((r) => r + 1)
       }
     }
+  }
+
+  // ---------------------------------------------------------------- Lock (OW-1)
+
+  /** A lock or unlock landed. Only the selection colors redraw, so no
+   *  viewport refresh reports the change: mark the document here, or the
+   *  lock gets no unsaved mark, autosave or close prompt. */
+  const handleLockChanged = () => {
+    viewportApi.current?.refreshSelectionColors?.()
+    // Through the ref: a lock toast keeps the closure from the render that
+    // raised it.
+    reconcileRef.current()
+  }
+
+  /** Lock or unlock nodes: one undo step, a typed refusal is a toast. The
+   *  selection stays; its edges change color when the lock lands. */
+  const applyLock = (nodes: readonly NodeRef[], locked: boolean): boolean => {
+    const scene = sceneRef.current
+    if (scene === null || nodes.length === 0) return false
+    try {
+      setNodesLocked(scene, nodes, locked)
+    } catch (err) {
+      const code = parseKernelErrorCode(err)
+      const rawMsg = err instanceof Error ? err.message : String(err)
+      handleToast(kernelErrorMessage(code ?? 'Unknown', rawMsg), code ?? undefined)
+      return false
+    }
+    handleLockChanged()
+    return true
+  }
+
+  /** Edit ▸ Lock: lock the selection. Only what is not already locked is
+   *  sent, so a selection that is entirely locked records no step. */
+  const selectionHasUnlocked = (() => {
+    const scene = sceneRef.current
+    if (scene === null) return false
+    try {
+      return unlockedAmong(scene, selectedIds).length > 0
+    } catch {
+      return false
+    }
+  })()
+
+  const handleLock = () => {
+    const scene = sceneRef.current
+    if (scene === null) return
+    // Locking restructures nothing, but the kernel refuses it while a
+    // component is open for editing: say so (the menu item is dimmed, but the
+    // palette and shortcuts reach here).
+    if (componentFrameOpen) {
+      // oxlint-disable-next-line lingui/no-unlocalized-strings -- kernel error code identifier
+      handleToast(kernelErrorMessage('ExplodeSessionScope', ''), 'ExplodeSessionScope')
+      return
+    }
+    applyLock(unlockedAmong(scene, selectedIds), true)
+  }
+
+  /** Edit ▸ Unlock ▸ Selected / All. Unlocking a copy unlocks its shape's
+   *  every copy; a node inside a locked group is unlocked by unlocking the
+   *  group (the selection names the group, not the member). */
+  const handleUnlock = (all: boolean) => {
+    const scene = sceneRef.current
+    if (scene === null) return
+    if (all) {
+      const everything = allLockableNodes(scene).filter((n) => isLocked(scene, n))
+      applyLock(everything, false)
+      return
+    }
+    applyLock(lockedAmong(scene, selectedIds), false)
+  }
+
+  /** The buttons a locked hint's toast carries, read from its code (the
+   *  node the hint is about) or, for the kernel's own refusal that names no
+   *  node, from the selection. */
+  lockToastActionsRef.current = (code) => {
+    const scene = sceneRef.current
+    if (scene === null) return undefined
+    const steps = lockToastSteps(scene, code, selectedIds)
+    if (steps === undefined) return undefined
+    return steps.map(({ action, node }): ToastAction => {
+      if (action === 'unlock') return { label: t`Unlock`, run: () => void applyLock([node], false) }
+      return {
+        label: t`Make Unique`,
+        run: () => {
+          const s = sceneRef.current
+          if (s === null) return
+          if (s.is_linked(node.id)) {
+            // Make Unique keeps the placement's id, so the selection stays.
+            runLinkedOp((sc) => makeUniqueCopy(sc, node.id))
+          } else {
+            viewportApi.current?.runMakeUnique(node.id)
+          }
+          viewportApi.current?.refreshSelectionColors?.()
+          setDocRev((r) => r + 1)
+        },
+      }
+    })
   }
 
   return (
@@ -7102,7 +9232,7 @@ export default function App() {
           and macOS keep native decorations, so their OS caption (which reflects
           setTitle) is the title bar — no custom one. */}
       {isTauri && isLinux && (
-        <TitleBar name={documentName(docSession)} saveState={saveStateLabel(docSession, nowTick)} />
+        <TitleBar name={shownDocumentName} saveState={saveStateLabel(docSession, nowTick)} />
       )}
 
       {/* App bar / menu bar.
@@ -7113,7 +9243,7 @@ export default function App() {
           centered title is shown by TitleBar on Linux/Windows so it is
           hidden here in that case. */}
       <MenuBar
-        name={documentName(docSession)}
+        name={shownDocumentName}
         saveState={saveStateLabel(docSession, nowTick)}
         nativeMenuBar={isTauri && isMac}
         hideTitle={isTauri && (isLinux || isWindows)}
@@ -7166,7 +9296,20 @@ export default function App() {
         undoLabel={undoLabel}
         redoLabel={redoLabel}
         activeTool={activeTool}
-        onSelectTool={(name) => activateTool(name as ToolName)}
+        onSelectTool={(name) => {
+          // Fillet and Chamfer are one tool entered in two modes (the menu
+          // actions set the mode, then activate it).
+          if (name === 'Fillet' || name === 'Chamfer') {
+            menuActionRef.current(name === 'Fillet' ? 'tool-fillet' : 'tool-chamfer')
+            return
+          }
+          activateTool(name as ToolName)
+        }}
+        onSelectDeformMode={(mode) => {
+          setDeformMode(mode as 'twist' | 'bend' | 'taper' | 'bend-to-path')
+          activateTool('Deform')
+        }}
+        deformMode={deformMode}
         // A section's check mark means "on screen": with the tray hidden
         // every section reads unchecked, and choosing one brings the tray
         // back with it open (toggleSection).
@@ -7205,7 +9348,15 @@ export default function App() {
         showAxes={showAxes}
         showGrid={showGrid}
         showGuides={showGuides}
-        onToggleAxes={() => setShowAxes((v) => !v)}
+        showTangentEdges={tangentEdgesVisible}
+        onToggleAxes={() => {
+          // The axes flag is recorded in the document's view style, which a
+          // running plugin command holds (docs/agents/PLUGINS.md "Compounds").
+          if (sceneRef.current?.busy()) return
+          setShowAxes((v) => !v)
+        }}
+        showPartAxes={showPartAxes}
+        onTogglePartAxes={() => setShowPartAxes(!getShowPartAxes())}
         onResetAxes={() => menuActionRef.current('reset-axes')}
         onToggleGrid={() => setShowGrid((v) => !v)}
         xray={xrayOn}
@@ -7213,6 +9364,7 @@ export default function App() {
         onToggleXray={toggleXray}
         onToggleWireframe={toggleWireframe}
         onToggleGuides={() => setShowGuides((v) => !v)}
+        onToggleTangentEdges={() => setTangentEdgesVisible((v) => !v)}
         onDeleteGuides={() => viewportApi.current?.deleteAllGuides()}
         sectionPlaneChecked={sectionPlaneMenuState.checked}
         sectionPlaneExists={sectionPlaneMenuState.exists}
@@ -7226,15 +9378,28 @@ export default function App() {
           canPlaceCopy: canPlace,
           canExplode: canExplode,
           canMakeUnique: canUnique,
+          canUnlink: menuGates?.canUnlink ?? false,
+          canUnlinkAll: menuGates?.canUnlinkAll ?? false,
+          canLinkSimilar: canLinkSimilarNow,
+          canPromote: menuGates?.canPromote ?? false,
+          canFlip: menuGates?.canFlip ?? false,
+          canLock: menuGates?.canLock ?? false,
+          canUnlock: menuGates?.canUnlock ?? false,
+          canUnlockAll: menuGates?.canUnlockAll ?? false,
           canBoolean,
+          canSmooth: menuGates?.canSmooth ?? false,
+          canSoften: menuGates?.canSoften ?? false,
+          smoothLevel: menuGates?.smoothLevel ?? null,
           canSaveSelectionToLibrary: menuGates?.canSaveSelectionToLibrary ?? false,
           canImport: !componentFrameOpen,
           canDrawText: !componentFrameOpen,
           hasStructuralSelection: menuGates?.hasStructuralSelection ?? false,
           clipboardHasContent: menuGates?.clipboardHasContent ?? false,
         }}
+        copiesLinked={copiesLinked}
         onZoomExtents={handleZoomExtents}
         onStandardView={(view) => viewportApi.current?.setStandardView(view)}
+        onHomeView={() => viewportApi.current?.goHomeView()}
         parallelProjectionChecked={parallelProjection}
         onToggleParallelProjection={() => viewportApi.current?.toggleProjection()}
         flyChecked={fly.mode === 'latched'}
@@ -7244,6 +9409,8 @@ export default function App() {
         onOpenPalette={() => openPalette()}
         onHelpSearch={(q) => openPalette(q)}
         onReportBug={handleReportBug}
+        onSentReports={() => handleSentReports()}
+        sentReportsNew={sentReportsNew}
         onCheckForUpdates={updaterAvailable ? handleCheckForUpdates : undefined}
         onOpenOnPhone={isTauri ? () => setPhoneShareOpen(true) : undefined}
         openOnPhoneDisabled={phoneShareDisabled}
@@ -7251,6 +9418,17 @@ export default function App() {
         windowList={isTauri ? windowList : undefined}
         onFocusWindow={focusWindow}
       />
+
+      {/* Reply notice for followed bug reports (follow-a-report §2.3). */}
+      <FollowNoticeBar onView={handleSentReports} />
+      <LibraryUpdateBar
+        count={updateCount(libLinks.pending)}
+        busy={libraryUpdateBusy}
+        onUpdateAll={() => void handleLibraryUpdate({ all: true })}
+        onReview={openLibraryReview}
+        onLater={libLinks.dismiss}
+      />
+      {isTauri && <UpdateReadyBar />}
 
       {/* Kernel panic sticky banner */}
       {kernelPanicked && (
@@ -7317,12 +9495,11 @@ export default function App() {
           onSelectTool={(name) => activateTool(name)}
           // The resting palette field lives at the top of the rail on every
           // platform ( — macOS forced it here since it has no in-window
-          // menu bar, and the rest follow for consistency). One shortcut
-          // everywhere now: Cmd/Ctrl+`/`, dispatched by the global keydown
-          // handler above and by the native menu on the macOS desktop.
+          // menu bar, and the rest follow for consistency). The chip shows
+          // the palette's key from the keymap (Cmd/Ctrl+`/` by default).
           onOpenPalette={() => openPalette()}
-          // oxlint-disable-next-line lingui/no-unlocalized-strings -- keyboard shortcut label, not translated
-          paletteKbd={isMac ? '⌘/' : 'Ctrl /'}
+          // oxlint-disable-next-line lingui/no-unlocalized-strings -- command id
+          paletteKbd={shortcutLabel('open-palette') || undefined}
           // The BROWSE entry point stays visible on every platform — the
           // dialog itself reports the web build's storage honestly
           // unavailable (matching Settings ▸ Folders' posture); only the
@@ -7350,6 +9527,7 @@ export default function App() {
             onStatusChange={handleStatusChange}
             onSceneChange={handleSceneChange}
             onToast={handleToast}
+            onBusy={runBusy}
             onToolHint={setToolStageHint}
             onPrecisionChange={setPrecisionSnap}
             activeTool={activeTool}
@@ -7362,13 +9540,14 @@ export default function App() {
             onSelectSnap={handleSelectSnap}
             onSelectMany={handleSelectMany}
             onSelectGuide={handleSelectGuide}
-            selectedGuide={selectedGuide}
+            selectedGuides={selectedGuides}
             onSelectAnnotation={handleSelectAnnotation}
-            selectedAnnotation={selectedAnnotation}
+            selectedAnnotations={selectedAnnotations}
             onOpenAnnotationEditor={handleOpenAnnotationEditor}
             onEnterContext={handleEnterContext}
             onExitContext={handleExitContext}
             onIsolationChange={handleIsolationChange}
+            onIsolationTargetsChange={handleIsolationTargetsChange}
             onExitAllContexts={handleExitAllContexts}
             onSessionChange={handleSessionChange}
             onDocumentChanged={handleDocumentChanged}
@@ -7391,8 +9570,7 @@ export default function App() {
           {/* Inference & viewport feedback (`07_inference_feedback.md`)
               — all net-new DOM overlays; Viewport.tsx rendered none of this
               before this milestone. */}
-          <SnapDot info={inferenceInfo} />
-          <InferenceTooltip info={inferenceInfo} detail={hoverDetail} />
+          <InferenceOverlays store={inferenceStore} detailFor={hoverDetailFor} />
           {/* The in-viewport annotation text editor (docs/design/
               dimensions-text.md): double-click-to-edit an existing dimension/
               leader, or the Text tool's second click wording a new leader. */}
@@ -7411,6 +9589,10 @@ export default function App() {
               can't see moves into its own children). display:contents keeps
               them out of the layout while still catching the bubbled events. */}
           <div style={{ display: 'contents' }} onPointerOver={() => setInferenceInfo(null)}>
+            {/* The active tool's floating panels (tools/toolPanels.tsx). */}
+            {panelsForTool(toolName).map((panel) => (
+              <Fragment key={panel.tool}>{panel.render({ profileSections })}</Fragment>
+            ))}
             {/* While flying with no tool reading live, the box shows the
                 flight speed instead (fly-navigation.md §3.4) — a tool's own
                 measurement (a Line's length mid-gesture) always wins, since
@@ -7418,12 +9600,21 @@ export default function App() {
             {measurement === '' && fly.mode !== 'off' ? (
               <MeasurementBox toolName={toolName} value={fly.speedText} label={t`Fly speed`} frozen position={measurementsPosition} />
             ) : (
-              <MeasurementBox toolName={toolName} value={measurement} frozen={measurementFrozen} position={measurementsPosition} />
+              <MeasurementBox
+                toolName={toolName}
+                value={measurement}
+                label={
+                  toolName === 'Fillet' && behaviorEnabled('fillet-profiles')
+                    ? (filletGripLabel ?? profileSizeLabel(filletSettings.profile))
+                    : toolName === 'Arc'
+                      ? (toolStageLabel ?? undefined)
+                      : undefined
+                }
+                frozen={measurementFrozen}
+                position={measurementsPosition}
+              />
             )}
-            <ViewportHUD
-              onSelectView={(view: StandardView) => viewportApi.current?.setStandardView(view)}
-              onOrbit={() => activateTool('Orbit')}
-            />
+            <ViewDie apiRef={viewportApi} />
           </div>
 
           {/* Selection path (docs/design/selection-path.md): where you are
@@ -7461,6 +9652,24 @@ export default function App() {
               escapeBusy={wizardEscapeBusy}
               onGeometryChanged={refreshAfterPanelMutation}
               onToast={handleToast}
+              onBusy={runBusy}
+              onWidthChange={setFixWizardWidth}
+            />
+          )}
+
+          {makeSolidSketches !== null && state !== null && (
+            <MakeSolidSketches
+              key={makeSolidSketches.nonce}
+              scene={state.scene}
+              sketchIds={makeSolidSketches.sketchIds}
+              docRev={docRev}
+              docGeneration={docGeneration}
+              onClose={() => setMakeSolidSketches(null)}
+              onHealthOverlay={handleWizardOverlay}
+              escapeBusy={wizardEscapeBusy}
+              onGeometryChanged={refreshAfterPanelMutation}
+              onSelectObject={(id) => handleSelect({ kind: 'object', id }, 'replace')}
+              onToast={handleToast}
               onWidthChange={setFixWizardWidth}
             />
           )}
@@ -7473,7 +9682,7 @@ export default function App() {
               title={MENU.modelHealth}
               storageKey="hew.ui.modelHealthWindow"
               onClose={() => setShowModelHealth(false)}
-              reservedRight={makeSolid !== null ? fixWizardWidth : 0}
+              reservedRight={makeSolid !== null || makeSolidSketches !== null ? fixWizardWidth : 0}
               onCoverChange={setHealthCover}
               focusNonce={healthFocusNonce}
               data-model-health-window
@@ -7493,6 +9702,9 @@ export default function App() {
                 onOverlayChange={handleHealthOverlay}
                 onGeometryChanged={refreshAfterPanelMutation}
                 onToast={handleToast}
+                lookAlikeCount={countLookAlikes(lookAlikeGroups)}
+                onLinkLookAlikes={() => handleLinkSimilar('model-health')}
+                onBusy={runBusy}
               />
             </FloatingWindow>
           )}
@@ -7502,7 +9714,7 @@ export default function App() {
             <IsolationBar
               count={isolatedCount}
               onShowEverything={handleClearIsolation}
-              rightInset={makeSolid !== null ? fixWizardWidth : 0}
+              rightInset={makeSolid !== null || makeSolidSketches !== null ? fixWizardWidth : 0}
             />
           )}
 
@@ -7576,15 +9788,18 @@ export default function App() {
           <div style={{ display: 'contents' }} onPointerOver={() => setInferenceInfo(null)}>
             <ContextualDock
               selectedIds={selectedIds}
-              selectedGuide={selectedGuide}
+              others={selectedGuides.length + selectedAnnotations.length}
               hidden={cameraDragging}
               activeToolId={toolActionId(activeTool)}
               hoveringSketchRegion={hoveringSketchRegion}
-              gates={{ canGroup: canGroupNow, canMakeComponent: canMakeComp, canSaveToLibrary: libraryStore().available() }}
+              gates={{ canGroup: canGroupNow, canMakeComponent: canMakeComp || (menuGates?.canPromote ?? false), canBoolean, canSaveToLibrary: libraryStore().available(), canUnlink: menuGates?.canUnlink ?? false, canUnlinkAll: menuGates?.canUnlinkAll ?? false, linkedKind: menuGates?.linkedKind ?? null, presentedKind: menuGates?.presentedKind ?? null, canLock: menuGates?.canLock ?? false, canUnlock: menuGates?.canUnlock ?? false }}
               onRun={(id) => menuActionRef.current(id)}
             />
           </div>
           )}
+
+          {/* A plugin command's progress notice, with Cancel. */}
+          <BusyNotice />
 
           {/* Toast stack — positioned inside the viewport container. */}
           <div
@@ -7605,6 +9820,9 @@ export default function App() {
               return (
                 <div
                   key={toast.id}
+                  data-testid="toast"
+                  data-lock-toast={isLockToastCode(toast.code) ? '' : undefined}
+                  data-emphasis={toast.emphasis === true ? 'true' : undefined}
                   onClick={() => dismissToast(toast.id)}
                   style={{
                     display: 'flex',
@@ -7617,12 +9835,16 @@ export default function App() {
                     // overlay/text-primary pair instead of a hardcoded dark
                     // chip, so it's no longer illegible against the light
                     // theme's own light canvas.
+                    // A guidance toast (emphasis) keeps the opaque overlay
+                    // surface — it can land over the floating dock — and
+                    // reads as guidance through the accent border and text.
                     background: toast.isError ? 'var(--status-leaky-bg)' : 'var(--surface-overlay)',
-                    color: toast.isError ? '#fff' : 'var(--text-primary)',
-                    border: toast.isError ? 'none' : '1px solid var(--border-strong)',
+                    color: toast.isError ? '#fff' : toast.emphasis === true ? 'var(--accent-text-strong)' : 'var(--text-primary)',
+                    border: toast.isError ? 'none' : toast.emphasis === true ? '2px solid var(--accent-base)' : '1px solid var(--border-strong)',
                     borderRadius: '4px',
-                    fontFamily: 'monospace',
-                    fontSize: '13px',
+                    fontFamily: toast.emphasis === true ? 'var(--font-family-ui)' : 'monospace',
+                    fontSize: toast.emphasis === true ? '15px' : '13px',
+                    fontWeight: toast.emphasis === true ? 600 : undefined,
                     cursor: 'pointer',
                     pointerEvents: 'auto',
                     boxShadow: '0 2px 8px rgba(0,0,0,0.4)',
@@ -7647,15 +9869,68 @@ export default function App() {
                   {toast.state === 'done' && (
                     <span aria-hidden="true" style={{ color: 'var(--status-solid)', flexShrink: 0 }}>✓</span>
                   )}
-                  {/* One flex item for the code and the message, so a long
-                      message wraps under the code instead of in a narrow
-                      column beside it. */}
+                  {/* The toast reads as plain words. The machine code stays in
+                      the log line and the bug-report bundle (logMessage). One
+                      flex item for the message and its dismiss hint, so a long
+                      message wraps under it instead of in a narrow column. */}
                   <span>
-                    {toast.code !== undefined && (
-                      <strong style={{ marginRight: '6px', opacity: 0.8 }}>[{toast.code}]</strong>
-                    )}
                     {toast.message}
+                    {toast.persistent === true && (
+                      <span style={{ display: 'block', marginTop: '4px', opacity: 0.75, fontSize: '11px' }}>
+                        <Trans>Click to dismiss</Trans>
+                      </span>
+                    )}
                   </span>
+                  {toast.actions?.map((action) => (
+                    <button
+                      key={action.label}
+                      type="button"
+                      data-toast-action
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        action.run()
+                        dismissToast(toast.id)
+                      }}
+                      style={{
+                        flexShrink: 0,
+                        background: 'transparent',
+                        border: '1px solid currentColor',
+                        borderRadius: '3px',
+                        color: 'inherit',
+                        cursor: 'pointer',
+                        fontFamily: 'inherit',
+                        fontSize: '12px',
+                        padding: '2px 8px',
+                        whiteSpace: 'nowrap',
+                      }}
+                    >
+                      {action.label}
+                    </button>
+                  ))}
+                  {isLockToastCode(toast.code) && (
+                    <button
+                      type="button"
+                      data-toast-close
+                      aria-label={t`Close`}
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        dismissToast(toast.id)
+                      }}
+                      style={{
+                        flexShrink: 0,
+                        background: 'transparent',
+                        border: 'none',
+                        color: 'inherit',
+                        cursor: 'pointer',
+                        fontFamily: 'inherit',
+                        fontSize: '16px',
+                        lineHeight: 1,
+                        padding: '0 2px',
+                      }}
+                    >
+                      ×
+                    </button>
+                  )}
                 </div>
               )
             })}
@@ -7741,6 +10016,7 @@ export default function App() {
             display: 'flex',
             flexDirection: 'column',
             minHeight: 0,
+            overflowY: 'auto',
             background: 'var(--surface-panel)',
             borderLeft: '1px solid var(--border-hairline)',
           }}
@@ -7751,14 +10027,15 @@ export default function App() {
               scene={state.scene}
               docRev={docRev}
               selectedIds={selectedIds}
-              selectedAnnotation={selectedAnnotation}
-              selectedGuide={selectedGuide}
+              selectedAnnotations={selectedAnnotations}
+              selectedGuides={selectedGuides}
               // Segments rebuilds a circle's chords, so it needs the repaint
               // path like every other tray panel that edits geometry; names
               // change nothing drawn and skip the re-tessellation.
               onNameChanged={handleNameChanged}
               onGeometryChanged={refreshAfterPanelMutation}
               onTagsChanged={handleObjectInfoTagsChanged}
+              onLockChanged={handleLockChanged}
               onSelectMany={handleReplaceSelection}
               onSelectTag={(path) => revealInTray('tags', path)}
               onSelectMaterial={(id) => revealInTray('materials', id)}
@@ -7769,6 +10046,7 @@ export default function App() {
             />
           </TraySection>
           <TraySection title={trayTitle.outliner} collapsed={!showModelInfo} onToggle={() => setShowModelInfo((v) => !v)}>
+            <GeoReferenceInfo scene={state.scene} docRev={docRev} />
             <DocumentTree
               scene={state.scene}
               docRev={docRev}
@@ -7787,7 +10065,11 @@ export default function App() {
               onToggleHidden={handleToggleHidden}
               onSetHiddenMany={handleSetHiddenMany}
               onReparent={handleReparent}
+              onUnlock={(node) => void applyLock([node], false)}
               onDropRefused={(reason) => handleToast(reason)}
+              linkedActions={linkedRowActions}
+              libraryLinks={libLinks.byDefinition}
+              onReviewLibraryUpdates={openLibraryReview}
             />
           </TraySection>
           <TraySection title={trayTitle.materials} collapsed={!showMaterials} onToggle={() => setShowMaterials((v) => !v)}>
@@ -7819,6 +10101,8 @@ export default function App() {
               onSelectNodes={handleReplaceSelection}
               onRenameComponent={handleRenameComponent}
               onDeleteComponent={handleDeleteComponent}
+              libraryLinks={libLinks.byDefinition}
+              onReviewLibraryUpdates={openLibraryReview}
             />
           </TraySection>
           <TraySection title={trayTitle.tags} collapsed={!showTags} onToggle={() => setShowTags((v) => !v)}>
@@ -7857,6 +10141,17 @@ export default function App() {
           unreadable on the light theme's light bar (the dark/light divergence
           the user flagged). Extra bottom padding avoids descender clipping
           under macOS Tahoe's rounded window corners. */}
+      {cutScope !== null && (
+        <CutScopeStrip
+          copies={cutScope.copies}
+          onCancel={() => setCutScope(null)}
+          onChoose={(scope) => {
+            const pending = cutScope
+            setCutScope(null)
+            runBooleanScoped(pending.op, pending.nodes, scope)
+          }}
+        />
+      )}
       <div
         style={{
           height: 30,
@@ -7934,6 +10229,22 @@ export default function App() {
             </span>
           </>
         )}
+        {/* Undo-memory note (historyTrim.ts): the oldest undo steps of a dense
+            model were let go. Pushed right, ahead of the health badge. */}
+        {historyTrimKept !== null && (
+          <span
+            data-testid="history-trim-note"
+            title={HISTORY_TRIM_TOOLTIP}
+            style={{
+              marginLeft: 'auto',
+              color: 'var(--text-secondary)',
+              fontSize: 'var(--font-size-dock-chip, 11px)',
+              whiteSpace: 'nowrap',
+            }}
+          >
+            {historyTrimNote(historyTrimKept)}
+          </span>
+        )}
         {/* Model health badge — aggregate solids feedback; no other single-glance
             home (per-object status lives in the Outliner). Right-aligned and
             neutral: not being solid is normal for a SketchUp model. All solid:
@@ -7942,7 +10253,7 @@ export default function App() {
         {objectCount > 0 && (notSolidCount === 0 ? (
           <span
             style={{
-              marginLeft: 'auto',
+              marginLeft: historyTrimKept !== null ? 8 : 'auto',
               padding: '2px 8px',
               fontSize: 'var(--font-size-dock-chip, 11px)',
               borderRadius: 4,
@@ -7959,7 +10270,7 @@ export default function App() {
             onClick={() => openModelHealth()}
             title={i18n._(BADGE_TOOLTIP_LIST)}
             style={{
-              marginLeft: 'auto',
+              marginLeft: historyTrimKept !== null ? 8 : 'auto',
               padding: '2px 8px',
               fontSize: 'var(--font-size-dock-chip, 11px)',
               fontFamily: 'inherit',
@@ -7984,6 +10295,7 @@ export default function App() {
           importDocument; runOpenSkp settles it on every way out, so a
           thrown error or a refused blank load never leaves it stuck. */}
       {isImporting && <ImportingOverlay fileName={importingName} opening={reportOpened} progress={openProgress} />}
+      {busyNote !== null && <BusyOverlay message={busyNote} />}
 
       {/* STL units-chooser — shown before the overlay above, since STL
           carries no unit information (see promptStlUnits). */}
@@ -8085,6 +10397,25 @@ export default function App() {
         />
       )}
 
+      {/* Saving an edit window whose Library item is gone: nothing is written
+          unless the person asks for the item to come back. */}
+      {libraryItemGone !== null && (
+        <ConfirmDialog
+          heading={t`This Library item is gone`}
+          body={t`"${libraryItemGoneName}" was removed from the Library while you were editing it. Save it back to the Library as an item again, or cancel and nothing is saved.`}
+          confirmLabel={t`Save back to Library`}
+          cancelDefault
+          onConfirm={() => {
+            libraryItemGone.resolve(true)
+            setLibraryItemGone(null)
+          }}
+          onCancel={() => {
+            libraryItemGone.resolve(false)
+            setLibraryItemGone(null)
+          }}
+        />
+      )}
+
       {/* Material delete confirmation — only shown when the material is
           actually used somewhere (v1.1 assets lane); an unused one deletes
           immediately with no modal. */}
@@ -8157,6 +10488,7 @@ export default function App() {
       {saveFormatPrompt !== null && (
         <SaveFormatDialog
           initial={saveFormatPrompt.initial}
+          initialCompat={saveFormatPrompt.compat}
           onChoose={settleSaveFormat}
           onCancel={() => settleSaveFormat(null)}
         />
@@ -8180,7 +10512,9 @@ export default function App() {
       {exportDialogOpen && (
         <ExportDialog
           onExport={handleExportFormat}
+          initialCompat={skpCompatRef.current}
           onCancel={() => setExportDialogOpen(false)}
+          hasSmoothed={sceneRef.current?.has_smoothed_objects() === true}
         />
       )}
 
@@ -8276,6 +10610,14 @@ export default function App() {
         />
       )}
 
+      {sentReports !== null && (
+        <SentReportsDialog
+          initialId={sentReports.id}
+          onCheckForUpdates={updaterAvailable ? handleCheckForUpdates : undefined}
+          onClose={() => setSentReports(null)}
+        />
+      )}
+
       {/* Draw ▸ 3D Text… (docs/design/3d-text.md) — resolves text/font/
           height/depth; OK arms the placement tool via handleTextPlace. */}
       {textDialogOpen && (
@@ -8304,7 +10646,7 @@ export default function App() {
             const ids = solidWarning.ids
             exportTargetRef.current = null
             setSolidWarning(null)
-            openMakeSolid('selection', ids)
+            openMakeSolid('export', ids)
           }}
           onCancel={() => {
             exportTargetRef.current = null
@@ -8381,14 +10723,26 @@ export default function App() {
         onRun={(id) => menuActionRef.current(id)}
         extraEntries={paletteExtraEntries}
         gates={{
-          selection: selectedIds.length > 0 || selectedGuide !== null || selectedAnnotation !== null,
+          selection: selection.length > 0,
           canGroup: menuGates?.canGroup ?? false,
           canUngroup: menuGates?.canUngroup ?? false,
-          canMakeComponent: menuGates?.canMakeComponent ?? false,
+          canMakeComponent: (menuGates?.canMakeComponent ?? false) || (menuGates?.canPromote ?? false),
           canPlaceCopy: menuGates?.canPlaceCopy ?? false,
           canExplode: menuGates?.canExplode ?? false,
           canMakeUnique: menuGates?.canMakeUnique ?? false,
+          canUnlink: menuGates?.canUnlink ?? false,
+          canUnlinkAll: menuGates?.canUnlinkAll ?? false,
+          canLinkSimilar: canLinkSimilarNow,
+          canPromote: menuGates?.canPromote ?? false,
+          canFlip: menuGates?.canFlip ?? false,
+          // Listed as runnable while a component is open for editing, so
+          // running it says why it cannot (handleLock's toast).
+          canLock: (menuGates?.canLock ?? false) || (componentFrameOpen && selectionHasUnlocked),
+          canUnlock: menuGates?.canUnlock ?? false,
+          canUnlockAll: menuGates?.canUnlockAll ?? false,
+          canPasteLinked: (menuGates?.clipboardHasContent ?? false) && !copiesLinked,
           canBoolean: menuGates?.canBoolean ?? false,
+          canSoften: menuGates?.canSoften ?? false,
           canSaveSelectionToLibrary: menuGates?.canSaveSelectionToLibrary ?? false,
           canImport: !componentFrameOpen,
           canRevertToSaved: revertable,
@@ -8416,12 +10770,22 @@ export default function App() {
           }}
         >
           <div
+            ref={settingsDialogRef}
+            role="dialog"
+            aria-modal="true"
+            aria-label={t`Settings`}
             onClick={(e) => e.stopPropagation()}
             style={{
               position: 'relative',
-              width: '520px',
-              height: '380px',
-              maxHeight: '80vh',
+              // Wide enough for the whole tab strip; the corner grip
+              // resizes it (`resize` needs the clipped overflow below).
+              width: '760px',
+              height: '520px',
+              minWidth: '360px',
+              minHeight: '300px',
+              maxWidth: '94vw',
+              maxHeight: '90vh',
+              resize: 'both',
               overflow: 'hidden',
               background: 'var(--surface-window, #1a1a1a)',
               color: 'var(--text-secondary, #ddd)',
@@ -8468,24 +10832,77 @@ export default function App() {
           onLibraryAddToPalette / handleSaveToLibraryCommit callbacks above). */}
       <LibraryDialog
         open={showLibrary}
+        // Library sources: built the first time the Library opens, never before.
+        {...(showLibrary ? { sources: defaultSourcesBinding() } : {})}
         onClose={() => setShowLibrary(false)}
         placements={libraryPlacements}
+        linkStates={libraryItemStates}
+        onReviewUpdates={openLibraryReview}
         onInsert={onLibraryInsert}
         onOpenAsDocument={onLibraryOpenAsDocument}
+        onEdit={onLibraryEdit}
         onPaintWith={onLibraryPaintWith}
         onAddToPalette={onLibraryAddToPalette}
         materialInPalette={libraryMaterialInPalette}
+        onUseProfile={onLibraryUseProfile}
+        onSaveProfileCopy={onLibrarySaveProfileCopy}
       />
 
       {/* Save to Library name prompt (frame 1d) — the ContextualDock's
           save-to-library verb (dock-anchored) and File ▸ Save to Library…
           (centered, whole document) share this one popover. */}
+      {promoteTarget !== null && (
+        <SaveToLibraryPopover
+          defaultName={promoteTarget.defaultName}
+          variant="dock"
+          anchorVerb="edit-make-component"
+          title={t`Make component`}
+          inputLabel={t`Component name`}
+          buttonLabel={t`Make component`}
+          hint={null}
+          onSave={(name) => {
+            const target = promoteTarget
+            setPromoteTarget(null)
+            runLinkedOp((s) => promoteToComponent(s, target.instance, name))
+          }}
+          onClose={() => setPromoteTarget(null)}
+        />
+      )}
+
       {saveToLibraryTarget !== null && (
         <SaveToLibraryPopover
           defaultName={saveToLibraryTarget.defaultName}
-          variant={saveToLibraryTarget.kind === 'document' ? 'modal' : 'dock'}
+          variant={saveToLibraryTarget.kind === 'selection' ? 'dock' : 'modal'}
+          anchorVerb="save-to-library"
+          title={saveToLibraryTarget.kind === 'profile' ? t`Save profile` : undefined}
+          rows={saveToLibraryTarget.kind === 'profile' ? saveToLibraryTarget.rows : undefined}
+          hideOriginHint={saveToLibraryTarget.kind === 'profile'}
+          replace={saveToLibraryTarget.kind === 'profile' ? saveToLibraryTarget.replace : undefined}
+          updateInLibrary={
+            libraryUpdateOffer === null || libraryUpdateOffer.linkedCopy
+              ? undefined
+              : { name: libraryUpdateOffer.itemName, confirm: libraryUpdateOffer.confirm, cannotCompare: libraryUpdateOffer.confirmKind === 'different' }
+          }
+          updateInLibraryBlocked={libraryUpdateOffer?.linkedCopy === true ? { name: libraryUpdateOffer.itemName, linkedSet: libraryUpdateOffer.linkedSet } : undefined}
+          onUpdateInLibrary={libraryUpdateOffer === null || libraryUpdateOffer.linkedCopy ? undefined : () => handleUpdateInLibrary(libraryUpdateOffer)}
           onSave={handleSaveToLibraryCommit}
           onClose={() => setSaveToLibraryTarget(null)}
+        />
+      )}
+
+      {libraryReviewOpen && (
+        <LibraryUpdateReview
+          links={libLinks.links}
+          itemName={(item) => libLinks.itemRef(item)?.name}
+          outcome={libraryOutcome?.outcome ?? null}
+          outcomeLinks={libraryOutcome?.links ?? []}
+          busy={libraryUpdateBusy}
+          onUpdateSelected={(definitions) => void handleLibraryUpdate({ definitions })}
+          onUpdateAllNewer={() => void handleLibraryUpdate({ all: true })}
+          onClose={() => {
+            setLibraryReviewOpen(false)
+            setLibraryOutcome(null)
+          }}
         />
       )}
     </main>

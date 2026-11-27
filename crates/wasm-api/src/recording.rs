@@ -37,6 +37,10 @@ use serde::{Deserialize, Serialize};
 /// exact version equality.
 pub const RECORDING_FORMAT_VERSION: u32 = 2;
 
+fn default_true() -> bool {
+    true
+}
+
 /// One committed `Scene` mutation, captured with the exact arguments needed to
 /// re-issue it. `#[serde(tag = "method")]` gives a self-describing JSON object
 /// per call (`{"method":"extrude_region","sketch":…,"region":…,"distance":…}`).
@@ -133,6 +137,15 @@ pub enum RecordedCall {
         /// so old recordings replay unchanged.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         stop_len: Option<f64>,
+        /// Follow Me twist (radians), end scale and stations per segment
+        /// (true-curves.md §5.2), absent for a plain sweep so existing
+        /// records stay byte-identical.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        twist: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        end_scale: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stations: Option<u32>,
     },
     /// `follow_me_around_face(sketch, region, path_object, path_face)` —
     /// sweep a profile region around a solid face's outer boundary loop.
@@ -150,6 +163,15 @@ pub enum RecordedCall {
         /// Group-context birth (design §2f), absent for top-level.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         group: Option<u64>,
+        /// Follow Me twist (radians), end scale and stations per segment
+        /// (true-curves.md §5.2), absent for a plain sweep so existing
+        /// records stay byte-identical.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        twist: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        end_scale: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stations: Option<u32>,
     },
     /// `follow_me_around_instance_face(...)` — a face loop reached through
     /// a component instance (design §2e). Additive variant.
@@ -161,6 +183,15 @@ pub enum RecordedCall {
         path_face: u64,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         stop_len: Option<f64>,
+        /// Follow Me twist (radians), end scale and stations per segment
+        /// (true-curves.md §5.2), absent for a plain sweep so existing
+        /// records stay byte-identical.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        twist: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        end_scale: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stations: Option<u32>,
     },
     /// `follow_me_merged_around_face(...)` — the merged molding gesture
     /// (design §3b). Additive variant, same posture as
@@ -172,6 +203,15 @@ pub enum RecordedCall {
         path_face: u64,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         stop_len: Option<f64>,
+        /// Follow Me twist (radians), end scale and stations per segment
+        /// (true-curves.md §5.2), absent for a plain sweep so existing
+        /// records stay byte-identical.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        twist: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        end_scale: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stations: Option<u32>,
     },
     /// `follow_me_face_along_edges(...)` — a solid face as the profile
     /// (design §3a). Additive variant.
@@ -182,6 +222,15 @@ pub enum RecordedCall {
         path_edges: Vec<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         stop_len: Option<f64>,
+        /// Follow Me twist (radians), end scale and stations per segment
+        /// (true-curves.md §5.2), absent for a plain sweep so existing
+        /// records stay byte-identical.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        twist: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        end_scale: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stations: Option<u32>,
     },
     /// `follow_me_face_around_face(...)` — a solid face as the profile,
     /// swept around a face loop. Additive variant.
@@ -192,6 +241,15 @@ pub enum RecordedCall {
         path_face: u64,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         stop_len: Option<f64>,
+        /// Follow Me twist (radians), end scale and stations per segment
+        /// (true-curves.md §5.2), absent for a plain sweep so existing
+        /// records stay byte-identical.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        twist: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        end_scale: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stations: Option<u32>,
     },
     /// `sketch_offset_region(sketch, region, distance)` — the Offset tool's
     /// sketch commit: the region's whole boundary offset by a uniform
@@ -218,6 +276,14 @@ pub enum RecordedCall {
         a: u64,
         b_kind: u8,
         b: u64,
+    },
+    /// `boolean_nodes_many(op, kinds, ids)` — the same combine over any
+    /// number of nodes as one undo step. Additive variant: a recording that
+    /// uses it fails to parse on older builds, loudly.
+    BooleanNodesMany {
+        op: u8,
+        kinds: Vec<u8>,
+        ids: Vec<u64>,
     },
     /// `group_nodes(kinds, ids)` — form a merge group. Additive variant;
     /// closes a pre-existing structural-op recording gap alongside
@@ -262,7 +328,56 @@ pub enum RecordedCall {
         ids: Vec<u64>,
         affine: [f64; 12],
         count: u32,
+        /// Linked copies ([`kernel::LinkPolicy::Linked`]). Missing in a
+        /// recording made before linked copies, which replays as
+        /// independent; written only when true, so an independent copy
+        /// records exactly as it always did.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        linked: bool,
     },
+    /// `duplicate_selection_placements(kinds, ids, affines, linked)` — the
+    /// Move tool's grid array: every listed node cloned once per placement
+    /// (`affines` is the 12-float rows concatenated), one undo step.
+    /// Additive variant (same posture as [`RecordedCall::DuplicateSelectionArray`]);
+    /// one that carries it fails to parse on older builds, loudly.
+    DuplicateSelectionPlacements {
+        kinds: Vec<u8>,
+        ids: Vec<u64>,
+        affines: Vec<f64>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        linked: bool,
+    },
+    /// `flip_selection(kinds, ids, sketch_ids, normal, about_kind, about, copy)`
+    /// — Flip: the selection mirrored across a plane (`normal` is the
+    /// plane's normal; `about_kind` 0 center, 1 origin, 2 the point
+    /// `about`), in place (`copy` 0) or as a linked (1) or independent (2)
+    /// mirrored copy, one undo step. Additive variant (same posture as the
+    /// others).
+    FlipSelection {
+        kinds: Vec<u8>,
+        ids: Vec<u64>,
+        sketch_ids: Vec<u64>,
+        normal: [f64; 3],
+        about_kind: u8,
+        about: [f64; 3],
+        copy: u8,
+    },
+    /// `wrap_linked(kind, id)` — one Object or Group wrapped as a linked
+    /// set. Additive variant (same posture as the others).
+    WrapLinked { kind: u8, id: u64 },
+    /// `join_linked(set_instance, joiner, affine)` — "Link identical
+    /// copies": the loose Object `joiner` replaced by a new placement of
+    /// `set_instance`'s linked set at `affine`, one undo step;
+    /// `join_linked_report` records as this too. Additive variant (same
+    /// posture as the others).
+    JoinLinked {
+        set_instance: u64,
+        joiner: u64,
+        affine: [f64; 12],
+    },
+    /// `set_linked(component, linked)` — "Make component" removing a linked
+    /// set's `hew` / `linked` (`linked = false`). Additive variant.
+    SetLinked { component: u64, linked: bool },
     /// `push_pull(object, face, distance)` — the user-level push/pull of a
     /// solid face. Replay re-issues it and the kernel re-derives the routing
     /// (translate, coplanar-aware, whole-wall radial offset, boss/recess, or
@@ -285,6 +400,19 @@ pub enum RecordedCall {
         face: u64,
         distance: f64,
     },
+    /// `extrude_face_as_new_object_in_instance(instance, object, face,
+    /// distance)` — the same modifier on a face picked through a placement
+    /// (a linked copy). Additive variant (the
+    /// [`RecordedCall::SketchBeginCurveWith`] posture).
+    ExtrudeFaceAsNewObjectInInstance {
+        instance: u64,
+        object: u64,
+        face: u64,
+        distance: f64,
+    },
+    /// `unlink_copies(instances)` — Unlink of linked copies. Additive
+    /// variant (the [`RecordedCall::SketchBeginCurveWith`] posture).
+    UnlinkCopies { instances: Vec<u64> },
     /// `scene_undo()` — recorded only when it succeeded (a refused undo
     /// commits nothing). Additive variant (the
     /// [`RecordedCall::SketchBeginCurveWith`] posture): old recordings
@@ -374,11 +502,42 @@ pub enum RecordedCall {
     ExplodeInstance { instance: u64 },
     /// `make_unique(instance)`.
     MakeUnique { instance: u64 },
+    /// `make_unique_by_path_json(path, cascade, deep)`. `MakeUnique` stays
+    /// for the one-instance entry point and keeps replaying old recordings.
+    MakeUniqueByPath {
+        path: Vec<u64>,
+        /// Absent in a hand-written recording: the default, `true`.
+        #[serde(default = "default_true")]
+        cascade: bool,
+        #[serde(default)]
+        deep: bool,
+    },
     /// `open_explode_session(instance)` (docs/design/explode-session-
     /// prototype.md, a `proto/explode-session` prototype).
     OpenExplodeSession { instance: u64 },
     /// `close_explode_session()`.
     CloseExplodeSession,
+    /// `set_pick_scope(objects, instances, frame_sketches)` — the editing
+    /// scope the picks favor. Session-only view state, neither undoable
+    /// nor saved, and recorded anyway (unlike the inference hide sets) so
+    /// a replayed session ends up with the same scope as the original (a
+    /// probe after replay then sees the same scoped picks). A recording
+    /// stores no pick results and replay issues no picks. Changes nothing
+    /// the state hash covers. Additive variant (the
+    /// [`RecordedCall::SketchBeginCurveWith`] posture).
+    SetPickScope {
+        objects: Vec<u64>,
+        instances: Vec<u64>,
+        /// Whether the open session frame's own drawing is in scope.
+        /// Additive field, always written by a current recorder: a
+        /// recording made before it has none and replays with that call's
+        /// original meaning (both lists empty cleared the scope; otherwise
+        /// the frame's drawing was in it). The format version is unchanged.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        frame_sketches: Option<bool>,
+    },
+    /// `clear_pick_scope()` — same posture as [`RecordedCall::SetPickScope`].
+    ClearPickScope,
     /// `open_group_session(group)` (docs/design/group-session.md).
     OpenGroupSession { group: u64 },
     /// `close_group_session()`.
@@ -429,6 +588,13 @@ pub enum RecordedCall {
         kinds: Vec<u8>,
         ids: Vec<u64>,
         path: Vec<String>,
+    },
+    /// `set_nodes_locked(kinds, ids, locked)` — one Lock or Unlock entry
+    /// over several nodes (OW-1). Additive variant.
+    SetNodesLocked {
+        kinds: Vec<u8>,
+        ids: Vec<u64>,
+        locked: bool,
     },
     /// `set_tag_hidden(path, hidden)` — not undoable, but persisted with
     /// the document (manifest v5), so it must replay for the saved bytes
@@ -503,6 +669,10 @@ pub enum RecordedCall {
     RenameScene { sid: u64, name: String },
     /// `set_scene_description(sid, text)`.
     SetSceneDescription { sid: u64, text: String },
+    /// `set_scene_transition(sid, seconds)`.
+    SetSceneTransition { sid: u64, seconds: Option<f64> },
+    /// `set_scene_delay(sid, seconds)`.
+    SetSceneDelay { sid: u64, seconds: Option<f64> },
     /// `move_scene(sid, index)`.
     MoveScene { sid: u64, index: u32 },
     /// `remove_scene(sid)`.
@@ -537,6 +707,13 @@ pub enum RecordedCall {
     },
     /// `set_material_alpha(material, alpha)`.
     SetMaterialAlpha { material: u64, alpha: u8 },
+    /// `set_material_pbr(material, metallic, roughness)`. Additive variant:
+    /// old recordings replay unchanged.
+    SetMaterialPbr {
+        material: u64,
+        metallic: f32,
+        roughness: f32,
+    },
     /// `set_material_name(material, name)` — palette material rename (v1.1
     /// assets lane). Additive variant (the [`RecordedCall::SketchBeginCurveWith`]
     /// posture): old recordings replay unchanged; one that renames a
@@ -555,6 +732,13 @@ pub enum RecordedCall {
     },
     /// `set_object_material(object, material)` — `u64::MAX` = clear.
     SetObjectMaterial { object: u64, material: u64 },
+    /// `set_instance_material(instance, material)` — `u64::MAX` = clear.
+    /// Additive variant: recordings that never paint a placement replay on
+    /// older builds unchanged.
+    SetInstanceMaterial { instance: u64, material: u64 },
+    /// `set_definition_material(component, material)` — `u64::MAX` =
+    /// clear. Additive, as [`RecordedCall::SetInstanceMaterial`].
+    SetDefinitionMaterial { component: u64, material: u64 },
     /// `replace_material(document_wide, scope_object, from, to)` — the
     /// Shift-click "replace everywhere" gesture (paint-tool design §2);
     /// `scope_object` is meaningless when `document_wide` is true. `u64::MAX`
@@ -589,6 +773,20 @@ pub enum RecordedCall {
     DeleteGuide { guide: u64 },
     /// `delete_all_guides()`.
     DeleteAllGuides,
+    /// `transform_guide(guide, affine)` — Move on a guide. Additive
+    /// variant (the [`RecordedCall::SketchBeginCurveWith`] posture): a
+    /// recording that never moves a guide replays on older builds
+    /// unchanged; one that does fails to parse there — loudly, never
+    /// silently divergent.
+    TransformGuide { guide: u64, affine: [f64; 12] },
+    /// `duplicate_guide_array(guide, affine, count)` — Move's copy and
+    /// ×N / /N array on a guide. Additive variant, as
+    /// [`RecordedCall::TransformGuide`].
+    DuplicateGuideArray {
+        guide: u64,
+        affine: [f64; 12],
+        count: u32,
+    },
     /// `add_linear_dimension(a_node_kind, a_node_id, a_point, b_node_kind,
     /// b_node_id, b_point, offset, plane, text_override)`. Additive variant
     /// (the [`RecordedCall::SketchBeginCurveWith`] posture): a recording
@@ -675,11 +873,11 @@ pub enum RecordedCall {
     /// `delete_annotation(id)`. Additive variant, same posture as
     /// [`RecordedCall::AddLinearDimension`].
     DeleteAnnotation { id: u64 },
-    /// `insert_item(bytes, affine, source_id, content_hash)` — a library
-    /// insert: embeds the item file, the placement pose, and the provenance
-    /// that drives idempotent definition reuse, so a session with an insert
-    /// replays self-contained AND reproduces the same reuse-vs-copy
-    /// decision. Additive variant (the
+    /// `insert_item(bytes, affine, source_id, content_hash, origin)` — a
+    /// library insert or a paste: embeds the item file, the placement pose,
+    /// and the provenance that drives idempotent definition reuse, so a
+    /// session with an insert replays self-contained AND reproduces the
+    /// same reuse-vs-copy decision. Additive variant (the
     /// [`RecordedCall::SketchBeginCurveWith`] posture): old recordings
     /// replay unchanged; one that inserts a library item fails to parse on
     /// older builds — loudly, never silently divergent.
@@ -688,6 +886,15 @@ pub enum RecordedCall {
         affine: [f64; 12],
         source_id: Option<String>,
         content_hash: Option<String>,
+        /// The composed clipboard origin of a same-document paste
+        /// (`Scene::clipboard_origin`), absent for a library placement.
+        /// Recorded as composed, so replay compares it with the stamps
+        /// inside `bytes` exactly as the live session did, whatever the
+        /// replaying scene's own epoch is. Same additive posture as
+        /// `stop_len` above: absent in older recordings, which replay
+        /// unchanged.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        origin: Option<String>,
     },
     /// `insert_item_palette(bytes)` — a material item's Add-to-palette:
     /// embeds the item file. Additive variant, same posture as
@@ -704,6 +911,16 @@ pub enum RecordedCall {
         source_id: String,
         content_hash: String,
         def_sid: Option<String>,
+    },
+    /// `update_definitions_from_items(request)` — Update from Library
+    /// (OW-2): the parts exactly as the live call resolved them, and each
+    /// item file they read embedded ONCE however many parts it updates
+    /// (the [`EMBED_CAP`] counts each file once), so replay reproduces the
+    /// same step whatever the Library holds then. Additive variant, same
+    /// posture as [`RecordedCall::InsertItem`].
+    UpdateDefinitionsFromItems {
+        parts: Vec<RecordedLibraryPart>,
+        items: Vec<RecordedLibraryItem>,
     },
     /// `import_dae(bytes, images)` — embeds the COLLADA file and its image
     /// map, so a session with an import replays self-contained.
@@ -803,6 +1020,10 @@ pub enum RecordedCall {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         rims: Option<Vec<u32>>,
     },
+    /// `mend(object, plan_json)` — Model Health's Mend (the mesh-repair
+    /// design). Additive variant: old recordings replay unchanged; one
+    /// that mends fails to parse on older builds — loudly.
+    Mend { object: u64, plan_json: String },
     /// `delete_faces(object, faces)` — Model Health's face removal (R2).
     DeleteFaces { object: u64, faces: Vec<u64> },
     /// `set_accepted_surface(object, accepted)` — Model Health's mark (R3).
@@ -817,6 +1038,10 @@ pub enum RecordedCall {
         object: u64,
         distance: f64,
     },
+    /// `rejoin_as_one_solid(ids)` — Model Health's "Rejoin as one solid":
+    /// one seam family capped, its walls deleted, and its pieces unioned,
+    /// one undo step. Additive variant (the same posture as the others).
+    RejoinAsOneSolid { ids: Vec<u64> },
     /// `delete_definition(component)` — deletes a component definition and
     /// every instance that places it (v1.1 assets lane). Additive variant
     /// (the [`RecordedCall::SketchBeginCurveWith`] posture): old recordings
@@ -848,6 +1073,15 @@ pub enum RecordedCall {
         path_edges: Vec<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         stop_len: Option<f64>,
+        /// Follow Me twist (radians), end scale and stations per segment
+        /// (true-curves.md §5.2), absent for a plain sweep so existing
+        /// records stay byte-identical.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        twist: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        end_scale: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stations: Option<u32>,
     },
     /// `follow_me_around_face_in_instance(instance, sketch, region,
     /// path_object, path_face, stop_len)`.
@@ -859,6 +1093,15 @@ pub enum RecordedCall {
         path_face: u64,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         stop_len: Option<f64>,
+        /// Follow Me twist (radians), end scale and stations per segment
+        /// (true-curves.md §5.2), absent for a plain sweep so existing
+        /// records stay byte-identical.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        twist: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        end_scale: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stations: Option<u32>,
     },
     /// `follow_me_merged_around_face_in_instance(instance, sketch, region,
     /// path_object, path_face, stop_len)`.
@@ -870,6 +1113,15 @@ pub enum RecordedCall {
         path_face: u64,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         stop_len: Option<f64>,
+        /// Follow Me twist (radians), end scale and stations per segment
+        /// (true-curves.md §5.2), absent for a plain sweep so existing
+        /// records stay byte-identical.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        twist: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        end_scale: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stations: Option<u32>,
     },
     /// `follow_me_face_along_edges_in_instance(instance, profile_object,
     /// profile_face, path_sketch, path_edges, stop_len)`.
@@ -881,6 +1133,15 @@ pub enum RecordedCall {
         path_edges: Vec<u64>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         stop_len: Option<f64>,
+        /// Follow Me twist (radians), end scale and stations per segment
+        /// (true-curves.md §5.2), absent for a plain sweep so existing
+        /// records stay byte-identical.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        twist: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        end_scale: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stations: Option<u32>,
     },
     /// `follow_me_face_around_face_in_instance(instance, profile_object,
     /// profile_face, path_object, path_face, stop_len)`.
@@ -892,6 +1153,15 @@ pub enum RecordedCall {
         path_face: u64,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         stop_len: Option<f64>,
+        /// Follow Me twist (radians), end scale and stations per segment
+        /// (true-curves.md §5.2), absent for a plain sweep so existing
+        /// records stay byte-identical.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        twist: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        end_scale: Option<f64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        stations: Option<u32>,
     },
     /// `boolean_in_component(component, op, a, b)`.
     BooleanInComponent {
@@ -899,6 +1169,21 @@ pub enum RecordedCall {
         op: u8,
         a: u64,
         b: u64,
+    },
+    /// `boolean_in_component_many(component, op, ids)`: the same over any
+    /// number of members of one definition. Additive variant.
+    BooleanInComponentMany {
+        component: u64,
+        op: u8,
+        ids: Vec<u64>,
+    },
+    /// `boolean_through_placement_json(path, host, tool, op)`.
+    BooleanThroughPlacement {
+        path: Vec<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        host: Option<u64>,
+        tool: u64,
+        op: u8,
     },
     /// `slice_def_member(instance, object, plane)`.
     SliceDefMember {
@@ -974,6 +1259,24 @@ pub enum RecordedCall {
     /// replaces going forward) replays on older builds unchanged; one that
     /// does fails to parse there — loudly, never silently divergent.
     DeleteSelection { kinds: Vec<u8>, ids: Vec<u64> },
+    /// `delete_mixed_selection(kinds, ids, guides, annotations)` — the
+    /// Delete-key/Cut batch delete of a selection that also holds
+    /// construction guides and annotations: every listed node, guide, and
+    /// annotation removed as ONE undo step. Additive variant, beside
+    /// [`RecordedCall::DeleteSelection`] rather than a change to its shape:
+    /// a recording that never deletes a guide or annotation with a
+    /// selection replays on older builds unchanged; one that does fails to
+    /// parse there — loudly, never silently divergent.
+    DeleteMixedSelection {
+        kinds: Vec<u8>,
+        ids: Vec<u64>,
+        guides: Vec<u64>,
+        annotations: Vec<u64>,
+    },
+    /// `cut_selection(kinds, ids)` — Cut's delete: `DeleteSelection`
+    /// without making a linked set's last copy plain. Additive variant
+    /// (the [`RecordedCall::SketchBeginCurveWith`] posture).
+    CutSelection { kinds: Vec<u8>, ids: Vec<u64> },
     /// `reparent_nodes(kinds, ids, group)` — the Outliner drag-and-drop
     /// "Add to Group"/"Move to top level" (v1.1-cycle.md grouping lane):
     /// every listed node moved as ONE undo step, `DeleteSelection`'s
@@ -1043,6 +1346,15 @@ pub enum RecordedCall {
         ctx: String,
         label: String,
     },
+    /// `draft_begin_detached(ctx_json, label)`: a draft that draws one new
+    /// detached shape (detached shapes §3.7). Additive (the posture above):
+    /// a recording that never draws a detached shape replays on older builds
+    /// unchanged; one that does fails to parse there, loudly.
+    DraftBeginDetached {
+        draft: u64,
+        ctx: String,
+        label: String,
+    },
     /// `draft_end(draft)`.
     DraftEnd { draft: u64 },
     /// `draft_cancel(draft)`.
@@ -1107,6 +1419,144 @@ pub enum RecordedCall {
         curve: u64,
         segments: u32,
     },
+    // ==== true-curves: blend ====
+    /// `draft_blend_corner(draft, at, profile)` — `profile` is the
+    /// `CornerProfile` JSON the call received.
+    DraftBlendCorner {
+        draft: u64,
+        at: [f64; 3],
+        profile: String,
+    },
+    /// `sketch_blend_corner(sketch, vertex, profile)` — `profile` is the
+    /// `CornerProfile` JSON the call received.
+    SketchBlendCorner {
+        sketch: u64,
+        vertex: u64,
+        profile: String,
+    },
+    /// `paint_logical_face(object, face, material)`.
+    PaintLogicalFace {
+        object: u64,
+        face: u64,
+        material: u64,
+    },
+    /// `blend_edges(object, spec)` — `spec` is the `BlendSpec` JSON the call
+    /// received.
+    BlendEdges { object: u64, spec: String },
+    /// `blend_edges_in_component(instance, object, spec)` — world sizes.
+    BlendEdgesInComponent {
+        instance: u64,
+        object: u64,
+        spec: String,
+    },
+    /// `resize_blend(object, blend, profile)` — `profile` is the
+    /// `BlendProfile` JSON the call received.
+    ResizeBlend {
+        object: u64,
+        blend: u32,
+        profile: String,
+    },
+    /// `resize_blend_in_component(instance, object, blend, profile)`.
+    ResizeBlendInComponent {
+        instance: u64,
+        object: u64,
+        blend: u32,
+        profile: String,
+    },
+    /// `remove_blend(object, blend)`.
+    RemoveBlend { object: u64, blend: u32 },
+    /// `remove_blend_in_component(instance, object, blend)`.
+    RemoveBlendInComponent {
+        instance: u64,
+        object: u64,
+        blend: u32,
+    },
+    // ==== end true-curves: blend ====
+    // ==== true-curves: shapes ====
+    /// `revolve(profile_json, spec_json)` — both JSON strings verbatim.
+    Revolve { profile: String, spec: String },
+    /// `revolve_in_instance(instance, object, face, spec_json)`.
+    RevolveInInstance {
+        instance: u64,
+        object: u64,
+        face: u64,
+        spec: String,
+    },
+    /// `deform(object, spec_json)` — the JSON verbatim.
+    Deform { object: u64, spec: String },
+    /// `loft(spec_json)` — the JSON verbatim.
+    Loft { spec: String },
+    /// `array_along_path(kinds, ids, path, count, scale_from, scale_to,
+    /// align)` — copy a selection along a path. `path` is the JSON string the
+    /// method received.
+    ArrayAlongPath {
+        kinds: Vec<u8>,
+        ids: Vec<u64>,
+        path: String,
+        count: u32,
+        scale_from: f64,
+        scale_to: f64,
+        align: bool,
+    },
+    // ==== end true-curves: shapes ====
+    // ==== true-curves: smooth ====
+    /// `set_smooth_level(object, level)`.
+    SetSmoothLevel { object: u64, level: u8 },
+    /// `set_crease(object, edges, crease)` — the edges as passed.
+    SetCrease {
+        object: u64,
+        edges: Vec<u64>,
+        crease: bool,
+    },
+    /// `bake(object)`.
+    Bake { object: u64 },
+    /// `shell(object, spec_json)` — the spec as the method received it.
+    Shell { object: u64, spec: String },
+    /// `project_imprint(object, sketch, regions)`.
+    ProjectImprint {
+        object: u64,
+        sketch: u64,
+        regions: Vec<u64>,
+    },
+    /// `project_depth(object, sketch, faces, depth, mode)`.
+    ProjectDepth {
+        object: u64,
+        sketch: u64,
+        faces: Vec<u64>,
+        depth: f64,
+        mode: u8,
+    },
+    // ==== end true-curves: smooth ====
+    // ==== true-curves: imports ====
+    /// `soften_by_angle(object, max_angle)` (radians).
+    SoftenByAngle { object: u64, max_angle: f64 },
+    // ==== end true-curves: imports ====
+    /// One forwarded plugin command's compound (docs/agents/PLUGINS.md
+    /// "Compounds"): the calls its handler made while the compound was
+    /// open, which landed as one undo entry. The forwarded frame itself is
+    /// never recorded (no plugin runs at replay time); its children are,
+    /// here and nowhere else, so an aborted compound records nothing.
+    ///
+    /// Replay opens a connection holding `grant` (identity `plugin:<id>`),
+    /// opens a kernel compound labeled `label` with that origin, replays
+    /// `calls` in order (a nested plugin command's compound is one of
+    /// them), and ends the compound: one entry, as live. Additive variant:
+    /// a recording without one replays on older builds unchanged.
+    PluginCompound {
+        /// The provider plugin's id.
+        plugin: String,
+        /// The compound's label: the command's declared label, or its name.
+        label: String,
+        /// The provider's grant, as JSON (`api::Grant`).
+        grant: serde_json::Value,
+        /// The calls recorded while the compound was open, in order.
+        calls: Vec<RecordedCall>,
+    },
+    /// `make_solid_from_sketches(sketches)`: Make Solid on drawn faces
+    /// (wireframe faces §6). Additive (the posture above): a recording that
+    /// never makes a solid from faces replays on older builds unchanged; one
+    /// that does fails to parse there, loudly.
+    MakeSolidFromSketches { sketches: Vec<u64> },
 }
 
 /// A [`kernel::UvFrame`]'s components, flattened for [`RecordedCall::SetFaceUvFrame`]
@@ -1154,6 +1604,9 @@ thread_local! {
     static ENABLED: Cell<bool> = const { Cell::new(false) };
     /// Calls captured so far.
     static CALLS: RefCell<Vec<RecordedCall>> = const { RefCell::new(Vec::new()) };
+    /// One buffer per open compound, innermost last ([`push_buffer`]):
+    /// while one exists, [`record`] appends to it instead of to `CALLS`.
+    static BUFFERS: RefCell<Vec<Vec<RecordedCall>>> = const { RefCell::new(Vec::new()) };
 }
 
 /// Begins capture, discarding any prior in-progress recording. The caller should
@@ -1171,6 +1624,23 @@ pub fn stop() {
 /// Whether capture is active.
 pub fn is_active() -> bool {
     ENABLED.with(|e| e.get())
+}
+
+/// One part of a recorded [`RecordedCall::UpdateDefinitionsFromItems`]:
+/// the definition's handle and its item's id.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RecordedLibraryPart {
+    pub definition: u64,
+    pub source_id: String,
+}
+
+/// One item file a recorded [`RecordedCall::UpdateDefinitionsFromItems`]
+/// read: its id, its content hash, and the file.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RecordedLibraryItem {
+    pub source_id: String,
+    pub content_hash: String,
+    pub bytes: Vec<u8>,
 }
 
 /// Largest source file an import call embeds in the recording; larger
@@ -1205,9 +1675,33 @@ pub fn record_import_sized(method: &str, total_len: usize, embed: impl FnOnce() 
 /// Appends one committed call — a no-op unless capture is active. Call this
 /// **after** the mutation succeeds, so failed/refused ops are never recorded.
 pub fn record(call: RecordedCall) {
-    if is_active() {
+    if !is_active() {
+        return;
+    }
+    let call = BUFFERS.with(|b| match b.borrow_mut().last_mut() {
+        Some(buffer) => {
+            buffer.push(call);
+            None
+        }
+        None => Some(call),
+    });
+    if let Some(call) = call {
         CALLS.with(|c| c.borrow_mut().push(call));
     }
+}
+
+/// Routes [`record`] into a fresh buffer until the matching [`pop_buffer`]:
+/// a compound's children are held until it ends (recorded as one
+/// [`RecordedCall::PluginCompound`]) or aborts (dropped). Nests; pushes
+/// whether or not capture is active, so push and pop always pair.
+pub fn push_buffer() {
+    BUFFERS.with(|b| b.borrow_mut().push(Vec::new()));
+}
+
+/// Takes the innermost buffer [`push_buffer`] opened; empty when none is
+/// open or capture was off.
+pub fn pop_buffer() -> Vec<RecordedCall> {
+    BUFFERS.with(|b| b.borrow_mut().pop().unwrap_or_default())
 }
 
 /// Takes the captured calls, clearing the buffer.
@@ -1235,15 +1729,25 @@ pub fn panic_snapshot_json() -> Option<String> {
         calls: &'a [RecordedCall],
         golden_hash: u64,
     }
+    // The calls a compound still holds follow the recorded ones (outermost
+    // first), so a panic mid-compound still reproduces.
+    let buffered: Vec<RecordedCall> = BUFFERS
+        .try_with(|b| {
+            b.try_borrow()
+                .map(|buffers| buffers.iter().flatten().cloned().collect())
+                .unwrap_or_default()
+        })
+        .unwrap_or_default();
     CALLS
         .try_with(|c| {
             let calls = c.try_borrow().ok()?;
-            if calls.is_empty() {
+            if calls.is_empty() && buffered.is_empty() {
                 return None;
             }
+            let all: Vec<RecordedCall> = calls.iter().cloned().chain(buffered).collect();
             serde_json::to_string(&RecordingView {
                 version: RECORDING_FORMAT_VERSION,
-                calls: &calls,
+                calls: &all,
                 golden_hash: 0,
             })
             .ok()
@@ -1261,10 +1765,35 @@ pub fn without_capture<R>(body: impl FnOnce() -> R) -> R {
     out
 }
 
+/// The optional Follow Me record fields for `opts`: all absent for a plain
+/// sweep (so its record is byte-identical to one made before the fields
+/// existed).
+pub(crate) fn sweep_fields(opts: &kernel::SweepOptions) -> (Option<f64>, Option<f64>, Option<u32>) {
+    if opts.is_default() {
+        (None, None, None)
+    } else {
+        (Some(opts.twist), Some(opts.end_scale), opts.stations)
+    }
+}
+
+/// The options a Follow Me record carries (defaults where absent).
+pub(crate) fn sweep_from(
+    twist: Option<f64>,
+    end_scale: Option<f64>,
+    stations: Option<u32>,
+) -> kernel::SweepOptions {
+    kernel::SweepOptions {
+        twist: twist.unwrap_or(0.0),
+        end_scale: end_scale.unwrap_or(1.0),
+        stations,
+    }
+}
+
 #[cfg(test)]
 pub fn reset() {
     ENABLED.with(|e| e.set(false));
     CALLS.with(|c| c.borrow_mut().clear());
+    BUFFERS.with(|b| b.borrow_mut().clear());
 }
 
 #[cfg(test)]
@@ -1325,6 +1854,47 @@ mod tests {
             let _held = c.borrow_mut();
             assert_eq!(panic_snapshot_json(), None);
         });
+    }
+
+    #[test]
+    fn buffers_hold_calls_until_popped_and_nest() {
+        reset();
+        start();
+        record(RecordedCall::BeginGroundSketch);
+        push_buffer();
+        record(RecordedCall::HistoryBracketOpen);
+        push_buffer();
+        record(RecordedCall::HistoryBracketAbort);
+        let rec: Recording =
+            serde_json::from_str(&panic_snapshot_json().expect("snapshot")).expect("parses");
+        assert_eq!(
+            rec.calls,
+            vec![
+                RecordedCall::BeginGroundSketch,
+                RecordedCall::HistoryBracketOpen,
+                RecordedCall::HistoryBracketAbort
+            ],
+            "a panic mid-compound still carries the buffered calls"
+        );
+        assert_eq!(pop_buffer(), vec![RecordedCall::HistoryBracketAbort]);
+        assert_eq!(pop_buffer(), vec![RecordedCall::HistoryBracketOpen]);
+        assert_eq!(pop_buffer(), Vec::new(), "nothing open pops empty");
+        assert_eq!(take_calls(), vec![RecordedCall::BeginGroundSketch]);
+    }
+
+    #[test]
+    fn plugin_compound_round_trips_through_json() {
+        let call = RecordedCall::PluginCompound {
+            plugin: "com.example.parts".into(),
+            label: "Cut list".into(),
+            grant: serde_json::json!({"plugin": "com.example.parts"}),
+            calls: vec![RecordedCall::ApiDispatch { frame: "{}".into() }],
+        };
+        let json = serde_json::to_value(&call).unwrap();
+        assert_eq!(json["method"], "plugin_compound");
+        assert_eq!(json["calls"][0]["method"], "api_dispatch");
+        let back: RecordedCall = serde_json::from_value(json).unwrap();
+        assert_eq!(back, call);
     }
 
     #[test]

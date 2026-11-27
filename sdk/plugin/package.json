@@ -1,0 +1,18 @@
+{
+  "name": "@hew3d/plugin",
+  "version": "0.1.0",
+  "description": "The runtime and types a Hew plugin is written against.",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "files": ["index.js", "index.d.ts", "src/protocol.ts"],
+  "scripts": {
+    "build": "node build.mjs",
+    "check": "node build.mjs --check"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2"
+  }
+}

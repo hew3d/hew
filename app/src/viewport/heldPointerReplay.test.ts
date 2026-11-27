@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { leftCanvasBounds, replaysWithoutSnap, shouldReplayHeldPointer, type HeldPointerState } from './heldPointerReplay'
+import { followsViewPlane, leftCanvasBounds, replaysWithoutSnap, shouldReplayHeldPointer, type HeldPointerState } from './heldPointerReplay'
 
 describe('shouldReplayHeldPointer', () => {
   const canvas = { id: 'canvas' } as unknown as Element
@@ -48,5 +48,15 @@ describe('leftCanvasBounds', () => {
   })
   it('a leave at a point inside the canvas is an overlay coming up over a resting pointer', () => {
     expect(leftCanvasBounds(500, 300, rect)).toBe(false)
+  })
+})
+
+describe('followsViewPlane', () => {
+  it('only a tool that opts in gets the idle-key, Shift and camera-settle hover replay', () => {
+    expect(followsViewPlane({ followsViewPlane: true })).toBe(true)
+    expect(followsViewPlane({ followsViewPlane: false })).toBe(false)
+    expect(followsViewPlane({})).toBe(false)
+    // Only a literal true opts in, not any truthy value.
+    expect(followsViewPlane({ followsViewPlane: 'yes' })).toBe(false)
   })
 })

@@ -33,6 +33,7 @@ import { t } from '@lingui/core/macro'
 import type { FileRef } from './fileHost'
 import { formatRelativeTime } from './relativeTime'
 import { stripKnownExtension } from './docFormat'
+import { isBetaBuild } from '../buildInfo'
 
 /** Snapshot of document session state. */
 export interface DocSessionState {
@@ -125,13 +126,22 @@ export function documentBaseName(state: DocSessionState): string {
   return stripKnownExtension(documentName(state))
 }
 
+/** How a window editing a Library item names it (one message, translated once). */
+export function libraryItemTitle(libraryItemName: string): string {
+  return t`${libraryItemName} (Library item)`
+}
+
 /**
  * Derive the window/document title for the current session state.
  *
- * Format: `[• ]<filename | importedName | 'Untitled'> — Hew`
+ * Format: `[• ]<filename | importedName | 'Untitled'> — Hew`, with the app
+ * name "Hew Beta" in the beta web build. A window editing a Library item
+ * names the item instead: `<item> (Library item) — Hew`.
  */
-export function deriveTitle(state: DocSessionState): string {
-  const name = documentName(state)
+export function deriveTitle(state: DocSessionState, libraryItemName?: string): string {
+  // A window editing a Library item says so: Save there changes the Library.
+  const name = libraryItemName !== undefined ? libraryItemTitle(libraryItemName) : documentName(state)
+  if (isBetaBuild()) return state.dirty ? t`• ${name} — Hew Beta` : t`${name} — Hew Beta`
   return state.dirty ? t`• ${name} — Hew` : t`${name} — Hew`
 }
 

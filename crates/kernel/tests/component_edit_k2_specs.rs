@@ -132,7 +132,11 @@ fn component_subface_push_through_cuts_every_instance_and_replays() {
     let mut doc = Document::new();
     let (component, instance, member) = boxed_component(&mut doc);
     let sibling = doc
-        .duplicate_node(NodeId::Instance(instance), &Transform::IDENTITY)
+        .duplicate_node(
+            NodeId::Instance(instance),
+            &Transform::IDENTITY,
+            kernel::LinkPolicy::Independent,
+        )
         .expect("duplicate instance")
         .0;
     let sibling = match sibling {
@@ -154,6 +158,7 @@ fn component_subface_push_through_cuts_every_instance_and_replays() {
                 ],
                 restore: None,
                 curves: Vec::new(),
+                edge_attrs: Vec::new(),
             },
         )
         .expect("imprint member")
@@ -220,7 +225,11 @@ fn definition_sketch_transform_stays_owned_and_updates_every_instance() {
     let mut doc = Document::new();
     let (component, instance, _) = boxed_component(&mut doc);
     let sibling = match doc
-        .duplicate_node(NodeId::Instance(instance), &Transform::IDENTITY)
+        .duplicate_node(
+            NodeId::Instance(instance),
+            &Transform::IDENTITY,
+            kernel::LinkPolicy::Independent,
+        )
         .expect("duplicate instance")
         .0
     {
@@ -1332,6 +1341,149 @@ fn follow_me_face_in_instance_merges_when_the_path_is_its_own_face_loop() {
     assert!(doc.object(merged).is_some());
 }
 
+/// Runs `edit`, which must refuse with `LockedNode` naming `member`, and
+/// checks the document is untouched (OW-1).
+#[track_caller]
+fn refused_by_member_lock<T: std::fmt::Debug>(
+    doc: &mut Document,
+    member: ObjectId,
+    edit: impl FnOnce(&mut Document) -> Result<T, DocumentError>,
+) {
+    let hash = doc.state_hash();
+    let depth = doc.undo_depth();
+    let geometry = doc.object(member).expect("live member").clone();
+    match edit(doc) {
+        Err(DocumentError::LockedNode {
+            node,
+            via_shared_shape: false,
+        }) => assert_eq!(node, NodeId::Object(member), "the refusal names the member"),
+        other => panic!("expected LockedNode naming the member, got {other:?}"),
+    }
+    assert_eq!(doc.state_hash(), hash, "a refused sweep changes nothing");
+    assert_eq!(doc.undo_depth(), depth, "a refused sweep records nothing");
+    assert!(
+        objects_equivalent(doc.object(member).expect("still live"), &geometry),
+        "the locked member is unchanged"
+    );
+}
+
+/// A merging Follow Me inside a definition consumes the path's base
+/// member, so a base that carries its own lock refuses the merge, though
+/// its shape and placement are free (OW-1; the world
+/// `follow_me_merged`'s posture).
+#[test]
+fn follow_me_merged_in_instance_refuses_a_locked_base_member() {
+    let mut doc = Document::new();
+    let (comp, inst, member) = boxed_component(&mut doc);
+    let top = face_matching(&doc, member, Vec3::new(0.0, 0.0, 1.0));
+    let (psid, _) = doc
+        .begin_sketch_on_plane_in_instance(inst, profile_plane_x(2.0))
+        .expect("begin profile sketch");
+    draw_profile_rect(&mut doc, psid, 2.0, -0.2, 0.8, 0.2, 1.2);
+    let pregion = only_region(&doc, psid);
+    let path = kernel::FollowMePath::FaceLoop {
+        object: member,
+        face: top,
+    };
+    doc.set_nodes_locked(&[NodeId::Object(member)], true)
+        .expect("lock the member");
+    assert!(doc.def_frozen(comp).is_none(), "the shape is not locked");
+    refused_by_member_lock(&mut doc, member, |d| {
+        d.follow_me_merged_in_instance(inst, psid, pregion, &path, None)
+    });
+}
+
+/// A face Follow Me inside a definition whose path is the profile member's
+/// own face loop merges with, and so consumes, that member: a member that
+/// carries its own lock refuses it (OW-1; the world `follow_me_face`'s
+/// posture).
+#[test]
+fn follow_me_face_in_instance_refuses_a_self_merge_on_a_locked_member() {
+    let mut doc = Document::new();
+    let (comp, inst, _placeholder) = boxed_component(&mut doc);
+    let base = extrude_box_in_instance(&mut doc, inst, 0.0, 0.0, 4.0, 2.0, 1.0);
+    let boss = extrude_box_in_instance(&mut doc, inst, 1.5, 0.5, 1.9, 0.9, 1.3);
+    let (member, _) = doc
+        .boolean_in_component(comp, base, boss, BooleanOp::Union)
+        .expect("union the boss onto the base");
+    let cap = face_matching_by_extent(&doc, member, Vec3::new(0.0, 0.0, 1.0), true);
+    let top = face_matching_by_extent(&doc, member, Vec3::new(0.0, 0.0, 1.0), false);
+    let path = kernel::FollowMePath::FaceLoop {
+        object: member,
+        face: top,
+    };
+    doc.set_nodes_locked(&[NodeId::Object(member)], true)
+        .expect("lock the member");
+    assert!(doc.def_frozen(comp).is_none(), "the shape is not locked");
+    refused_by_member_lock(&mut doc, member, |d| {
+        d.follow_me_face_in_instance(inst, member, cap, &path, None)
+    });
+}
+
+/// A definition sketch drawn on a member's top face and owned by that
+/// member, the member then locked: the drawing is frozen with it (OW-1).
+/// Returns `(instance, member, sketch, region)`.
+fn locked_member_owning_a_sketch(
+    doc: &mut Document,
+) -> (InstanceId, ObjectId, SketchId, kernel::SketchRegionId) {
+    let (comp, inst, member) = boxed_component(doc);
+    let top = Plane::from_point_normal(Point3::new(0.0, 0.0, 1.0), Vec3::new(0.0, 0.0, 1.0))
+        .expect("top plane is well-defined");
+    let (sid, _) = doc
+        .begin_sketch_on_plane_in_instance(inst, top)
+        .expect("begin sketch on the member's top face");
+    let region = draw_rect(
+        doc,
+        sid,
+        [
+            Point3::new(1.0, 0.5, 1.0),
+            Point3::new(2.0, 0.5, 1.0),
+            Point3::new(2.0, 1.5, 1.0),
+            Point3::new(1.0, 1.5, 1.0),
+        ],
+    );
+    doc.set_sketch_object_owner(sid, Some(member))
+        .expect("the member owns the drawing on its face");
+    doc.set_nodes_locked(&[NodeId::Object(member)], true)
+        .expect("lock the member");
+    assert!(doc.def_frozen(comp).is_none(), "the shape is not locked");
+    (inst, member, sid, region)
+}
+
+/// Extruding a region inside a definition consumes the region's edges, so
+/// a sketch frozen with its locked owner member refuses it, as the world
+/// `extrude_region` does (found by review: the commit audit caught the
+/// scaffolding leaving the frozen sketch).
+#[test]
+fn extrude_region_in_instance_refuses_a_sketch_frozen_by_its_owner_member() {
+    let mut doc = Document::new();
+    let (inst, member, sid, region) = locked_member_owning_a_sketch(&mut doc);
+    let edges = doc.sketch(sid).expect("live").edges().len();
+    refused_by_member_lock(&mut doc, member, |d| {
+        d.extrude_region_in_instance(inst, sid, region, 0.5)
+    });
+    assert_eq!(doc.sketch(sid).expect("live").edges().len(), edges);
+    doc.set_nodes_locked(&[NodeId::Object(member)], false)
+        .expect("unlock");
+    doc.extrude_region_in_instance(inst, sid, region, 0.5)
+        .expect("unlocked, the region extrudes");
+}
+
+/// The same for a Follow Me inside a definition: the profile's edges
+/// leave the frozen sketch, so it refuses before any sweep is tried.
+#[test]
+fn follow_me_in_instance_refuses_a_sketch_frozen_by_its_owner_member() {
+    let mut doc = Document::new();
+    let (inst, member, sid, region) = locked_member_owning_a_sketch(&mut doc);
+    let path = kernel::FollowMePath::FaceLoop {
+        object: member,
+        face: face_matching(&doc, member, Vec3::new(0.0, 0.0, 1.0)),
+    };
+    refused_by_member_lock(&mut doc, member, |d| {
+        d.follow_me_in_instance(inst, sid, region, &path, None)
+    });
+}
+
 /// The profile object must be a live member of the calling instance's OWN
 /// definition — a world object or a foreign definition's member refuses.
 #[test]
@@ -1617,7 +1769,7 @@ fn slice_def_member_round_trips_through_a_rotated_scaled_pose() {
     };
     let local_plane =
         Plane::from_point_normal(Point3::new(2.0, 1.0, 0.5), Vec3::new(1.0, 0.0, 0.0)).unwrap();
-    let world_plane = pose.apply_plane(&local_plane).unwrap();
+    let world_plane = pose.apply_plane_keeping_side(&local_plane).unwrap();
     let ((world_pos, world_neg), _) = doc
         .slice_node(world_box, &local_plane)
         .expect("world slice");
@@ -1665,7 +1817,7 @@ fn slice_def_member_round_trips_through_a_mirrored_pose() {
     };
     let local_plane =
         Plane::from_point_normal(Point3::new(2.0, 1.0, 0.5), Vec3::new(1.0, 0.0, 0.0)).unwrap();
-    let world_plane = pose.apply_plane(&local_plane).unwrap();
+    let world_plane = pose.apply_plane_keeping_side(&local_plane).unwrap();
     let ((world_pos, world_neg), _) = doc
         .slice_node(world_box, &local_plane)
         .expect("world slice");
@@ -1736,7 +1888,7 @@ fn slice_def_member_round_trips_through_a_non_uniform_pose() {
     };
     let local_plane =
         Plane::from_point_normal(Point3::new(2.0, 1.0, 0.5), Vec3::new(1.0, 0.0, 0.0)).unwrap();
-    let world_plane = pose.apply_plane(&local_plane).unwrap();
+    let world_plane = pose.apply_plane_keeping_side(&local_plane).unwrap();
     let ((world_pos, world_neg), _) = doc
         .slice_node(world_box, &local_plane)
         .expect("world slice");
@@ -1996,11 +2148,12 @@ fn transform_def_member_bakes_correctly_through_a_mirrored_pose() {
     }
 }
 
-/// A REFLECTING world gesture refuses regardless of the instance's own
-/// pose — mirrored or not — exactly like `transform_object` refuses a
-/// reflecting `t` in world space.
+/// A REFLECTING world gesture bakes regardless of the instance's own
+/// pose — mirrored or not — exactly like `transform_object` bakes a
+/// reflecting `t` in world space: the member stays valid, watertight, and
+/// outward-facing in the definition frame.
 #[test]
-fn transform_def_member_refuses_a_reflecting_gesture_regardless_of_pose() {
+fn transform_def_member_bakes_a_reflecting_gesture_regardless_of_pose() {
     let reflect = Transform::scale(Vec3::new(1.0, 1.0, -1.0));
     assert!(reflect.determinant() < 0.0);
 
@@ -2014,14 +2167,12 @@ fn transform_def_member_refuses_a_reflecting_gesture_regardless_of_pose() {
         let mut doc = Document::new();
         let (_comp, inst, member) = boxed_component(&mut doc);
         doc.transform_instance(inst, &pose).unwrap();
-        assert_eq!(
-            doc.transform_def_member(inst, member, &reflect),
-            Err(DocumentError::Transform(kernel::TransformError::Reflection))
-        );
-        assert!(
-            doc.object(member).is_some(),
-            "a refused bake touches nothing"
-        );
+        doc.transform_def_member(inst, member, &reflect)
+            .expect("a reflecting gesture is baked");
+        let o = doc.object(member).expect("member still live");
+        assert!(o.validate().is_ok());
+        assert_eq!(o.watertight(), kernel::WatertightState::Watertight);
+        assert!(o.signed_volume() > 0.0, "definition member stays outward");
     }
 }
 

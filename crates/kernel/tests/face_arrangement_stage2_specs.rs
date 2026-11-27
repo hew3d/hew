@@ -31,7 +31,7 @@ use kernel::{
 };
 use proptest::prelude::*;
 
-mod face_arrangement_support;
+use crate::face_arrangement_support;
 use face_arrangement_support::*;
 
 // --------------------------------------------------------------- helpers
@@ -320,7 +320,7 @@ proptest! {
         let split_state = w.obj().clone();
         let bytes1 = w.doc.save();
         let edge = r.new_edges[pick % r.new_edges.len()];
-        w.doc.apply_object_op(w.id, KernelOp::MergeFaces { edge }).expect("merge");
+        w.doc.apply_object_op(w.id, KernelOp::MergeFaces { edge, keep_vertices: Vec::new() }).expect("merge");
         prop_assert!(objects_equivalent(w.obj(), &original));
         let bytes2 = w.doc.save();
         for _ in 0..2 {
@@ -400,7 +400,10 @@ fn a_run_covering_a_whole_imprint_refuses_covers_boundary() {
     let e = edge_at(w.obj(), mm(&w, 10.0, 10.0), mm(&w, 20.0, 10.0));
     assert_op_refused(
         &mut w,
-        KernelOp::MergeFaces { edge: e },
+        KernelOp::MergeFaces {
+            edge: e,
+            keep_vertices: Vec::new(),
+        },
         StickyError::SharedChainCoversBoundary,
     );
 }
@@ -429,7 +432,13 @@ fn a_face_meeting_the_hole_along_two_runs_merges_and_splits_the_hole() {
     let p = w.face;
     let (report, _) = w
         .doc
-        .apply_object_op(w.id, KernelOp::MergeFaces { edge: e })
+        .apply_object_op(
+            w.id,
+            KernelOp::MergeFaces {
+                edge: e,
+                keep_vertices: Vec::new(),
+            },
+        )
         .expect("the band merges across both runs");
     let KernelOpReport::FaceMerge(r) = report else {
         panic!("a merge report")
@@ -474,14 +483,23 @@ fn a_disc_touching_the_hole_at_a_vertex_refuses_disconnected() {
     inscribed(&mut w);
     let e = edge_at(w.obj(), tl_corner(&w), rim(&w, 6));
     w.doc
-        .apply_object_op(w.id, KernelOp::MergeFaces { edge: e })
+        .apply_object_op(
+            w.id,
+            KernelOp::MergeFaces {
+                edge: e,
+                keep_vertices: Vec::new(),
+            },
+        )
         .expect("top-left corner merges");
     // The disc now meets the wall's hole along the top-left arc AND at the
     // bottom tangent vertex: merging it would pinch the hole.
     let arc = edge_at(w.obj(), rim(&w, 7), rim(&w, 8));
     assert_op_refused(
         &mut w,
-        KernelOp::MergeFaces { edge: arc },
+        KernelOp::MergeFaces {
+            edge: arc,
+            keep_vertices: Vec::new(),
+        },
         StickyError::SharedChainDisconnected,
     );
 }
@@ -1044,7 +1062,10 @@ fn a_merge_that_would_pinch_the_outer_loop_refuses_and_is_no_chord() {
     let e = edge_at(w.obj(), mm(&w, 20.0, 10.0), mm(&w, 30.0, 10.0));
     assert_op_refused(
         &mut w,
-        KernelOp::MergeFaces { edge: e },
+        KernelOp::MergeFaces {
+            edge: e,
+            keep_vertices: Vec::new(),
+        },
         StickyError::SharedChainDisconnected,
     );
     assert!(no_pinch_anywhere(w.obj()));
@@ -1099,7 +1120,13 @@ fn redoing_a_merge_of_differently_painted_faces_reproduces_it_exactly() {
             w.doc.paint_face(w.id, side, Some(red)).expect("paint");
             let e = edge_at(w.obj(), mm(&w, 12.0, 0.0), mm(&w, 12.0, 30.0));
             w.doc
-                .apply_object_op(w.id, KernelOp::MergeFaces { edge: e })
+                .apply_object_op(
+                    w.id,
+                    KernelOp::MergeFaces {
+                        edge: e,
+                        keep_vertices: Vec::new(),
+                    },
+                )
                 .expect("merge");
             let merged = w.doc.save();
             let material = w.obj().faces()[face_at(&w, 15.0 * MM, 15.0 * MM)].material;

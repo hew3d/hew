@@ -58,28 +58,36 @@ const SIMPLE: Record<string, MessageDescriptor> = {
   slice: msg`Slice`,
   'push-through': msg`Push/Pull through`,
   'add-thickness': msg`Add thickness`,
+  mend: msg`Mend object`,
   'detach-sketch': msg`Move sketch off its plane`,
   'copy-sketch': msg`Copy sketch`,
   'attach-sketch': msg`Attach sketch`,
   'group-sketch': msg`Group sketch`,
   'move-axes': msg`Move drawing axes`,
+  'set-geo': msg`Set geo-location`,
   'move-sketch-point': msg`Move sketch point`,
   draw: msg`Draw`,
   group: msg`Group`,
   ungroup: msg`Ungroup`,
   'place-instance': msg`Place instance`,
   copy: msg`Copy`,
+  paste: msg`Paste`,
   guide: msg`Guide`,
   'delete-guide': msg`Delete guide`,
+  'move-guide': msg`Move guide`,
   'delete-sketch': msg`Delete sketch`,
   explode: msg`Explode`,
   'make-unique': msg`Make unique`,
+  'link-identical-copies': msg`Link identical copies`,
+  'make-solid': msg`Make Solid`,
   'edit-group': msg`Edit group`,
   'finish-editing-group': msg`Finish editing group`,
   'paint-face': msg`Paint face`,
   'paint-object': msg`Paint object`,
+  'paint-instance': msg`Paint instance`,
   'position-texture': msg`Position texture`,
   'material-opacity': msg`Change material opacity`,
+  'material-surface': msg`Change material surface`,
   'rename-material': msg`Rename material`,
   'delete-material': msg`Delete material`,
   'delete-component': msg`Delete component`,
@@ -90,6 +98,9 @@ const SIMPLE: Record<string, MessageDescriptor> = {
   'change-tags': msg`Change tags`,
   'rename-tag': msg`Rename tag`,
   'delete-component-member': msg`Delete component member`,
+  lock: msg`Lock`,
+  unlock: msg`Unlock`,
+  'update-from-library': msg`Update from Library`,
 }
 
 /** "{verb} {count} {noun}" — the transform family's verb and noun words. */
@@ -166,6 +177,10 @@ export function historyKindLabel(k: HistoryKind): string | null {
       const n = count(k, 'count')
       return plural(n, { one: 'Close an opening', other: 'Close # openings' })
     }
+    case 'remove-degenerate': {
+      const n = count(k, 'count')
+      return plural(n, { one: 'Remove a degenerate face', other: 'Remove # degenerate faces' })
+    }
     case 'delete-faces': {
       const n = count(k, 'count')
       return plural(n, { one: 'Delete # face', other: 'Delete # faces' })
@@ -213,6 +228,8 @@ export function historyKindLabel(k: HistoryKind): string | null {
     }
     case 'make-component':
       return withName(t`Make component`, name)
+    case 'change-component-axes':
+      return withName(t`Change component axes`, name)
     case 'copy-array': {
       const n = count(k, 'count')
       return t`Copy ×${n}`
@@ -220,6 +237,10 @@ export function historyKindLabel(k: HistoryKind): string | null {
     case 'delete-guides': {
       const n = count(k, 'count')
       return plural(n, { one: 'Delete # guide', other: 'Delete # guides' })
+    }
+    case 'copy-guides': {
+      const n = count(k, 'count')
+      return plural(n, { one: 'Copy guide', other: 'Copy guide ×#' })
     }
     case 'add-annotation':
       return annotationWord(text(k, 'what'))

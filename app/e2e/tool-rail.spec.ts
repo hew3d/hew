@@ -70,7 +70,7 @@ test('compact rail: icons sit centered with no horizontal scroll, and search sti
 
 test('compact rail: View > Compact Tool Rail toggles it with a check mark', async ({ page }) => {
   const openItem = async () => {
-    await page.getByRole('button', { name: 'View' }).click()
+    await page.getByTestId('menu-bar').getByRole('button', { name: 'View' }).click()
     // The label shares its span with the check mark, so match either state.
     return page.getByTestId('menu-bar').getByText(/^✓?Compact Tool Rail$/)
   }

@@ -11,12 +11,19 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+pub mod mend;
+pub use mend::{
+    FILL_DIHEDRAL_WEIGHT, FILL_MWT_MAX_EDGES, FillScope, MendCensus, MendPlan, MendReport,
+    SkippedRim, default_weld_distance, weld_range,
+};
+
 use crate::error::TopologyError;
 use crate::geom2d::{boundaries_contact, point_inside_polygon, polygon_is_simple};
 use crate::health::{Finding, Rim, diagnose};
 use crate::ids::{FaceId, HalfEdgeId, LoopId, ShellId, VertexId};
 use crate::math::{Plane, Point3, Vec3};
-use crate::topo::{Face, HalfEdge, Loop, LoopKind, Object, WatertightState};
+use crate::tol;
+use crate::topo::{AttrSlot, Face, HalfEdge, Loop, LoopKind, Object, WatertightState};
 
 /// The thinnest solid [`Object::thicken_sheet`] makes: a micron, far above
 /// the point-merge tolerance its walls' corners must clear, far below any
@@ -66,6 +73,39 @@ pub enum RepairError {
     /// The result failed validation (the violation is logged). A kernel
     /// bug, surfaced instead of committed.
     Invalid,
+    /// Remove degenerate faces found none.
+    NothingToRemove,
+    /// Mend found nothing to do: no points to merge, nothing pinched, one
+    /// island, no gap it could fill.
+    NothingToMend,
+    /// The weld distance is not a finite length within the object's range
+    /// ([`mend::weld_range`]).
+    WeldDistanceOutOfRange,
+    /// Merging the points would leave an edge shared by more than two
+    /// faces, or by two running the same way; separating pinched parts
+    /// (the split) cuts those apart.
+    WeldFoldsFaces,
+    /// Merging the points would collapse every face.
+    WeldCollapsesObject,
+    /// A fill would touch or cross the object's faces.
+    FillCrossesFaces,
+    /// The gap is too small or too thin to take a face.
+    FillRimTooSmall,
+    /// Asked for a solid, the Mend would leave an object open.
+    StillOpen,
+    /// Removing the zero-width folds would leave parts touching at a
+    /// point; separating pinched parts (the split) takes them apart.
+    FoldRemovalPinches,
+    /// Merging the points would turn a face over (a point merged across
+    /// the face's opposite edge).
+    WeldFlipsFaces,
+    /// The Mend would leave the object more open than it was: a solid
+    /// that would not stay one, or edges left open that were not (a weld
+    /// pinching a narrow part shut).
+    MendOpensObject,
+    /// Merging the points would press opposite sides of a thin part
+    /// together, leaving a shell around no volume.
+    WeldFlattensObject,
 }
 
 impl std::fmt::Display for RepairError {
@@ -90,6 +130,35 @@ impl std::fmt::Display for RepairError {
                 write!(f, "the surface has a seam whose faces do not share edges")
             }
             RepairError::Invalid => write!(f, "the repair produced invalid topology"),
+            RepairError::NothingToRemove => write!(f, "no degenerate faces found"),
+            RepairError::NothingToMend => write!(f, "there is nothing to mend"),
+            RepairError::WeldDistanceOutOfRange => {
+                write!(f, "the distance for merging points is out of range")
+            }
+            RepairError::WeldFoldsFaces => write!(
+                f,
+                "merging those points would fold faces onto each other; separate pinched parts too"
+            ),
+            RepairError::WeldCollapsesObject => {
+                write!(f, "merging those points would collapse every face")
+            }
+            RepairError::FillCrossesFaces => write!(f, "filling the gap would cross other faces"),
+            RepairError::FillRimTooSmall => write!(f, "the gap is too small to fill"),
+            RepairError::StillOpen => write!(f, "the result would still be open"),
+            RepairError::FoldRemovalPinches => write!(
+                f,
+                "removing those folds would leave parts touching at a point; separate pinched parts too"
+            ),
+            RepairError::WeldFlipsFaces => {
+                write!(f, "merging those points would turn a face over")
+            }
+            RepairError::MendOpensObject => {
+                write!(f, "the mend would leave the object more open than it is")
+            }
+            RepairError::WeldFlattensObject => write!(
+                f,
+                "merging those points would press opposite sides together"
+            ),
         }
     }
 }
@@ -356,6 +425,8 @@ impl Object {
                 back_material: None,
                 uv_frame: None,
                 surface: None,
+                blend: None,
+                attrs: AttrSlot::NONE,
             });
             let outer = obj.add_cap_loop(&rim.half_edges, face, LoopKind::Outer);
             obj.faces[face].outer_loop = outer;
@@ -419,7 +490,6 @@ impl Object {
             components.swap_remove(keep);
             for comp in &components {
                 let mut piece = obj.rebuild_component(comp);
-                piece.carry_edge_claims(&obj);
                 piece.orient_closed_islands();
                 piece.validate().map_err(invalid)?;
                 pieces.push(piece);
@@ -526,22 +596,17 @@ impl Object {
                 f
             })
         };
-        let plane_of = |ring: &[usize], positions: &[Point3]| {
+        let tol = self.planarity_tol;
+        let plane_of = |ring: &[usize], holes: &[Vec<usize>], positions: &[Point3]| {
             let pts: Vec<Point3> = ring.iter().map(|&i| positions[i]).collect();
-            Plane::from_polygon(&pts).map_err(|_| {
+            let hole_pts: Vec<Point3> = holes.iter().flatten().map(|&i| positions[i]).collect();
+            crate::serialize::own_ring_plane(&pts, &hole_pts, tol).map_err(|_| {
                 tracing::warn!(target: "kernel::op", "thicken: degenerate face ring");
                 RepairError::Invalid
             })
         };
 
-        let mut specs: Vec<(
-            Vec<usize>,
-            Vec<Vec<usize>>,
-            Plane,
-            crate::material::FaceMaterial,
-            Option<crate::material::UvFrame>,
-            Option<crate::topo::SurfaceRef>,
-        )> = Vec::with_capacity(faces.len() * 3);
+        let mut specs: Vec<crate::build::FaceSpec> = Vec::with_capacity(faces.len() * 3);
         for &f in faces {
             let face = &self.faces[f];
             let mut lower_rings = Vec::new();
@@ -556,7 +621,7 @@ impl Object {
             }
             for (mut rings, by) in [(lower_rings, lo), (upper_rings, hi)] {
                 let outer = rings.remove(0);
-                let plane = plane_of(&outer, &positions)?;
+                let plane = plane_of(&outer, &rings, &positions)?;
                 // The lower copy faces the way the sheet's back did, and
                 // shows the back's paint.
                 let material = if by == lo {
@@ -571,6 +636,8 @@ impl Object {
                     material,
                     shifted(face.uv_frame, by),
                     None,
+                    // Both copies are the sheet's face, dictionary included.
+                    self.face_attrs(f).cloned().unwrap_or_default(),
                 ));
             }
         }
@@ -581,8 +648,16 @@ impl Object {
                     let (a_lo, a_hi) = at(he[h].origin, &mut positions);
                     let (b_lo, b_hi) = at(he[he[h].next].origin, &mut positions);
                     let wall = vec![a_lo, b_lo, b_hi, a_hi];
-                    let plane = plane_of(&wall, &positions)?;
-                    specs.push((wall, Vec::new(), plane, None, None, None));
+                    let plane = plane_of(&wall, &[], &positions)?;
+                    specs.push((
+                        wall,
+                        Vec::new(),
+                        plane,
+                        None,
+                        None,
+                        None,
+                        crate::attr::AttrDict::new(),
+                    ));
                 }
             }
         }
@@ -623,7 +698,7 @@ impl Object {
 
     /// Turn `faces` over — a set closed under twinning (whole islands), so
     /// every twin pair still runs opposite afterwards.
-    fn reverse_faces(&mut self, faces: &BTreeSet<FaceId>) {
+    pub(crate) fn reverse_faces(&mut self, faces: &BTreeSet<FaceId>) {
         let loops: Vec<LoopId> = faces
             .iter()
             .flat_map(|&f| {
@@ -631,6 +706,20 @@ impl Object {
                 std::iter::once(face.outer_loop).chain(face.inner_loops.iter().copied())
             })
             .collect();
+        self.reverse_loops(&loops);
+        for &f in faces {
+            let face = &mut self.faces[f];
+            face.plane = face.plane.flipped();
+        }
+    }
+
+    /// Runs each of `loops` the other way, leaving every face plane as it
+    /// is: the half of turning a face over that a map which mirrors a loop
+    /// IN its plane needs (the loop's vertices moved; its face still faces
+    /// the same side). The set must be closed under twinning, so every twin
+    /// pair still runs opposite afterwards. Handles, edges and twins are
+    /// kept.
+    pub(crate) fn reverse_loops(&mut self, loops: &[LoopId]) {
         let hs: Vec<HalfEdgeId> = loops
             .iter()
             .flat_map(|&l| self.loop_half_edges(l).collect::<Vec<_>>())
@@ -653,10 +742,6 @@ impl Object {
             if self.half_edges[vert.outgoing].origin != v {
                 vert.outgoing = leaving[&v];
             }
-        }
-        for &f in faces {
-            let face = &mut self.faces[f];
-            face.plane = face.plane.flipped();
         }
     }
 
@@ -788,27 +873,64 @@ impl Object {
         true
     }
 
-    /// Give this object's edges the curve claims and soft flags of the
-    /// edges of `source` they coincide with — a piece rebuilt from
-    /// `source`'s faces (which rebuilds edges bare) keeps what its edges
-    /// were. A soft flag needs an interior edge, so it only carries onto
-    /// one.
-    fn carry_edge_claims(&mut self, source: &Object) {
-        type Key = ([u64; 3], [u64; 3]);
-        let key = |a: Point3, b: Point3| -> Key {
-            let k = |p: Point3| [p.x.to_bits(), p.y.to_bits(), p.z.to_bits()];
-            let (ka, kb) = (k(a), k(b));
-            if ka <= kb { (ka, kb) } else { (kb, ka) }
-        };
-        let claims: BTreeMap<Key, (Option<crate::sketch::CurveGeom>, bool)> = source
-            .edges
+    /// Give this object's edges the curve and polygon claims and the soft
+    /// and crease flags of the edges of `source` they coincide with — a
+    /// piece rebuilt from `source`'s faces (which rebuilds edges bare)
+    /// keeps what its edges were. A soft or crease flag needs an interior
+    /// edge, so it only carries onto one.
+    pub(crate) fn carry_edge_claims(&mut self, source: &Object) {
+        self.apply_edge_claims(&source.edge_claims());
+    }
+
+    /// This object's marked edges keyed by their exact endpoint positions:
+    /// what [`Object::apply_edge_claims`] gives back to rebuilt pieces.
+    /// Built once when several pieces come from one object.
+    pub(crate) fn edge_claims(&self) -> EdgeClaims {
+        self.edges
             .keys()
             .filter_map(|e| {
-                let (a, b) = source.edge_endpoints(e)?;
-                let edge = &source.edges[e];
-                (edge.curve.is_some() || edge.soft).then(|| (key(a, b), (edge.curve, edge.soft)))
+                let (a, b) = self.edge_endpoints(e)?;
+                let edge = &self.edges[e];
+                (edge.curve.is_some() || edge.polygon.is_some() || edge.soft || edge.crease).then(
+                    || {
+                        (
+                            claim_key(a, b),
+                            (edge.curve, edge.polygon, edge.soft, edge.crease),
+                        )
+                    },
+                )
             })
+            .collect()
+    }
+
+    /// [`Object::edge_claims`] split by piece: `pieces[i]`'s faces' marked
+    /// edges in table `i`, so pieces touching along an edge never trade
+    /// marks. One pass over the edges.
+    pub(crate) fn edge_claims_by_piece(&self, pieces: &[Vec<FaceId>]) -> Vec<EdgeClaims> {
+        let piece_of: BTreeMap<FaceId, usize> = pieces
+            .iter()
+            .enumerate()
+            .flat_map(|(i, fs)| fs.iter().map(move |&f| (f, i)))
             .collect();
+        let mut out: Vec<EdgeClaims> = vec![BTreeMap::new(); pieces.len()];
+        for (e, edge) in &self.edges {
+            if !(edge.curve.is_some() || edge.polygon.is_some() || edge.soft || edge.crease) {
+                continue;
+            }
+            let face = self.loops[self.half_edges[edge.half_edge].loop_id].face;
+            let (Some(&i), Some((a, b))) = (piece_of.get(&face), self.edge_endpoints(e)) else {
+                continue;
+            };
+            out[i].insert(
+                claim_key(a, b),
+                (edge.curve, edge.polygon, edge.soft, edge.crease),
+            );
+        }
+        out
+    }
+
+    /// Mark each edge whose endpoints match a claim in `claims`.
+    pub(crate) fn apply_edge_claims(&mut self, claims: &EdgeClaims) {
         if claims.is_empty() {
             return;
         }
@@ -817,17 +939,20 @@ impl Object {
             let Some((a, b)) = self.edge_endpoints(e) else {
                 continue;
             };
-            if let Some(&(curve, soft)) = claims.get(&key(a, b)) {
+            if let Some(&(curve, polygon, soft, crease)) = claims.get(&claim_key(a, b)) {
                 let edge = &mut self.edges[e];
                 edge.curve = curve;
+                edge.polygon = polygon;
                 edge.soft = soft && edge.twin_half_edge.is_some();
+                edge.crease = crease && edge.twin_half_edge.is_some();
             }
         }
     }
 
     /// Divergence-theorem signed volume over every loop (holes wind
-    /// opposite and subtract): positive for a right-side-out closed shell.
-    pub(crate) fn signed_volume(&self) -> f64 {
+    /// opposite and subtract): positive for a right-side-out closed shell,
+    /// negative for an inside-out one.
+    pub fn signed_volume(&self) -> f64 {
         let mut six_v = 0.0;
         for f in self.faces.values() {
             for lid in std::iter::once(f.outer_loop).chain(f.inner_loops.iter().copied()) {
@@ -840,6 +965,34 @@ impl Object {
         six_v / 6.0
     }
 
+    /// The enclosed volume of a watertight Object, in cubic model units;
+    /// `None` for an open one (an open shell encloses nothing, and a guess
+    /// would be a silent repair).
+    pub fn volume(&self) -> Option<f64> {
+        (self.watertight() == crate::topo::WatertightState::Watertight)
+            .then(|| self.signed_volume().abs())
+    }
+
+    /// The summed area of every face (holes subtracted), in square model
+    /// units. Defined for open Objects too.
+    pub fn surface_area(&self) -> f64 {
+        let ring_area = |lid| {
+            let p: Vec<Vec3> = self.loop_positions(lid).map(|pt| pt.to_vec()).collect();
+            let mut sum = Vec3::new(0.0, 0.0, 0.0);
+            for i in 0..p.len() {
+                sum = sum + p[i].cross(p[(i + 1) % p.len()]);
+            }
+            (sum * 0.5).length()
+        };
+        self.faces
+            .values()
+            .map(|f| {
+                let holes: f64 = f.inner_loops.iter().map(|&l| ring_area(l)).sum();
+                (ring_area(f.outer_loop) - holes).max(0.0)
+            })
+            .sum()
+    }
+
     /// The cap polygon for `rim`: its vertices against the boundary's
     /// direction, with the plane that winding defines. `None` for a rim too
     /// short to bound an area.
@@ -850,7 +1003,7 @@ impl Object {
         }
         let at = |k: usize| self.vertices[self.half_edges[rim.half_edges[k]].origin].position;
         let points: Vec<Point3> = std::iter::once(at(0)).chain((1..n).rev().map(at)).collect();
-        let plane = Plane::from_polygon(&points).ok()?;
+        let plane = crate::serialize::own_ring_plane(&points, &[], self.planarity_tol).ok()?;
         Some(CapLoop { points, plane })
     }
 
@@ -882,8 +1035,19 @@ impl Object {
                 area(*p).total_cmp(&area(*q))
             })
             .unwrap_or(a);
-        let Ok(plane) = Plane::from_point_normal(a, (b - a).cross(c - a)) else {
-            return false;
+        // Three points too close to one line for a normal of their own
+        // still span a plane by the kernel's face rule when the triangle
+        // they make is wide enough (as `health::planar_fit` judges the
+        // rim); imported geometry keeps the area floor alone.
+        let plane = match Plane::from_point_normal(a, (b - a).cross(c - a)) {
+            Ok(plane) => plane,
+            Err(_) if !crate::health::imported_tol(self.planarity_tol) => {
+                match Plane::from_polygon(&[a, b, c]) {
+                    Ok(plane) => plane,
+                    Err(_) => return false,
+                }
+            }
+            Err(_) => return false,
         };
         pts.iter()
             .all(|&p| plane.signed_distance(p).abs() <= self.planarity_tol)
@@ -934,8 +1098,9 @@ impl Object {
                 let b = self.half_edges[h];
                 debug_assert!(b.twin.is_none(), "a rim half-edge is boundary");
                 debug_assert_eq!(self.edges[b.edge].half_edge, h);
+                let origin = self.half_edges[b.next].origin;
                 self.half_edges.insert(HalfEdge {
-                    origin: self.half_edges[b.next].origin,
+                    origin,
                     twin: Some(h),
                     next: HalfEdgeId::default(),
                     prev: HalfEdgeId::default(),
@@ -1000,6 +1165,7 @@ impl Object {
                             edge.half_edge = t;
                             edge.twin_half_edge = None;
                             edge.soft = false;
+                            edge.crease = false;
                         }
                         None => {
                             self.edges.remove(he.edge);
@@ -1071,6 +1237,36 @@ mod tests {
         Object::from_polygons(&positions, &faces).unwrap()
     }
 
+    /// A bow-tie rim (planar, crossing itself, no net area) 1 µm long and
+    /// 30 nm wide under a four-triangle tent: its three spread corners are
+    /// too close to one line for a normal of their own but wide enough for
+    /// the face rule, so it reads as crossing itself, not as warped. An
+    /// imported copy keeps the area floor and the old answer.
+    #[test]
+    fn a_band_width_rim_that_crosses_itself_is_not_called_warped() {
+        let (l, w) = (1e-6, 3e-8);
+        let p = |x: f64, y: f64, z: f64| Point3::new(x, y, z);
+        let positions = vec![
+            p(0.0, 0.0, 0.0),
+            p(l, w, 0.0),
+            p(l, 0.0, 0.0),
+            p(0.0, w, 0.0),
+            p(l / 2.0, w / 2.0, 2e-6),
+        ];
+        let faces = vec![vec![0, 1, 4], vec![1, 2, 4], vec![2, 3, 4], vec![3, 0, 4]];
+        let obj = Object::from_polygons(&positions, &faces).unwrap();
+        assert_eq!(
+            obj.clone().cap_rims(&[0]).unwrap_err(),
+            RepairError::RimSelfIntersecting
+        );
+        let mut imported = obj;
+        imported.planarity_tol = crate::tol::IMPORT_PLANE_DIST;
+        assert_eq!(
+            imported.cap_rims(&[0]).unwrap_err(),
+            RepairError::RimNotPlanar
+        );
+    }
+
     #[test]
     fn a_sheet_with_an_unjoined_seam_refuses_to_thicken() {
         let obj = slit_sheet();
@@ -1114,4 +1310,172 @@ mod tests {
         // And the kept island's too (x = 1).
         assert_eq!(obj.edges().values().filter(|e| e.soft).count(), 1);
     }
+}
+
+// ==== true-curves: imports ====
+
+/// What [`Object::remove_degenerate_faces`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DegenerateReport {
+    /// How many faces were removed.
+    pub removed: usize,
+}
+
+impl Object {
+    /// Removes the degenerate faces ([`ring_is_degenerate`]), keeping the
+    /// object closed: an explicit repair the user asks for, never run on
+    /// import. A short edge of a degenerate face collapses onto its
+    /// lower-numbered end (that vertex keeps its position; the other moves
+    /// at most `POINT_MERGE`); a sliver's other vertices move into the loop
+    /// of the face across its longest edge, and the sliver goes. Faces left
+    /// with fewer than three points go too.
+    ///
+    /// # Errors
+    /// `NothingToRemove` when no face is degenerate; `Invalid` when the
+    /// result does not rebuild (with the input's watertightness).
+    pub fn remove_degenerate_faces(&mut self) -> Result<DegenerateReport, RepairError> {
+        let bad = crate::health::degenerate_faces(self);
+        if bad.is_empty() {
+            return Err(RepairError::NothingToRemove);
+        }
+        let mut patch = self.to_patch();
+        let face_order: Vec<FaceId> = self.faces().keys().collect();
+        let slot: BTreeMap<FaceId, usize> = face_order
+            .iter()
+            .enumerate()
+            .map(|(i, &f)| (f, i))
+            .collect();
+        let pos = |i: usize| match patch.verts[i] {
+            crate::patch::PVert::Existing(v) => self.vertices()[v].position,
+            crate::patch::PVert::New(p) => p,
+        };
+        // 1. Short edges of degenerate faces: merge into the lower index.
+        let mut merge: Vec<usize> = (0..patch.verts.len()).collect();
+        fn root(m: &mut [usize], mut x: usize) -> usize {
+            while m[x] != x {
+                m[x] = m[m[x]];
+                x = m[x];
+            }
+            x
+        }
+        for &f in &bad {
+            let ring = &patch.add[slot[&f]].outer;
+            for k in 0..ring.len() {
+                let (a, b) = (ring[k], ring[(k + 1) % ring.len()]);
+                if pos(a).approx_eq(pos(b), tol::POINT_MERGE) {
+                    let (ra, rb) = (root(&mut merge, a), root(&mut merge, b));
+                    if ra != rb {
+                        merge[ra.max(rb)] = ra.min(rb);
+                    }
+                }
+            }
+        }
+        let mut drop: BTreeSet<usize> = BTreeSet::new();
+        // 2. Slivers with no short edge: hand their other vertices to the
+        // face across the longest edge.
+        for &f in &bad {
+            let s = slot[&f];
+            let ring = patch.add[s].outer.clone();
+            let n = ring.len();
+            let short =
+                (0..n).any(|k| pos(ring[k]).approx_eq(pos(ring[(k + 1) % n]), tol::POINT_MERGE));
+            if short {
+                continue;
+            }
+            let k = (0..n)
+                .max_by(|&i, &j| {
+                    let li = (pos(ring[(i + 1) % n]) - pos(ring[i])).length();
+                    let lj = (pos(ring[(j + 1) % n]) - pos(ring[j])).length();
+                    li.total_cmp(&lj)
+                })
+                .expect("a ring of three or more");
+            let (a, b) = (ring[k], ring[(k + 1) % n]);
+            // The rest of the sliver's loop, from b back round to a.
+            let path: Vec<usize> = (2..n).map(|j| ring[(k + j) % n]).collect();
+            // The neighbor runs b→a.
+            let Some(ni) = patch.add.iter().enumerate().position(|(i, pf)| {
+                i != s
+                    && !drop.contains(&i)
+                    && (0..pf.outer.len())
+                        .any(|j| pf.outer[j] == b && pf.outer[(j + 1) % pf.outer.len()] == a)
+            }) else {
+                return Err(RepairError::Invalid);
+            };
+            let nb = &mut patch.add[ni].outer;
+            let j = (0..nb.len())
+                .find(|&j| nb[j] == b && nb[(j + 1) % nb.len()] == a)
+                .expect("found above");
+            for (off, &v) in path.iter().enumerate() {
+                nb.insert(j + 1 + off, v);
+            }
+            patch.add[ni].plane = None;
+            drop.insert(s);
+        }
+        // 3. Rewrite every loop through the merges; drop collapsed faces.
+        for (i, pf) in patch.add.iter_mut().enumerate() {
+            if drop.contains(&i) {
+                continue;
+            }
+            for ring in std::iter::once(&mut pf.outer).chain(pf.holes.iter_mut()) {
+                for v in ring.iter_mut() {
+                    *v = root(&mut merge, *v);
+                }
+                ring.dedup();
+                while ring.len() > 1 && ring.first() == ring.last() {
+                    ring.pop();
+                }
+            }
+            if pf.outer.len() < 3 || pf.holes.iter().any(|h| h.len() < 3) {
+                drop.insert(i);
+            } else if bad.contains(&face_order[i]) {
+                // A degenerate face that survived its merges keeps its
+                // place only if it is no longer degenerate.
+                let ring: Vec<Point3> = pf.outer.iter().map(|&v| pos(v)).collect();
+                if crate::health::ring_is_degenerate(&ring) {
+                    drop.insert(i);
+                }
+            }
+            pf.plane = None;
+        }
+        let removed = drop.len();
+        patch.add = patch
+            .add
+            .into_iter()
+            .enumerate()
+            .filter(|(i, _)| !drop.contains(i))
+            .map(|(_, f)| f)
+            .collect();
+        // Edge metadata keyed by merged-away vertices no longer applies.
+        let roots: Vec<usize> = (0..merge.len()).map(|x| root(&mut merge, x)).collect();
+        patch.edge_meta = patch
+            .edge_meta
+            .into_iter()
+            .filter(|((a, b), _)| roots[*a] == *a && roots[*b] == *b)
+            .collect();
+        let out = self.apply_patch(&patch).map_err(|_| RepairError::Invalid)?;
+        *self = out.object;
+        Ok(DegenerateReport { removed })
+    }
+}
+
+// ==== end true-curves: imports ====
+
+/// An edge's endpoints as exact position bits, order-free.
+type ClaimKey = ([u64; 3], [u64; 3]);
+
+/// Marked edges by endpoints: curve claim, polygon claim, soft, crease.
+pub(crate) type EdgeClaims = BTreeMap<
+    ClaimKey,
+    (
+        Option<crate::sketch::CurveGeom>,
+        Option<crate::sketch::CurveGeom>,
+        bool,
+        bool,
+    ),
+>;
+
+fn claim_key(a: Point3, b: Point3) -> ClaimKey {
+    let k = |p: Point3| [p.x.to_bits(), p.y.to_bits(), p.z.to_bits()];
+    let (ka, kb) = (k(a), k(b));
+    if ka <= kb { (ka, kb) } else { (kb, ka) }
 }

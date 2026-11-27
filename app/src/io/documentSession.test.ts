@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi, afterEach } from 'vitest'
 import {
   INITIAL_SESSION,
   deriveTitle,
@@ -41,6 +41,31 @@ describe('documentSession', () => {
   })
 
   describe('deriveTitle', () => {
+    afterEach(() => {
+      vi.unstubAllGlobals()
+    })
+
+    it('names the app "Hew Beta" only in a beta build', () => {
+      vi.stubGlobal('__HEW_BETA__', true)
+      expect(deriveTitle(INITIAL_SESSION)).toBe('Untitled — Hew Beta')
+      vi.stubGlobal('__HEW_BETA__', false)
+      expect(deriveTitle(INITIAL_SESSION)).toBe('Untitled — Hew')
+    })
+
+    it('leaves a document name containing "Hew" alone in a beta build', () => {
+      vi.stubGlobal('__HEW_BETA__', true)
+      const state: DocSessionState = { currentRef: mockRef('Hew chair.hew'), dirty: true, lastEditAt: null, lastSavedAt: null, nonUndoableReasons: NO_REASONS }
+      expect(deriveTitle(state)).toBe('• Hew chair.hew — Hew Beta')
+    })
+
+    it('names a Library item being edited, clean or dirty, in either build', () => {
+      const clean: DocSessionState = { currentRef: mockRef('leg-1a2b3c.hew'), dirty: false, lastEditAt: null, lastSavedAt: null, nonUndoableReasons: NO_REASONS }
+      expect(deriveTitle(clean, 'Leg')).toBe('Leg (Library item) — Hew')
+      expect(deriveTitle({ ...clean, dirty: true }, 'Leg')).toBe('• Leg (Library item) — Hew')
+      vi.stubGlobal('__HEW_BETA__', true)
+      expect(deriveTitle(clean, 'Leg')).toBe('Leg (Library item) — Hew Beta')
+    })
+
     it('shows "Untitled" when no ref', () => {
       expect(deriveTitle(INITIAL_SESSION)).toBe('Untitled — Hew')
     })

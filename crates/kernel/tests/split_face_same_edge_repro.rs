@@ -5,6 +5,7 @@
 //! ("invalid SlotMap key used", found by the on-face Arc E2E) instead
 //! of splitting. ep1 now re-resolves against the current outer loop.
 
+use kernel::trig;
 use kernel::{Object, Plane, Point3, Profile, Vec3, WatertightState};
 
 fn box_2x2x1() -> Object {
@@ -78,14 +79,18 @@ fn split_face_arc_path_endpoints_on_same_boundary_edge() {
     let s = 0.4_f64;
     let r = (h * h + s * s) / (2.0 * s);
     let cy = 2.0 + (r - s);
-    let half_sweep = f64::atan2(h, r - s);
+    let half_sweep = trig::atan2(h, r - s);
     let n = 12; // interior facets
     let mut path = vec![Point3::new(0.5, 2.0, 1.0)];
     for i in 1..n {
         // Sweep from A (left) to B (right) under the chord: angle measured
         // from +y (up) rotating left-to-right through the bulge apex.
         let a = -half_sweep + (2.0 * half_sweep * i as f64) / n as f64;
-        path.push(Point3::new(1.0 + r * a.sin(), cy - r * a.cos(), 1.0));
+        path.push(Point3::new(
+            1.0 + r * trig::sin(a),
+            cy - r * trig::cos(a),
+            1.0,
+        ));
     }
     path.push(Point3::new(1.5, 2.0, 1.0));
     assert_lens_split(&path);

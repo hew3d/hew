@@ -21,19 +21,27 @@
 //! `version()`/`demo_mesh()` remain from M0 until the viewport fully retires
 //! the demo path.
 
+mod curves_api;
 mod draft_api;
+mod geo_api;
 mod health;
 mod live;
 mod log;
+// The plugin install exports exist only in a preview build
+// (`loader.kernelExports` of the "plugins" entry of preview-features.json).
+#[cfg(hew_preview)]
+mod plugins_api;
 mod recording;
 mod scenes_api;
+mod sources_api;
 
 use dae_import::ImageMap;
 use inference::{
-    ApertureMode, Axis, ElementRef, FacePolicy, InferenceScene, PickRay, SketchRegionFace,
-    SnapKind, SnapLock, SnapQuery, SnapWeights,
+    ApertureMode, Axis, ElementRef, FacePolicy, InferenceScene, PickRay, PickScope,
+    SketchRegionFace, SnapKind, SnapLock, SnapQuery, SnapWeights,
 };
 use js_sys::{Object as JsObject, Reflect, Uint8Array};
+use kernel::trig;
 use kernel::{
     Anchor, Annotation, AnnotationId, BooleanOp, CapturedCurve, ComponentId, DocChange, Document,
     DocumentError, EdgeId, FaceId, GroupId, Guide, GuideId, HistoryOrigin, ImageFormat, InstanceId,
@@ -54,8 +62,22 @@ use wasm_bindgen::prelude::*;
 /// deliberate click without competing with nearby solid geometry.
 const SKETCH_PICK_APERTURE: f64 = 0.02;
 
+/// The most hits one top-level placement contributes to
+/// [`Scene::pick_instance_sketch_edge`] and
+/// [`Scene::pick_instance_sketch_region`], its best-ranked first. Enough
+/// for the caller's occlusion filter to reach a visible line behind a few
+/// hidden ones without a dense drawing flooding the list.
+const INSTANCE_PICK_HITS_PER_PLACEMENT: usize = 8;
+
 fn segment_ray_depth(origin: Point3, direction: kernel::Vec3, a: Point3, b: Point3) -> f64 {
     let dir = direction.normalized().unwrap_or(direction);
+    (segment_ray_closest(origin, dir, a, b) - origin).dot(dir)
+}
+
+/// The point of segment `[a, b]` nearest the line of a ray with unit
+/// direction `dir` (an end when the nearest point of the segment's line
+/// falls past it, `a` for a degenerate or parallel segment).
+fn segment_ray_closest(origin: Point3, dir: kernel::Vec3, a: Point3, b: Point3) -> Point3 {
     let seg = b - a;
     let seg_len_sq = seg.length_squared();
     let s = if seg_len_sq <= kernel::tol::NORMALIZE_MIN_LENGTH.powi(2) {
@@ -70,7 +92,28 @@ fn segment_ray_depth(origin: Point3, direction: kernel::Vec3, a: Point3, b: Poin
             ((seg.dot(w) - ray_seg * dir.dot(w)) / denom).clamp(0.0, 1.0)
         }
     };
-    ((a + seg * s) - origin).dot(dir)
+    a + seg * s
+}
+
+/// How a pose scales areas on a plane with unit `normal`: the area of the
+/// image of a unit square in the plane. A region's world area is its own
+/// area times this.
+fn in_plane_area_scale(pose: &Transform, normal: kernel::Vec3) -> f64 {
+    // Any in-plane axis: the normal crossed with the world axis it leans
+    // on least.
+    let (x, y, z) = (normal.x.abs(), normal.y.abs(), normal.z.abs());
+    let seed = if x <= y && x <= z {
+        kernel::Vec3::new(1.0, 0.0, 0.0)
+    } else if y <= z {
+        kernel::Vec3::new(0.0, 1.0, 0.0)
+    } else {
+        kernel::Vec3::new(0.0, 0.0, 1.0)
+    };
+    let Ok(u) = normal.cross(seed).normalized() else {
+        return 1.0;
+    };
+    let v = normal.cross(u);
+    pose.apply_vector(u).cross(pose.apply_vector(v)).length()
 }
 
 // Persist a panic message where the UI can read it after the wasm instance is
@@ -123,6 +166,24 @@ pub fn start() {
 pub fn version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
 }
+
+/// Whether this module's live API is a preview build's (`HEW_PREVIEW=1`
+/// when it was compiled; docs/dev/DEVELOPMENT.md "Preview features"). The
+/// app compares it with its own build flag at startup, so a production page
+/// can never run on a preview module, or the reverse, unnoticed.
+#[wasm_bindgen]
+pub fn preview_build() -> bool {
+    api::preview::PREVIEW_BUILD
+}
+
+// This crate's own `cfg(hew_preview)` (build.rs) and the API crate's are set
+// from the same variable by two build scripts; a build where they disagree
+// would leave a Preview export in a module whose API refuses Preview
+// commands, or the reverse, so it does not compile.
+const _: () = assert!(
+    cfg!(hew_preview) == api::preview::PREVIEW_BUILD,
+    "wasm-api and api disagree about HEW_PREVIEW"
+);
 
 // ------------------------------------------------------- diagnostic logging
 //
@@ -191,14 +252,24 @@ pub fn end_gesture() {
 /// this trust boundary (recorded sessions are plain JSON replayed through
 /// that method verbatim, so a hand-edited count must fail typed instead of
 /// hanging the engine). The single source of truth: the UI reads it via
-/// [`Scene::max_array_count`], so the app-side cap cannot drift.
-pub const MAX_ARRAY_COUNT: u32 = 1000;
+/// [`Scene::max_array_count`], so the app-side cap cannot drift. The value
+/// lives in the kernel, shared with the path array's own check.
+pub use kernel::MAX_ARRAY_COUNT;
 
 // ------------------------------------------------------------------ errors
 
 /// Boundary error: stringly `"CODE: message"` per docs/dev/DEVELOPMENT.md B3.
 #[derive(Debug)]
 pub struct ApiError(String);
+
+impl std::fmt::Display for ApiError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// Lets a `JsError` method guard with `?` like an `ApiError` one does.
+impl std::error::Error for ApiError {}
 
 impl ApiError {
     /// Builds a `"CODE: message"` boundary error directly.
@@ -235,6 +306,33 @@ fn api_err(code_source: &dyn std::fmt::Debug, message: &dyn std::fmt::Display) -
     ApiError(format!("{code}: {message}"))
 }
 
+/// The mesh an object is drawn with: its Smooth surface at its level, or
+/// the cage itself when it has none, or when the cage has grown too dense
+/// for its level since (the surface refuses and the cage shows).
+fn render_mesh(
+    doc: &kernel::Document,
+    id: ObjectId,
+    object: &kernel::Object,
+) -> Result<RenderMesh, tessellate::TessellateError> {
+    let palette = doc.materials();
+    let level = doc.smooth_level(id);
+    if level > 0
+        && let Ok(mesh) = tessellate::tessellate_smoothed(object, palette, level)
+    {
+        return Ok(mesh);
+    }
+    tessellate(object, palette)
+}
+
+/// One cached Mend preview ([`Scene::mend_census_json`]).
+struct CensusEntry {
+    object: u64,
+    plan: String,
+    generation: u64,
+    weld: Option<f64>,
+    census: std::rc::Rc<kernel::repair::MendCensus>,
+}
+
 fn stale(code: &str, what: &str) -> ApiError {
     ApiError(format!("{code}: stale or unknown {what} handle"))
 }
@@ -263,20 +361,52 @@ fn doc_err(e: DocumentError) -> ApiError {
         DocumentError::Op(KernelOpError::Sticky(inner)) => api_err(inner, &e),
         DocumentError::InvalidAxesFrame(inner) => api_err(inner, &e),
         DocumentError::Repair(inner) => api_err(inner, &e),
+        DocumentError::Shape(inner) => api_err(inner, &e),
+        DocumentError::Blend(inner) => api_err(inner, &e),
+        // The indirect lock (OW-1) answers a code of its own, so the app
+        // can say why and offer Make Unique first: the shape is also used
+        // inside something locked.
+        DocumentError::LockedNode {
+            via_shared_shape: true,
+            ..
+        } => ApiError::new("LockedNodeViaSharedShape", &e.to_string()),
         // UnknownSketch/UnknownObject/UnknownFace/UnknownMaterial/NothingTo{Undo,Redo}/
         // InverseFailed carry no separate inner code: the variant name is the code.
         _ => api_err(&e, &e),
     }
 }
 
+/// The bus commands that write the kernel's user-hidden flags without
+/// moving the history (`mutates_document = false`): a bare one is still
+/// recorded, so a reproducer replays to the same document.
+const USER_HIDDEN_WRITERS: &[&str] = &["hew.view.hide", "hew.view.show", "hew.view.show_all"];
+
 /// Whether the command in `frame` records itself when it succeeds, so the
 /// dispatcher must not ALSO record the envelope: `hew.doc.import` (bare, or
 /// as the sole command of a one-command `hew.doc.transact`, the shape MCP
 /// sends) records the file it merged under the import size cap
 /// (`LiveHost::import_document`); recording its frame too would replay the
-/// import twice and carry the whole file in base64 past that cap.
+/// import twice and carry the whole file in base64 past that cap. The
+/// user-context host effects (`USER_CONTEXT_EFFECTS`) "record themselves" as
+/// nothing: there is no kernel call for a replay to re-run.
 fn records_itself(method: &str, frame: &str) -> bool {
-    if method == "hew.doc.import" {
+    sole_command_is(method, frame, |name| {
+        name == "hew.doc.import" || USER_CONTEXT_EFFECTS.contains(&name)
+    })
+}
+
+/// Whether the dispatch is an import: `hew.doc.import`, bare or as the sole
+/// command of a one-command `hew.doc.transact`. Model Health's "Last import"
+/// bookkeeping keys on this, not on [`records_itself`], so a view command
+/// never touches it.
+fn is_import(method: &str, frame: &str) -> bool {
+    sole_command_is(method, frame, |name| name == "hew.doc.import")
+}
+
+/// Whether `method` satisfies `pred`, or is a `hew.doc.transact` whose only
+/// command does.
+fn sole_command_is(method: &str, frame: &str, pred: impl Fn(&str) -> bool) -> bool {
+    if pred(method) {
         return true;
     }
     if method != "hew.doc.transact" {
@@ -287,12 +417,158 @@ fn records_itself(method: &str, frame: &str) -> bool {
         .and_then(|v| {
             let commands = v.pointer("/params/commands")?.as_array()?.clone();
             match commands.as_slice() {
-                [only] => Some(only.get("method")?.as_str()? == "hew.doc.import"),
+                [only] => Some(pred(only.get("method")?.as_str()?)),
                 _ => Some(false),
             }
         })
         .unwrap_or(false)
 }
+
+/// The host effects on the user's window (`hew.view.enter`/`exit`/
+/// `exit_all`): `mutates_document` so a session open or close resyncs, but
+/// no kernel call a replay could re-run — the session itself records its own
+/// open and close through the app's ordinary paths — so the dispatcher does
+/// not record the frame.
+const USER_CONTEXT_EFFECTS: &[&str] = &["hew.view.enter", "hew.view.exit", "hew.view.exit_all"];
+
+/// What one live API frame came to: a reply frame, or a plugin command for
+/// the caller to route ([`Scene::api_dispatch`]).
+enum FrameOutcome {
+    Reply(String),
+    Pending(Box<api::ForwardRequest>),
+    /// The reply to a dry run: the document was never touched, so nothing
+    /// was recorded, resynced, or written back.
+    DryRun(String),
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many times a dispatch reached the post-dispatch write-back of
+    /// the selection, isolation, and view directives: a test reads it to
+    /// prove a dry run never does.
+    static WRITE_BACKS: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// A forward [`Scene::api_dispatch`] handed out and has not seen completed.
+struct PendingForward {
+    /// Whether the forwarded plugin command (the one inside a sole-command
+    /// transaction, not the envelope) can change the document, fixed when
+    /// the forward was issued so a plugin unregistered meanwhile does not
+    /// change the answer.
+    mutating: bool,
+    /// The provider plugin's id.
+    plugin: String,
+    /// The command's registry name.
+    method: String,
+    /// The command's declared undo label, if any.
+    label: Option<String>,
+}
+
+/// A compound the host opened around a mutating forward
+/// ([`Scene::compound_begin`]), innermost last on [`Scene::open_compounds`].
+struct HostCompound {
+    kernel_token: kernel::CompoundToken,
+    /// The forward the compound serves (the `ForwardRequest` token): the
+    /// stamp [`Scene::api_dispatch_in_forward`] must carry.
+    forward_token: u64,
+    /// The provider plugin's id.
+    plugin: String,
+    label: String,
+    /// The provider's grant, as recorded with the compound: its own
+    /// connection's when one is open at begin, else the grant of the first
+    /// connection that dispatched inside the compound.
+    grant: Option<serde_json::Value>,
+    /// The selection and isolation mirrors at begin: an abort puts both
+    /// back, since the document's snapshot does not carry them.
+    selection_at_begin: Vec<live::UiSelectionEntry>,
+    isolation_at_begin: Option<Vec<live::UiIsolationEntry>>,
+}
+
+/// How a frame reaches [`Scene::api_dispatch_outcome`].
+#[derive(Clone, Copy)]
+enum DispatchScope {
+    /// A plain frame: refused `document_busy` while a compound is open.
+    Plain,
+    /// A frame a realm issued while serving this forward.
+    InForward(u64),
+    /// A recorded frame re-issued by [`Scene::replay`].
+    Replay,
+}
+
+/// The `&mut self` methods of the `#[wasm_bindgen] impl Scene` blocks
+/// that run while a compound is open (every other one calls
+/// [`Scene::ensure_not_busy`] first; `tests/busy_guard.rs` holds the
+/// line): the bus itself, view mirrors, the compound controls, and the
+/// methods that touch only `Scene`'s own caches, never the document.
+pub const BUSY_EXEMPT: &[&str] = &[
+    "api_dispatch",
+    "api_dispatch_in_forward",
+    "api_complete_forward",
+    "api_connection_open",
+    "api_plugin_connection_open",
+    "api_connection_close",
+    "register_plugin_commands",
+    "unregister_plugin_commands",
+    "compound_begin",
+    "compound_end",
+    "compound_abort",
+    "set_display_units",
+    "set_pick_scope",
+    "clear_pick_scope",
+    "set_hidden",
+    "take_pending_view_directives",
+    "set_ui_selection",
+    "set_ui_isolation",
+    "set_ui_context",
+    "set_ui_gesture_armed",
+    // event bookkeeping on the `Scene`, never the document;
+    "drain_events",
+    "set_host_document_id",
+    "note_document_event",
+    "note_tool_changed",
+    "note_scene_activated",
+    // a plugin's state, queued for the next drain like the notes above
+    // (a preview build's method, `plugins_api.rs`; named here in every
+    // build because the guard test reads the sources, not the build);
+    "note_plugin_state",
+    // a running plugin's connection takes a wider grant while its command
+    // holds the document (the connection only, never the document; also a
+    // preview build's method in `plugins_api.rs`);
+    "api_connection_set_grant",
+    // Scene caches only, no document mutator:
+    // the inference scope of the instance being edited;
+    "set_active_inference_instance",
+    // the Model Health verdict cache;
+    "health_summary_json",
+    // the inference scene's transient tool segments;
+    "add_transient_segment",
+    "clear_transient_segments",
+    // the undo-memory budget and its trim note (session settings the
+    // scene holds; a trim never runs while a compound is open);
+    "set_history_budget",
+    "take_history_trim",
+    // the face-range cache a tessellation fills;
+    "object_mesh",
+    "member_mesh",
+    "face_mesh_range",
+    // the `.skp` source a later save builds on (a `Scene` field);
+    "commit_skp_save",
+    "set_skp_source",
+    // the document id a save mints (file identity, not document content:
+    // no history, and a compound abort keeps it), so a `.hew` save while a
+    // plugin command holds the document still writes it;
+    "ensure_document_id",
+    // the kernel's debug validation switch (session-only, never saved, no
+    // document content): Settings ▸ Debug Mode stays usable while busy;
+    "set_torture_mode",
+    // the inference scene's guide candidates (crate-internal, run by the
+    // rebuild after every compound end and abort);
+    "reregister_guides",
+    // the inference scene's view switches.
+    "set_guides_snappable",
+    "set_axes_snappable",
+    "set_render_mode",
+];
 
 /// The most faces a document may hold for `reconcile` to stamp its
 /// canonical `state_hash` on the log after every committed op (see there).
@@ -482,11 +758,28 @@ fn skp_units(name: Option<&str>) -> Option<skp_export::DisplayUnits> {
     name.and_then(skp_export::DisplayUnits::from_name)
 }
 
-fn skp_target(target: &str) -> Result<skp_export::Target, JsError> {
+/// The target a wire name and the `compat` choice stand for: `compat`
+/// (revision 17 of the 2021-and-later container) only applies to `"skp2026"`
+/// or `"skp"`; a stream release ignores it.
+fn skp_target(target: &str, compat: bool) -> Result<skp_export::Target, JsError> {
+    if target == "skp2026" || target == "skp" {
+        return Ok(skp_export::Target::Skp2026.with_compat(compat));
+    }
+    match api::DocFormat::skp_from_name(target) {
+        Some(api::DocFormat::SkpStream(n)) => {
+            skp_import::skpwright::Release::of_name(u32::from(n)).map(skp_export::Target::Stream)
+        }
+        _ => None,
+    }
+    .ok_or_else(|| JsError::new(&format!("SKP: unknown target '{target}'")))
+}
+
+/// The name of a target as the app holds it: `"skp2026"` for the 2026
+/// container, else the release's wire name (`"skp8"`, `"skp2017"`).
+fn skp_target_name(target: skp_export::Target) -> String {
     match target {
-        "skp2026" => Ok(skp_export::Target::Skp2026),
-        "skp2017" => Ok(skp_export::Target::Skp2017),
-        other => Err(JsError::new(&format!("SKP: unknown target '{other}'"))),
+        skp_export::Target::Skp2026 | skp_export::Target::Skp2026Compat => "skp2026".to_string(),
+        skp_export::Target::Stream(r) => api::DocFormat::SkpStream(r.number()).as_str(),
     }
 }
 
@@ -564,12 +857,38 @@ fn insert_report_to_js(report: &kernel::InsertReport) -> JsValue {
     Reflect::set(&js, &JsValue::from_str("rootIds"), &ids_arr).unwrap();
     set_num("definitionsAdded", report.definitions_added);
     set_num("definitionsReused", report.definitions_reused);
+    set_num("definitionsLinked", report.definitions_linked);
     set_num("materialsAdded", report.materials_added);
     set_num("materialsReused", report.materials_reused);
     set_num("objectsAdded", report.objects_added);
     set_num("guidesAdded", report.guides_added);
     set_num("worldSketchesSkipped", report.world_sketches_skipped);
     set_num("annotationsSkipped", report.annotations_skipped);
+    let drawn = serde_json::Value::Array(
+        report
+            .drawn
+            .iter()
+            .map(|d| {
+                let n = d.plane.normal();
+                let o = Point3::ORIGIN + n * (-d.plane.signed_distance(Point3::ORIGIN));
+                serde_json::json!({
+                    "plane": [o.x, o.y, o.z, n.x, n.y, n.z],
+                    "detached": d.detached.map(|s| s.data().as_ffi().to_string()),
+                    "anchors": d.anchors.iter().map(|(a, b)| {
+                        serde_json::json!([[a.x, a.y, a.z], [b.x, b.y, b.z]])
+                    }).collect::<Vec<_>>(),
+                })
+            })
+            .collect(),
+    );
+    let drawn = js_sys::JSON::parse(&drawn.to_string()).unwrap_or(JsValue::NULL);
+    Reflect::set(&js, &JsValue::from_str("drawn"), &drawn).unwrap();
+    Reflect::set(
+        &js,
+        &JsValue::from_str("drawingUnchanged"),
+        &JsValue::from_bool(report.drawing_unchanged),
+    )
+    .unwrap();
     js.into()
 }
 
@@ -582,6 +901,19 @@ fn insert_report_to_js(report: &kernel::InsertReport) -> JsValue {
 /// written before a failing one do remain on this fresh item document,
 /// which the caller then discards.
 fn apply_library_meta(item: &mut Document, meta_json: Option<&str>) -> Result<(), ApiError> {
+    // The remote note (design 7.2) stays only on the item it was stamped
+    // on: a document carrying one (opened from a noted item) gives it up
+    // here unless the caller's metadata passes a note of its own.
+    if item
+        .attr_get(&kernel::AttrTarget::Document)
+        .ok()
+        .flatten()
+        .and_then(|d| d.get("hew.library"))
+        .is_some_and(|lib| lib.get("remote").is_some())
+    {
+        item.attr_delete(kernel::AttrTarget::Document, "hew.library", Some("remote"))
+            .map_err(doc_err)?;
+    }
     let Some(raw) = meta_json.filter(|m| !m.trim().is_empty()) else {
         return Ok(());
     };
@@ -603,7 +935,128 @@ fn apply_library_meta(item: &mut Document, meta_json: Option<&str>) -> Result<()
         )
         .map_err(doc_err)?;
     }
+    // Every save to the Library writes the item's content prints (OW-2),
+    // computed from the item itself, whatever the metadata said.
+    api::library_print::stamp_item_prints(item).map_err(doc_err)?;
     Ok(())
+}
+
+/// One Library item as the app describes it to
+/// [`Scene::library_status_json`] / [`Scene::update_definitions_from_items`]
+/// (OW-2): its stored prints, its file bytes, and the file's content hash.
+#[derive(Debug, Clone, Default)]
+struct LibraryItemInput {
+    prints: Option<std::collections::BTreeMap<u64, String>>,
+    bytes: Option<Vec<u8>>,
+    content_hash: Option<String>,
+}
+
+/// Parses `{ "<item id>": { prints?, bytes?, contentHash? } }`.
+fn library_items_from_js(
+    value: &JsValue,
+) -> Result<std::collections::BTreeMap<String, LibraryItemInput>, ApiError> {
+    let mut out = std::collections::BTreeMap::new();
+    if value.is_undefined() || value.is_null() {
+        return Ok(out);
+    }
+    if !value.is_object() {
+        return Err(ApiError::new(
+            "BadLibrary",
+            "the library must be an object keyed by item id",
+        ));
+    }
+    let obj = JsObject::from(value.clone());
+    let keys = JsObject::keys(&obj);
+    for i in 0..keys.length() {
+        let key = keys.get(i);
+        let id = key.as_string().unwrap_or_default();
+        let entry = Reflect::get(&obj, &key).unwrap_or(JsValue::UNDEFINED);
+        if !entry.is_object() {
+            continue;
+        }
+        let field =
+            |k: &str| Reflect::get(&entry, &JsValue::from_str(k)).unwrap_or(JsValue::UNDEFINED);
+        let mut input = LibraryItemInput::default();
+        let prints = field("prints");
+        if prints.is_object() {
+            let text = js_sys::JSON::stringify(&prints)
+                .ok()
+                .and_then(|s| s.as_string())
+                .unwrap_or_default();
+            input.prints = Some(parse_prints_json(&text)?);
+        }
+        let bytes = field("bytes");
+        if bytes.is_object() {
+            input.bytes = Some(Uint8Array::from(bytes).to_vec());
+        }
+        input.content_hash = field("contentHash").as_string();
+        out.insert(id, input);
+    }
+    Ok(out)
+}
+
+/// `{ "<def sid>": "p1:<hex>" }` as a prints map.
+fn parse_prints_json(text: &str) -> Result<std::collections::BTreeMap<u64, String>, ApiError> {
+    let raw: std::collections::BTreeMap<String, String> = serde_json::from_str(text)
+        .map_err(|e| ApiError::new("BadLibrary", &format!("prints: {e}")))?;
+    raw.into_iter()
+        .map(|(sid, p)| {
+            sid.parse::<u64>().map(|sid| (sid, p)).map_err(|_| {
+                ApiError::new(
+                    "BadLibrary",
+                    &format!("prints: {sid:?} is not a definition sid"),
+                )
+            })
+        })
+        .collect()
+}
+
+/// A prints map as JSON, keyed by decimal sid.
+fn prints_json(prints: &std::collections::BTreeMap<u64, String>) -> serde_json::Value {
+    serde_json::Value::Object(
+        prints
+            .iter()
+            .map(|(sid, p)| (sid.to_string(), serde_json::Value::String(p.clone())))
+            .collect(),
+    )
+}
+
+/// What the Library says, from the app's description of each item: its
+/// stored prints when they are under this build's scheme, else the prints
+/// computed from its bytes (also returned, for the app to cache). An item
+/// with neither is left out (its links read `item_missing`).
+#[allow(clippy::type_complexity)]
+fn library_item_prints(
+    items: &std::collections::BTreeMap<String, LibraryItemInput>,
+) -> Result<
+    (
+        std::collections::BTreeMap<String, std::collections::BTreeMap<u64, String>>,
+        std::collections::BTreeMap<String, std::collections::BTreeMap<u64, String>>,
+    ),
+    ApiError,
+> {
+    let mut prints = std::collections::BTreeMap::new();
+    let mut computed = std::collections::BTreeMap::new();
+    for (id, input) in items {
+        let stored = input
+            .prints
+            .as_ref()
+            .filter(|p| p.values().all(|v| kernel::is_current_print(v)));
+        if let Some(p) = stored {
+            prints.insert(id.clone(), p.clone());
+            continue;
+        }
+        // An unreadable file says nothing: its links read `item_missing`
+        // (an update of one refuses `LoadFailed`).
+        if let Some(bytes) = &input.bytes
+            && let Ok(doc) = Document::load(bytes)
+        {
+            let p = api::library_print::item_prints(&doc);
+            computed.insert(id.clone(), p.clone());
+            prints.insert(id.clone(), p);
+        }
+    }
+    Ok((prints, computed))
 }
 
 /// Converts a `u64` handle to a [`MaterialId`], or `None` if the sentinel
@@ -759,6 +1212,22 @@ fn node_id(kind: u8, id: u64) -> Result<NodeId, ApiError> {
             "BadNodeKind: node kind must be 0 (object), 1 (group), or 2 (instance)".to_string(),
         )),
     }
+}
+
+/// Decode parallel `(kinds, ids)` FFI lists into [`NodeId`]s, empty allowed
+/// (a clipboard copy of drawing alone). Mismatched lengths are a boundary
+/// error.
+fn node_list(kinds: &[u8], ids: &[u64]) -> Result<Vec<NodeId>, ApiError> {
+    if kinds.len() != ids.len() {
+        return Err(ApiError(
+            "BadNodeList: kinds and ids must be the same length".to_string(),
+        ));
+    }
+    kinds
+        .iter()
+        .zip(ids)
+        .map(|(&k, &i)| node_id(k, i))
+        .collect()
 }
 
 /// Decode parallel `(kinds, ids)` FFI lists into [`NodeId`]s — the
@@ -1316,7 +1785,27 @@ pub fn item_ghost_mesh(bytes: &[u8]) -> Result<GhostMeshJs, JsError> {
             edge_positions.extend_from_slice(&[p.x as f32, p.y as f32, p.z as f32]);
         }
     }
-    let (lo, hi) = softrender::document_bbox(&doc);
+    let (mut lo, mut hi) = softrender::document_bbox(&doc);
+    // A clipboard item's copied drawing (its world sketches, which a paste
+    // draws): its lines join the stroke and its bounds the box the snap and
+    // the origin cue use (v1.5 decisions D3).
+    let carried = doc.carried_drawing();
+    if !carried.is_empty() && doc.top_level_nodes().is_empty() {
+        // Drawing alone: the empty-document box must not widen it.
+        lo = kernel::Point3::new(f64::INFINITY, f64::INFINITY, f64::INFINITY);
+        hi = kernel::Point3::new(f64::NEG_INFINITY, f64::NEG_INFINITY, f64::NEG_INFINITY);
+    }
+    for s in carried {
+        let Some(sk) = doc.sketch(s) else { continue };
+        for e in sk.edges().values() {
+            for v in [e.from, e.to] {
+                let p = sk.vertices()[v].position;
+                edge_positions.extend_from_slice(&[p.x as f32, p.y as f32, p.z as f32]);
+                lo = kernel::Point3::new(lo.x.min(p.x), lo.y.min(p.y), lo.z.min(p.z));
+                hi = kernel::Point3::new(hi.x.max(p.x), hi.y.max(p.y), hi.z.max(p.z));
+            }
+        }
+    }
     Ok(GhostMeshJs {
         positions,
         normals,
@@ -1349,6 +1838,91 @@ impl NodeJs {
     pub fn id(&self) -> u64 {
         self.id
     }
+}
+
+/// The JSON of a linked copy's result: the new placements and every wrap
+/// the copy made, handles as decimal strings (see
+/// [`Scene::duplicate_selection_array_linked`]).
+fn linked_result_json(roots: &[NodeId], change: &kernel::DocChange) -> String {
+    let node_json = |n: NodeId| {
+        let (kind, id) = match n {
+            NodeId::Object(o) => ("object", o.data().as_ffi()),
+            NodeId::Group(g) => ("group", g.data().as_ffi()),
+            NodeId::Instance(i) => ("instance", i.data().as_ffi()),
+        };
+        serde_json::json!({ "kind": kind, "id": id.to_string() })
+    };
+    let nodes: Vec<serde_json::Value> = roots.iter().map(|&n| node_json(n)).collect();
+    let linked: Vec<serde_json::Value> = change
+        .linked
+        .iter()
+        .map(|w| {
+            serde_json::json!({
+                "source": node_json(w.source),
+                "instance": w.instance.data().as_ffi().to_string(),
+                "definition": w.definition.data().as_ffi().to_string(),
+            })
+        })
+        .collect();
+    serde_json::json!({ "nodes": nodes, "linked": linked }).to_string()
+}
+
+/// The flip arguments checked at the trust boundary: parallel node lists,
+/// finite numbers in every slot (the unused `about` too), and an
+/// `about_kind` of 0 (center), 1 (origin), or 2 (the point `about`).
+#[allow(clippy::type_complexity)]
+fn flip_args(
+    kinds: &[u8],
+    ids: &[u64],
+    sketch_ids: &[u64],
+    normal: [f64; 3],
+    about_kind: u8,
+    about: [f64; 3],
+) -> Result<
+    (
+        Vec<NodeId>,
+        Vec<kernel::SketchId>,
+        kernel::Vec3,
+        kernel::FlipAbout,
+    ),
+    ApiError,
+> {
+    if kinds.len() != ids.len() {
+        return Err(ApiError(
+            "BadNodeList: kinds and ids must be the same length".to_string(),
+        ));
+    }
+    let nodes = kinds
+        .iter()
+        .zip(ids)
+        .map(|(&k, &i)| node_id(k, i))
+        .collect::<Result<Vec<_>, _>>()?;
+    let sketches: Vec<_> = sketch_ids.iter().map(|&s| sketch_id(s)).collect();
+    if normal.iter().any(|v| !v.is_finite()) {
+        return Err(ApiError::new("BadFlip", "the plane normal must be finite"));
+    }
+    // Checked whatever `about_kind` says: a recording writes every slot, and
+    // a non-finite number there would not replay.
+    if about.iter().any(|v| !v.is_finite()) {
+        return Err(ApiError::new("BadFlip", "the plane point must be finite"));
+    }
+    let about = match about_kind {
+        0 => kernel::FlipAbout::Center,
+        1 => kernel::FlipAbout::Origin,
+        2 => kernel::FlipAbout::Point(kernel::Point3::new(about[0], about[1], about[2])),
+        _ => {
+            return Err(ApiError::new(
+                "BadFlip",
+                "about_kind must be 0 (center), 1 (origin), or 2 (a point)",
+            ));
+        }
+    };
+    Ok((
+        nodes,
+        sketches,
+        kernel::Vec3::new(normal[0], normal[1], normal[2]),
+        about,
+    ))
 }
 
 fn node_js(node: NodeId) -> NodeJs {
@@ -1451,6 +2025,20 @@ impl MeshJs {
         self.mesh.soft_edge_positions.clone()
     }
 
+    /// Line-segment endpoints (xyz pairs) of the tangent edges: joints between
+    /// two different surfaces that meet tangentially (fillet rails, a rounded
+    /// rectangle's wall-to-corner seams). Hidden by default; View ▸ Tangent
+    /// Edges draws them thin (true-curves.md §3.3 rule 3).
+    pub fn tangent_edge_positions(&self) -> Vec<f32> {
+        self.mesh.tangent_edge_positions.clone()
+    }
+
+    /// Line-segment endpoints (xyz pairs) of a smoothed object's cage
+    /// edges, for the wire overlay; empty for an unsmoothed object.
+    pub fn cage_edge_positions(&self) -> Vec<f32> {
+        self.mesh.cage_edge_positions.clone()
+    }
+
     /// Whether the source Object encloses a volume.
     pub fn watertight(&self) -> bool {
         self.watertight
@@ -1468,10 +2056,34 @@ pub struct MaterialJs {
     has_texture: bool,
     world_w: f64,
     world_h: f64,
+    /// Metallic and roughness factors; the plain surface's (0 and 1) when
+    /// the material has no physically based properties.
+    metallic: f32,
+    roughness: f32,
+    has_pbr: bool,
+    /// Which maps it carries: metallic, roughness, normal, occlusion.
+    has_maps: [bool; 4],
 }
 
 #[wasm_bindgen]
 impl MaterialJs {
+    /// Whether the material has physically based properties beyond the
+    /// plain surface.
+    pub fn has_pbr(&self) -> bool {
+        self.has_pbr
+    }
+    /// Metalness, 0 to 1 (0 for a plain material).
+    pub fn metallic(&self) -> f32 {
+        self.metallic
+    }
+    /// Roughness, 0 to 1 (1 for a plain material).
+    pub fn roughness(&self) -> f32 {
+        self.roughness
+    }
+    /// Whether the material carries a normal map.
+    pub fn has_normal_map(&self) -> bool {
+        self.has_maps[2]
+    }
     /// Human-facing name.
     pub fn name(&self) -> String {
         self.name.clone()
@@ -1763,6 +2375,67 @@ impl FaceSplitJs {
     }
 }
 
+/// What the undo and redo stacks hold (mirrors `kernel::HistoryMemory`),
+/// from [`Scene::history_memory`]. Byte counts are estimates and cross as
+/// `number`s (exact far past any wasm heap).
+#[wasm_bindgen]
+pub struct HistoryMemoryJs {
+    inner: kernel::HistoryMemory,
+}
+
+#[wasm_bindgen]
+impl HistoryMemoryJs {
+    /// Estimated bytes only the undo and redo stacks hold.
+    pub fn bytes(&self) -> f64 {
+        self.inner.bytes as f64
+    }
+
+    /// The budget: the stacks are trimmed once they hold more than this.
+    pub fn budget_bytes(&self) -> f64 {
+        self.inner.budget.max_bytes as f64
+    }
+
+    /// The fewest undo steps a trim keeps.
+    pub fn min_steps(&self) -> u32 {
+        self.inner.budget.min_steps as u32
+    }
+
+    /// Undo steps on the stack.
+    pub fn undo_steps(&self) -> u32 {
+        self.inner.undo_steps as u32
+    }
+
+    /// Redo steps on the stack.
+    pub fn redo_steps(&self) -> u32 {
+        self.inner.redo_steps as u32
+    }
+
+    /// Undo steps trimmed since the document was created or opened.
+    pub fn trimmed_total(&self) -> f64 {
+        self.inner.trimmed_total as f64
+    }
+}
+
+/// One trim the undo-memory budget made (mirrors `kernel::HistoryTrim`),
+/// from [`Scene::take_history_trim`]: the app's status-bar note.
+#[wasm_bindgen]
+pub struct HistoryTrimJs {
+    inner: kernel::HistoryTrim,
+}
+
+#[wasm_bindgen]
+impl HistoryTrimJs {
+    /// The oldest undo steps the trim dropped.
+    pub fn dropped(&self) -> u32 {
+        self.inner.dropped as u32
+    }
+
+    /// The undo steps left.
+    pub fn kept(&self) -> u32 {
+        self.inner.kept as u32
+    }
+}
+
 /// What a document mutation touched (mirrors `kernel::DocChange`). Undo and
 /// redo return this so the renderer can rebuild only the affected scene
 /// graph nodes instead of falling back to a full-scene refresh.
@@ -1930,6 +2603,7 @@ pub struct SketchRegionPickJs {
     sketch: u64,
     region: u64,
     depth: f64,
+    detached: bool,
 }
 
 #[wasm_bindgen]
@@ -1947,6 +2621,13 @@ impl SketchRegionPickJs {
     /// Radial distance along the normalized pick ray.
     pub fn depth(&self) -> f64 {
         self.depth
+    }
+
+    /// Whether the region's sketch is a detached shape (detached shapes
+    /// D8): drawn to stay apart from the face it lies on, so a pick that
+    /// ties with that face goes to the region.
+    pub fn detached(&self) -> bool {
+        self.detached
     }
 }
 
@@ -1974,6 +2655,104 @@ impl SketchEdgePickJs {
     /// Radial distance along the normalized pick ray.
     pub fn depth(&self) -> f64 {
         self.depth
+    }
+}
+
+/// The lines or fills drawn inside components under a pick ray, RANKED
+/// (`Scene::pick_instance_sketch_edge`, `Scene::pick_instance_sketch_region`):
+/// up to `INSTANCE_PICK_HITS_PER_PLACEMENT` hits per shown top-level
+/// instance (one per line for an edge pick, one per sketch for a region
+/// pick), all of them best first, so an instance may appear more than
+/// once. Parallel arrays, one entry per hit: `instances()` the top-level
+/// placement the drawing is seen through, `sketches()` the sketch holding
+/// it (the definition's own, or a nested definition's), `depths()` the
+/// distance along the normalized ray, and `points()` the world point hit,
+/// three floats per hit (on the line for an edge pick, on the fill for a
+/// region pick). Empty on a miss.
+#[wasm_bindgen]
+#[derive(Default)]
+pub struct InstanceSketchHitsJs {
+    instances: Vec<u64>,
+    sketches: Vec<u64>,
+    depths: Vec<f64>,
+    points: Vec<f64>,
+}
+
+#[wasm_bindgen]
+impl InstanceSketchHitsJs {
+    /// How many hits, best first.
+    pub fn len(&self) -> usize {
+        self.instances.len()
+    }
+
+    /// Whether nothing was hit.
+    pub fn is_empty(&self) -> bool {
+        self.instances.is_empty()
+    }
+
+    /// The top-level placement of each hit (`BigUint64Array`).
+    pub fn instances(&self) -> Vec<u64> {
+        self.instances.clone()
+    }
+
+    /// The sketch of each hit (`BigUint64Array`).
+    pub fn sketches(&self) -> Vec<u64> {
+        self.sketches.clone()
+    }
+
+    /// The distance of each hit along the normalized ray (`Float64Array`).
+    pub fn depths(&self) -> Vec<f64> {
+        self.depths.clone()
+    }
+
+    /// The world point of each hit, `[x, y, z]` per hit (`Float64Array`).
+    pub fn points(&self) -> Vec<f64> {
+        self.points.clone()
+    }
+}
+
+impl InstanceSketchHitsJs {
+    fn push(&mut self, instance: InstanceId, sketch: SketchId, depth: f64, point: Point3) {
+        self.instances.push(instance.data().as_ffi());
+        self.sketches.push(sketch.data().as_ffi());
+        self.depths.push(depth);
+        self.points.extend([point.x, point.y, point.z]);
+    }
+}
+
+/// The lines drawn inside one placement (`Scene::instance_sketch_placements`):
+/// one entry per drawn sketch, nested definitions included. `sketches()`
+/// the sketch ids; `poses()` one row-major 3×4 affine per sketch (12
+/// floats each, concatenated) mapping the sketch's stored coordinates into
+/// the placement's own frame, so it draws at `instance_pose × pose`.
+#[wasm_bindgen]
+#[derive(Default)]
+pub struct InstanceSketchPlacementsJs {
+    sketches: Vec<u64>,
+    poses: Vec<f64>,
+}
+
+#[wasm_bindgen]
+impl InstanceSketchPlacementsJs {
+    /// How many sketches.
+    pub fn len(&self) -> usize {
+        self.sketches.len()
+    }
+
+    /// Whether the placement draws no line.
+    pub fn is_empty(&self) -> bool {
+        self.sketches.is_empty()
+    }
+
+    /// The sketch ids (`BigUint64Array`).
+    pub fn sketches(&self) -> Vec<u64> {
+        self.sketches.clone()
+    }
+
+    /// 12 floats per sketch, row-major 3×4, into the placement's frame
+    /// (`Float64Array`).
+    pub fn poses(&self) -> Vec<f64> {
+        self.poses.clone()
     }
 }
 
@@ -2060,8 +2839,9 @@ impl SnapJs {
     }
 
     /// Snap kind for cue styling: "endpoint", "center", "quadrant",
-    /// "midpoint", "intersection", "tangent", "on-edge", "on-face",
-    /// "on-guide", "on-axis", "parallel", "perpendicular".
+    /// "midpoint", "intersection", "tangent", "on-edge",
+    /// "on-intersection-line", "on-face", "on-guide", "on-axis",
+    /// "parallel", "perpendicular".
     pub fn kind(&self) -> String {
         match self.snap.kind {
             SnapKind::Endpoint => "endpoint",
@@ -2071,6 +2851,7 @@ impl SnapJs {
             SnapKind::Intersection => "intersection",
             SnapKind::Tangent => "tangent",
             SnapKind::OnEdge => "on-edge",
+            SnapKind::OnIntersectionLine => "on-intersection-line",
             SnapKind::OnFace => "on-face",
             SnapKind::OnGuide => "on-guide",
             SnapKind::OnAxis => "on-axis",
@@ -2109,14 +2890,26 @@ impl SnapJs {
     }
 
     /// "vertex" | "edge" | "face" | "sketch-edge" | "sketch-region" |
-    /// "sketch-curve" for interpreting `element` / `sketch_region` /
-    /// `sketch_curve`.
+    /// "sketch-curve" | "meeting-line" for interpreting `element` /
+    /// `sketch_region` / `sketch_curve`.
     ///
     /// "sketch-curve" carries NO `element`: the analytic points of a drawn
     /// curve (a circle's center, its quadrants, an anchored tangent) belong
     /// to the curve CHAIN, not to any one facet edge — a center lies on no
     /// edge at all. Read `sketch_curve` (plus `sketch`) for it.
+    ///
+    /// "meeting-line" is a snap on the line where two owners' faces meet
+    /// (`"on-intersection-line"`, or the `"midpoint"` of such a line; see
+    /// `meeting_line`). It lies on two faces at once and is a pick of
+    /// neither, so it never reads as "face": a consumer that adopts the
+    /// plane or normal of a face under the cursor, or treats a face hit as
+    /// a part, must not take the first face's for it. `object`/`instance`/
+    /// `element` (or `sketch`/`sketch_region`) still name that first face,
+    /// the line's owner of record.
     pub fn element_kind(&self) -> Option<String> {
+        if self.snap.meeting_line.is_some() {
+            return Some("meeting-line".to_string());
+        }
         self.snap
             .source
             .map(|s| {
@@ -2201,6 +2994,29 @@ impl SnapJs {
     pub fn projected_from(&self) -> Option<Vec<f64>> {
         self.snap.projected_from.map(|p| vec![p.x, p.y, p.z])
     }
+
+    /// Whether this `"intersection"` snap is an edge passing THROUGH a face
+    /// of another owner (`inference::Snap::pierced_face` is set) rather
+    /// than two edges, or an edge and a guide or axis, crossing. The edge
+    /// is the snap's provenance as usual; a tool words the point from
+    /// this ("where the edge meets the face") without a second lookup.
+    /// `false` for every other snap.
+    pub fn pierces_face(&self) -> bool {
+        self.snap.pierced_face.is_some()
+    }
+
+    /// The line where a face of one owner meets a face of another, when
+    /// this snap lies on one (`"on-intersection-line"`, or the
+    /// `"midpoint"` of such a line): its two ends as `[ax, ay, az, bx, by,
+    /// bz]`, for drawing the virtual edge under the cursor
+    /// (`inference::Snap::meeting_line`). The snap's `element_kind` is
+    /// `"meeting-line"`, and its `object`/`element` name the first of the
+    /// two faces. `undefined` for every other snap.
+    pub fn meeting_line(&self) -> Option<Vec<f64>> {
+        self.snap
+            .meeting_line
+            .map(|l| vec![l.a.x, l.a.y, l.a.z, l.b.x, l.b.y, l.b.z])
+    }
 }
 
 // ------------------------------------------------------------------- scene
@@ -2235,26 +3051,62 @@ pub struct Scene {
     /// scoped avoids duplicate/ghost inference at sibling placements.
     active_inference_instance: Option<InstanceId>,
     active_inference_sketches: Vec<SketchId>,
+    /// Whether the innermost open session frame's own drawing
+    /// ([`Document::session_frame_sketches`]) is in the editing scope the
+    /// sketch picks favor — the `frame_sketches` argument of
+    /// [`Scene::set_pick_scope`]. Per window and never saved, like the
+    /// scope itself (which lives on `inference`); meaningful only while a
+    /// scope is set, and reset with it.
+    pick_scope_frame_sketches: bool,
     /// Open live API connections (docs/agents/HEW_API.md §11.2), keyed by the id
     /// [`Scene::api_connection_open`] minted. Each holds its own
     /// `api::Connection` dispatch state (granted profile, hello/attach
     /// lifecycle) — session-only, like `hidden_objects` above, never
     /// persisted and never fed into the canonical serialization.
     api_connections: std::collections::HashMap<u32, api::Connection>,
+    /// The one command registry every live API connection dispatches
+    /// against: protocol 1 plus the commands plugins registered
+    /// ([`Scene::register_plugin_commands`]).
+    api_registry: api::Registry,
+    /// Each forward [`Scene::api_dispatch`] handed out and
+    /// [`Scene::api_complete_forward`] has not completed, by connection and
+    /// token: what completing it records and whether it resyncs.
+    api_pending_forwards: std::collections::HashMap<(u32, u64), PendingForward>,
     /// The next id [`Scene::api_connection_open`] mints. Monotonic for
     /// this `Scene`'s lifetime — wrapping is astronomically unreachable
     /// (2^32 live connections in one session) but wraps rather than
     /// panics if it ever were.
     next_api_conn_id: u32,
-    /// A JSON-encoded [`live::ViewDirective`] left by the most recent
-    /// [`Scene::api_dispatch`] call whose command was `hew.view.camera`,
-    /// `hew.view.zoom_extents`, or `hew.view.units` and succeeded —
-    /// `None` otherwise, including for a refused view command (which
-    /// changes nothing, view included). [`Scene::take_pending_view_directive`]
-    /// is how the live bridge collects it; see that method and
-    /// `live::ViewDirective`'s doc comment for why this rides a separate
-    /// accessor rather than the JSON-RPC reply itself.
-    pending_view_directive: Option<String>,
+    /// The [`live::ViewDirective`]s the most recent [`Scene::api_dispatch`]
+    /// left, in order: one per host view effect its commands asked for, a
+    /// transaction possibly carrying several. Empty for a refused dispatch
+    /// (which changes nothing, view included).
+    /// [`Scene::take_pending_view_directives`] is how the live bridge
+    /// collects them; see that method and `live::ViewDirective`'s doc
+    /// comment for why they ride a separate accessor rather than the
+    /// JSON-RPC reply itself.
+    pending_view_directives: Vec<live::ViewDirective>,
+    /// The app's selection as it last mirrored it
+    /// ([`Scene::set_ui_selection`]), and as a successful
+    /// `hew.selection.set` left it: what the bus reads and merges into.
+    ui_selection: Vec<live::UiSelectionEntry>,
+    /// The live viewport's isolation as the app last mirrored it
+    /// ([`Scene::set_ui_isolation`]), or as a successful bus command left
+    /// it; `None` when nothing is isolated.
+    ui_isolation: Option<Vec<live::UiIsolationEntry>>,
+    /// The app's in-context (fallback) entries as it last mirrored them
+    /// ([`Scene::set_ui_context`]), outermost first.
+    ui_context: Vec<live::UiContextEntry>,
+    /// Whether a tool gesture is armed in the user's window, as the app last
+    /// reported it ([`Scene::set_ui_gesture_armed`]).
+    ui_gesture_armed: bool,
+    /// The active tool's name as the app last reported it
+    /// ([`Scene::note_tool_changed`]).
+    ui_tool: String,
+    /// The selection and tool [`Scene::drain_events`] last reported, to
+    /// emit `selection_changed` and `tool_changed` once per change.
+    last_drained_selection: Vec<live::UiSelectionEntry>,
+    last_drained_tool: String,
     /// The one open drafting gesture ([`Scene::draft_begin_plane`] and
     /// friends): its handle and instance pose. Session-only; the kernel
     /// `Document` owns the draft itself.
@@ -2263,6 +3115,12 @@ pub struct Scene {
     next_draft_handle: u64,
     /// The open history bracket ([`Scene::history_bracket_open`]), if any.
     open_bracket: Option<kernel::DocTransaction>,
+    /// The undo-memory budget ([`Scene::set_history_budget`]), applied to
+    /// whatever document the scene holds.
+    history_budget: kernel::HistoryBudget,
+    /// The last trim the budget made and nobody has collected yet
+    /// ([`Scene::take_history_trim`]).
+    history_trim: Option<kernel::HistoryTrim>,
     /// The objects the last import created (Model Health's "Last import"
     /// scope); replaced by each import, kept across other edits.
     last_import_objects: Vec<ObjectId>,
@@ -2270,6 +3128,13 @@ pub struct Scene {
     /// dropped for every object a change touches (`reconcile`) and all at
     /// once when a document loads.
     health_cache: std::collections::BTreeMap<ObjectId, kernel::health::Verdict>,
+    /// Each object's rims for the health overlay, dropped with
+    /// `health_cache` ([`health::RimCache`]).
+    rim_cache: health::RimCache,
+    /// The last Mend preview: `(object, plan JSON, history generation)` and
+    /// its census, so the preview line and the hover's highlight points
+    /// share one census. Dropped on every reconcile.
+    census_cache: std::cell::RefCell<Option<CensusEntry>>,
     /// The app's display length format, as the live bridge last reported
     /// it ([`Scene::set_display_units`]): what an API `.skp` export opens in.
     api_display_units: Option<String>,
@@ -2287,6 +3152,38 @@ pub struct Scene {
     /// A `.skp` open under way between [`Scene::open_skp_begin`] and the
     /// [`Scene::open_skp_step`] that finishes it.
     pending_open: Option<PendingOpen>,
+    /// The compounds the host opened ([`Scene::compound_begin`]), innermost
+    /// last; the kernel holds the matching stack.
+    open_compounds: Vec<HostCompound>,
+    /// Non-zero while [`Scene::replay`] re-enters a recorded plugin
+    /// compound: the compound is replay's own, so its calls are not busy.
+    replay_compounds: u32,
+    /// The host's id for this window's document, as events name it
+    /// ([`Scene::set_host_document_id`]).
+    host_document_id: String,
+    /// The document epoch [`Scene::drain_events`] last drained up to.
+    last_drained_epoch: u64,
+    /// What the last drain saw, to emit a change once: the session stack,
+    /// the Scenes (stable id and entry JSON), the Scene last activated,
+    /// and the display units.
+    last_context: Vec<NodeId>,
+    /// The fallback entries the last drain saw, beside `last_context`.
+    last_drained_fallback: Vec<live::UiContextEntry>,
+    last_scenes: Vec<(u64, String)>,
+    last_active_scene: Option<u64>,
+    /// The active Scene as of the last drain.
+    drained_active_scene: Option<u64>,
+    last_units: Option<String>,
+    /// Events the host reported since the last drain (document lifecycle,
+    /// tool changes): `(event name, params)`.
+    pending_host_events: Vec<(String, serde_json::Value)>,
+    /// How many times [`Scene::load`] has replaced the document — the
+    /// scene-side half of the clipboard origin ([`Scene::clipboard_origin`]).
+    /// The kernel's stable ids are per-document counters, so an origin that
+    /// did not change with the document would let a copy taken from the
+    /// previous document of this window link to whatever definition now
+    /// holds the same id.
+    doc_epoch: u64,
 }
 
 impl Default for Scene {
@@ -2339,6 +3236,8 @@ impl Scene {
         for &id in &change.objects_touched {
             self.face_range_cache.remove(id);
             self.health_cache.remove(&id);
+            self.rim_cache.borrow_mut().remove(&id);
+            self.census_cache.borrow_mut().take();
             // A user-hidden object stays out of inference even when a mutation
             // touches it, so snap/pick never resurrect hidden candidates.
             if self.doc.is_world_object(id) && !self.hidden_objects.contains(&id) {
@@ -2346,15 +3245,17 @@ impl Scene {
                 self.inference.add_object(id, object, &Transform::IDENTITY);
             } else {
                 self.inference.remove_object(id);
-                // A touched non-world id may be a definition member whose
-                // shared geometry just changed — a definition edit reports
-                // the member here and every instance of it in
-                // `instances_touched`. Dropping the cached definition-space
-                // candidates makes the instance re-registration below
-                // re-extract from the new geometry; for a plain hidden or
-                // deleted world object this is a no-op.
-                self.inference.remove_def_member(id);
             }
+            // A touched id may ALSO be cached as a definition member whose
+            // shared geometry just changed: a definition edit reports the
+            // member here and every instance of it in `instances_touched`,
+            // and a session edit reports a world object that every live
+            // sibling placement renders as a member (ARCHITECTURE.md 2.11,
+            // live sibling placements). Dropping the cached definition-
+            // space candidates makes the instance re-registration below
+            // re-extract from the new geometry; for an id never placed
+            // this is a no-op.
+            self.inference.remove_def_member(id);
         }
         // Instances: re-register each touched instance's definition geometry at
         // its pose (clearing any prior candidates first), or drop hidden/gone
@@ -2424,6 +3325,15 @@ impl Scene {
         }
 
         self.torture_self_check(change);
+
+        // The undo-memory budget (kernel `history_budget.rs`): between
+        // operations, so a trim never lands inside one. The kernel itself
+        // refuses inside an open bracket. The budget is re-applied each
+        // time because a load or New replaces the document.
+        self.doc.set_history_budget(self.history_budget);
+        if let Some(trim) = self.doc.enforce_history_budget() {
+            self.history_trim = Some(trim);
+        }
     }
 
     /// Torture-mode (docs/dev/DEVELOPMENT.md) re-tessellation self-check.
@@ -2600,8 +3510,24 @@ impl Scene {
                         Some(SketchCurveRim {
                             curve: rim.curve,
                             center: pose.apply_point(rim.center),
-                            axis: pose.apply_plane(&source.plane()).ok()?.normal(),
+                            // The placed sketch's up, as a world sketch's
+                            // rim axis is its plane normal.
+                            axis: pose
+                                .apply_plane_keeping_side(&source.plane())
+                                .ok()?
+                                .normal(),
                             radius: rim.radius * scale,
+                            // The basis maps as plain vectors, so under a
+                            // mirror it is left-handed about `axis`. That is
+                            // deliberate: `coverage` holds angles measured in
+                            // the definition's (u, v), and every consumer
+                            // (quadrant points, tangent angles, `covers`)
+                            // parametrizes the rim as center + r(cos t u +
+                            // sin t v) in that same basis, which maps a
+                            // covered angle to the image of the same point.
+                            // `axis` is only used to project onto the plane,
+                            // where its sign does not matter. Re-orienting
+                            // the basis would invalidate the coverage.
                             basis_u: pose.apply_vector(rim.basis_u).normalized().ok()?,
                             basis_v: pose.apply_vector(rim.basis_v).normalized().ok()?,
                             coverage: rim.coverage,
@@ -2617,7 +3543,10 @@ impl Scene {
                 .collect();
             self.inference
                 .add_sketch_polygon_centers(sid, &polygon_centers);
-            let Some(plane) = pose.apply_plane(&source.plane()).ok() else {
+            // Side-keeping, like a world sketch's region faces: the plane's
+            // normal is the placed sketch's up, which a mirrored pose must
+            // not turn over.
+            let Some(plane) = pose.apply_plane_keeping_side(&source.plane()).ok() else {
                 continue;
             };
             let faces: Vec<SketchRegionFace> = source
@@ -2716,6 +3645,32 @@ impl Scene {
         Some(out)
     }
 
+    /// `Err(DocumentBusy)` while a plugin command holds the document (a
+    /// compound is open, docs/agents/PLUGINS.md "Compounds"): the first
+    /// statement of every document-mutating `Scene` method outside
+    /// [`BUSY_EXEMPT`]. The UI reaches the kernel only through `Scene`, so
+    /// this is the whole busy guard for it; the bus carries the compound's
+    /// forward stamp instead ([`Scene::api_dispatch_in_forward`]).
+    fn ensure_not_busy(&self) -> Result<(), ApiError> {
+        if self.doc.compound_open() && self.replay_compounds == 0 {
+            return Err(ApiError::new(
+                "DocumentBusy",
+                "a plugin command is running; wait for it to finish or cancel it",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Pops the innermost host compound when it is `kernel_token`'s.
+    fn pop_host_compound(&mut self, kernel_token: u64) -> Result<HostCompound, ApiError> {
+        match self.open_compounds.last() {
+            Some(top) if top.kernel_token.to_raw() == kernel_token => {
+                Ok(self.open_compounds.pop().expect("checked"))
+            }
+            _ => Err(doc_err(kernel::DocumentError::CompoundTokenMismatch)),
+        }
+    }
+
     fn apply_op(&mut self, handle: u64, op: KernelOp) -> Result<KernelOpReport, ApiError> {
         let (report, change) = self
             .doc
@@ -2739,19 +3694,56 @@ impl Scene {
             hidden_instances: std::collections::HashSet::new(),
             active_inference_instance: None,
             active_inference_sketches: Vec::new(),
+            pick_scope_frame_sketches: false,
             api_connections: std::collections::HashMap::new(),
+            api_registry: api::Registry::protocol_1(),
+            api_pending_forwards: std::collections::HashMap::new(),
             next_api_conn_id: 0,
-            pending_view_directive: None,
+            pending_view_directives: Vec::new(),
+            ui_selection: Vec::new(),
+            ui_isolation: None,
+            ui_context: Vec::new(),
+            ui_gesture_armed: false,
+            ui_tool: String::new(),
+            last_drained_selection: Vec::new(),
+            last_drained_tool: String::new(),
             open_draft: None,
             open_bracket: None,
+            history_budget: kernel::HistoryBudget::default(),
+            history_trim: None,
             next_draft_handle: 0,
             last_import_objects: Vec::new(),
             health_cache: std::collections::BTreeMap::new(),
+            rim_cache: Default::default(),
+            census_cache: Default::default(),
             api_display_units: None,
             skp_source: None,
             pending_skp_source: None,
             pending_open: None,
+            open_compounds: Vec::new(),
+            replay_compounds: 0,
+            host_document_id: "doc_1".to_string(),
+            last_drained_epoch: 0,
+            last_context: Vec::new(),
+            last_drained_fallback: Vec::new(),
+            last_scenes: Vec::new(),
+            last_active_scene: None,
+            drained_active_scene: None,
+            last_units: None,
+            pending_host_events: Vec::new(),
+            doc_epoch: 0,
         }
+    }
+
+    /// The clipboard origin token for `window_nonce` against THIS scene's
+    /// current document: the nonce (the app's per-window random id) plus
+    /// the document epoch, so it differs between windows AND between the
+    /// documents one window opens in turn. [`Scene::extract_item`] stamps
+    /// it into clipboard bytes and [`Scene::insert_item`] passes it to the
+    /// kernel, which links a pasted definition to its original only when
+    /// the two agree ([`kernel::InsertOptions::origin`]).
+    fn clipboard_origin(&self, window_nonce: &str) -> String {
+        format!("{window_nonce}#{}", self.doc_epoch)
     }
 
     /// Scope definition-sketch inference to the component instance currently
@@ -2764,7 +3756,7 @@ impl Scene {
     // -------------------------------------------------------------- live API
 
     /// Opens a new live API connection against this scene's document,
-    /// granted `Profile::App` (docs/agents/HEW_API.md §10, §11.2). Returns the
+    /// granted `Grant::app()` (docs/agents/HEW_API.md §10, §11.2). Returns the
     /// connection id the caller must pass to every subsequent
     /// [`Scene::api_dispatch`]/[`Scene::api_connection_close`] call. The
     /// Tauri shell opens exactly one of these per accepted socket
@@ -2775,8 +3767,43 @@ impl Scene {
         self.next_api_conn_id = self.next_api_conn_id.wrapping_add(1);
         let identity = format!("live:{id}");
         self.api_connections
-            .insert(id, api::Connection::new(api::Profile::App, &identity));
+            .insert(id, api::Connection::new(api::Grant::app(), &identity));
         id
+    }
+
+    /// Opens a live API connection holding a restricted grant — a plugin's
+    /// or a connected app's (docs/agents/HEW_API.md §10) — given as the
+    /// grant's JSON. Refuses `GRANT` when the JSON is malformed or the
+    /// grant is not a plugin's or an app's (it names neither, or it holds
+    /// `all`, which only first-party connections hold): first-party
+    /// connections go through [`Scene::api_connection_open`]. The connection's identity
+    /// is `plugin:<id>` or `app:<pairing>`, which history records as the
+    /// origin of its changes.
+    pub fn api_plugin_connection_open(&mut self, grant_json: &str) -> Result<u32, ApiError> {
+        let grant: api::Grant = serde_json::from_str(grant_json)
+            .map_err(|e| ApiError::new("GRANT", &format!("malformed grant: {e}")))?;
+        if !grant.is_restricted() {
+            return Err(ApiError::new(
+                "GRANT",
+                "a plugin connection's grant must name a plugin or an app",
+            ));
+        }
+        if grant.holds(&api::Permission::All) {
+            return Err(ApiError::new(
+                "GRANT",
+                "a plugin connection's grant may not hold `all`, which is for first-party connections",
+            ));
+        }
+        let id = self.next_api_conn_id;
+        self.next_api_conn_id = self.next_api_conn_id.wrapping_add(1);
+        let identity = grant.identity_or(&format!("live:{id}"));
+        let connection = if grant.plugin.is_some() {
+            api::Connection::for_plugin(grant, &identity)
+        } else {
+            api::Connection::new(grant, &identity)
+        };
+        self.api_connections.insert(id, connection);
+        Ok(id)
     }
 
     /// Closes a live API connection and drops its dispatch state. A no-op
@@ -2785,6 +3812,29 @@ impl Scene {
     /// connection ends; this just releases what `Scene` was holding for it.
     pub fn api_connection_close(&mut self, conn_id: u32) {
         self.api_connections.remove(&conn_id);
+        self.api_pending_forwards
+            .retain(|(conn, _), _| *conn != conn_id);
+    }
+
+    /// Adds a plugin's commands to the registry every connection dispatches
+    /// against (docs/agents/PLUGINS.md "Commands"). `decls_json` is a JSON
+    /// array of the manifest's `contributes.commands` entries. Refuses
+    /// `REGISTER` with the registration error's name, or for malformed
+    /// JSON; a refused registration adds nothing.
+    pub fn register_plugin_commands(&mut self, id: &str, decls_json: &str) -> Result<(), ApiError> {
+        let decls: Vec<plugin_manifest::CommandContribution> = serde_json::from_str(decls_json)
+            .map_err(|e| {
+                ApiError::new("REGISTER", &format!("malformed command declarations: {e}"))
+            })?;
+        self.api_registry
+            .register_plugin(id, &decls)
+            .map_err(|e| ApiError::new("REGISTER", e.name()))
+    }
+
+    /// Removes every command plugin `id` registered. A no-op for a plugin
+    /// with none.
+    pub fn unregister_plugin_commands(&mut self, id: &str) {
+        self.api_registry.unregister_plugin(id);
     }
 
     /// The app's display length format (`m`, `cm`, `mm`, `arch`,
@@ -2816,13 +3866,253 @@ impl Scene {
     /// `reconcile`'s touched-set-only update — more work, but still cheap
     /// for any Hew-sized document since it only re-registers inference
     /// candidates and never re-tessellates.
+    ///
+    /// The answer is tagged JSON text: `{"reply": "<frame>"}` for a
+    /// response, or `{"pending": {"token": n, "forward": <ForwardRequest>}}`
+    /// for a plugin command, which the caller routes to its plugin and
+    /// completes with [`Scene::api_complete_forward`].
+    ///
+    /// While a compound is open ([`Scene::busy`]) every frame is refused
+    /// `-32000` `document_busy` before the dispatcher runs: the host queues
+    /// instead, and a frame a plugin issues while serving the forward goes
+    /// through [`Scene::api_dispatch_in_forward`]. This is the backstop.
     pub fn api_dispatch(&mut self, conn_id: u32, frame: &str) -> Option<String> {
+        self.api_dispatch_tagged(conn_id, frame, DispatchScope::Plain)
+    }
+
+    /// [`Scene::api_dispatch`] for a frame a plugin realm issued while
+    /// serving forward `forward_token` (docs/agents/PLUGINS.md
+    /// "Compounds"): dispatched with the stamp, so a forward it issues in
+    /// turn carries it. While a compound is open, `forward_token` must be
+    /// the innermost compound's forward, else the frame is refused
+    /// `document_busy` like a plain one. Its mutations land as children of
+    /// that compound, and so do its recordings.
+    pub fn api_dispatch_in_forward(
+        &mut self,
+        conn_id: u32,
+        forward_token: u64,
+        frame: &str,
+    ) -> Option<String> {
+        self.api_dispatch_tagged(conn_id, frame, DispatchScope::InForward(forward_token))
+    }
+
+    /// True while a plugin command holds the document (a compound is
+    /// open): the UI refuses input, the live bridge queues frames, and
+    /// every document-mutating `Scene` method refuses `DocumentBusy`.
+    pub fn busy(&self) -> bool {
+        self.doc.compound_open()
+    }
+
+    /// How many compounds are open (nested plugin commands).
+    pub fn compound_depth(&self) -> usize {
+        self.doc.compound_depth()
+    }
+
+    /// Opens a compound around the mutating forward `forward_token` issued
+    /// on `conn_id` (docs/agents/PLUGINS.md "Compounds"): everything that
+    /// lands until [`Scene::compound_end`] is one undo entry, labeled with
+    /// the command's declared label (or its name) and attributed to the
+    /// provider plugin (`plugin:<id>`). Starts holding back the recording
+    /// until the compound ends. Returns the kernel's token.
+    ///
+    /// # Errors
+    /// `FORWARD` when no such forward is pending or it is not mutating.
+    pub fn compound_begin(&mut self, conn_id: u32, forward_token: u64) -> Result<u64, ApiError> {
+        let Some(pending) = self.api_pending_forwards.get(&(conn_id, forward_token)) else {
+            return Err(ApiError::new("FORWARD", "unknown forward token"));
+        };
+        if !pending.mutating {
+            return Err(ApiError::new(
+                "FORWARD",
+                "a compound opens only around a mutating forward",
+            ));
+        }
+        let plugin = pending.plugin.clone();
+        let label = pending
+            .label
+            .clone()
+            .unwrap_or_else(|| pending.method.clone());
+        // The provider's own connection, lowest id first so the choice is
+        // deterministic.
+        let grant = self
+            .api_connections
+            .iter()
+            .filter(|(_, c)| c.grant().plugin.as_deref() == Some(plugin.as_str()))
+            .min_by_key(|(id, _)| **id)
+            .map(|(_, c)| serde_json::to_value(c.grant()).expect("a grant serializes"));
+        let kernel_token = self.doc.begin_compound(kernel::CompoundMeta {
+            label: label.clone(),
+            origin: kernel::HistoryOrigin::Connection(format!("plugin:{plugin}")),
+            coalesce: None,
+        });
+        recording::push_buffer();
+        self.open_compounds.push(HostCompound {
+            kernel_token,
+            forward_token,
+            plugin,
+            label,
+            grant,
+            selection_at_begin: self.ui_selection.clone(),
+            isolation_at_begin: self.ui_isolation.clone(),
+        });
+        Ok(kernel_token.to_raw())
+    }
+
+    /// Ends the innermost compound and answers `{"committed": bool,
+    /// "generation": n, "epoch": n}`. What its calls recorded becomes one
+    /// `plugin_compound` call (when there was any); the derived caches are
+    /// rebuilt.
+    ///
+    /// # Errors
+    /// `CompoundTokenMismatch` when `kernel_token` is not the innermost
+    /// compound (nothing changes); the kernel's disturbance refusals
+    /// (`TransactionHistoryDisturbed` and its siblings), which abort the
+    /// compound.
+    pub fn compound_end(&mut self, kernel_token: u64) -> Result<String, ApiError> {
+        let top = self.pop_host_compound(kernel_token)?;
+        let calls = recording::pop_buffer();
+        let ended = self.doc.end_compound(top.kernel_token);
+        self.full_resync();
+        let outcome = ended.map_err(doc_err)?;
+        // Recorded whether or not an undo entry landed: a compound whose
+        // children were only registry writes (a material, a tag) still
+        // changed the document.
+        if !calls.is_empty() {
+            let grant = top.grant.unwrap_or_else(|| {
+                serde_json::to_value(api::Grant::plugin(
+                    &top.plugin,
+                    None,
+                    std::collections::BTreeSet::new(),
+                ))
+                .expect("a grant serializes")
+            });
+            recording::record(recording::RecordedCall::PluginCompound {
+                plugin: top.plugin,
+                label: top.label,
+                grant,
+                calls,
+            });
+        }
+        Ok(serde_json::json!({
+            "committed": outcome.committed,
+            "generation": outcome.generation,
+            "epoch": outcome.epoch,
+        })
+        .to_string())
+    }
+
+    /// Aborts the innermost compound: the document is restored whole to
+    /// what it was at [`Scene::compound_begin`] (view state included), the
+    /// recording it held back is dropped, and the derived caches are
+    /// rebuilt. The host treats this as a document-wide change.
+    ///
+    /// The selection and isolation the compound's frames changed go back
+    /// too: the mirrors return to their values at begin, and a `selection`
+    /// and an `isolate` (unframed) or `clear_isolation` directive are left
+    /// for [`Scene::take_pending_view_directives`] when they differ, so the
+    /// app shows them again. The camera a frame moved is not put back.
+    ///
+    /// # Errors
+    /// `CompoundTokenMismatch` when `kernel_token` is not the innermost
+    /// compound; nothing changes.
+    pub fn compound_abort(&mut self, kernel_token: u64) -> Result<(), ApiError> {
+        let top = self.pop_host_compound(kernel_token)?;
+        recording::pop_buffer();
+        self.doc.abort_compound(top.kernel_token).map_err(doc_err)?;
+        self.full_resync();
+        if self.ui_selection != top.selection_at_begin {
+            self.ui_selection = top.selection_at_begin;
+            self.pending_view_directives
+                .push(live::ViewDirective::Selection {
+                    entries: self.ui_selection.clone(),
+                    mode: "replace".to_string(),
+                });
+        }
+        if self.ui_isolation != top.isolation_at_begin {
+            self.ui_isolation = top.isolation_at_begin;
+            self.pending_view_directives.push(match &self.ui_isolation {
+                Some(entries) => live::ViewDirective::Isolate {
+                    entries: entries.clone(),
+                    frame: false,
+                },
+                None => live::ViewDirective::ClearIsolation,
+            });
+        }
+        Ok(())
+    }
+
+    fn api_dispatch_tagged(
+        &mut self,
+        conn_id: u32,
+        frame: &str,
+        scope: DispatchScope,
+    ) -> Option<String> {
+        let tagged = match self.api_dispatch_outcome(conn_id, frame, scope)? {
+            FrameOutcome::Reply(reply) => serde_json::json!({ "reply": reply }),
+            // The host skips the refresh it runs after a mutation (the
+            // inference rebuild included): nothing changed.
+            FrameOutcome::DryRun(reply) => serde_json::json!({ "reply": reply, "dry_run": true }),
+            FrameOutcome::Pending(forward) => {
+                serde_json::json!({ "pending": { "token": forward.token, "forward": forward } })
+            }
+        };
+        Some(tagged.to_string())
+    }
+
+    /// Completes a forward [`Scene::api_dispatch`] handed out, with the
+    /// plugin's reply (`reply_json` is a `ForwardReply`: `{"ok": value}`,
+    /// `{"refusal": {...}}`, or `{"failed": "<reason>"}`), and returns the
+    /// final reply frame text (not tagged). A successful mutating command
+    /// is recorded and resynced exactly as a direct reply is. Refuses
+    /// `FORWARD` for an unknown connection or token, or malformed JSON.
+    pub fn api_complete_forward(
+        &mut self,
+        conn_id: u32,
+        token: u64,
+        reply_json: &str,
+    ) -> Result<String, ApiError> {
+        self.pending_view_directives.clear();
+        let reply: api::ForwardReply = serde_json::from_str(reply_json)
+            .map_err(|e| ApiError::new("FORWARD", &format!("malformed forward reply: {e}")))?;
+        let Some(conn) = self.api_connections.get_mut(&conn_id) else {
+            return Err(ApiError::new("FORWARD", "unknown API connection"));
+        };
+        let Some(pending) = self.api_pending_forwards.remove(&(conn_id, token)) else {
+            return Err(ApiError::new("FORWARD", "unknown forward token"));
+        };
+        let resp = conn.complete_forward(&self.api_registry, token, reply);
+        // The forwarded frame itself is never recorded: no plugin runs at
+        // replay time. What its handler did is recorded as the compound's
+        // children ([`Scene::compound_end`]).
+        if resp.error.is_none() && pending.mutating {
+            self.full_resync();
+        }
+        Ok(serde_json::to_string(&resp).expect("Response serializes"))
+    }
+
+    /// [`Scene::api_dispatch`] for tests that never forward: the reply
+    /// frame, untagged.
+    #[cfg(test)]
+    fn api_dispatch_reply(&mut self, conn_id: u32, frame: &str) -> Option<String> {
+        match self.api_dispatch_outcome(conn_id, frame, DispatchScope::Plain)? {
+            FrameOutcome::Reply(reply) | FrameOutcome::DryRun(reply) => Some(reply),
+            FrameOutcome::Pending(forward) => panic!("{} forwarded", forward.method),
+        }
+    }
+
+    /// [`Scene::api_dispatch`]'s work, untagged.
+    fn api_dispatch_outcome(
+        &mut self,
+        conn_id: u32,
+        frame: &str,
+        scope: DispatchScope,
+    ) -> Option<FrameOutcome> {
         // Cleared unconditionally up front, so every early-return path
         // below (parse error, unknown connection, a dropped notification)
-        // leaves nothing stale for `take_pending_view_directive` to hand
-        // out from a PREVIOUS dispatch — only a `hew.view.*` command that
-        // both runs and succeeds in this very call sets it again below.
-        self.pending_view_directive = None;
+        // leaves nothing stale for `take_pending_view_directives` to hand
+        // out from a PREVIOUS dispatch — only view commands that run and
+        // succeed in this very call leave directives again below.
+        self.pending_view_directives.clear();
         let request: api::Request = match serde_json::from_str(frame) {
             Ok(r) => r,
             Err(e) => {
@@ -2831,14 +4121,54 @@ impl Scene {
                     api::codes::PARSE_ERROR,
                     &format!("malformed JSON-RPC frame: {e}"),
                 );
-                return Some(serde_json::to_string(&resp).expect("Response serializes"));
+                return Some(FrameOutcome::Reply(
+                    serde_json::to_string(&resp).expect("Response serializes"),
+                ));
             }
         };
+        // While a plugin command holds the document, only the frames it
+        // issues itself may run (docs/agents/PLUGINS.md "Compounds"); the
+        // host queues the rest, and this refusal is the backstop.
+        let stamped_by_innermost = match scope {
+            DispatchScope::Plain => false,
+            DispatchScope::InForward(token) => self
+                .open_compounds
+                .last()
+                .is_none_or(|top| top.forward_token == token),
+            DispatchScope::Replay => true,
+        };
+        if self.doc.compound_open() && !stamped_by_innermost {
+            request.id.as_ref()?;
+            let resp = api::Response::err_with(
+                request.id.clone(),
+                api::codes::REFUSED,
+                "refused",
+                api::transact::document_busy().into_data(0, &request.method),
+            );
+            let resp = serde_json::to_string(&resp).expect("Response serializes");
+            // A dry run refused here is still answered as one.
+            return Some(
+                if api::is_dry_run(&request.method, request.params.as_ref()) {
+                    FrameOutcome::DryRun(resp)
+                } else {
+                    FrameOutcome::Reply(resp)
+                },
+            );
+        }
+        // The provider's grant for the compound's recording, when no
+        // connection of its own was open at begin.
+        if let DispatchScope::InForward(_) = scope
+            && let Some(top) = self.open_compounds.last_mut()
+            && top.grant.is_none()
+            && let Some(conn) = self.api_connections.get(&conn_id)
+        {
+            top.grant = Some(serde_json::to_value(conn.grant()).expect("a grant serializes"));
+        }
         // An import over the API sets Model Health's "Last import" scope
         // like one from the File menu: the objects it leaves behind that
         // were not there before.
         let import_before: Option<std::collections::BTreeSet<ObjectId>> =
-            records_itself(&request.method, frame)
+            is_import(&request.method, frame)
                 .then(|| self.doc.live_object_ids().into_iter().collect());
         let Some(conn) = self.api_connections.get_mut(&conn_id) else {
             // Not a protocol case reachable by any well-behaved client —
@@ -2850,7 +4180,9 @@ impl Scene {
                 api::codes::INTERNAL_FAULT,
                 "unknown API connection",
             );
-            return Some(serde_json::to_string(&resp).expect("Response serializes"));
+            return Some(FrameOutcome::Reply(
+                serde_json::to_string(&resp).expect("Response serializes"),
+            ));
         };
         // Snapshot the method's class before `dispatch` consumes the
         // request, so the mutation check below doesn't need `crates/api`
@@ -2862,19 +4194,76 @@ impl Scene {
         // hew.history.undo/redo are solitary for that reason while
         // plainly changing the document (see
         // `api::CommandDecl::mutates_document`).
-        let mutates = conn
-            .registry()
+        let mutates = self
+            .api_registry
             .get(&method)
             .is_some_and(|c| c.mutates_document);
+        // The host works on copies of the app's selection and isolation
+        // mirrors; they are written back only when the dispatch succeeds,
+        // so a refused command or an aborted transaction leaves them as
+        // they were.
         let mut host = live::LiveHost {
             display_units: self.api_display_units.clone(),
+            selection: api::SelectionState {
+                entries: self
+                    .ui_selection
+                    .iter()
+                    .map(live::UiSelectionEntry::to_entry)
+                    .collect(),
+            },
+            isolation: self
+                .ui_isolation
+                .as_ref()
+                .map(|v| v.iter().map(live::UiIsolationEntry::to_entry).collect()),
+            fallback: self
+                .ui_context
+                .iter()
+                .map(live::UiContextEntry::to_entry)
+                .collect(),
+            gesture_armed: self.ui_gesture_armed,
+            at_top_level: self.doc.session_stack().is_empty() && self.ui_context.is_empty(),
             ..live::LiveHost::default()
         };
-        let outcome = conn.dispatch(&mut self.doc, &mut host, request);
-        let api::DispatchOutcome::Reply(resp) = outcome else {
+        let outcome = match scope {
+            DispatchScope::InForward(token) => conn.dispatch_in_forward(
+                &self.api_registry,
+                &mut self.doc,
+                &mut host,
+                request,
+                token,
+            ),
+            DispatchScope::Plain | DispatchScope::Replay => {
+                conn.dispatch(&self.api_registry, &mut self.doc, &mut host, request)
+            }
+        };
+        let resp = match outcome {
+            api::DispatchOutcome::Reply(resp) => resp,
+            // A rehearsal ran on a clone with a host of its own: no
+            // recording, no resync, no selection or isolation write-back,
+            // no view directives (`pending_view_directives` was cleared
+            // above and stays empty).
+            api::DispatchOutcome::DryRun(resp) => {
+                return Some(FrameOutcome::DryRun(
+                    serde_json::to_string(&resp).expect("Response serializes"),
+                ));
+            }
             // A dropped client-originated notification: no side effect,
             // no reply (§4.1).
-            return None;
+            api::DispatchOutcome::Dropped => return None,
+            // A plugin command: nothing ran, so nothing is recorded or
+            // resynced until its reply completes it.
+            api::DispatchOutcome::Forward(forward) => {
+                self.api_pending_forwards.insert(
+                    (conn_id, forward.token),
+                    PendingForward {
+                        mutating: forward.mutating,
+                        plugin: forward.plugin.clone(),
+                        method: forward.method.clone(),
+                        label: forward.label.clone(),
+                    },
+                );
+                return Some(FrameOutcome::Pending(Box::new(forward)));
+            }
         };
         if resp.error.is_none() && mutates {
             // Capture and resync on ONE condition, so a recording can
@@ -2902,41 +4291,342 @@ impl Scene {
             }
         }
         if resp.error.is_none() {
-            // `hew.view.camera`/`zoom_extents`/`units` are NOT `mutates`
-            // (they change no document state — registry.rs's
-            // `mutates_document = false`), so they never reach the branch
-            // above; this is their own hand-off, unconditional on
-            // `mutates` and gated only on success (a refused view command
-            // changes nothing, view included, matching every other
-            // refusal's untouched-document guarantee).
-            self.pending_view_directive = host
-                .directive
-                .take()
-                .map(|d| serde_json::to_string(&d).expect("ViewDirective serializes"));
+            #[cfg(test)]
+            WRITE_BACKS.with(|n| n.set(n.get() + 1));
+            // A bare hide or show writes persisted view state without
+            // mutating the document's history; it is recorded so a
+            // reproducer replays to the same document (inside a
+            // transaction the envelope's own frame is recorded above).
+            if !mutates && USER_HIDDEN_WRITERS.contains(&method.as_str()) {
+                recording::record(recording::RecordedCall::ApiDispatch {
+                    frame: frame.to_string(),
+                });
+            }
+            for directive in &host.directives {
+                if let live::ViewDirective::ActivateScene { sid } = directive {
+                    self.last_active_scene = Some(*sid);
+                }
+            }
+            self.ui_selection = host
+                .selection
+                .entries
+                .iter()
+                .map(|e| live::UiSelectionEntry::from_entry(*e))
+                .collect();
+            self.ui_isolation = host.isolation.as_ref().map(|v| {
+                v.iter()
+                    .map(|e| live::UiIsolationEntry::from_entry(*e))
+                    .collect()
+            });
+            // The view commands (hew.view.camera and the like) do not mutate
+            // the document, and `hew.view.enter`/`exit`/`exit_all` mutate it
+            // (a session open or close is a history step) without recording
+            // a replayable call, so both resync through the branch above
+            // where they mutate. This is the directive hand-off for all of
+            // them, unconditional on `mutates` and gated only on success (a
+            // refused view command changes nothing, view included,
+            // matching every other refusal's untouched-document guarantee).
+            self.pending_view_directives = std::mem::take(&mut host.directives);
         }
-        Some(serde_json::to_string(&resp).expect("Response serializes"))
+        Some(FrameOutcome::Reply(
+            serde_json::to_string(&resp).expect("Response serializes"),
+        ))
     }
 
-    /// Takes (clears) the [`live::ViewDirective`] left by the dispatch this
-    /// `Scene` just ran, JSON-encoded — `None` unless that dispatch's
-    /// command was `hew.view.camera`, `hew.view.zoom_extents`, or
-    /// `hew.view.units` and it succeeded. `app/src/api/liveBridge.ts` calls
-    /// this immediately after every [`Scene::api_dispatch`], in the same
-    /// synchronous JS task, and applies the directive itself: a `Camera`
-    /// directive through the mounted `Viewport`'s existing
-    /// `setCamera`/`setStandardView` (the same calls the Camera menu
-    /// makes), a `ZoomExtents` directive through `Viewport.zoomExtents()`,
-    /// and a `Units` directive through `app/src/settings/units.ts`'s
-    /// `setLengthUnit` directly (not a viewport call). See
-    /// [`live::ViewDirective`]'s doc comment for why this is a separate
-    /// accessor rather than a field riding the JSON-RPC reply itself.
+    /// Takes (clears) every [`live::ViewDirective`] the dispatch this
+    /// `Scene` just ran left, in order, as a JSON array — `[]` unless that
+    /// dispatch succeeded and one of its commands asked for a host view
+    /// effect (`hew.view.camera`, `zoom_extents`, `units`, a Scene
+    /// activation, the selection, hide and show, isolation, `zoom_to`).
+    /// `app/src/api/liveBridge.ts` calls this immediately after every
+    /// [`Scene::api_dispatch`], in the same synchronous JS task, and applies
+    /// each directive in order through the app's own paths: the mounted
+    /// `Viewport`'s camera, framing, and isolation calls, the selection
+    /// handlers, the hidden-state re-read, and `app/src/settings/units.ts`'s
+    /// `setLengthUnit`. See [`live::ViewDirective`]'s doc comment for why
+    /// this is a separate accessor rather than a field riding the JSON-RPC
+    /// reply itself.
     ///
     /// "Takes" rather than "peeks": a directive is one-shot intent from one
     /// dispatch, not scene state, so leaving it behind would let a LATER,
     /// unrelated `api_dispatch` call (or a caller that simply forgets to
     /// check) accidentally replay it.
-    pub fn take_pending_view_directive(&mut self) -> Option<String> {
-        self.pending_view_directive.take()
+    pub fn take_pending_view_directives(&mut self) -> String {
+        let directives = std::mem::take(&mut self.pending_view_directives);
+        serde_json::to_string(&directives).expect("ViewDirective serializes")
+    }
+
+    /// The app mirrors its selection here (docs/agents/HEW_API.md §7,
+    /// "Selection and view state") whenever it changes: a JSON array of
+    /// `{"kind": "object"|"group"|"instance"|"sketch"|"guide"|"annotation",
+    /// "id": "<decimal handle>"}` in pick order, the primary first. The
+    /// app's drafting kinds have no public id and are left out. What
+    /// `hew.selection.get` reads and `selection_changed` reports.
+    ///
+    /// # Errors
+    /// `SELECTION` for JSON that is not such an array; the mirror keeps its
+    /// previous value.
+    pub fn set_ui_selection(&mut self, json: &str) -> Result<(), ApiError> {
+        let entries: Vec<live::UiSelectionEntry> = serde_json::from_str(json)
+            .map_err(|e| ApiError::new("SELECTION", &format!("malformed selection: {e}")))?;
+        self.ui_selection = entries;
+        Ok(())
+    }
+
+    /// The app mirrors the live viewport's isolation here whenever it
+    /// changes: a JSON array of `{"kind": "object"|"group"|"instance",
+    /// "id": "<decimal handle>"}` and `{"kind": "member", "object": "<id>",
+    /// "instance": "<id>"}`, or `null` when nothing is isolated. What
+    /// `hew.view.hidden` reports as `isolated`.
+    ///
+    /// # Errors
+    /// `ISOLATION` for JSON of any other shape; the mirror keeps its
+    /// previous value.
+    pub fn set_ui_isolation(&mut self, json: &str) -> Result<(), ApiError> {
+        let entries: Option<Vec<live::UiIsolationEntry>> = serde_json::from_str(json)
+            .map_err(|e| ApiError::new("ISOLATION", &format!("malformed isolation: {e}")))?;
+        self.ui_isolation = entries;
+        Ok(())
+    }
+
+    /// The app mirrors its in-context (fallback) entries here whenever they
+    /// change, outermost first: a JSON array of `{"kind": "object" |
+    /// "instance", "id": "<decimal handle>"}`. What `hew.query.context`
+    /// reports as `fallback`; [`Scene::drain_events`] emits
+    /// `context_changed` when either this or the session stack moved.
+    ///
+    /// # Errors
+    /// `CONTEXT` for JSON of any other shape; the mirror keeps its previous
+    /// value.
+    pub fn set_ui_context(&mut self, json: &str) -> Result<(), ApiError> {
+        let entries: Vec<live::UiContextEntry> = serde_json::from_str(json)
+            .map_err(|e| ApiError::new("CONTEXT", &format!("malformed context: {e}")))?;
+        self.ui_context = entries;
+        Ok(())
+    }
+
+    /// The app reports here whenever a tool gesture arms or disarms (a Move
+    /// drag in flight, ended by commit or Escape). While armed,
+    /// `hew.view.enter`/`exit`/`exit_all` refuse `gesture_in_progress`.
+    pub fn set_ui_gesture_armed(&mut self, armed: bool) {
+        self.ui_gesture_armed = armed;
+    }
+
+    // ------------------------------------------------------------- events
+
+    /// Every event frame owed to every live connection since the last
+    /// drain (docs/agents/HEW_API.md §4.5), as JSON:
+    /// `[{"conn": <conn_id>, "frames": ["<frame>", ...]}, ...]`, by
+    /// connection id; a connection owed nothing is absent. When the host
+    /// reported lifecycle steps, a last batch `{"conn": null, "frames":
+    /// [...]}` carries each such frame once, `path` included: for the
+    /// host to offer first-party connections that hold no session in this
+    /// window (a listener bound to another document hears of this one
+    /// only that way). Take-not-peek,
+    /// like [`Scene::take_pending_view_directives`]: the host calls it after
+    /// every dispatch and every UI commit and sends each frame on its
+    /// connection.
+    ///
+    /// `document_changed` goes out once per change record since the last
+    /// drain, except a plugin command's: while its compound is open its
+    /// children are held back, and once it ends its one entry goes out (or,
+    /// aborted, one `abort`); more than 64, or a gap the change ring no
+    /// longer covers,
+    /// collapse into one `full` commit at the current clock. The host's
+    /// own events (lifecycle, tool) come first, in the order reported;
+    /// `context_changed`, `scenes_changed`, and `units_changed` follow the
+    /// changes, when the session stack, the Scenes (or the active one), or
+    /// the display units differ from the last drain. Each connection gets the frames it subscribed
+    /// to and its grant may receive, about this document only for a
+    /// connection bound to one, and a lifecycle event's `path` only under
+    /// `documents.save`.
+    pub fn drain_events(&mut self) -> String {
+        let doc_id = self.host_document_id.clone();
+        // The host's own events first: a load reports the old document
+        // closed and the new one opened before the reset that follows.
+        let mut events: Vec<(String, serde_json::Value)> = Vec::new();
+        if self.ui_tool != self.last_drained_tool {
+            events.push((
+                "tool_changed".into(),
+                api::events::tool_changed(&self.ui_tool),
+            ));
+            self.last_drained_tool = self.ui_tool.clone();
+        }
+        events.append(&mut self.pending_host_events);
+
+        // While a plugin command's compound is open its children are not
+        // history yet: they become one entry when it ends, or none when it
+        // aborts. Only what came before it goes out now.
+        let held_at = self.doc.compound_start_epoch();
+        let collapsed = match self.doc.change_records_since_epoch(self.last_drained_epoch) {
+            Some(records) => {
+                let records: Vec<&kernel::ChangeRecord> = records
+                    .iter()
+                    .filter(|r| held_at.is_none_or(|start| r.epoch <= start))
+                    .collect();
+                if records.len() > api::events::MAX_RECORDS_PER_DRAIN {
+                    true
+                } else {
+                    for record in records {
+                        events.push((
+                            "document_changed".into(),
+                            api::events::document_changed(&self.doc, &doc_id, record),
+                        ));
+                    }
+                    false
+                }
+            }
+            None => true,
+        };
+        if collapsed {
+            let record = api::events::collapsed_record(&self.doc);
+            events.push((
+                "document_changed".into(),
+                api::events::document_changed(&self.doc, &doc_id, &record),
+            ));
+        }
+        self.last_drained_epoch = match held_at {
+            Some(start) => self.last_drained_epoch.max(start),
+            None => self.doc.document_epoch(),
+        };
+
+        let stack = self.doc.session_stack();
+        if stack != self.last_context || self.ui_context != self.last_drained_fallback {
+            let fallback: Vec<api::ContextEntry> = self
+                .ui_context
+                .iter()
+                .map(live::UiContextEntry::to_entry)
+                .collect();
+            events.push((
+                "context_changed".into(),
+                api::events::context_changed(&self.doc, &doc_id, &fallback),
+            ));
+            self.last_context = stack;
+            self.last_drained_fallback = self.ui_context.clone();
+        }
+
+        let scenes_params = api::events::scenes_changed(&self.doc, &doc_id, self.last_active_scene);
+        let scenes: Vec<(u64, String)> = self
+            .doc
+            .scenes()
+            .iter()
+            .zip(scenes_params["scenes"].as_array().into_iter().flatten())
+            .map(|(scene, entry)| (scene.sid, entry.to_string()))
+            .collect();
+        if scenes != self.last_scenes || self.last_active_scene != self.drained_active_scene {
+            events.push(("scenes_changed".into(), scenes_params));
+            self.last_scenes = scenes;
+            self.drained_active_scene = self.last_active_scene;
+        }
+
+        if self.api_display_units != self.last_units {
+            if let Some(units) = &self.api_display_units {
+                events.push((
+                    "units_changed".into(),
+                    api::events::units_changed(&doc_id, units),
+                ));
+            }
+            self.last_units = self.api_display_units.clone();
+        }
+
+        if self.ui_selection != self.last_drained_selection {
+            let entries: Vec<api::SelectionEntry> = self
+                .ui_selection
+                .iter()
+                .map(live::UiSelectionEntry::to_entry)
+                .collect();
+            events.push((
+                "selection_changed".into(),
+                api::events::selection_changed(&self.doc, &doc_id, &entries),
+            ));
+            self.last_drained_selection = self.ui_selection.clone();
+        }
+
+        let mut ids: Vec<u32> = self.api_connections.keys().copied().collect();
+        ids.sort_unstable();
+        let mut out = Vec::new();
+        let broadcast: Vec<String> = events
+            .iter()
+            .filter(|(name, _)| api::events::LIFECYCLE_EVENTS.contains(&name.as_str()))
+            .map(|(name, params)| api::events::notification(name, params.clone()))
+            .collect();
+        for id in ids {
+            let conn = &self.api_connections[&id];
+            let grant = conn.grant();
+            let paths = !grant.is_restricted()
+                || grant.holds(&api::Permission::All)
+                || grant.holds(&api::Permission::DocumentsSave);
+            let frames: Vec<String> = events
+                .iter()
+                .filter(|(name, _)| conn.wants_for(name, &doc_id))
+                .map(|(name, params)| {
+                    let mut params = params.clone();
+                    if !paths
+                        && api::events::LIFECYCLE_EVENTS.contains(&name.as_str())
+                        && let Some(object) = params.as_object_mut()
+                    {
+                        object.remove("path");
+                    }
+                    api::events::notification(name, params)
+                })
+                .collect();
+            if !frames.is_empty() {
+                out.push(serde_json::json!({ "conn": id, "frames": frames }));
+            }
+        }
+        if !broadcast.is_empty() {
+            out.push(serde_json::json!({ "conn": null, "frames": broadcast }));
+        }
+        serde_json::Value::Array(out).to_string()
+    }
+
+    /// The host's id for this window's document (`doc_N` on desktop,
+    /// `doc_1` on the web), which every event names. Defaults to `doc_1`.
+    pub fn set_host_document_id(&mut self, id: &str) {
+        self.host_document_id = id.to_string();
+    }
+
+    /// The host reports a document lifecycle step, emitted by the next
+    /// [`Scene::drain_events`]: `kind` is `will_save`, `saved`, `opened`,
+    /// or `closed` (any other kind is ignored); `format` is the file
+    /// format of a save. Nothing waits for subscribers.
+    pub fn note_document_event(
+        &mut self,
+        kind: &str,
+        title: &str,
+        path: Option<String>,
+        format: Option<String>,
+    ) {
+        let event = match kind {
+            "will_save" => "document_will_save",
+            "saved" => "document_saved",
+            "opened" => "document_opened",
+            "closed" => "document_closed",
+            _ => return,
+        };
+        let document_id = self.doc.document_id();
+        let params = api::events::document_lifecycle(
+            kind,
+            &self.host_document_id,
+            title,
+            path.as_deref(),
+            format.as_deref(),
+            document_id.as_deref(),
+        );
+        self.pending_host_events.push((event.to_string(), params));
+    }
+
+    /// The host reports the active tool (its name, as the toolbar names
+    /// it): the next [`Scene::drain_events`] emits `tool_changed` when it
+    /// differs from the tool last reported.
+    pub fn note_tool_changed(&mut self, tool: &str) {
+        self.ui_tool = tool.to_string();
+    }
+
+    /// The app activated Scene `sid` itself (the Scenes panel): the next
+    /// [`Scene::drain_events`] reports it as the active Scene.
+    pub fn note_scene_activated(&mut self, sid: u64) {
+        self.last_active_scene = Some(sid);
     }
 
     /// Whether `method` is a document-mutating API command, straight
@@ -2953,22 +4643,25 @@ impl Scene {
     /// An unknown method answers `false`: it cannot mutate anything, it
     /// can only come back as a method-not-found error.
     pub fn api_method_mutates(&self, method: &str) -> bool {
-        api::Registry::protocol_1()
+        self.api_registry
             .get(method)
             .is_some_and(|c| c.mutates_document)
     }
 
     /// An empty [`InferenceScene`] that keeps the current one's per-window
-    /// view switches — guide and axis snapping (View ▸ Guides / Axes) and
-    /// the render mode's face policy ([`Scene::set_render_mode`]). Those
-    /// belong to the window, not the document, so rebuilding the candidates
-    /// (a load, a live-API resync) must not quietly turn hidden guides or
-    /// axes snappable again, or drop X-ray or Wireframe picking.
+    /// view switches — guide and axis snapping (View ▸ Guides / Axes), the
+    /// render mode's face policy ([`Scene::set_render_mode`]) and the
+    /// editing scope ([`Scene::set_pick_scope`]). Those belong to the
+    /// window, not the document, so rebuilding the candidates (a live-API
+    /// resync) must not quietly turn hidden guides or axes snappable again,
+    /// drop X-ray or Wireframe picking, or forget the open edit. A load
+    /// drops the scope itself (its ids name the old document).
     fn fresh_inference(&self) -> InferenceScene {
         let mut fresh = InferenceScene::new();
         fresh.set_guides_enabled(self.inference.guides_enabled());
         fresh.set_axes_enabled(self.inference.axes_enabled());
         fresh.set_face_policy(self.inference.face_policy());
+        fresh.set_pick_scope(self.inference.pick_scope().cloned());
         fresh
     }
 
@@ -2986,6 +4679,8 @@ impl Scene {
     fn full_resync(&mut self) {
         self.face_range_cache = SecondaryMap::new();
         self.health_cache.clear();
+        self.rim_cache.borrow_mut().clear();
+        self.census_cache.borrow_mut().take();
         self.inference = self.fresh_inference();
         self.inference.set_axes_frame(self.doc.axes());
         for id in self.doc.visible_object_ids() {
@@ -3013,9 +4708,10 @@ impl Scene {
     /// Adds a fresh, empty sketch on the ground plane (M1: the only sketch
     /// surface) and returns its handle. **Additive** — existing sketches are
     /// untouched, so independent coplanar shapes can coexist.
-    pub fn begin_ground_sketch(&mut self) -> u64 {
+    pub fn begin_ground_sketch(&mut self) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
         recording::record(recording::RecordedCall::BeginGroundSketch);
-        self.doc.add_sketch(ground_plane()).data().as_ffi()
+        Ok(self.doc.add_sketch(ground_plane()).data().as_ffi())
     }
 
     /// Adds a fresh, empty sketch on the plane through `(px,py,pz)` with
@@ -3039,6 +4735,7 @@ impl Scene {
         ny: f64,
         nz: f64,
     ) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
         let point = Point3::new(px, py, pz);
         let normal = kernel::Vec3::new(nx, ny, nz);
         let plane = Plane::from_point_normal(point, normal).map_err(|e| api_err(&e, &e))?;
@@ -3082,6 +4779,7 @@ impl Scene {
         ny: f64,
         nz: f64,
     ) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
         let point = Point3::new(px, py, pz);
         let normal = kernel::Vec3::new(nx, ny, nz);
         let plane = Plane::from_point_normal(point, normal).map_err(|e| api_err(&e, &e))?;
@@ -3107,6 +4805,7 @@ impl Scene {
     /// the sketch's creation into that step — undoing it removes the sketch.
     /// Tools bracket exactly their commit batch; gestures never nest.
     pub fn sketch_begin_gesture(&mut self, sketch: u64) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         self.doc
             .begin_sketch_gesture(sketch_id(sketch))
             .map_err(doc_err)?;
@@ -3117,6 +4816,7 @@ impl Scene {
     /// Closes the open drawing gesture on `sketch`, pushing one undo step if
     /// anything changed (an unchanged gesture records nothing).
     pub fn sketch_end_gesture(&mut self, sketch: u64) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let change = self
             .doc
             .end_sketch_gesture(sketch_id(sketch))
@@ -3128,10 +4828,12 @@ impl Scene {
 
     /// Drops the open drawing gesture (if any) without recording an undo step
     /// — the tool-cancel path. Safe to call when no gesture is open.
-    pub fn sketch_cancel_gesture(&mut self) {
+    pub fn sketch_cancel_gesture(&mut self) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         if self.doc.cancel_sketch_gesture() {
             recording::record(recording::RecordedCall::SketchCancelGesture);
         }
+        Ok(())
     }
 
     /// Handles of every shown sketch in the document (one drawn in a
@@ -3168,7 +4870,10 @@ impl Scene {
         by: f64,
         bz: f64,
     ) -> Result<SegmentAddedJs, ApiError> {
+        self.ensure_not_busy()?;
         let sid = sketch_id(sketch);
+        // A drawing frozen by a lock answers the lock's refusal (OW-1).
+        self.doc.check_sketch_editable(sid).map_err(doc_err)?;
         let s = self
             .doc
             .sketch_mut(sid)
@@ -3194,8 +4899,11 @@ impl Scene {
         sketch: u64,
         edge: u64,
     ) -> Result<EdgeRemovedJs, ApiError> {
+        self.ensure_not_busy()?;
         let sid = sketch_id(sketch);
         let eid = SketchEdgeId::from(KeyData::from_ffi(edge));
+        // A drawing frozen by a lock answers the lock's refusal (OW-1).
+        self.doc.check_sketch_editable(sid).map_err(doc_err)?;
         let s = self
             .doc
             .sketch_mut(sid)
@@ -3222,8 +4930,11 @@ impl Scene {
         region: u64,
         distance: f64,
     ) -> Result<RegionOffsetJs, ApiError> {
+        self.ensure_not_busy()?;
         let sid = sketch_id(sketch);
         let rid = SketchRegionId::from(KeyData::from_ffi(region));
+        // A drawing frozen by a lock answers the lock's refusal (OW-1).
+        self.doc.check_sketch_editable(sid).map_err(doc_err)?;
         let s = self
             .doc
             .sketch_mut(sid)
@@ -3275,7 +4986,10 @@ impl Scene {
     /// `sketch_end_curve` are ONE curve chain (an arc's or circle's facets),
     /// selected and deleted as a unit. Returns the curve handle.
     pub fn sketch_begin_curve(&mut self, sketch: u64) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
         let sid = sketch_id(sketch);
+        // A drawing frozen by a lock answers the lock's refusal (OW-1).
+        self.doc.check_sketch_editable(sid).map_err(doc_err)?;
         let s = self
             .doc
             .sketch_mut(sid)
@@ -3298,7 +5012,10 @@ impl Scene {
         cz: f64,
         radius: f64,
     ) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
         let sid = sketch_id(sketch);
+        // A drawing frozen by a lock answers the lock's refusal (OW-1).
+        self.doc.check_sketch_editable(sid).map_err(doc_err)?;
         let s = self
             .doc
             .sketch_mut(sid)
@@ -3332,7 +5049,10 @@ impl Scene {
         cz: f64,
         radius: f64,
     ) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
         let sid = sketch_id(sketch);
+        // A drawing frozen by a lock answers the lock's refusal (OW-1).
+        self.doc.check_sketch_editable(sid).map_err(doc_err)?;
         let s = self
             .doc
             .sketch_mut(sid)
@@ -3377,8 +5097,11 @@ impl Scene {
         curve: u64,
         segments: u32,
     ) -> Result<CurveRefacetedJs, ApiError> {
+        self.ensure_not_busy()?;
         let sid = sketch_id(sketch);
         let cid = kernel::SketchCurveId::from(KeyData::from_ffi(curve));
+        // A drawing frozen by a lock answers the lock's refusal (OW-1).
+        self.doc.check_sketch_editable(sid).map_err(doc_err)?;
         let s = self
             .doc
             .sketch_mut(sid)
@@ -3415,7 +5138,10 @@ impl Scene {
 
     /// Closes the open curve bracket on `sketch` (no-op when none is open).
     pub fn sketch_end_curve(&mut self, sketch: u64) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let sid = sketch_id(sketch);
+        // A drawing frozen by a lock answers the lock's refusal (OW-1).
+        self.doc.check_sketch_editable(sid).map_err(doc_err)?;
         let s = self
             .doc
             .sketch_mut(sid)
@@ -3586,6 +5312,7 @@ impl Scene {
         island: u64,
         affine: &[f64],
     ) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let rows: &[f64; 12] = affine.try_into().map_err(|_| {
             ApiError("BadAffine: transform must be 12 floats (row-major 3x4)".to_string())
         })?;
@@ -3638,12 +5365,21 @@ impl Scene {
     /// handles; an arranging landing gives the moved geometry fresh handles
     /// (island ids may be gone), so re-query via `sketch_island_ids`. See
     /// [`kernel::Document::transform_sketch_islands`].
+    ///
+    /// Returns the step's report as the JSON [`Scene::draft_end`] returns
+    /// (wireframe faces §16 R20): `{"objects":[],"sketches":[id..],
+    /// "kept_as_sketch":[],"faces_closed":[id..],"cells":[..]}`, where
+    /// `sketches` lists every sketch the step wrote, the moved sketch first
+    /// (a detaching move: the source, then the new sketch), and
+    /// `faces_closed` / `cells` say what the move closed — a face on another
+    /// plane, or a solid made or grown — exactly as for a draw.
     pub fn transform_sketch_islands(
         &mut self,
         sketch: u64,
         islands: &[u64],
         affine: &[f64],
-    ) -> Result<(), ApiError> {
+    ) -> Result<String, ApiError> {
+        self.ensure_not_busy()?;
         let rows: &[f64; 12] = affine.try_into().map_err(|_| {
             ApiError("BadAffine: transform must be 12 floats (row-major 3x4)".to_string())
         })?;
@@ -3663,7 +5399,10 @@ impl Scene {
             islands: islands.to_vec(),
             affine: *rows,
         });
-        Ok(())
+        Ok(draft_api::draft_report_json(
+            &self.doc.sketch_edit_report(&change),
+            None,
+        ))
     }
 
     /// The island of `sketch` that holds the edge whose endpoints sit at
@@ -3718,7 +5457,10 @@ impl Scene {
     /// new sketch's handle. This is Move+Alt's OUT-OF-PLANE sketch copy: an
     /// in-plane copy replays into the source sketch (the UI's gesture-replay
     /// path), but a sketch is planar, so islands copied off its plane land on
-    /// a sketch of their own — on the transformed plane. Passing every island
+    /// a sketch of their own — on the transformed plane. A detached sketch's
+    /// copy is a new detached sketch, and is made here in plane too (an
+    /// in-plane affine is accepted): a copy landing in the source would
+    /// arrange with the original where they overlap (detached shapes D7). Passing every island
     /// of the sketch copies it whole; passing a subset copies just those.
     /// Keeping a sketch's islands together on one call is what preserves a
     /// region's HOLES (a hole boundary is its own island). Curve chains keep
@@ -3729,12 +5471,23 @@ impl Scene {
     /// hides the copy, `scene_redo` unhides it (the returned handle stays
     /// valid across both). The new sketch's island/element handles are fresh;
     /// re-query via `sketch_island_ids`, as after any reshaping mutation.
+    ///
+    /// Returns the step's report as the JSON [`Scene::draft_end`] returns
+    /// (wireframe faces §16 R20): `{"objects":[],"sketches":[copy,..],
+    /// "kept_as_sketch":[],"faces_closed":[id..],"cells":[..]}`. The new
+    /// sketch's handle is `sketches[0]`, always (the rest are sketches the
+    /// close pass and the cells search wrote); `faces_closed` / `cells` say
+    /// what the copy closed — a face on another plane, or a solid made or
+    /// grown — exactly as for a draw. A copy whose faces became a solid is
+    /// consumed in the same step, so `sketches[0]` may then name a deleted
+    /// sketch.
     pub fn copy_sketch_islands(
         &mut self,
         sketch: u64,
         islands: &[u64],
         affine: &[f64],
-    ) -> Result<u64, ApiError> {
+    ) -> Result<String, ApiError> {
+        self.ensure_not_busy()?;
         let rows: &[f64; 12] = affine.try_into().map_err(|_| {
             ApiError("BadAffine: transform must be 12 floats (row-major 3x4)".to_string())
         })?;
@@ -3754,7 +5507,13 @@ impl Scene {
             islands: islands.to_vec(),
             affine: *rows,
         });
-        Ok(copy.data().as_ffi())
+        let report = self.doc.sketch_edit_report(&change);
+        debug_assert_eq!(
+            report.sketches.first(),
+            Some(&copy),
+            "the copy is named first"
+        );
+        Ok(draft_api::draft_report_json(&report, None))
     }
 
     /// A sketch's plane as `[px,py,pz, nx,ny,nz]` — a point on the plane
@@ -3771,6 +5530,35 @@ impl Scene {
         let p = plane.point();
         let n = plane.normal();
         Some(vec![p.x, p.y, p.z, n.x, n.y, n.z])
+    }
+
+    /// Whether `sketch` is a detached shape (separate-shapes design D16).
+    /// `false` for an unknown sketch. Unlike the world-frame batch listing
+    /// this also answers for a component-definition member sketch.
+    pub fn sketch_is_detached(&self, sketch: u64) -> bool {
+        self.doc
+            .sketch(sketch_id(sketch))
+            .is_some_and(kernel::Sketch::detached)
+    }
+
+    /// Whether `sketch` is a foreign file's drawing the user has not drawn
+    /// in since (`kernel::Sketch::imported`): its lines draw in the neutral
+    /// edge color, not as drawing made in Hew. `false` for an unknown or
+    /// deleted sketch. Answers for a world, group-held or
+    /// component-definition sketch alike (every handle `sketch_lines`
+    /// takes). Read-only.
+    pub fn sketch_is_imported(&self, sketch: u64) -> bool {
+        self.doc.sketch_is_imported(sketch_id(sketch))
+    }
+
+    /// The Object that owns `sketch`'s edges (a loose sketch drawn on a
+    /// solid's face), or `None` when the sketch is unowned (a world,
+    /// detached, group-held or component-member sketch) or unknown. Read-only;
+    /// the viewport uses it to color owned sketch edges as part of a face.
+    pub fn sketch_owner_object(&self, sketch: u64) -> Option<u64> {
+        self.doc
+            .sketch_owner_object(sketch_id(sketch))
+            .map(|o| o.data().as_ffi())
     }
 
     /// All sketch edges as xyz line-segment endpoint pairs, for drawing.
@@ -3812,6 +5600,7 @@ impl Scene {
         region: u64,
         distance: f64,
     ) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
         let region_id = SketchRegionId::from(KeyData::from_ffi(region));
         let (id, change) = self
             .doc
@@ -3847,6 +5636,7 @@ impl Scene {
         region: u64,
         distance: f64,
     ) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
         let region_id = SketchRegionId::from(KeyData::from_ffi(region));
         let (id, change) = self
             .doc
@@ -3891,6 +5681,32 @@ impl Scene {
         stop_len: Option<f64>,
         group: Option<u64>,
     ) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
+        self.follow_me_along_edges_opts(
+            sketch,
+            region,
+            path_sketch,
+            path_edges,
+            stop_len,
+            group,
+            kernel::SweepOptions::default(),
+        )
+    }
+
+    /// [`Scene::follow_me_along_edges`] with Follow Me twist and end scale
+    /// (true-curves.md §5.2); `opts` default is the plain call.
+    #[allow(clippy::too_many_arguments)]
+    fn follow_me_along_edges_opts(
+        &mut self,
+        sketch: u64,
+        region: u64,
+        path_sketch: u64,
+        path_edges: Vec<u64>,
+        stop_len: Option<f64>,
+        group: Option<u64>,
+        opts: kernel::SweepOptions,
+    ) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
         let region_id = SketchRegionId::from(KeyData::from_ffi(region));
         let edges: Vec<SketchEdgeId> = path_edges
             .iter()
@@ -3902,26 +5718,30 @@ impl Scene {
         };
         let sid = sketch_id(sketch);
         let (id, change) = match group {
-            Some(g) => self.doc.follow_me_grouped(
+            Some(g) => self.doc.follow_me_grouped_with(
                 sid,
                 region_id,
                 &path,
                 stop_len,
                 GroupId::from(KeyData::from_ffi(g)),
+                opts,
             ),
-            None => match stop_len {
-                None => self.doc.follow_me(sid, region_id, &path),
-                Some(stop) => self.doc.follow_me_to(sid, region_id, &path, stop),
-            },
+            None => self
+                .doc
+                .follow_me_with(sid, region_id, &path, stop_len, opts),
         }
         .map_err(doc_err)?;
         self.reconcile(&change);
+        let (twist, end_scale, stations) = recording::sweep_fields(&opts);
         recording::record(recording::RecordedCall::FollowMeAlongEdges {
             sketch,
             region,
             path_sketch,
             path_edges,
             stop_len,
+            twist,
+            end_scale,
+            stations,
             group,
         });
         Ok(id.data().as_ffi())
@@ -3943,6 +5763,32 @@ impl Scene {
         stop_len: Option<f64>,
         group: Option<u64>,
     ) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
+        self.follow_me_around_face_opts(
+            sketch,
+            region,
+            path_object,
+            path_face,
+            stop_len,
+            group,
+            kernel::SweepOptions::default(),
+        )
+    }
+
+    /// [`Scene::follow_me_around_face`] with Follow Me twist and end scale
+    /// (true-curves.md §5.2); `opts` default is the plain call.
+    #[allow(clippy::too_many_arguments)]
+    fn follow_me_around_face_opts(
+        &mut self,
+        sketch: u64,
+        region: u64,
+        path_object: u64,
+        path_face: u64,
+        stop_len: Option<f64>,
+        group: Option<u64>,
+        opts: kernel::SweepOptions,
+    ) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
         let region_id = SketchRegionId::from(KeyData::from_ffi(region));
         let path = kernel::FollowMePath::FaceLoop {
             object: object_id(path_object),
@@ -3950,26 +5796,30 @@ impl Scene {
         };
         let sid = sketch_id(sketch);
         let (id, change) = match group {
-            Some(g) => self.doc.follow_me_grouped(
+            Some(g) => self.doc.follow_me_grouped_with(
                 sid,
                 region_id,
                 &path,
                 stop_len,
                 GroupId::from(KeyData::from_ffi(g)),
+                opts,
             ),
-            None => match stop_len {
-                None => self.doc.follow_me(sid, region_id, &path),
-                Some(stop) => self.doc.follow_me_to(sid, region_id, &path, stop),
-            },
+            None => self
+                .doc
+                .follow_me_with(sid, region_id, &path, stop_len, opts),
         }
         .map_err(doc_err)?;
         self.reconcile(&change);
+        let (twist, end_scale, stations) = recording::sweep_fields(&opts);
         recording::record(recording::RecordedCall::FollowMeAroundFace {
             sketch,
             region,
             path_object,
             path_face,
             stop_len,
+            twist,
+            end_scale,
+            stations,
             group,
         });
         Ok(id.data().as_ffi())
@@ -3989,6 +5839,30 @@ impl Scene {
         path_face: u64,
         stop_len: Option<f64>,
     ) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
+        self.follow_me_merged_around_face_opts(
+            sketch,
+            region,
+            path_object,
+            path_face,
+            stop_len,
+            kernel::SweepOptions::default(),
+        )
+    }
+
+    /// [`Scene::follow_me_merged_around_face`] with Follow Me twist and end scale
+    /// (true-curves.md §5.2); `opts` default is the plain call.
+    #[allow(clippy::too_many_arguments)]
+    fn follow_me_merged_around_face_opts(
+        &mut self,
+        sketch: u64,
+        region: u64,
+        path_object: u64,
+        path_face: u64,
+        stop_len: Option<f64>,
+        opts: kernel::SweepOptions,
+    ) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
         let region_id = SketchRegionId::from(KeyData::from_ffi(region));
         let path = kernel::FollowMePath::FaceLoop {
             object: object_id(path_object),
@@ -3996,15 +5870,19 @@ impl Scene {
         };
         let (id, change) = self
             .doc
-            .follow_me_merged(sketch_id(sketch), region_id, &path, stop_len)
+            .follow_me_merged_with(sketch_id(sketch), region_id, &path, stop_len, opts)
             .map_err(doc_err)?;
         self.reconcile(&change);
+        let (twist, end_scale, stations) = recording::sweep_fields(&opts);
         recording::record(recording::RecordedCall::FollowMeMergedAroundFace {
             sketch,
             region,
             path_object,
             path_face,
             stop_len,
+            twist,
+            end_scale,
+            stations,
         });
         Ok(id.data().as_ffi())
     }
@@ -4022,6 +5900,30 @@ impl Scene {
         path_edges: Vec<u64>,
         stop_len: Option<f64>,
     ) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
+        self.follow_me_face_along_edges_opts(
+            profile_object,
+            profile_face,
+            path_sketch,
+            path_edges,
+            stop_len,
+            kernel::SweepOptions::default(),
+        )
+    }
+
+    /// [`Scene::follow_me_face_along_edges`] with Follow Me twist and end scale
+    /// (true-curves.md §5.2); `opts` default is the plain call.
+    #[allow(clippy::too_many_arguments)]
+    fn follow_me_face_along_edges_opts(
+        &mut self,
+        profile_object: u64,
+        profile_face: u64,
+        path_sketch: u64,
+        path_edges: Vec<u64>,
+        stop_len: Option<f64>,
+        opts: kernel::SweepOptions,
+    ) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
         let edges: Vec<SketchEdgeId> = path_edges
             .iter()
             .map(|&e| SketchEdgeId::from(KeyData::from_ffi(e)))
@@ -4032,20 +5934,25 @@ impl Scene {
         };
         let (id, change) = self
             .doc
-            .follow_me_face(
+            .follow_me_face_with(
                 object_id(profile_object),
                 FaceId::from(KeyData::from_ffi(profile_face)),
                 &path,
                 stop_len,
+                opts,
             )
             .map_err(doc_err)?;
         self.reconcile(&change);
+        let (twist, end_scale, stations) = recording::sweep_fields(&opts);
         recording::record(recording::RecordedCall::FollowMeFaceAlongEdges {
             profile_object,
             profile_face,
             path_sketch,
             path_edges,
             stop_len,
+            twist,
+            end_scale,
+            stations,
         });
         Ok(id.data().as_ffi())
     }
@@ -4061,26 +5968,55 @@ impl Scene {
         path_face: u64,
         stop_len: Option<f64>,
     ) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
+        self.follow_me_face_around_face_opts(
+            profile_object,
+            profile_face,
+            path_object,
+            path_face,
+            stop_len,
+            kernel::SweepOptions::default(),
+        )
+    }
+
+    /// [`Scene::follow_me_face_around_face`] with Follow Me twist and end scale
+    /// (true-curves.md §5.2); `opts` default is the plain call.
+    #[allow(clippy::too_many_arguments)]
+    fn follow_me_face_around_face_opts(
+        &mut self,
+        profile_object: u64,
+        profile_face: u64,
+        path_object: u64,
+        path_face: u64,
+        stop_len: Option<f64>,
+        opts: kernel::SweepOptions,
+    ) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
         let path = kernel::FollowMePath::FaceLoop {
             object: object_id(path_object),
             face: FaceId::from(KeyData::from_ffi(path_face)),
         };
         let (id, change) = self
             .doc
-            .follow_me_face(
+            .follow_me_face_with(
                 object_id(profile_object),
                 FaceId::from(KeyData::from_ffi(profile_face)),
                 &path,
                 stop_len,
+                opts,
             )
             .map_err(doc_err)?;
         self.reconcile(&change);
+        let (twist, end_scale, stations) = recording::sweep_fields(&opts);
         recording::record(recording::RecordedCall::FollowMeFaceAroundFace {
             profile_object,
             profile_face,
             path_object,
             path_face,
             stop_len,
+            twist,
+            end_scale,
+            stations,
         });
         Ok(id.data().as_ffi())
     }
@@ -4106,6 +6042,7 @@ impl Scene {
         face: u64,
         distance: f64,
     ) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
         let (id, change) = self
             .doc
             .extrude_face_as_new_object(
@@ -4116,6 +6053,50 @@ impl Scene {
             .map_err(doc_err)?;
         self.reconcile(&change);
         recording::record(recording::RecordedCall::ExtrudeFaceAsNewObject {
+            object,
+            face,
+            distance,
+        });
+        Ok(id.data().as_ffi())
+    }
+
+    /// [`Scene::extrude_face_as_new_object`] for a face picked THROUGH the
+    /// world placement `instance` (a linked copy or a component copy, the
+    /// face pick's `.instance()`), `object` being the member of its
+    /// definition that the pick named: the new Object stands on the copy
+    /// that was clicked, at its pose, a plain top-level Object. The
+    /// placement, its definition and every other copy are untouched, and a
+    /// lock does not refuse it (nothing that exists changes). `distance` is
+    /// the WORLD drag distance, mapped through the pose like
+    /// [`Scene::push_pull_in_component`]'s.
+    ///
+    /// # Errors
+    /// `UnknownInstance` — a stale, hidden or definition-owned placement;
+    /// `ExplodeSessionOpen` — its definition is open for editing;
+    /// `UnknownObject` — `object` is not a member of the placement's own
+    /// definition; `UnknownFace`; `AmbiguousInstanceScale` — a non-uniformly
+    /// scaled placement; `Extrude` — a degenerate profile or distance. The
+    /// document is untouched on error.
+    pub fn extrude_face_as_new_object_in_instance(
+        &mut self,
+        instance: u64,
+        object: u64,
+        face: u64,
+        distance: f64,
+    ) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
+        let (id, change) = self
+            .doc
+            .extrude_face_as_new_object_in_instance(
+                instance_id(instance),
+                object_id(object),
+                FaceId::from(KeyData::from_ffi(face)),
+                distance,
+            )
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::ExtrudeFaceAsNewObjectInInstance {
+            instance,
             object,
             face,
             distance,
@@ -4137,6 +6118,32 @@ impl Scene {
         path_face: u64,
         stop_len: Option<f64>,
     ) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
+        self.follow_me_around_instance_face_opts(
+            sketch,
+            region,
+            instance,
+            path_object,
+            path_face,
+            stop_len,
+            kernel::SweepOptions::default(),
+        )
+    }
+
+    /// [`Scene::follow_me_around_instance_face`] with Follow Me twist and end scale
+    /// (true-curves.md §5.2); `opts` default is the plain call.
+    #[allow(clippy::too_many_arguments)]
+    fn follow_me_around_instance_face_opts(
+        &mut self,
+        sketch: u64,
+        region: u64,
+        instance: u64,
+        path_object: u64,
+        path_face: u64,
+        stop_len: Option<f64>,
+        opts: kernel::SweepOptions,
+    ) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
         let region_id = SketchRegionId::from(KeyData::from_ffi(region));
         let path = kernel::FollowMePath::InstanceFaceLoop {
             instance: InstanceId::from(KeyData::from_ffi(instance)),
@@ -4144,12 +6151,12 @@ impl Scene {
             face: FaceId::from(KeyData::from_ffi(path_face)),
         };
         let sid = sketch_id(sketch);
-        let (id, change) = match stop_len {
-            None => self.doc.follow_me(sid, region_id, &path),
-            Some(stop) => self.doc.follow_me_to(sid, region_id, &path, stop),
-        }
-        .map_err(doc_err)?;
+        let (id, change) = self
+            .doc
+            .follow_me_with(sid, region_id, &path, stop_len, opts)
+            .map_err(doc_err)?;
         self.reconcile(&change);
+        let (twist, end_scale, stations) = recording::sweep_fields(&opts);
         recording::record(recording::RecordedCall::FollowMeAroundInstanceFace {
             sketch,
             region,
@@ -4157,6 +6164,9 @@ impl Scene {
             path_object,
             path_face,
             stop_len,
+            twist,
+            end_scale,
+            stations,
         });
         Ok(id.data().as_ffi())
     }
@@ -4181,6 +6191,32 @@ impl Scene {
         path_edges: Vec<u64>,
         stop_len: Option<f64>,
     ) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
+        self.follow_me_along_edges_in_instance_opts(
+            instance,
+            sketch,
+            region,
+            path_sketch,
+            path_edges,
+            stop_len,
+            kernel::SweepOptions::default(),
+        )
+    }
+
+    /// [`Scene::follow_me_along_edges_in_instance`] with Follow Me twist and end scale
+    /// (true-curves.md §5.2); `opts` default is the plain call.
+    #[allow(clippy::too_many_arguments)]
+    fn follow_me_along_edges_in_instance_opts(
+        &mut self,
+        instance: u64,
+        sketch: u64,
+        region: u64,
+        path_sketch: u64,
+        path_edges: Vec<u64>,
+        stop_len: Option<f64>,
+        opts: kernel::SweepOptions,
+    ) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
         let region_id = SketchRegionId::from(KeyData::from_ffi(region));
         let edges: Vec<SketchEdgeId> = path_edges
             .iter()
@@ -4192,15 +6228,17 @@ impl Scene {
         };
         let (id, change) = self
             .doc
-            .follow_me_in_instance(
+            .follow_me_in_instance_with(
                 instance_id(instance),
                 sketch_id(sketch),
                 region_id,
                 &path,
                 stop_len,
+                opts,
             )
             .map_err(doc_err)?;
         self.reconcile(&change);
+        let (twist, end_scale, stations) = recording::sweep_fields(&opts);
         recording::record(recording::RecordedCall::FollowMeAlongEdgesInInstance {
             instance,
             sketch,
@@ -4208,6 +6246,9 @@ impl Scene {
             path_sketch,
             path_edges,
             stop_len,
+            twist,
+            end_scale,
+            stations,
         });
         Ok(id.data().as_ffi())
     }
@@ -4225,6 +6266,32 @@ impl Scene {
         path_face: u64,
         stop_len: Option<f64>,
     ) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
+        self.follow_me_around_face_in_instance_opts(
+            instance,
+            sketch,
+            region,
+            path_object,
+            path_face,
+            stop_len,
+            kernel::SweepOptions::default(),
+        )
+    }
+
+    /// [`Scene::follow_me_around_face_in_instance`] with Follow Me twist and end scale
+    /// (true-curves.md §5.2); `opts` default is the plain call.
+    #[allow(clippy::too_many_arguments)]
+    fn follow_me_around_face_in_instance_opts(
+        &mut self,
+        instance: u64,
+        sketch: u64,
+        region: u64,
+        path_object: u64,
+        path_face: u64,
+        stop_len: Option<f64>,
+        opts: kernel::SweepOptions,
+    ) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
         let region_id = SketchRegionId::from(KeyData::from_ffi(region));
         let path = kernel::FollowMePath::FaceLoop {
             object: object_id(path_object),
@@ -4232,15 +6299,17 @@ impl Scene {
         };
         let (id, change) = self
             .doc
-            .follow_me_in_instance(
+            .follow_me_in_instance_with(
                 instance_id(instance),
                 sketch_id(sketch),
                 region_id,
                 &path,
                 stop_len,
+                opts,
             )
             .map_err(doc_err)?;
         self.reconcile(&change);
+        let (twist, end_scale, stations) = recording::sweep_fields(&opts);
         recording::record(recording::RecordedCall::FollowMeAroundFaceInInstance {
             instance,
             sketch,
@@ -4248,6 +6317,9 @@ impl Scene {
             path_object,
             path_face,
             stop_len,
+            twist,
+            end_scale,
+            stations,
         });
         Ok(id.data().as_ffi())
     }
@@ -4265,6 +6337,32 @@ impl Scene {
         path_face: u64,
         stop_len: Option<f64>,
     ) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
+        self.follow_me_merged_around_face_in_instance_opts(
+            instance,
+            sketch,
+            region,
+            path_object,
+            path_face,
+            stop_len,
+            kernel::SweepOptions::default(),
+        )
+    }
+
+    /// [`Scene::follow_me_merged_around_face_in_instance`] with Follow Me twist and end scale
+    /// (true-curves.md §5.2); `opts` default is the plain call.
+    #[allow(clippy::too_many_arguments)]
+    fn follow_me_merged_around_face_in_instance_opts(
+        &mut self,
+        instance: u64,
+        sketch: u64,
+        region: u64,
+        path_object: u64,
+        path_face: u64,
+        stop_len: Option<f64>,
+        opts: kernel::SweepOptions,
+    ) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
         let region_id = SketchRegionId::from(KeyData::from_ffi(region));
         let path = kernel::FollowMePath::FaceLoop {
             object: object_id(path_object),
@@ -4272,15 +6370,17 @@ impl Scene {
         };
         let (id, change) = self
             .doc
-            .follow_me_merged_in_instance(
+            .follow_me_merged_in_instance_with(
                 instance_id(instance),
                 sketch_id(sketch),
                 region_id,
                 &path,
                 stop_len,
+                opts,
             )
             .map_err(doc_err)?;
         self.reconcile(&change);
+        let (twist, end_scale, stations) = recording::sweep_fields(&opts);
         recording::record(
             recording::RecordedCall::FollowMeMergedAroundFaceInInstance {
                 instance,
@@ -4289,6 +6389,9 @@ impl Scene {
                 path_object,
                 path_face,
                 stop_len,
+                twist,
+                end_scale,
+                stations,
             },
         );
         Ok(id.data().as_ffi())
@@ -4307,6 +6410,32 @@ impl Scene {
         path_edges: Vec<u64>,
         stop_len: Option<f64>,
     ) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
+        self.follow_me_face_along_edges_in_instance_opts(
+            instance,
+            profile_object,
+            profile_face,
+            path_sketch,
+            path_edges,
+            stop_len,
+            kernel::SweepOptions::default(),
+        )
+    }
+
+    /// [`Scene::follow_me_face_along_edges_in_instance`] with Follow Me twist and end scale
+    /// (true-curves.md §5.2); `opts` default is the plain call.
+    #[allow(clippy::too_many_arguments)]
+    fn follow_me_face_along_edges_in_instance_opts(
+        &mut self,
+        instance: u64,
+        profile_object: u64,
+        profile_face: u64,
+        path_sketch: u64,
+        path_edges: Vec<u64>,
+        stop_len: Option<f64>,
+        opts: kernel::SweepOptions,
+    ) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
         let edges: Vec<SketchEdgeId> = path_edges
             .iter()
             .map(|&e| SketchEdgeId::from(KeyData::from_ffi(e)))
@@ -4317,15 +6446,17 @@ impl Scene {
         };
         let (id, change) = self
             .doc
-            .follow_me_face_in_instance(
+            .follow_me_face_in_instance_with(
                 instance_id(instance),
                 object_id(profile_object),
                 FaceId::from(KeyData::from_ffi(profile_face)),
                 &path,
                 stop_len,
+                opts,
             )
             .map_err(doc_err)?;
         self.reconcile(&change);
+        let (twist, end_scale, stations) = recording::sweep_fields(&opts);
         recording::record(recording::RecordedCall::FollowMeFaceAlongEdgesInInstance {
             instance,
             profile_object,
@@ -4333,6 +6464,9 @@ impl Scene {
             path_sketch,
             path_edges,
             stop_len,
+            twist,
+            end_scale,
+            stations,
         });
         Ok(id.data().as_ffi())
     }
@@ -4350,21 +6484,49 @@ impl Scene {
         path_face: u64,
         stop_len: Option<f64>,
     ) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
+        self.follow_me_face_around_face_in_instance_opts(
+            instance,
+            profile_object,
+            profile_face,
+            path_object,
+            path_face,
+            stop_len,
+            kernel::SweepOptions::default(),
+        )
+    }
+
+    /// [`Scene::follow_me_face_around_face_in_instance`] with Follow Me twist and end scale
+    /// (true-curves.md §5.2); `opts` default is the plain call.
+    #[allow(clippy::too_many_arguments)]
+    fn follow_me_face_around_face_in_instance_opts(
+        &mut self,
+        instance: u64,
+        profile_object: u64,
+        profile_face: u64,
+        path_object: u64,
+        path_face: u64,
+        stop_len: Option<f64>,
+        opts: kernel::SweepOptions,
+    ) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
         let path = kernel::FollowMePath::FaceLoop {
             object: object_id(path_object),
             face: FaceId::from(KeyData::from_ffi(path_face)),
         };
         let (id, change) = self
             .doc
-            .follow_me_face_in_instance(
+            .follow_me_face_in_instance_with(
                 instance_id(instance),
                 object_id(profile_object),
                 FaceId::from(KeyData::from_ffi(profile_face)),
                 &path,
                 stop_len,
+                opts,
             )
             .map_err(doc_err)?;
         self.reconcile(&change);
+        let (twist, end_scale, stations) = recording::sweep_fields(&opts);
         recording::record(recording::RecordedCall::FollowMeFaceAroundFaceInInstance {
             instance,
             profile_object,
@@ -4372,6 +6534,9 @@ impl Scene {
             path_object,
             path_face,
             stop_len,
+            twist,
+            end_scale,
+            stations,
         });
         Ok(id.data().as_ffi())
     }
@@ -4381,6 +6546,7 @@ impl Scene {
     /// 0 = union, 1 = subtract (`a - b`), 2 = intersect. Operands and result
     /// stay stable handles across undo/redo.
     pub fn boolean(&mut self, op: u8, a: u64, b: u64) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
         let bop = match op {
             0 => BooleanOp::Union,
             1 => BooleanOp::Subtract,
@@ -4414,6 +6580,7 @@ impl Scene {
         b_kind: u8,
         b: u64,
     ) -> Result<NodeJs, ApiError> {
+        self.ensure_not_busy()?;
         let bop = match op {
             0 => BooleanOp::Union,
             1 => BooleanOp::Subtract,
@@ -4434,6 +6601,53 @@ impl Scene {
         Ok(node_js(root))
     }
 
+    /// [`Scene::boolean_nodes`] over any number of nodes (`kinds[i]`,
+    /// `ids[i]`), as one undo step: a Union of all of them, the first minus
+    /// the union of the rest, or the intersection of all. Records
+    /// `BooleanNodesMany`; exactly two nodes are the two-operand call and
+    /// record as it does, so a recording made of pairs stays readable by
+    /// every build that reads `BooleanNodes`.
+    ///
+    /// # Errors
+    /// As [`Scene::boolean_nodes`]; `BooleanNeedsTwo` for fewer than two
+    /// nodes, `BadNodeKind` for a kind outside 0..=2, and `BadNodeList` when
+    /// the two arrays differ in length.
+    pub fn boolean_nodes_many(
+        &mut self,
+        op: u8,
+        kinds: &[u8],
+        ids: &[u64],
+    ) -> Result<NodeJs, ApiError> {
+        self.ensure_not_busy()?;
+        let bop = match op {
+            0 => BooleanOp::Union,
+            1 => BooleanOp::Subtract,
+            2 => BooleanOp::Intersect,
+            _ => return Err(ApiError("BadOp: op must be 0, 1, or 2".to_string())),
+        };
+        if kinds.len() != ids.len() {
+            return Err(ApiError(
+                "BadNodeList: kinds and ids must have the same length".to_string(),
+            ));
+        }
+        if let (&[a_kind, b_kind], &[a, b]) = (kinds, ids) {
+            return self.boolean_nodes(op, a_kind, a, b_kind, b);
+        }
+        let nodes: Vec<NodeId> = kinds
+            .iter()
+            .zip(ids)
+            .map(|(&k, &id)| node_id(k, id))
+            .collect::<Result<_, _>>()?;
+        let (root, change) = self.doc.boolean_nodes_many(bop, &nodes).map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::BooleanNodesMany {
+            op,
+            kinds: kinds.to_vec(),
+            ids: ids.to_vec(),
+        });
+        Ok(node_js(root))
+    }
+
     /// Slice a watertight solid by a plane into two independent watertight
     /// solids. `plane` is 6 floats `[px,py,pz,nx,ny,nz]` — a point on the
     /// cut plane and its (unnormalized) normal. Returns the two new object
@@ -4442,6 +6656,7 @@ impl Scene {
     /// undo/redo. Errors if the object is unknown/hidden, not a solid, or the
     /// cut is degenerate or misses the solid.
     pub fn slice_object(&mut self, object: u64, plane: &[f64]) -> Result<Vec<u64>, ApiError> {
+        self.ensure_not_busy()?;
         let p: &[f64; 6] = plane.try_into().map_err(|_| {
             ApiError("BadPlane: slice plane must be 6 floats [px,py,pz,nx,ny,nz]".to_string())
         })?;
@@ -4463,6 +6678,7 @@ impl Scene {
     /// `[m00 m01 m02 tx, m10 m11 m12 ty, m20 m21 m22 tz]`. The object handle is
     /// unchanged; the UI re-pulls its mesh afterward.
     pub fn transform_object(&mut self, object: u64, affine: &[f64]) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let rows: &[f64; 12] = affine.try_into().map_err(|_| {
             ApiError("BadAffine: transform must be 12 floats (row-major 3x4)".to_string())
         })?;
@@ -4488,8 +6704,9 @@ impl Scene {
     /// # Errors
     /// - `BadAffine` — `affine` is not 12 floats.
     /// - `UnknownSketch` — stale or hidden (deleted) handle.
-    /// - `Transform` — singular or orientation-flipping (e.g. negative scale).
+    /// - `Transform` — singular.
     pub fn transform_sketch(&mut self, sketch: u64, affine: &[f64]) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let rows: &[f64; 12] = affine.try_into().map_err(|_| {
             ApiError("BadAffine: transform must be 12 floats (row-major 3x4)".to_string())
         })?;
@@ -4523,6 +6740,7 @@ impl Scene {
         y: f64,
         z: f64,
     ) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let change = self
             .doc
             .move_sketch_vertex(
@@ -4545,19 +6763,25 @@ impl Scene {
     /// [`Scene::transform_object`]). Returns the new node (always the **same kind**
     /// as the source `kind`/`id`): an Object/Group copy bakes the offset into
     /// fresh geometry; an Instance copy shares its definition at the offset pose.
-    /// Undoable; the source is left untouched.
+    /// Undoable; the source is left untouched. Always an independent copy
+    /// ([`kernel::LinkPolicy::Independent`]); a linked copy goes through
+    /// [`Scene::duplicate_selection_array`] with `linked`.
     pub fn duplicate_node(
         &mut self,
         kind: u8,
         id: u64,
         affine: &[f64],
     ) -> Result<NodeJs, ApiError> {
+        self.ensure_not_busy()?;
         let node = node_id(kind, id)?;
         let rows: &[f64; 12] = affine.try_into().map_err(|_| {
             ApiError("BadAffine: transform must be 12 floats (row-major 3x4)".to_string())
         })?;
         let t = Transform::from_affine(rows);
-        let (new_node, change) = self.doc.duplicate_node(node, &t).map_err(doc_err)?;
+        let (new_node, change) = self
+            .doc
+            .duplicate_node(node, &t, kernel::LinkPolicy::Independent)
+            .map_err(doc_err)?;
         self.reconcile(&change);
         recording::record(recording::RecordedCall::DuplicateNode {
             kind,
@@ -4575,7 +6799,10 @@ impl Scene {
     /// the full offset divided by `count`. Placement per kind matches
     /// [`Scene::duplicate_node`]: an Object/Group copy bakes fresh
     /// independent geometry, an Instance copy shares its definition at the
-    /// composed pose. The whole array is **one undoable step**.
+    /// composed pose. With `linked`, each Object or Group is first wrapped
+    /// as its own linked set ([`Scene::wrap_linked`]) and every copy is a
+    /// placement of it; the returned nodes are then instances. The whole
+    /// array is **one undoable step** either way.
     ///
     /// `kinds`/`ids` are parallel arrays naming live sibling-or-not tree
     /// nodes (kind `0` = object, `1` = group, `2` = instance, as in
@@ -4595,8 +6822,12 @@ impl Scene {
     /// - `EmptySelection` — nothing to duplicate.
     /// - `UnknownObject`/`UnknownGroup`/`UnknownInstance` — a stale or hidden
     ///   handle.
-    /// - `Transform` — a singular `affine`, or one that reflects a baked
-    ///   target.
+    /// - `Transform` — a singular `affine`, or one that shrinks a baked
+    ///   target below what a saved file could reopen (a reflection bakes a
+    ///   mirrored copy).
+    /// - With `linked`: `DuplicateMember` for a node listed beside a group
+    ///   that contains it, `ExplodeSessionScope` / `ComponentDepthExceeded`
+    ///   / `ComponentExpansionExceeded` as for [`Scene::wrap_linked`].
     ///
     /// On error the document is untouched (partial clones are rolled back).
     pub fn duplicate_selection_array(
@@ -4605,7 +6836,43 @@ impl Scene {
         ids: &[u64],
         affine: &[f64],
         count: u32,
+        linked: bool,
     ) -> Result<Vec<NodeJs>, ApiError> {
+        self.ensure_not_busy()?;
+        let (roots, _) = self.duplicate_selection_array_core(kinds, ids, affine, count, linked)?;
+        Ok(roots.into_iter().map(node_js).collect())
+    }
+
+    /// The [`Scene::duplicate_selection_array`] call with `linked = true`,
+    /// returning the new placements and every wrap it made as JSON:
+    /// `{"nodes":[{"kind":"instance","id":"<ffi>"},...],
+    ///   "linked":[{"source":{"kind":"object","id":"<ffi>"},"instance":"<ffi>","definition":"<ffi>"},...]}`
+    /// (decimal-string handles). The selection store maps each `source` to
+    /// its `instance`. Same errors.
+    pub fn duplicate_selection_array_linked(
+        &mut self,
+        kinds: &[u8],
+        ids: &[u64],
+        affine: &[f64],
+        count: u32,
+    ) -> Result<String, ApiError> {
+        self.ensure_not_busy()?;
+        let (roots, change) =
+            self.duplicate_selection_array_core(kinds, ids, affine, count, true)?;
+        Ok(linked_result_json(&roots, &change))
+    }
+
+    /// The shared body of the two array-copy entry points: validates at the
+    /// trust boundary, runs the kernel op, reconciles, and records.
+    fn duplicate_selection_array_core(
+        &mut self,
+        kinds: &[u8],
+        ids: &[u64],
+        affine: &[f64],
+        count: u32,
+        linked: bool,
+    ) -> Result<(Vec<NodeId>, kernel::DocChange), ApiError> {
+        self.ensure_not_busy()?;
         if kinds.len() != ids.len() {
             return Err(ApiError(
                 "BadNodeList: kinds and ids must be the same length".to_string(),
@@ -4631,10 +6898,20 @@ impl Scene {
         let rows: &[f64; 12] = affine.try_into().map_err(|_| {
             ApiError("BadAffine: transform must be 12 floats (row-major 3x4)".to_string())
         })?;
+        if rows.iter().any(|v| !v.is_finite()) {
+            return Err(ApiError(
+                "BadAffine: transform must be 12 finite floats (row-major 3x4)".to_string(),
+            ));
+        }
         let t = Transform::from_affine(rows);
+        let policy = if linked {
+            kernel::LinkPolicy::Linked
+        } else {
+            kernel::LinkPolicy::Independent
+        };
         let (roots, change) = self
             .doc
-            .duplicate_nodes_array(&nodes, &t, count_nz)
+            .duplicate_nodes_array(&nodes, &t, count_nz, policy)
             .map_err(doc_err)?;
         self.reconcile(&change);
         recording::record(recording::RecordedCall::DuplicateSelectionArray {
@@ -4642,6 +6919,244 @@ impl Scene {
             ids: ids.to_vec(),
             affine: *rows,
             count,
+            linked,
+        });
+        Ok((roots, change))
+    }
+
+    /// Copies the nodes to every placement in `affines` (row-major 3x4,
+    /// 12 floats each, concatenated), as ONE undoable step: the kernel's
+    /// [`Document::duplicate_nodes_placements`]. The Move tool's grid array
+    /// uses it: the placements are the lattice slots, original excluded.
+    /// `linked` selects the policy as in [`Scene::duplicate_selection_array`].
+    /// Returns the new nodes in placement-major order (every source's copy
+    /// at placement 0, then placement 1, …). The cap is [`MAX_ARRAY_COUNT`]
+    /// placements.
+    ///
+    /// # Errors
+    /// - `BadNodeList` — `kinds` and `ids` differ in length or name a bad
+    ///   kind.
+    /// - `DuplicateMember` — the same node is listed twice.
+    /// - `BadCount` — no placements, or more than [`MAX_ARRAY_COUNT`].
+    /// - `BadAffine` — `affines.len()` is not a multiple of 12, or a value
+    ///   is not finite.
+    /// - The rest as [`Scene::duplicate_selection_array`].
+    ///
+    /// On error the document is untouched.
+    pub fn duplicate_selection_placements(
+        &mut self,
+        kinds: &[u8],
+        ids: &[u64],
+        affines: &[f64],
+        linked: bool,
+    ) -> Result<Vec<NodeJs>, ApiError> {
+        self.ensure_not_busy()?;
+        let (roots, _) = self.duplicate_selection_placements_core(kinds, ids, affines, linked)?;
+        Ok(roots.into_iter().map(node_js).collect())
+    }
+
+    /// [`Scene::duplicate_selection_placements`] with `linked = true`,
+    /// returning the new placements and every wrap it made as JSON, in the
+    /// shape of [`Scene::duplicate_selection_array_linked`].
+    pub fn duplicate_selection_placements_linked(
+        &mut self,
+        kinds: &[u8],
+        ids: &[u64],
+        affines: &[f64],
+    ) -> Result<String, ApiError> {
+        self.ensure_not_busy()?;
+        let (roots, change) =
+            self.duplicate_selection_placements_core(kinds, ids, affines, true)?;
+        Ok(linked_result_json(&roots, &change))
+    }
+
+    /// The shared body of the two placement entry points.
+    fn duplicate_selection_placements_core(
+        &mut self,
+        kinds: &[u8],
+        ids: &[u64],
+        affines: &[f64],
+        linked: bool,
+    ) -> Result<(Vec<NodeId>, kernel::DocChange), ApiError> {
+        self.ensure_not_busy()?;
+        if kinds.len() != ids.len() {
+            return Err(ApiError(
+                "BadNodeList: kinds and ids must be the same length".to_string(),
+            ));
+        }
+        if !affines.len().is_multiple_of(12) || affines.iter().any(|v| !v.is_finite()) {
+            return Err(ApiError(
+                "BadAffine: transforms must be 12 finite floats each (row-major 3x4)".to_string(),
+            ));
+        }
+        let n = affines.len() / 12;
+        if n == 0 || n > MAX_ARRAY_COUNT as usize {
+            return Err(ApiError::new(
+                "BadCount",
+                &format!("placements must be between 1 and {MAX_ARRAY_COUNT}"),
+            ));
+        }
+        let nodes = kinds
+            .iter()
+            .zip(ids)
+            .map(|(&k, &i)| node_id(k, i))
+            .collect::<Result<Vec<_>, _>>()?;
+        let placements: Vec<Transform> = affines
+            .as_chunks::<12>()
+            .0
+            .iter()
+            .map(|c| {
+                let rows: &[f64; 12] = c;
+                Transform::from_affine(rows)
+            })
+            .collect();
+        let policy = if linked {
+            kernel::LinkPolicy::Linked
+        } else {
+            kernel::LinkPolicy::Independent
+        };
+        let (roots, change) = self
+            .doc
+            .duplicate_nodes_placements(&nodes, &placements, policy)
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::DuplicateSelectionPlacements {
+            kinds: kinds.to_vec(),
+            ids: ids.to_vec(),
+            affines: affines.to_vec(),
+            linked,
+        });
+        Ok((roots, change))
+    }
+
+    /// The mirror Flip applies, as 12 floats (row-major 3x4): the
+    /// reflection across the plane with normal `(nx, ny, nz)` through the
+    /// point `about_kind` picks — 0 the center of the selection's world
+    /// bounds (the nodes' leaf geometry with the listed sketches), 1 the
+    /// world origin, 2 the point `(ax, ay, az)` (ignored otherwise). The
+    /// kernel's [`kernel::Document::flip_matrix`]; nothing changes.
+    ///
+    /// # Errors
+    /// - `BadNodeList` — `kinds` and `ids` differ in length or name a bad
+    ///   kind.
+    /// - `BadFlip` — a non-finite value in any slot (the `about` point
+    ///   included when it is unused), or `about_kind` above 2.
+    /// - `EmptySelection` — nothing listed (or, for the center, nothing
+    ///   listed has geometry).
+    /// - `UnknownObject`/`UnknownGroup`/`UnknownInstance`/`UnknownSketch`
+    ///   — a stale, deleted, or non-world handle.
+    /// - `Singular` — the normal is zero.
+    #[allow(clippy::too_many_arguments)]
+    pub fn flip_matrix(
+        &self,
+        kinds: &[u8],
+        ids: &[u64],
+        sketch_ids: &[u64],
+        nx: f64,
+        ny: f64,
+        nz: f64,
+        about_kind: u8,
+        ax: f64,
+        ay: f64,
+        az: f64,
+    ) -> Result<Vec<f64>, ApiError> {
+        let (nodes, sketches, normal, about) = flip_args(
+            kinds,
+            ids,
+            sketch_ids,
+            [nx, ny, nz],
+            about_kind,
+            [ax, ay, az],
+        )?;
+        let m = self
+            .doc
+            .flip_matrix(&nodes, &sketches, normal, about)
+            .map_err(doc_err)?;
+        Ok(m.to_affine().to_vec())
+    }
+
+    /// Flip: mirror the selection across the plane [`Scene::flip_matrix`]
+    /// names, as ONE undoable step. `copy` 0 flips in place (objects and
+    /// sketches bake the reflection, instances take a mirrored pose) and
+    /// returns the listed nodes, same handles. `copy` 1 makes a linked
+    /// mirrored copy (each Object or Group wrapped as its own set, the copy
+    /// a placement at the mirrored pose) and 2 an independent one; both
+    /// return the new nodes and copy only the nodes — listed sketches still
+    /// count toward the center, and the app copies drawing itself with
+    /// [`Scene::flip_matrix`]'s matrix. A linked copy wraps its loose
+    /// sources, so a caller holding their ids refreshes the whole tree.
+    ///
+    /// # Errors
+    /// As [`Scene::flip_matrix`], plus `BadFlip` for `copy` above 2, then
+    /// the kernel's refusals for [`kernel::Document::flip_nodes`] and
+    /// [`kernel::Document::flip_copy`]. On error the document is untouched.
+    #[allow(clippy::too_many_arguments)]
+    pub fn flip_selection(
+        &mut self,
+        kinds: &[u8],
+        ids: &[u64],
+        sketch_ids: &[u64],
+        nx: f64,
+        ny: f64,
+        nz: f64,
+        about_kind: u8,
+        ax: f64,
+        ay: f64,
+        az: f64,
+        copy: u8,
+    ) -> Result<Vec<NodeJs>, ApiError> {
+        self.ensure_not_busy()?;
+        let (nodes, sketches, normal, about) = flip_args(
+            kinds,
+            ids,
+            sketch_ids,
+            [nx, ny, nz],
+            about_kind,
+            [ax, ay, az],
+        )?;
+        let (roots, change) = match copy {
+            0 => {
+                let change = self
+                    .doc
+                    .flip_nodes(&nodes, &sketches, normal, about)
+                    .map_err(doc_err)?;
+                (nodes, change)
+            }
+            1 | 2 => {
+                // The sketches count toward the center in both modes; the
+                // copy itself is of the nodes only. Any point of the mirror
+                // plane names it: half the reflection's translation is one.
+                let m = self
+                    .doc
+                    .flip_matrix(&nodes, &sketches, normal, about)
+                    .map_err(doc_err)?;
+                let a = m.to_affine();
+                let on_plane = kernel::Point3::new(a[3] * 0.5, a[7] * 0.5, a[11] * 0.5);
+                let policy = if copy == 1 {
+                    kernel::LinkPolicy::Linked
+                } else {
+                    kernel::LinkPolicy::Independent
+                };
+                self.doc
+                    .flip_copy(&nodes, normal, kernel::FlipAbout::Point(on_plane), policy)
+                    .map_err(doc_err)?
+            }
+            _ => {
+                return Err(ApiError::new(
+                    "BadFlip",
+                    "copy must be 0 (flip), 1 (linked copy), or 2 (independent copy)",
+                ));
+            }
+        };
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::FlipSelection {
+            kinds: kinds.to_vec(),
+            ids: ids.to_vec(),
+            sketch_ids: sketch_ids.to_vec(),
+            normal: [nx, ny, nz],
+            about_kind,
+            about: [ax, ay, az],
+            copy,
         });
         Ok(roots.into_iter().map(node_js).collect())
     }
@@ -4683,6 +7198,7 @@ impl Scene {
     /// member node (kind `0` = object, `1` = group, `2` = instance); they
     /// must be the same length, name live sibling nodes, and not repeat.
     pub fn group_nodes(&mut self, kinds: &[u8], ids: &[u64]) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
         if kinds.len() != ids.len() {
             return Err(ApiError(
                 "BadNodeList: kinds and ids must be the same length".to_string(),
@@ -4705,6 +7221,7 @@ impl Scene {
     /// Dissolves a group, returning its members to the group's own parent
     /// (inverse of `group_nodes`). The members keep their geometry and handles.
     pub fn ungroup(&mut self, group: u64) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let change = self.doc.ungroup(group_id(group)).map_err(doc_err)?;
         self.reconcile(&change);
         recording::record(recording::RecordedCall::Ungroup { group });
@@ -4720,6 +7237,7 @@ impl Scene {
     /// selections are out of scope here ( routes guides to
     /// `delete_guide`/`delete_all_guides`).
     pub fn delete_node(&mut self, kind: u8, id: u64) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let node = node_id(kind, id)?;
         let change = self.doc.delete_node(node).map_err(doc_err)?;
         self.reconcile(&change);
@@ -4736,10 +7254,83 @@ impl Scene {
     /// nothing applied, matching `add_node_tag_many`'s all-or-nothing
     /// posture.
     pub fn delete_selection(&mut self, kinds: &[u8], ids: &[u64]) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let nodes = node_ids(kinds, ids)?;
-        let change = self.doc.delete_selection(&nodes).map_err(doc_err)?;
+        let change = self
+            .doc
+            .delete_selection(&nodes, &[], &[])
+            .map_err(doc_err)?;
         self.reconcile(&change);
         recording::record(recording::RecordedCall::DeleteSelection {
+            kinds: kinds.to_vec(),
+            ids: ids.to_vec(),
+        });
+        Ok(())
+    }
+
+    /// [`Scene::delete_selection`] for a selection that may also hold
+    /// construction guides and annotations: every listed node, guide, and
+    /// annotation is removed as ONE undo step —
+    /// [`kernel::Document::delete_selection`]. Each guide and annotation goes
+    /// exactly as [`Scene::delete_guide`] and [`Scene::delete_annotation`]
+    /// remove one. `kinds`/`ids` are parallel, `delete_selection`'s
+    /// convention, and may be empty when guides or annotations are listed.
+    ///
+    /// # Errors
+    /// - `BadNodeList` — `kinds` and `ids` differ in length, or nothing at
+    ///   all is listed (an empty selection refuses, as it does for
+    ///   [`Scene::delete_selection`]).
+    /// - `BadNodeKind` — a `kinds` entry names no node kind.
+    /// - `UnknownObject` / `UnknownGroup` / `UnknownInstance` /
+    ///   `UnknownGuide` / `UnknownAnnotation` — a listed handle is stale,
+    ///   deleted, or foreign. The whole batch refuses with the document
+    ///   untouched.
+    pub fn delete_mixed_selection(
+        &mut self,
+        kinds: &[u8],
+        ids: &[u64],
+        guides: &[u64],
+        annotations: &[u64],
+    ) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
+        // Nodes may be absent when guides or annotations are listed; an
+        // empty selection refuses through `node_ids`, as it does for
+        // `delete_selection`.
+        let nodes =
+            if kinds.is_empty() && ids.is_empty() && !(guides.is_empty() && annotations.is_empty())
+            {
+                Vec::new()
+            } else {
+                node_ids(kinds, ids)?
+            };
+        let guide_ids: Vec<GuideId> = guides.iter().map(|&g| guide_id(g)).collect();
+        let annotation_ids: Vec<AnnotationId> =
+            annotations.iter().map(|&a| annotation_id(a)).collect();
+        let change = self
+            .doc
+            .delete_selection(&nodes, &guide_ids, &annotation_ids)
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::DeleteMixedSelection {
+            kinds: kinds.to_vec(),
+            ids: ids.to_vec(),
+            guides: guides.to_vec(),
+            annotations: annotations.to_vec(),
+        });
+        Ok(())
+    }
+
+    /// Cut's delete ([`kernel::Document::cut_selection`]):
+    /// [`Scene::delete_selection`] exactly (same arguments, one undo step,
+    /// all-or-nothing), except that a linked set the Cut leaves with one
+    /// copy keeps that copy a placement, so pasting the cut copy back in
+    /// this document rejoins the set. A Delete makes such a copy plain.
+    pub fn cut_selection(&mut self, kinds: &[u8], ids: &[u64]) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
+        let nodes = node_ids(kinds, ids)?;
+        let change = self.doc.cut_selection(&nodes).map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::CutSelection {
             kinds: kinds.to_vec(),
             ids: ids.to_vec(),
         });
@@ -4775,6 +7366,7 @@ impl Scene {
         ids: &[u64],
         group: Option<u64>,
     ) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let nodes = node_ids(kinds, ids)?;
         let change = self
             .doc
@@ -4798,6 +7390,7 @@ impl Scene {
     /// # Errors
     /// - `UnknownSketch` — stale, already-hidden, or foreign handle.
     pub fn delete_sketch(&mut self, sketch: u64) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let change = self.doc.delete_sketch(sketch_id(sketch)).map_err(doc_err)?;
         self.reconcile(&change);
         recording::record(recording::RecordedCall::DeleteSketch { sketch });
@@ -4808,6 +7401,7 @@ impl Scene {
     /// beneath it (undoable). `affine` is the same row-major 3×4
     /// 12-float matrix as [`Scene::transform_object`].
     pub fn transform_group(&mut self, group: u64, affine: &[f64]) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let rows: &[f64; 12] = affine.try_into().map_err(|_| {
             ApiError("BadAffine: transform must be 12 floats (row-major 3x4)".to_string())
         })?;
@@ -4849,6 +7443,7 @@ impl Scene {
         sketches: &[u64],
         affine: &[f64],
     ) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         if kinds.len() != ids.len() {
             return Err(ApiError(
                 "BadNodeList: kinds and ids must be the same length".to_string(),
@@ -4890,6 +7485,7 @@ impl Scene {
     /// `InvalidRescaleFactor` — `factor` is non-finite, zero, or negative;
     /// the document is untouched.
     pub fn rescale_document(&mut self, factor: f64) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let change = self.doc.rescale_document(factor).map_err(doc_err)?;
         self.reconcile(&change);
         recording::record(recording::RecordedCall::RescaleDocument { factor });
@@ -4944,6 +7540,7 @@ impl Scene {
         yy: f64,
         yz: f64,
     ) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let change = self
             .doc
             .set_axes(
@@ -4992,6 +7589,62 @@ impl Scene {
             .collect()
     }
 
+    /// A world node measured along its own axes: `hew.query.part_frame`'s
+    /// result JSON (`{generation, epoch, origin, x, y, z, extents, source,
+    /// mirrored}`, docs/agents/HEW_API.md §7) for the node's world
+    /// placement — the measurement the cut list and the parts sheet show.
+    /// `kind` is `0` = object, `1` = group, `2` = instance.
+    ///
+    /// # Errors
+    /// - `NotPlaced` — the handle is stale, hidden, or not a world
+    ///   node.
+    /// - `NoPartFrame` — the node holds no faces to measure.
+    /// - `TooManyOccurrences` — the node holds more placements than one
+    ///   walk lists.
+    pub fn part_frame_json(&self, kind: u8, id: u64) -> Result<String, ApiError> {
+        let node = node_id(kind, id)?;
+        let occ = self
+            .doc
+            .occurrence_at(&[], node)
+            .ok_or_else(|| ApiError::new("NotPlaced", "no world placement for that node"))?;
+        let mut v = api::commands::parts::part_frame_result(&self.doc, &occ)
+            .map_err(|e| api_err(&e, &e))?
+            .ok_or_else(|| ApiError::new("NoPartFrame", "that node holds no faces to measure"))?;
+        v["generation"] = serde_json::json!(self.doc.history_generation());
+        v["epoch"] = serde_json::json!(self.doc.document_epoch());
+        Ok(v.to_string())
+    }
+
+    /// `hew.query.measure`'s result JSON for one world node: `{ volume, area,
+    /// bbox, extents, leaf_count, open_leaves }` (volume is null when any
+    /// leaf is open; hidden members still measure). `kind` is `0` = object,
+    /// `1` = group, `2` = instance.
+    ///
+    /// # Errors
+    /// - `NotPlaced` — the node has no world placement: a stale handle, or a
+    ///   nested group member that needs a path to place.
+    /// - `NoGeometry` — the node holds no geometry to measure.
+    /// - any other kernel refusal (e.g. `TooManyOccurrences`) keeps its code.
+    pub fn measure_json(&self, kind: u8, id: u64) -> Result<String, ApiError> {
+        let node = node_id(kind, id)?;
+        let occ = self
+            .doc
+            .occurrence_at(&[], node)
+            .ok_or_else(|| ApiError::new("NotPlaced", "no world placement for that node"))?;
+        let v = api::commands::query::measure_result(&self.doc, occ).map_err(|e| match e {
+            api::commands::CmdError::Params(m) => ApiError::new("NoGeometry", &m),
+            other => api_err(&other, &format!("{other:?}")),
+        })?;
+        Ok(v.to_string())
+    }
+
+    /// The document's epoch: bumped when the document is replaced (a load),
+    /// so a cache keyed on [`Scene::history_generation`] alone can tell a
+    /// swapped document from an unchanged one.
+    pub fn document_epoch(&self) -> u64 {
+        self.doc.document_epoch()
+    }
+
     /// The containing group handle of a node, or `None` if it is top-level (or
     /// the node handle is stale/hidden). `kind` is `0` = object, `1` = group.
     pub fn node_parent(&self, kind: u8, id: u64) -> Result<Option<u64>, ApiError> {
@@ -5021,6 +7674,7 @@ impl Scene {
     /// [`Scene::instance_def`]). `kinds`/`ids` are parallel arrays (kind `0` =
     /// object, `1` = group, `2` = instance), same as [`Scene::group_nodes`].
     pub fn make_component(&mut self, kinds: &[u8], ids: &[u64]) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
         if kinds.len() != ids.len() {
             return Err(ApiError(
                 "BadNodeList: kinds and ids must be the same length".to_string(),
@@ -5044,6 +7698,7 @@ impl Scene {
     /// floats), returning the new instance handle. Reflection and
     /// non-uniform scale are allowed; a singular pose errors.
     pub fn place_instance(&mut self, component: u64, affine: &[f64]) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
         let pose = affine_transform(affine)?;
         let (instance, change) = self
             .doc
@@ -5086,6 +7741,7 @@ impl Scene {
         name: String,
         group: Option<u64>,
     ) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
         let region_ids: Vec<SketchRegionId> = regions
             .iter()
             .map(|&r| SketchRegionId::from(KeyData::from_ffi(r)))
@@ -5114,6 +7770,7 @@ impl Scene {
     /// Move/rotate/scale an instance by composing `affine` (row-major 3×4) into
     /// its pose — never baked. Mirror/non-uniform allowed; singular errors.
     pub fn transform_instance(&mut self, instance: u64, affine: &[f64]) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let t = affine_transform(affine)?;
         let change = self
             .doc
@@ -5131,8 +7788,9 @@ impl Scene {
     }
 
     /// "Explode": bakes an instance's pose into independent world objects,
-    /// returning their handles. A mirrored instance errors (`CannotExplodeReflected`).
+    /// returning their handles. A mirrored instance explodes like any other.
     pub fn explode_instance(&mut self, instance: u64) -> Result<Vec<u64>, ApiError> {
+        self.ensure_not_busy()?;
         let (created, change) = self
             .doc
             .explode_instance(instance_id(instance))
@@ -5146,6 +7804,7 @@ impl Scene {
     /// its definition, returning the new component handle. Later edits to this
     /// instance's definition no longer affect its former siblings.
     pub fn make_unique(&mut self, instance: u64) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
         let (new_def, change) = self
             .doc
             .make_unique(instance_id(instance))
@@ -5155,16 +7814,306 @@ impl Scene {
         Ok(new_def.data().as_ffi())
     }
 
+    /// Wraps one Object or Group (`kind` 0 or 1) as a linked set
+    /// ([`kernel::Document::wrap_linked`]): a new definition carrying
+    /// `hew` / `linked`, whose only member is the node (same id), placed
+    /// once at identity in the node's spot. Returns the new placement's
+    /// handle; the definition is [`Scene::instance_def`] of it. One undo
+    /// step.
+    ///
+    /// # Errors
+    /// `NotWrappable` for an instance (kind 2), `UnknownObject` /
+    /// `UnknownGroup` for a stale node, `ExplodeSessionScope` for a node
+    /// outside an open session, `ComponentDepthExceeded`,
+    /// `ComponentExpansionExceeded`, `BadNodeKind`.
+    pub fn wrap_linked(&mut self, kind: u8, id: u64) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
+        let node = node_id(kind, id)?;
+        let (_, instance, change) = self.doc.wrap_linked(node).map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::WrapLinked { kind, id });
+        Ok(instance.data().as_ffi())
+    }
+
+    /// "Link identical copies": replaces the loose world Object `joiner`
+    /// with a new placement of `set_instance`'s linked set at `affine`
+    /// (row-major 3x4, 12 finite floats; a reflection is allowed and makes
+    /// a mirrored placement) ([`kernel::Document::join_linked`]). The
+    /// kernel checks the pose: the set's solid placed by it must be the
+    /// joiner's shape at the signature's 1 µm quantum. The placement takes
+    /// the joiner's name, tags, user-hidden flag, object material (as its
+    /// instance material), and attributes (not its `hew.part` / `frame`:
+    /// the shared member's serves every placement); face paint on the
+    /// joiner is dropped. A base material on the shared member moves onto
+    /// every placement the set already has and is cleared on the member,
+    /// so each copy keeps its own color. The joiner is hidden. Returns the new
+    /// placement's handle; [`Scene::join_linked_report`] also says what
+    /// was dropped. One undo step, labeled "Link identical copies".
+    ///
+    /// # Errors
+    /// `UnknownInstance` for a stale or non-world `set_instance`,
+    /// `NotLinked` when it places a component that is not a linked set,
+    /// `UnknownObject` for a stale joiner or a definition member,
+    /// `GroupedOperand` for a joiner inside a group, `ExplodeSessionScope`
+    /// while a session is open, `Transform` for a singular pose,
+    /// `ComponentExpansionExceeded`, `NotIdentical` when the pose does not
+    /// place the set's shape onto the joiner (or the set holds more than
+    /// one solid), and `BadAffine` for a wrong length or a non-finite
+    /// value.
+    pub fn join_linked(
+        &mut self,
+        set_instance: u64,
+        joiner: u64,
+        affine: &[f64],
+    ) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
+        Ok(self
+            .join_linked_core(set_instance, joiner, affine)?
+            .instance
+            .data()
+            .as_ffi())
+    }
+
+    /// [`Scene::join_linked`], returning what the app announces as JSON:
+    /// `{"instance":"<ffi>","dropped_face_paint":bool,"frame_differed":bool}`
+    /// (a decimal-string handle). `dropped_face_paint`: the joiner had
+    /// painted faces, which the shared solid cannot keep.
+    /// `frame_differed`: the joiner's own `hew.part` / `frame` (or its
+    /// lack of one) was not the shared member's, which now serves the
+    /// placement. Same errors; recorded as the same call.
+    pub fn join_linked_report(
+        &mut self,
+        set_instance: u64,
+        joiner: u64,
+        affine: &[f64],
+    ) -> Result<String, ApiError> {
+        self.ensure_not_busy()?;
+        let join = self.join_linked_core(set_instance, joiner, affine)?;
+        Ok(serde_json::json!({
+            "instance": join.instance.data().as_ffi().to_string(),
+            "dropped_face_paint": join.dropped_face_paint,
+            "frame_differed": join.frame_differed,
+        })
+        .to_string())
+    }
+
+    /// The shared body of the two join entry points: validates at the
+    /// trust boundary, runs the kernel op, reconciles, and records.
+    fn join_linked_core(
+        &mut self,
+        set_instance: u64,
+        joiner: u64,
+        affine: &[f64],
+    ) -> Result<kernel::LinkedJoin, ApiError> {
+        self.ensure_not_busy()?;
+        let rec_affine: [f64; 12] = affine
+            .try_into()
+            .ok()
+            .filter(|a: &[f64; 12]| a.iter().all(|v| v.is_finite()))
+            .ok_or_else(|| {
+                ApiError(
+                    "BadAffine: transform must be 12 finite floats (row-major 3x4)".to_string(),
+                )
+            })?;
+        let pose = Transform::from_affine(&rec_affine);
+        let (join, change) =
+            match self
+                .doc
+                .join_linked(instance_id(set_instance), object_id(joiner), pose)
+            {
+                Ok(done) => done,
+                Err(DocumentError::UnknownAttr) => {
+                    return Err(ApiError::new(
+                        "NotLinked",
+                        "that placement is not one of a linked set",
+                    ));
+                }
+                Err(e) => return Err(doc_err(e)),
+            };
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::JoinLinked {
+            set_instance,
+            joiner,
+            affine: rec_affine,
+        });
+        Ok(join)
+    }
+
+    /// Unlink: each listed placement of a linked set becomes plain world
+    /// geometry where it stands, and a set left with one placement is no
+    /// set: that copy becomes plain too ([`kernel::Document::unlink_copies`]).
+    /// So unlinking one of two copies leaves two plain Objects, and passing
+    /// every copy (`instances_of`) is Unlink all. Each copy keeps its name,
+    /// color and tags; a locked set's copies stay locked, each with a lock
+    /// of its own. One undo step, labeled "Unlink"; undo restores the set.
+    ///
+    /// Returns the nodes the LISTED placements became, in order (each is
+    /// usually one Object, or one group for a set of a group): what the
+    /// selection moves to.
+    ///
+    /// # Errors
+    /// `EmptySelection`; `UnknownInstance` for a stale, hidden or
+    /// definition-owned placement; `NotLinked` for a placement of a
+    /// component that is not a linked set; `ExplodeSessionScope` /
+    /// `ExplodeSessionOpen` while a session is open and the copy is outside
+    /// it; `LockedNode` for a copy in a locked group (or a locked set that
+    /// holds a component among its parts); `CannotExplodeNonUniformScale`.
+    /// The document is untouched on error.
+    pub fn unlink_copies(&mut self, instances: &[u64]) -> Result<Vec<NodeJs>, ApiError> {
+        self.ensure_not_busy()?;
+        let ids: Vec<InstanceId> = instances.iter().map(|&i| instance_id(i)).collect();
+        let (roots, change) = match self.doc.unlink_copies(&ids) {
+            Ok(done) => done,
+            Err(DocumentError::UnknownAttr) => {
+                return Err(ApiError::new(
+                    "NotLinked",
+                    "that placement is not one of a linked set",
+                ));
+            }
+            Err(e) => return Err(doc_err(e)),
+        };
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::UnlinkCopies {
+            instances: instances.to_vec(),
+        });
+        Ok(roots.into_iter().map(node_js).collect())
+    }
+
+    /// Whether `instance` places a linked set (its definition carries
+    /// `hew` / `linked`). False for a stale handle.
+    pub fn is_linked(&self, instance: u64) -> bool {
+        self.doc
+            .instance_def(instance_id(instance))
+            .is_some_and(|c| self.doc.is_linked_set(c))
+    }
+
+    /// Whether a node handle (`kind` 0 object, 1 group, 2 instance) is a
+    /// live, visible world node. False for a stale, hidden, or
+    /// definition-owned handle, or a bad kind. Read-only.
+    pub fn node_is_live(&self, kind: u8, id: u64) -> bool {
+        node_id(kind, id).is_ok_and(|node| self.doc.node_is_live(node))
+    }
+
+    /// `linked = false` removes `hew` / `linked` from `component` (the
+    /// attribute half of "Make component"; the name is
+    /// [`Scene::set_component_name`]'s). One undo step. `linked = true` is
+    /// refused `NotLinkable`: a component never becomes a linked set.
+    ///
+    /// # Errors
+    /// `NotLinkable` (see above), `NotLinked` for a component that is not a
+    /// linked set, `UnknownComponent` for a stale handle.
+    pub fn set_linked(&mut self, component: u64, linked: bool) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
+        if linked {
+            return Err(ApiError::new(
+                "NotLinkable",
+                "a component cannot become a linked set",
+            ));
+        }
+        let change = match self.doc.promote_linked(component_id(component)) {
+            Ok(change) => change,
+            Err(DocumentError::UnknownAttr) => {
+                return Err(ApiError::new(
+                    "NotLinked",
+                    "that component is not a linked set",
+                ));
+            }
+            Err(e) => return Err(doc_err(e)),
+        };
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::SetLinked { component, linked });
+        Ok(())
+    }
+
+    /// The definition that owns a node (`kind` 0 object, 1 group, 2
+    /// instance) when it is a definition member, or `None` for a world
+    /// node, a stale handle, or a bad kind. Read-only.
+    pub fn owner_definition(&self, kind: u8, id: u64) -> Option<u64> {
+        let node = node_id(kind, id).ok()?;
+        self.doc.owner_definition(node).map(|c| c.data().as_ffi())
+    }
+
+    /// "Make Unique" by occurrence path. `path` is instance handles, outermost
+    /// first; the last is the placement to fork. `cascade` forks every
+    /// definition on the path so only that placement diverges (otherwise only
+    /// the last definition is forked, in place); `deep` also forks the
+    /// definitions nested inside the leaf's. Returns JSON
+    /// `{ "component": "<ffi>", "instance": "<ffi>", "remap": {
+    ///   "objects": [["<old>","<new>"], ...], "groups": [...],
+    ///   "instances": [...], "components": [...] } }`
+    /// with every handle as a decimal string (as `part_frame_json` does).
+    /// `instance` is the placement at the end of the path after the call.
+    ///
+    /// # Errors
+    /// As [`Scene::make_unique`] (`UnknownInstance`, `UnknownComponent`,
+    /// `ExplodeSessionScope` for a definition on loan to a session), plus
+    /// `BadNodeList` for an empty path.
+    pub fn make_unique_by_path_json(
+        &mut self,
+        path: Vec<u64>,
+        cascade: bool,
+        deep: bool,
+    ) -> Result<String, ApiError> {
+        self.ensure_not_busy()?;
+        if path.is_empty() {
+            return Err(ApiError::new(
+                "BadNodeList",
+                "the path needs at least one instance",
+            ));
+        }
+        let ids: Vec<InstanceId> = path.iter().map(|&h| instance_id(h)).collect();
+        let (component, instance, remap, change) = self
+            .doc
+            .make_unique_by_path(&ids, cascade, deep)
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::MakeUniqueByPath {
+            path,
+            cascade,
+            deep,
+        });
+        fn pairs<K: slotmap::Key, V: slotmap::Key>(
+            map: &std::collections::BTreeMap<K, V>,
+        ) -> serde_json::Value {
+            serde_json::Value::Array(
+                map.iter()
+                    .map(|(k, v)| {
+                        serde_json::json!([
+                            k.data().as_ffi().to_string(),
+                            v.data().as_ffi().to_string()
+                        ])
+                    })
+                    .collect(),
+            )
+        }
+        Ok(serde_json::json!({
+            "component": component.data().as_ffi().to_string(),
+            "instance": instance.data().as_ffi().to_string(),
+            "remap": {
+                "objects": pairs(&remap.objects),
+                "groups": pairs(&remap.groups),
+                "instances": pairs(&remap.instances),
+                "components": pairs(&remap.components),
+            },
+        })
+        .to_string())
+    }
+
     /// Opens an explode session on `instance` (docs/design/explode-session-
     /// prototype.md, a `proto/explode-session` prototype): temporarily bakes
     /// the instance's definition's live members/sketches into WORLD-owned
     /// geometry at the instance's pose (SAME ids — a move, not
-    /// `explode_instance`'s copy) and hides every live instance of that
-    /// definition, so the app's ordinary, unmodified tool set can edit them.
+    /// `explode_instance`'s copy) and hides the entered instance, so the
+    /// app's ordinary, unmodified tool set can edit them. Every other
+    /// placement of the definition stays live and renders the session's
+    /// geometry through its own pose (`instance_expanded_members` /
+    /// `instance_expanded_local_poses` answer with the session's world
+    /// objects and the inverse session pose — ARCHITECTURE.md 2.11), so a
+    /// renderer shows the edit on every copy as it happens.
     /// `close_explode_session` folds them back. Refuses typed if a session
-    /// is already open, or if the instance's pose is not a similarity with
-    /// positive determinant.
+    /// is already open, or if the instance's pose is not a similarity (uneven scale).
     pub fn open_explode_session(&mut self, instance: u64) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let change = self
             .doc
             .open_explode_session(instance_id(instance))
@@ -5177,6 +8126,7 @@ impl Scene {
     /// Closes the open explode session, folding its live members/sketches
     /// back into the definition. Refuses typed if no session is open.
     pub fn close_explode_session(&mut self) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let change = self.doc.close_explode_session().map_err(doc_err)?;
         self.reconcile(&change);
         recording::record(recording::RecordedCall::CloseExplodeSession);
@@ -5200,6 +8150,81 @@ impl Scene {
         self.doc
             .explode_session_component()
             .map(|c| c.data().as_ffi())
+    }
+
+    /// Every live world instance that renders a definition on loan to an
+    /// open component frame — the live sibling placements of each entered
+    /// instance, plus world placements of definitions that nest one
+    /// (ARCHITECTURE.md 2.11). These draw the session's in-progress
+    /// objects through their own poses, so a renderer re-pulls their
+    /// placements after any session edit (the kernel reports them in
+    /// every mid-session `DocChange`'s `instances_touched` for the same
+    /// reason). Empty when no component frame is open. Read-only.
+    pub fn session_placements(&self) -> Vec<u64> {
+        self.doc
+            .session_placements()
+            .iter()
+            .map(|i| i.data().as_ffi())
+            .collect()
+    }
+
+    /// Where else the innermost open component session's live geometry is
+    /// drawn: one row-major 3×4 affine (12 floats, concatenated) per shown
+    /// placement image of the definition on loan, each mapping the
+    /// session's WORLD coordinates — what every tool inside the session
+    /// previews in — onto that sibling's rendering (ARCHITECTURE.md 2.11:
+    /// the inverse session pose, then the placement's own pose, with the
+    /// nesting poses between for a placement reached through another
+    /// definition). A drag preview built once in session coordinates is
+    /// drawn again through each frame, so every copy shows the gesture as
+    /// it happens, the way the committed edit will land on it. The entered
+    /// instance is not listed (its image IS the session geometry); a
+    /// placement hidden by eye or tag, isolated away, or reached through a
+    /// hidden member is not either. Empty when no component session is
+    /// open. Read-only; one call per gesture is the intended cost.
+    pub fn session_sibling_frames(&self) -> Vec<f64> {
+        let Some(def) = self.doc.explode_session_component() else {
+            return Vec::new();
+        };
+        // The inverse session pose, as the sketch frame already reads it.
+        let Some((_, pose_inv)) = self.doc.def_rendered_sketches(def) else {
+            return Vec::new();
+        };
+        let session_objects: std::collections::BTreeSet<ObjectId> = self
+            .doc
+            .explode_session_objects()
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+        let mut frames: Vec<Transform> = Vec::new();
+        for i in self.doc.session_placements() {
+            if self.hidden_instances.contains(&i) {
+                continue;
+            }
+            let (Some(pose), Some(idef)) = (self.doc.instance_pose(i), self.doc.instance_def(i))
+            else {
+                continue;
+            };
+            if idef == def {
+                // A direct sibling: the one image the loan rule gives it.
+                frames.push(pose_inv.then(&pose));
+                continue;
+            }
+            // A placement of a definition that nests the one on loan: the
+            // expansion already composes the inverse session pose with the
+            // nesting poses for each session object; every distinct local
+            // pose a shown session object lands at is one image.
+            let placements = self.doc.expanded_def_placements(idef);
+            let shown = self.doc.expanded_def_placements_shown(idef);
+            let mut locals: Vec<Transform> = Vec::new();
+            for ((o, local), s) in placements.iter().zip(shown) {
+                if s && session_objects.contains(o) && !locals.contains(local) {
+                    locals.push(*local);
+                }
+            }
+            frames.extend(locals.iter().map(|l| l.then(&pose)));
+        }
+        frames.iter().flat_map(|t| t.to_affine()).collect()
     }
 
     /// The live objects inside the open explode session (original members
@@ -5232,6 +8257,7 @@ impl Scene {
     /// typed on a stale/hidden group, a nested group (drill down through
     /// its ancestors), or while a component session is open.
     pub fn open_group_session(&mut self, group: u64) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let change = self
             .doc
             .open_group_session(group_id(group))
@@ -5245,6 +8271,7 @@ impl Scene {
     /// re-homing survivors and folding in mid-session creations. Refuses
     /// typed otherwise.
     pub fn close_group_session(&mut self) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let change = self.doc.close_group_session().map_err(doc_err)?;
         self.reconcile(&change);
         recording::record(recording::RecordedCall::CloseGroupSession);
@@ -5255,6 +8282,7 @@ impl Scene {
     /// the app's Escape / double-click-outside gesture. Dispatches to the
     /// specific close, so the recording stays replay-exact.
     pub fn close_innermost_session(&mut self) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         match self.doc.session_stack().last() {
             Some(NodeId::Instance(_)) => self.close_explode_session(),
             Some(_) => self.close_group_session(),
@@ -5303,6 +8331,7 @@ impl Scene {
         ay: f64,
         az: f64,
     ) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let change = self
             .doc
             .rescale_session(factor, Point3::new(ax, ay, az))
@@ -5370,6 +8399,19 @@ impl Scene {
             .expanded_def_placements(def)
             .iter()
             .flat_map(|(_, local)| local.to_affine().to_vec())
+            .collect()
+    }
+
+    /// The material each expanded placement inherits (`u64::MAX` = none),
+    /// parallel to [`Scene::instance_expanded_members`]: the instance's own
+    /// material, overridden by any nested placement on the way in that has
+    /// one ([`kernel::Document::instance_expanded_inherited`]). The renderer
+    /// draws each entry through [`Scene::member_mesh`] with this id.
+    pub fn instance_expanded_inherited(&self, instance: u64) -> Vec<u64> {
+        self.doc
+            .instance_expanded_inherited(instance_id(instance))
+            .into_iter()
+            .map(|m| m.map_or(u64::MAX, |m| m.data().as_ffi()))
             .collect()
     }
 
@@ -5441,6 +8483,7 @@ impl Scene {
         component: u64,
         name: Option<String>,
     ) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let change = self
             .doc
             .set_component_name(component_id(component), name)
@@ -5468,6 +8511,7 @@ impl Scene {
     /// - `DefinitionNestedInDefinition` — a live definition still places
     ///   this one as a member; delete/explode the parent first.
     pub fn delete_definition(&mut self, component: u64) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let cid = component_id(component);
         let change = self.doc.delete_definition(cid).map_err(doc_err)?;
         self.reconcile(&change);
@@ -5488,11 +8532,18 @@ impl Scene {
     /// for a definition that isn't (or isn't currently) placed anywhere
     /// (`definition_usage() == 0`). The Components panel thumbnail path.
     /// `undefined` for a stale/hidden component, a definition with nothing
-    /// visible to render, or while a component-edit session is open —
-    /// best-effort: the caller just skips the thumbnail rather than the
-    /// panel surfacing an error for a purely cosmetic miss.
+    /// visible to render — best-effort: the caller just skips the
+    /// thumbnail rather than the panel surfacing an error for a purely
+    /// cosmetic miss. A part open for editing renders as it would once
+    /// the session closed.
     pub fn render_definition_thumbnail(&self, component: u64, size: u32) -> Option<Vec<u8>> {
-        let item = self.doc.definition_preview(component_id(component)).ok()?;
+        // While a part is open for editing, preview the document as it
+        // would stand with the session closed (a clone only then).
+        let item = self
+            .doc
+            .session_closed()
+            .definition_preview(component_id(component))
+            .ok()?;
         let size = size.clamp(16, 2048);
         softrender::render_document_thumbnail(&item, size)
     }
@@ -5513,6 +8564,7 @@ impl Scene {
     /// undo entry labeled "Purge unused" (no entry, and a zeroed report, when
     /// there is nothing to purge).
     pub fn purge_unused(&mut self) -> Result<PurgeReportJs, ApiError> {
+        self.ensure_not_busy()?;
         let report = self.doc.purge_unused().map_err(doc_err)?;
         // purge_unused can touch an arbitrary set of objects/instances/
         // components across the whole document (every unused definition's
@@ -5546,6 +8598,7 @@ impl Scene {
         id: u64,
         name: Option<String>,
     ) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let node = node_id(kind, id)?;
         let change = self
             .doc
@@ -5562,6 +8615,7 @@ impl Scene {
     ///
     /// `kind`: 0 = object, 1 = group, 2 = instance.
     pub fn add_node_tag(&mut self, kind: u8, id: u64, path: Vec<String>) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let node = node_id(kind, id)?;
         let change = self.doc.add_node_tag(node, path.clone()).map_err(doc_err)?;
         self.reconcile(&change);
@@ -5580,6 +8634,7 @@ impl Scene {
         ids: &[u64],
         path: Vec<String>,
     ) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let nodes = node_ids(kinds, ids)?;
         let label = tag_batch_label("Tag", nodes.len());
         let change = self
@@ -5603,6 +8658,7 @@ impl Scene {
         ids: &[u64],
         path: Vec<String>,
     ) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let nodes = node_ids(kinds, ids)?;
         let label = tag_batch_label("Untag", nodes.len());
         let change = self
@@ -5628,6 +8684,7 @@ impl Scene {
         id: u64,
         path: Vec<String>,
     ) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let node = node_id(kind, id)?;
         let change = self.doc.remove_node_tag(node, &path).map_err(doc_err)?;
         self.reconcile(&change);
@@ -5684,12 +8741,14 @@ impl Scene {
     /// is `/`-joined like [`Scene::node_tags`]. View state, not undoable;
     /// persisted with the document (manifest v5) so hidden `.skp` layers
     /// stay hidden across save/load.
-    pub fn set_tag_hidden(&mut self, path: String, hidden: bool) {
+    pub fn set_tag_hidden(&mut self, path: String, hidden: bool) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let segments: Vec<String> = path.split('/').map(str::to_string).collect();
         self.doc.set_tag_hidden(segments, hidden);
         // A guide hides with its tags: what snaps follows at once.
         self.reregister_guides();
         recording::record(recording::RecordedCall::SetTagHidden { path, hidden });
+        Ok(())
     }
 
     /// Delete the tag `path` — and every registered tag nested under it —
@@ -5699,6 +8758,7 @@ impl Scene {
     /// No-op (no undo entry) for an unknown path. `path` is `/`-joined like
     /// [`Scene::node_tags`].
     pub fn delete_tag(&mut self, path: String) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let segments: Vec<String> = path.split('/').map(str::to_string).collect();
         let change = self.doc.delete_tag(&segments).map_err(doc_err)?;
         self.reconcile(&change);
@@ -5713,6 +8773,7 @@ impl Scene {
     /// collision (`DuplicateTag`) or an empty / self-nested target
     /// (`InvalidTagPath`).
     pub fn rename_tag(&mut self, path: String, new_path: String) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let from: Vec<String> = path
             .split('/')
             .map(|s| s.trim().to_string())
@@ -5729,12 +8790,73 @@ impl Scene {
         Ok(())
     }
 
+    /// Whether a node is locked (OW-1): an object's or group's own lock, or
+    /// for an instance its definition's, which every copy shares
+    /// ([`kernel::Document::node_locked`]). `false` for a stale node.
+    ///
+    /// `kind`: 0 = object, 1 = group, 2 = instance.
+    pub fn node_locked(&self, kind: u8, id: u64) -> Result<bool, ApiError> {
+        let node = node_id(kind, id)?;
+        Ok(self.doc.node_locked(node))
+    }
+
+    /// The locked node that keeps `(kind, id)` from changing, or
+    /// `undefined` when nothing does ([`kernel::Document::node_frozen`]):
+    /// the node itself when it is locked, a locked group above it, or a
+    /// placement of a locked shape it is part of. The app names it in the
+    /// "Locked" hint and offers to unlock it. Read-only.
+    ///
+    /// `kind`: 0 = object, 1 = group, 2 = instance.
+    pub fn node_frozen(&self, kind: u8, id: u64) -> Result<Option<NodeJs>, ApiError> {
+        let node = node_id(kind, id)?;
+        Ok(self.doc.node_frozen(node).map(node_js))
+    }
+
+    /// Locks (`locked = true`) or unlocks the nodes as ONE undo step
+    /// labeled "Lock" or "Unlock" ([`kernel::Document::set_nodes_locked`]).
+    /// An instance stands for its definition, so every copy changes with
+    /// it. `kinds`/`ids` are parallel; nodes already in the asked state are
+    /// left alone, and a call that changes nothing records no entry. A
+    /// stale handle anywhere refuses the whole call with nothing applied.
+    ///
+    /// # Errors
+    /// - `BadNodeList` / `BadNodeKind` — malformed lists.
+    /// - `UnknownObject` / `UnknownGroup` / `UnknownInstance` /
+    ///   `UnknownComponent` — a stale or hidden node.
+    pub fn set_nodes_locked(
+        &mut self,
+        kinds: &[u8],
+        ids: &[u64],
+        locked: bool,
+    ) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
+        let nodes = node_ids(kinds, ids)?;
+        let change = self.doc.set_nodes_locked(&nodes, locked).map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::SetNodesLocked {
+            kinds: kinds.to_vec(),
+            ids: ids.to_vec(),
+            locked,
+        });
+        Ok(())
+    }
+
     /// Whether a node is USER-hidden (persisted view state, manifest v6).
     ///
     /// `kind`: 0 = object, 1 = group, 2 = instance.
     pub fn node_user_hidden(&self, kind: u8, id: u64) -> Result<bool, ApiError> {
         let node = node_id(kind, id)?;
         Ok(self.doc.node_user_hidden(node))
+    }
+
+    /// Whether a node is hidden by anything the person set: its own
+    /// user-hidden flag, a group above it, or a hidden tag on it or on any
+    /// ancestor ([`kernel::Document::node_effectively_hidden`]). Read-only.
+    ///
+    /// `kind`: 0 = object, 1 = group, 2 = instance.
+    pub fn node_effectively_hidden(&self, kind: u8, id: u64) -> Result<bool, ApiError> {
+        let node = node_id(kind, id)?;
+        Ok(self.doc.node_effectively_hidden(node))
     }
 
     /// Sets a node's USER-hidden flag (persisted view state, not
@@ -5747,6 +8869,7 @@ impl Scene {
         id: u64,
         hidden: bool,
     ) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let node = node_id(kind, id)?;
         self.doc.set_node_user_hidden(node, hidden);
         recording::record(recording::RecordedCall::SetNodeUserHidden { kind, id, hidden });
@@ -5801,7 +8924,7 @@ impl Scene {
     /// rim overlay.
     pub fn health_rim_segments(&self, ids: Vec<u64>) -> Vec<f32> {
         let ids: Vec<ObjectId> = ids.into_iter().map(object_id).collect();
-        health::rim_segments(&self.doc, &ids, None)
+        health::rim_segments(&self.doc, &ids, None, &self.rim_cache)
     }
 
     /// World bounds of objects at their placements, as one box `[minx,
@@ -5853,7 +8976,7 @@ impl Scene {
     /// the panel's current finding.
     pub fn health_rim_highlight(&self, id: u64, rim: u32) -> Vec<f32> {
         let id = object_id(id);
-        health::rim_segments(&self.doc, &[id], Some((id, rim as usize)))
+        health::rim_segments(&self.doc, &[id], Some((id, rim as usize)), &self.rim_cache)
     }
 
     /// The Hew API's public ids (`obj_…`) for object handles, in order —
@@ -5886,6 +9009,7 @@ impl Scene {
     /// `ObjectIsSolid`, `UnknownRim`, `RimNotPlanar`, `RimSelfIntersecting`,
     /// `CapWouldBeCoplanar`, `NonManifoldRim`, `CapsOverlap`, `Invalid`.
     pub fn cap_rims(&mut self, object: u64, rims: Option<Vec<u32>>) -> Result<String, ApiError> {
+        self.ensure_not_busy()?;
         let indices: Option<Vec<usize>> = rims
             .as_ref()
             .map(|r| r.iter().map(|&i| i as usize).collect());
@@ -5903,6 +9027,147 @@ impl Scene {
         .to_string())
     }
 
+    /// Mend an object — a world object or a definition member, whose
+    /// repair every instance shows — as one undo step: Model Health's Mend
+    /// ([`kernel::Document::mend`]). `plan_json` is
+    /// `{"weld": number|false|null, "folds": bool, "split": bool, "fill":
+    /// "holes"|[rim, …]|false|null, "require_solid": bool}`; an omitted
+    /// field takes the one-click value (the default weld distance, folds,
+    /// split and fill holes on). Returns the report as JSON
+    /// (`welded_vertices`, `weld_max_move`, `collapsed_faces`,
+    /// `folds_removed`, `split_vertices`, `split_edges`, `pieces` (handles
+    /// of the parts cut loose), `filled_rims`, `stitched_rims`,
+    /// `fill_triangles`, `skipped_rims` (`{object, rim, reason}`, `reason`
+    /// the refusal's snake_case code), `reversed`, `closed`,
+    /// `pieces_closed`).
+    ///
+    /// # Errors
+    /// `UnknownObject`, `UnknownComponent`, `BadMendPlan` (the JSON), or a
+    /// refusal: `NothingToMend`, `WeldDistanceOutOfRange`,
+    /// `WeldFoldsFaces`, `WeldFlipsFaces`, `WeldCollapsesObject`,
+    /// `WeldFlattensObject`, `MendOpensObject`, `UnknownRim`, `StillOpen`,
+    /// `FoldRemovalPinches`, `Invalid`.
+    pub fn mend(&mut self, object: u64, plan_json: &str) -> Result<String, ApiError> {
+        self.ensure_not_busy()?;
+        let plan = self.mend_plan(object, plan_json)?;
+        let (report, pieces, change) = self.doc.mend(object_id(object), &plan).map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::Mend {
+            object,
+            plan_json: plan_json.to_string(),
+        });
+        let handles: Vec<String> = pieces
+            .iter()
+            .map(|o| o.data().as_ffi().to_string())
+            .collect();
+        Ok(api::health::mend_report_json(&report, handles).to_string())
+    }
+
+    /// What [`Scene::mend`] would do under `plan_json` (the same form),
+    /// counted by running the Mend on a copy: JSON `{weld, weld_pairs,
+    /// weld_vertices, weld_max_gap, folds, collapsed_faces, split_edges,
+    /// branching_vertices, islands, pieces, hole_rims, hole_rims_planar,
+    /// hole_rims_warped, outer_rims, fill_rims, filled_rims, fill_curved,
+    /// skipped_rims}` (`weld` the distance the plan resolved to, or null;
+    /// `filled_rims` and `skipped_rims` counts the result's). Pure.
+    ///
+    /// # Errors
+    /// What [`Scene::mend`] would refuse, except `NothingToMend` and
+    /// `StillOpen` (they judge these counts): `UnknownObject`,
+    /// `UnknownComponent`, `ExplodeSessionScope`, `BadMendPlan`, and the
+    /// Mend's own refusals.
+    pub fn mend_census_json(&self, object: u64, plan_json: &str) -> Result<String, ApiError> {
+        let (census, weld) = self.mend_census_cached(object, plan_json)?;
+        Ok(api::health::mend_census_json(&census, weld).to_string())
+    }
+
+    /// The census for `(object, plan_json)` at this history generation,
+    /// computed once and shared by [`Scene::mend_census_json`] and
+    /// [`Scene::mend_census_points`].
+    fn mend_census_cached(
+        &self,
+        object: u64,
+        plan_json: &str,
+    ) -> Result<(std::rc::Rc<kernel::repair::MendCensus>, Option<f64>), ApiError> {
+        let generation = self.doc.history_generation();
+        if let Some(e) = self.census_cache.borrow().as_ref()
+            && e.object == object
+            && e.plan == plan_json
+            && e.generation == generation
+        {
+            return Ok((e.census.clone(), e.weld));
+        }
+        let plan = self.mend_plan(object, plan_json)?;
+        let census = std::rc::Rc::new(
+            self.doc
+                .mend_census(object_id(object), &plan)
+                .map_err(doc_err)?,
+        );
+        *self.census_cache.borrow_mut() = Some(CensusEntry {
+            object,
+            plan: plan_json.to_string(),
+            generation,
+            weld: plan.weld,
+            census: census.clone(),
+        });
+        Ok((census, plan.weld))
+    }
+
+    /// The points [`Scene::mend_census_json`] counts, world-space at every
+    /// placement of the object (`[x, y, z, …]`): `kind` 0 the points that
+    /// would merge, 1 the points that would split. Empty for a stale
+    /// handle, a bad plan or another kind.
+    pub fn mend_census_points(&self, object: u64, plan_json: &str, kind: u32) -> Vec<f32> {
+        let Ok((census, _)) = self.mend_census_cached(object, plan_json) else {
+            return Vec::new();
+        };
+        let points = match kind {
+            0 => &census.weld_points,
+            1 => &census.split_points,
+            _ => return Vec::new(),
+        };
+        health::points_at_placements(&self.doc, object_id(object), points)
+    }
+
+    /// Mend's default weld distance for an object (meters;
+    /// [`kernel::repair::default_weld_distance`]); 0 for a stale handle.
+    pub fn default_weld_distance(&self, object: u64) -> f64 {
+        self.doc
+            .object(object_id(object))
+            .map(kernel::repair::default_weld_distance)
+            .unwrap_or(0.0)
+    }
+
+    /// The weld distances Mend accepts for an object, `[min, max]` meters
+    /// ([`kernel::repair::weld_range`]); empty for a stale handle.
+    pub fn weld_range(&self, object: u64) -> Vec<f64> {
+        self.doc
+            .object(object_id(object))
+            .map(|o| {
+                let (lo, hi) = kernel::repair::weld_range(o);
+                vec![lo, hi]
+            })
+            .unwrap_or_default()
+    }
+
+    fn mend_plan(
+        &self,
+        object: u64,
+        plan_json: &str,
+    ) -> Result<kernel::repair::MendPlan, ApiError> {
+        let obj = self
+            .doc
+            .object(object_id(object))
+            .ok_or_else(|| stale("UnknownObject", "object"))?;
+        let v: serde_json::Value = if plan_json.trim().is_empty() {
+            serde_json::json!({})
+        } else {
+            serde_json::from_str(plan_json)
+                .map_err(|e| ApiError(format!("BadMendPlan: the Mend plan is not JSON: {e}")))?
+        };
+        api::health::mend_plan_from_json(&v, obj).map_err(|e| ApiError(format!("BadMendPlan: {e}")))
+    }
+
     /// Remove `faces` (face handles) from an open object: Model Health's
     /// face removal ([`kernel::Document::delete_faces`]). Islands the
     /// deletion cuts loose become objects of their own beside it; their
@@ -5912,6 +9177,7 @@ impl Scene {
     /// `UnknownObject`, `UnknownComponent`, `LastDefinitionMember`, or a
     /// refusal: `ObjectIsSolid`, `UnknownFace`, `Invalid`.
     pub fn delete_faces(&mut self, object: u64, faces: Vec<u64>) -> Result<Vec<u64>, ApiError> {
+        self.ensure_not_busy()?;
         let ids: Vec<kernel::FaceId> = faces
             .iter()
             .map(|&f| kernel::FaceId::from(KeyData::from_ffi(f)))
@@ -5942,6 +9208,7 @@ impl Scene {
         start: f64,
         end: f64,
     ) -> Result<Vec<u64>, ApiError> {
+        self.ensure_not_busy()?;
         let (split_off, change) = self
             .doc
             .thicken_sheet(object_id(object), start, end)
@@ -5949,6 +9216,30 @@ impl Scene {
         self.reconcile(&change);
         recording::record(recording::RecordedCall::ThickenSheet { object, start, end });
         Ok(split_off.iter().map(|o| o.data().as_ffi()).collect())
+    }
+
+    /// Rejoin one seam family into a single solid: Model Health's "Rejoin
+    /// as one solid" ([`kernel::Document::rejoin_as_one_solid`]). `ids` are
+    /// every member Object handle of one family (as
+    /// [`Scene::health_report_json`] lists it; a subset refuses); each piece is capped at its shared rims, the inside
+    /// walls are deleted, and the pieces are unioned, keeping the largest
+    /// piece's name, tags, attributes, and group. One undo step. Returns
+    /// the result Object's handle.
+    ///
+    /// # Errors
+    /// `RejoinNotPossible` (not one whole family, fewer than two pieces,
+    /// members under different parents, a shape that stays open, or pieces
+    /// that meet only through a wall),
+    /// `UnknownObject`, `UnknownComponent`, `ExplodeSessionScope`, a cap
+    /// refusal (`RimNotPlanar`, …), or a boolean refusal. On any error the
+    /// document is untouched.
+    pub fn rejoin_as_one_solid(&mut self, ids: &[u64]) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
+        let members: Vec<ObjectId> = ids.iter().map(|&h| object_id(h)).collect();
+        let (result, change) = self.doc.rejoin_as_one_solid(&members).map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::RejoinAsOneSolid { ids: ids.to_vec() });
+        Ok(result.data().as_ffi())
     }
 
     /// [`Scene::thicken_sheet`] for a definition member picked through
@@ -5966,6 +9257,7 @@ impl Scene {
         object: u64,
         distance: f64,
     ) -> Result<Vec<u64>, ApiError> {
+        self.ensure_not_busy()?;
         let (component, local) = self
             .doc
             .map_instance_world_distance(instance_id(instance), distance)
@@ -5994,6 +9286,7 @@ impl Scene {
     /// # Errors
     /// `UnknownObject`; `ObjectIsSolid` when marking a solid.
     pub fn set_accepted_surface(&mut self, object: u64, accepted: bool) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let change = self
             .doc
             .set_accepted_surface(object_id(object), accepted)
@@ -6046,6 +9339,40 @@ impl Scene {
             .collect()
     }
 
+    /// The sketches a renderer draws for every placement of a definition
+    /// (`component_rendered_sketches`), paired with
+    /// [`Scene::component_sketch_frame`]: a closed definition's own
+    /// def-local sketches, or — while the definition is on loan to an open
+    /// component session — the session's live world drawing (its baked
+    /// sketches, free sketches drawn mid-session, the members' owned
+    /// sketches), so a live sibling placement shows the drawing as it
+    /// happens (ARCHITECTURE.md 2.11). Same liveness/tag filter as
+    /// [`Scene::component_member_sketches`]. Read-only.
+    pub fn component_rendered_sketches(&self, component: u64) -> Vec<u64> {
+        self.doc
+            .def_rendered_sketches(component_id(component))
+            .map(|(v, _)| v)
+            .unwrap_or_default()
+            .iter()
+            .filter(|&&s| self.doc.sketch(s).is_some() && !self.doc.sketch_tags_hidden(s))
+            .map(|s| s.data().as_ffi())
+            .collect()
+    }
+
+    /// The row-major 3×4 affine that maps [`Scene::component_rendered_sketches`]'
+    /// stored coordinates into the definition's local frame — identity for
+    /// a closed definition, the inverse session pose while the definition is
+    /// on loan. A renderer draws each placement's sketches at
+    /// `instance_pose × this`. Read-only.
+    pub fn component_sketch_frame(&self, component: u64) -> Vec<f64> {
+        self.doc
+            .def_rendered_sketches(component_id(component))
+            .map(|(_, t)| t)
+            .unwrap_or(Transform::IDENTITY)
+            .to_affine()
+            .to_vec()
+    }
+
     /// The visible instances that place a definition.
     pub fn instances_of(&self, component: u64) -> Vec<u64> {
         self.doc
@@ -6084,6 +9411,7 @@ impl Scene {
         face: u64,
         distance: f64,
     ) -> Result<PushPullJs, ApiError> {
+        self.ensure_not_busy()?;
         let iid = instance_id(instance);
         let (component, local_distance) = self
             .doc
@@ -6161,6 +9489,7 @@ impl Scene {
     /// - `LastDefinitionMember` — `object` is the definition's only live
     ///   member; delete its instances instead.
     pub fn delete_def_member(&mut self, component: u64, object: u64) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let change = self
             .doc
             .delete_def_member(component_id(component), object_id(object))
@@ -6183,6 +9512,7 @@ impl Scene {
         a: u64,
         b: u64,
     ) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
         let bop = match op {
             0 => BooleanOp::Union,
             1 => BooleanOp::Subtract,
@@ -6203,6 +9533,113 @@ impl Scene {
         Ok(id.data().as_ffi())
     }
 
+    /// [`Scene::boolean_in_component`] over any number of members of
+    /// `component`, as one undo step. Records `BooleanInComponentMany`;
+    /// exactly two members are the two-operand call and record as it does.
+    ///
+    /// # Errors
+    /// As [`Scene::boolean_in_component`]; `BooleanNeedsTwo` for fewer than
+    /// two members.
+    pub fn boolean_in_component_many(
+        &mut self,
+        component: u64,
+        op: u8,
+        ids: &[u64],
+    ) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
+        let bop = match op {
+            0 => BooleanOp::Union,
+            1 => BooleanOp::Subtract,
+            2 => BooleanOp::Intersect,
+            _ => return Err(ApiError("BadOp: op must be 0, 1, or 2".to_string())),
+        };
+        if let &[a, b] = ids {
+            return self.boolean_in_component(component, op, a, b);
+        }
+        let objects: Vec<ObjectId> = ids.iter().map(|&id| object_id(id)).collect();
+        let (id, change) = self
+            .doc
+            .boolean_in_component_many(component_id(component), &objects, bop)
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::BooleanInComponentMany {
+            component,
+            op,
+            ids: ids.to_vec(),
+        });
+        Ok(id.data().as_ffi())
+    }
+
+    /// A boolean whose host is a definition member seen through a
+    /// placement and whose tool is a world object (Addendum D §5, "Subtract,
+    /// host is a placement"): the tool maps into the definition's frame
+    /// through the inverse of `path`'s composed pose, the boolean runs
+    /// inside the definition, the world tool is consumed, and every
+    /// placement shows the result, which keeps the host's name, tags, and
+    /// attributes. One undo entry. See
+    /// [`kernel::Document::boolean_through_placement`].
+    ///
+    /// `path` is the placement's instance chain, outermost first (`[a]` for
+    /// a world instance `a`). `host` is the member object; `None` takes the
+    /// definition's only live member when that is a single object; a
+    /// definition of several live parts refuses `AmbiguousHost`, one with
+    /// no live part `BooleanOperandEmpty`, one whose only part is a group
+    /// `GroupedOperand`, one whose only part is a nested placement
+    /// `BooleanOperandHasInstance`, and a stale one `UnknownComponent`.
+    /// `op` is 1 = subtract (`host - tool`); 0 = union and 2 = intersect
+    /// refuse `BooleanOperandHasInstance`, since world material cannot
+    /// join a shared definition (unlink first). Returns `{"result": "<handle>"}`, the
+    /// new member's handle as a decimal string.
+    pub fn boolean_through_placement_json(
+        &mut self,
+        path: Vec<u64>,
+        host: Option<u64>,
+        tool: u64,
+        op: u8,
+    ) -> Result<String, ApiError> {
+        self.ensure_not_busy()?;
+        let bop = match op {
+            0 => BooleanOp::Union,
+            1 => BooleanOp::Subtract,
+            2 => BooleanOp::Intersect,
+            _ => return Err(ApiError("BadOp: op must be 0, 1, or 2".to_string())),
+        };
+        let instances: Vec<InstanceId> = path.iter().map(|&i| instance_id(i)).collect();
+        let host_id = match host {
+            Some(h) => object_id(h),
+            None => {
+                let def = instances
+                    .last()
+                    .and_then(|&i| self.doc.instance_def(i))
+                    .ok_or_else(|| doc_err(kernel::DocumentError::UnknownInstance))?;
+                // A stale definition, one with no live part, or one whose
+                // only part is a group or a nested placement refuses with
+                // its own kernel code; several parts need a named host.
+                self.doc
+                    .sole_member_object(def)
+                    .map_err(doc_err)?
+                    .ok_or_else(|| {
+                        ApiError::new(
+                            "AmbiguousHost",
+                            "the placement holds more than one part; name the one to cut",
+                        )
+                    })?
+            }
+        };
+        let (id, change) = self
+            .doc
+            .boolean_through_placement(&instances, host_id, object_id(tool), bop)
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::BooleanThroughPlacement {
+            path,
+            host,
+            tool,
+            op,
+        });
+        Ok(serde_json::json!({ "result": id.data().as_ffi().to_string() }).to_string())
+    }
+
     /// [`Scene::slice_object`] on a member of `instance`'s definition
     /// (component-edit-parity.md phase K2): `plane` is 6 floats
     /// `[px,py,pz,nx,ny,nz]` in WORLD space, mapped into definition-local
@@ -6216,6 +9653,7 @@ impl Scene {
         object: u64,
         plane: &[f64],
     ) -> Result<Vec<u64>, ApiError> {
+        self.ensure_not_busy()?;
         let p: &[f64; 6] = plane.try_into().map_err(|_| {
             ApiError("BadPlane: slice plane must be 6 floats [px,py,pz,nx,ny,nz]".to_string())
         })?;
@@ -6251,6 +9689,7 @@ impl Scene {
         object: u64,
         affine: &[f64],
     ) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let rows: &[f64; 12] = affine.try_into().map_err(|_| {
             ApiError("BadAffine: transform must be 12 floats (row-major 3x4)".to_string())
         })?;
@@ -6275,6 +9714,7 @@ impl Scene {
         sketch: u64,
         affine: &[f64],
     ) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let rows: &[f64; 12] = affine.try_into().map_err(|_| {
             ApiError("BadAffine: transform must be 12 floats (row-major 3x4)".to_string())
         })?;
@@ -6324,6 +9764,7 @@ impl Scene {
         island: u64,
         affine: &[f64],
     ) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let rows: &[f64; 12] = affine.try_into().map_err(|_| {
             ApiError("BadAffine: transform must be 12 floats (row-major 3x4)".to_string())
         })?;
@@ -6356,6 +9797,7 @@ impl Scene {
         islands: &[u64],
         affine: &[f64],
     ) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         if island_sketches.len() != islands.len() {
             return Err(ApiError(
                 "BadSelection: island sketch and island arrays must have equal length".to_string(),
@@ -6447,7 +9889,26 @@ impl Scene {
             .doc
             .object(id)
             .ok_or_else(|| stale("UnknownObject", "object"))?;
-        let mesh = tessellate(object, self.doc.materials()).map_err(|e| api_err(&e, &e))?;
+        let mesh = render_mesh(&self.doc, id, object).map_err(|e| api_err(&e, &e))?;
+        self.face_range_cache.insert(id, mesh.face_ranges.clone());
+        let watertight = object.watertight() == WatertightState::Watertight;
+        Ok(MeshJs { mesh, watertight })
+    }
+
+    /// Render buffers for a definition member drawn through placements
+    /// whose inherited material is `inherited` (`u64::MAX` = none): faces
+    /// with neither their own paint nor an Object base take it
+    /// (`tessellate::tessellate_with`). [`Scene::object_mesh`] is this with
+    /// no inherited material, which is what a world Object always draws.
+    pub fn member_mesh(&mut self, object: u64, inherited: u64) -> Result<MeshJs, ApiError> {
+        let id = object_id(object);
+        let object = self
+            .doc
+            .object(id)
+            .ok_or_else(|| stale("UnknownObject", "object"))?;
+        let mesh =
+            tessellate::tessellate_with(object, self.doc.materials(), material_id_opt(inherited))
+                .map_err(|e| api_err(&e, &e))?;
         self.face_range_cache.insert(id, mesh.face_ranges.clone());
         let watertight = object.watertight() == WatertightState::Watertight;
         Ok(MeshJs { mesh, watertight })
@@ -6486,6 +9947,16 @@ impl Scene {
         Ok(object.watertight() == WatertightState::Watertight)
     }
 
+    /// Whether `object` was built from a foreign file's mesh and has not
+    /// been drawn on since (`kernel::Document::object_is_imported`): the
+    /// edges that split its faces are the source's, so its drawing overlay
+    /// shows them in the neutral edge color rather than as shapes drawn in
+    /// Hew. `false` for an unknown or hidden object. Answers for a world
+    /// object or a component-definition member alike. Read-only.
+    pub fn object_is_imported(&self, object: u64) -> bool {
+        self.doc.object_is_imported(object_id(object))
+    }
+
     /// World-space outer-loop vertices (flat xyz) of a sketch region — for
     /// rendering the region fill and for client-side region picking. M1
     /// sketches are planar, so this is the region's boundary polygon.
@@ -6510,6 +9981,28 @@ impl Scene {
             out.extend([p.x as f32, p.y as f32, p.z as f32]);
         }
         Ok(out)
+    }
+
+    /// How many holes `face` has (its inner loops). A Loft refuses a shape
+    /// with holes at the pick, for a solid face as for a drawn region.
+    pub fn face_hole_count(&self, object: u64, face: u64) -> u32 {
+        use slotmap::KeyData;
+        self.doc
+            .object(object_id(object))
+            .and_then(|o| o.faces().get(FaceId::from(KeyData::from_ffi(face))))
+            .map_or(0, |f| f.inner_loops.len() as u32)
+    }
+
+    /// How many holes a sketch region has, drawn free or on a solid's face
+    /// (0 for a stale id). The Loft tool's partner to [`Self::face_hole_count`].
+    pub fn region_hole_count(&self, sketch: u64, region: u64) -> u32 {
+        self.doc
+            .sketch(sketch_id(sketch))
+            .and_then(|s| {
+                s.regions()
+                    .get(SketchRegionId::from(KeyData::from_ffi(region)))
+            })
+            .map_or(0, |r| r.holes.len() as u32)
     }
 
     /// An Object face's outer-loop boundary as a flat `[x,y,z, x,y,z, …]` of
@@ -6574,6 +10067,24 @@ impl Scene {
             .next()
             .ok_or_else(|| stale("DegenerateFace", "face"))?;
         Ok(vec![p.x, p.y, p.z, n.x, n.y, n.z])
+    }
+
+    /// Whether an Object face is a chord facet of a curved wall (it carries
+    /// an analytic surface reference, the same stamp the tessellator smooths
+    /// by). `false` for every plane-true face. The drawing-plane cue reads
+    /// this to outline only faces that are really flat, without tessellating
+    /// the object to find out.
+    pub fn face_is_curved(&self, object: u64, face: u64) -> Result<bool, ApiError> {
+        let object = self
+            .doc
+            .object(object_id(object))
+            .ok_or_else(|| stale("UnknownObject", "object"))?;
+        let fid = FaceId::from(KeyData::from_ffi(face));
+        let face = object
+            .faces()
+            .get(fid)
+            .ok_or_else(|| stale("UnknownFace", "face"))?;
+        Ok(face.surface.is_some())
     }
 
     /// A world Object edge's two endpoint positions in world space, as
@@ -6689,8 +10200,38 @@ impl Scene {
         face: u64,
         distance: f64,
     ) -> Result<PushPullJs, ApiError> {
+        self.ensure_not_busy()?;
         let face_id = FaceId::from(KeyData::from_ffi(face));
         let oid = object_id(object);
+
+        // A blend face resizes its blend; a face beside blends moves with
+        // them re-applied, falling back to the ordinary Push/Pull when they
+        // cannot be (WP08 §5). Replay routes the same way.
+        if let Some(obj) = self.doc.object(oid) {
+            let change = if obj.blend_of_face(face_id).is_some() {
+                Some(
+                    self.doc
+                        .push_pull_blend(oid, face_id, distance)
+                        .map_err(doc_err)?,
+                )
+            } else if obj.face_borders_blend(face_id) {
+                self.doc.push_pull_with_blends(oid, face_id, distance).ok()
+            } else {
+                None
+            };
+            if let Some(change) = change {
+                self.reconcile(&change);
+                recording::record(recording::RecordedCall::PushPull {
+                    object,
+                    face,
+                    distance,
+                });
+                return Ok(PushPullJs {
+                    inner: None,
+                    through: Vec::new(),
+                });
+            }
+        }
 
         // Through detection: an inward push past the opposite wall becomes
         // a subtract, an outward pull past a co-facing wall a union — not a
@@ -6766,6 +10307,7 @@ impl Scene {
     /// per-object op delegates to that object's [`History`]. Returns what the
     /// undo touched so callers can refresh only the affected scene nodes.
     pub fn scene_undo(&mut self) -> Result<DocChangeJs, ApiError> {
+        self.ensure_not_busy()?;
         let change = self.doc.undo().map_err(doc_err)?;
         self.reconcile(&change);
         recording::record(recording::RecordedCall::SceneUndo);
@@ -6777,6 +10319,7 @@ impl Scene {
     /// redo never has to remap ids. Returns what the redo touched so callers
     /// can refresh only the affected scene nodes.
     pub fn scene_redo(&mut self) -> Result<DocChangeJs, ApiError> {
+        self.ensure_not_busy()?;
         let change = self.doc.redo().map_err(doc_err)?;
         self.reconcile(&change);
         recording::record(recording::RecordedCall::SceneRedo);
@@ -6810,8 +10353,10 @@ impl Scene {
     /// set before it was captured will therefore show `at_saved_mark() ==
     /// false` at a depth the original session had marked clean; that's
     /// fine — replay never asserts on save state.
-    pub fn mark_saved(&mut self) {
+    pub fn mark_saved(&mut self) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         self.doc.mark_saved();
+        Ok(())
     }
 
     /// True when the undo stack sits exactly at the depth
@@ -6829,6 +10374,48 @@ impl Scene {
     /// `Option<u32>` to `number | undefined`.
     pub fn saved_depth(&self) -> Option<u32> {
         self.doc.saved_depth().map(|d| d as u32)
+    }
+
+    /// What the undo and redo stacks hold, and the budget in force
+    /// (kernel `Document::history_memory`). Pure; O(objects + steps).
+    pub fn history_memory(&self) -> HistoryMemoryJs {
+        let mut memory = self.doc.history_memory();
+        memory.budget = self.history_budget;
+        HistoryMemoryJs { inner: memory }
+    }
+
+    /// Sets the undo-memory budget: once the stacks hold more than
+    /// `max_bytes` (an estimate), the oldest undo steps are dropped after
+    /// the next mutation, keeping at least `min_steps` (raised to 1). The
+    /// default is 1 GiB and 3 steps. Held by the scene, so it carries over
+    /// to every document the scene loads. Trims nothing by itself.
+    ///
+    /// # Errors
+    /// `BadHistoryBudget` when `max_bytes` is negative or not finite.
+    pub fn set_history_budget(&mut self, max_bytes: f64, min_steps: u32) -> Result<(), ApiError> {
+        if !max_bytes.is_finite() || max_bytes < 0.0 {
+            return Err(ApiError::new(
+                "BadHistoryBudget",
+                "the undo memory budget must be a finite number of bytes, zero or more",
+            ));
+        }
+        self.history_budget = kernel::HistoryBudget {
+            // Saturating: a budget past the address space is "no limit".
+            max_bytes: max_bytes as usize,
+            min_steps: (min_steps as usize).max(1),
+        };
+        self.doc.set_history_budget(self.history_budget);
+        Ok(())
+    }
+
+    /// The trim the undo-memory budget made since the last call, if any,
+    /// and forgets it: the app shows it once as a status-bar note ("Undo
+    /// history trimmed to save memory: 12 steps kept"). Several trims
+    /// between calls report the latest, whose `kept` is current.
+    pub fn take_history_trim(&mut self) -> Option<HistoryTrimJs> {
+        self.history_trim
+            .take()
+            .map(|inner| HistoryTrimJs { inner })
     }
 
     /// Every undo/redo entry with a human-readable label and origin, plus
@@ -6890,6 +10477,7 @@ impl Scene {
         target: Box<[f64]>,
         up: Box<[f64]>,
     ) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let kernel_projection = match projection {
             "perspective" => kernel::CameraProjection::Perspective,
             "parallel" => kernel::CameraProjection::Parallel,
@@ -6914,6 +10502,11 @@ impl Scene {
             eye: Point3::new(eye3[0], eye3[1], eye3[2]),
             target: Point3::new(target3[0], target3[1], target3[2]),
             up: kernel::Vec3::new(up3[0], up3[1], up3[2]),
+            // Unset: the document keeps a held Match Photo image width and
+            // ratio for a view that has not moved, and drops them for one
+            // that has (`Document::set_camera_state`).
+            image_width: None,
+            aspect_ratio: None,
         });
         recording::record(recording::RecordedCall::SetCameraState {
             projection: projection.to_string(),
@@ -6986,6 +10579,12 @@ impl Scene {
     /// (X-ray, Wireframe — see [`SnapQuery::see_through_points`]). Only a
     /// tool that drops such a snap onto its plane and discloses it passes it;
     /// omitted/`None` is `false`, the plain plane filter in every mode.
+    ///
+    /// `lock_direction`, when it holds three finite components of non-zero
+    /// length, locks the snap to that direction (normalized here) through
+    /// `anchor` — [`SnapLock::Direction`], taking precedence over
+    /// `lock_axis`. Anything else (absent, the wrong length, non-finite, or
+    /// too short to normalize) leaves the `lock_axis` mapping as it was.
     // Scalar xyz args are deliberate boundary ergonomics (docs/dev/DEVELOPMENT.md).
     #[allow(clippy::too_many_arguments)]
     pub fn snap(
@@ -7006,6 +10605,7 @@ impl Scene {
         off_plane_points: Option<bool>,
         pick: Option<bool>,
         see_through_points: Option<bool>,
+        lock_direction: Option<Box<[f64]>>,
     ) -> Result<Option<SnapJs>, ApiError> {
         let anchor = match anchor {
             None => None,
@@ -7036,7 +10636,14 @@ impl Scene {
                 ));
             }
         };
+        // A direction lock wins over an axis lock when it is usable: three
+        // finite components of non-zero length, normalized here. Anything
+        // else falls through to the axis mapping.
+        let direction = lock_direction
+            .filter(|d| d.len() == 3 && d.iter().all(|c| c.is_finite()))
+            .and_then(|d| kernel::Vec3::new(d[0], d[1], d[2]).normalized().ok());
         let lock = match lock_axis {
+            _ if direction.is_some() => direction.map(SnapLock::Direction),
             None => None,
             Some(0) => Some(SnapLock::Axis(Axis::X)),
             Some(1) => Some(SnapLock::Axis(Axis::Y)),
@@ -7087,7 +10694,9 @@ impl Scene {
     /// tool). Unlike `snap`, this ignores the drawing snap-priority model, so
     /// it reliably returns the surface under the cursor rather than a nearby
     /// vertex or edge. `undefined` when the ray hits no face, and always
-    /// `undefined` in Wireframe ([`Scene::set_render_mode`]).
+    /// `undefined` in Wireframe ([`Scene::set_render_mode`]). With an
+    /// editing scope set ([`Scene::set_pick_scope`]), Shaded or X-ray, the
+    /// nearest face inside the scope, else the nearest face.
     pub fn pick_face(
         &self,
         ox: f64,
@@ -7125,19 +10734,27 @@ impl Scene {
     /// (`SKETCH_PICK_APERTURE`) stands in for screen-derived aperture (the `snap`
     /// convention) — picking a thin line by exact ray intersection alone would
     /// be unreasonably precise to hit.
+    ///
+    /// With an editing scope set ([`Scene::set_pick_scope`]), Shaded or
+    /// X-ray, a sketch inside the scope wins over a nearer one outside it,
+    /// as [`Scene::pick_face`] does for faces. Wireframe ignores the scope.
     pub fn pick_sketch(&self, ox: f64, oy: f64, oz: f64, dx: f64, dy: f64, dz: f64) -> Option<u64> {
         let ray = PickRay {
             origin: Point3::new(ox, oy, oz),
             direction: kernel::Vec3::new(dx, dy, dz),
         };
+        let scope = self.sketch_pick_scope();
         self.inference
-            .pick_sketch(&ray, SKETCH_PICK_APERTURE)
-            .map(|id| id.data().as_ffi())
+            .pick_sketch_edge_preferring(&ray, SKETCH_PICK_APERTURE, &|s| {
+                scope.as_ref().is_some_and(|sc| sc.contains(s))
+            })
+            .map(|(id, _)| id.data().as_ffi())
     }
 
     /// Picks the nearest live sketch edge under the ray (same aperture and
     /// ranking as `pick_sketch`), returning both the owning sketch and the
-    /// edge — the Select tool's per-edge pick. `undefined` on a miss.
+    /// edge — the Select tool's per-edge pick. `undefined` on a miss. Scoped
+    /// like [`Scene::pick_sketch`].
     pub fn pick_sketch_edge(
         &self,
         ox: f64,
@@ -7151,8 +10768,11 @@ impl Scene {
             origin: Point3::new(ox, oy, oz),
             direction: kernel::Vec3::new(dx, dy, dz),
         };
+        let scope = self.sketch_pick_scope();
         self.inference
-            .pick_sketch_edge(&ray, SKETCH_PICK_APERTURE)
+            .pick_sketch_edge_preferring(&ray, SKETCH_PICK_APERTURE, &|s| {
+                scope.as_ref().is_some_and(|sc| sc.contains(s))
+            })
             .and_then(|(sid, eid)| {
                 let sketch = self.doc.sketch(sid)?;
                 let edge = sketch.edges().get(eid)?;
@@ -7180,6 +10800,11 @@ impl Scene {
     /// The "any sketch" targeting primitive: push/pull region targeting,
     /// select-by-interior, and dock hover all resolve through this, replacing
     /// the app's old single-active-sketch bookkeeping.
+    ///
+    /// With an editing scope set ([`Scene::set_pick_scope`]), Shaded or
+    /// X-ray, the nearest region of a sketch inside the scope wins over a
+    /// nearer one outside it; with none in scope under the ray, the
+    /// unscoped answer.
     pub fn pick_sketch_region(
         &self,
         ox: f64,
@@ -7193,13 +10818,15 @@ impl Scene {
         if !self.inference.face_policy().faces_are_targets() {
             return None;
         }
-        self.sketch_region_under_ray(ox, oy, oz, dx, dy, dz)
+        let scope = self.sketch_pick_scope();
+        self.sketch_region_under_ray(ox, oy, oz, dx, dy, dz, scope.as_ref())
     }
 
     /// [`Scene::pick_sketch_region`] ignoring the render mode's face policy
-    /// ([`Scene::set_render_mode`]): the sketch region under the ray even in
-    /// Wireframe, where a fill is no input target. For camera questions (the
-    /// orbit pivot over a drawn, not yet extruded shape).
+    /// ([`Scene::set_render_mode`]) and the editing scope: the sketch region
+    /// under the ray even in Wireframe, where a fill is no input target. For
+    /// camera questions (the orbit pivot over a drawn, not yet extruded
+    /// shape).
     pub fn pick_sketch_region_geometry(
         &self,
         ox: f64,
@@ -7209,14 +10836,15 @@ impl Scene {
         dy: f64,
         dz: f64,
     ) -> Option<SketchRegionPickJs> {
-        self.sketch_region_under_ray(ox, oy, oz, dx, dy, dz)
+        self.sketch_region_under_ray(ox, oy, oz, dx, dy, dz, None)
     }
 
     /// [`Scene::pick_face`] ignoring the render mode's face policy
-    /// ([`Scene::set_render_mode`]): the nearest face the ray passes through,
-    /// even in Wireframe. For questions about where the geometry IS rather
-    /// than what is an input target — the orbit pivot, and which face a
-    /// snapped edge or corner lies on when a draw tool starts there.
+    /// ([`Scene::set_render_mode`]) and the editing scope: the nearest face
+    /// the ray passes through, even in Wireframe. For questions about where
+    /// the geometry IS rather than what is an input target — the orbit
+    /// pivot, and which face a snapped edge or corner lies on when a draw
+    /// tool starts there.
     pub fn pick_face_geometry(
         &self,
         ox: f64,
@@ -7245,9 +10873,58 @@ impl Scene {
     }
 }
 
+/// Which world sketches are inside the editing scope, for the scoped
+/// sketch picks ([`Scene::sketch_pick_scope`]): a sketch owned by an object
+/// in the scope, or — when the scope takes in the frame's drawing
+/// (`frame_sketches`, [`Scene::set_pick_scope`]) — one of the innermost
+/// session frame's own sketches ([`Document::session_frame_sketches`]).
+/// Membership only, like [`PickScope`]; the frame's set is read on the
+/// first sketch that needs it, so a pick with no candidate pays nothing
+/// for it.
+struct SketchPickScope<'a> {
+    doc: &'a Document,
+    scope: &'a PickScope,
+    frame_sketches: bool,
+    frame: std::cell::OnceCell<std::collections::BTreeSet<SketchId>>,
+}
+
+impl SketchPickScope<'_> {
+    fn contains(&self, sketch: SketchId) -> bool {
+        self.doc
+            .sketch_owner_object(sketch)
+            .is_some_and(|o| self.scope.objects.contains(&o))
+            || (self.frame_sketches
+                && self
+                    .frame
+                    .get_or_init(|| self.doc.session_frame_sketches().into_iter().collect())
+                    .contains(&sketch))
+    }
+}
+
 impl Scene {
+    /// The sketch membership test for the sketch picks, when they are
+    /// scoped: wherever faces are targets ([`FacePolicy::Opaque`] and
+    /// [`FacePolicy::SeeThrough`], as for [`Scene::pick_face`]) with an
+    /// editing scope set ([`Scene::set_pick_scope`]). `None` otherwise —
+    /// in Wireframe, or at the top level — and the picks are then exactly
+    /// the unscoped ones.
+    fn sketch_pick_scope(&self) -> Option<SketchPickScope<'_>> {
+        if !self.inference.face_policy().faces_are_targets() {
+            return None;
+        }
+        Some(SketchPickScope {
+            doc: &self.doc,
+            scope: self.inference.pick_scope()?,
+            frame_sketches: self.pick_scope_frame_sketches,
+            frame: std::cell::OnceCell::new(),
+        })
+    }
+
     /// The body of [`Scene::pick_sketch_region`], without the face-policy
-    /// gate.
+    /// gate. With a `scope`, two running bests by the same rule — the
+    /// nearest region of any sketch and the nearest of an in-scope sketch —
+    /// and the in-scope one wins when there is one.
+    #[allow(clippy::too_many_arguments)]
     fn sketch_region_under_ray(
         &self,
         ox: f64,
@@ -7256,10 +10933,17 @@ impl Scene {
         dx: f64,
         dy: f64,
         dz: f64,
+        scope: Option<&SketchPickScope<'_>>,
     ) -> Option<SketchRegionPickJs> {
         let origin = Point3::new(ox, oy, oz);
         let dir = kernel::Vec3::new(dx, dy, dz);
         let mut best: Option<(f64, f64, SketchId, SketchRegionId)> = None;
+        let mut best_in_scope: Option<(f64, f64, SketchId, SketchRegionId)> = None;
+        let beats = |best: &Option<(f64, f64, SketchId, SketchRegionId)>, t: f64, area: f64| {
+            best.is_none_or(|(best_t, best_area, _, _)| {
+                t < best_t || ((t - best_t).abs() < kernel::tol::PLANE_DIST && area < best_area)
+            })
+        };
         for sid in self.doc.visible_sketch_ids() {
             let Some(sketch) = self.doc.sketch(sid) else {
                 continue;
@@ -7282,19 +10966,133 @@ impl Scene {
                     continue;
                 }
                 let area = sketch.region_area(rid).unwrap_or(f64::INFINITY);
-                if best.is_none_or(|(best_t, best_area, _, _)| {
-                    t < best_t || ((t - best_t).abs() < kernel::tol::PLANE_DIST && area < best_area)
-                }) {
+                if beats(&best, t, area) {
                     best = Some((t, area, sid, rid));
+                }
+                if beats(&best_in_scope, t, area) && scope.is_some_and(|sc| sc.contains(sid)) {
+                    best_in_scope = Some((t, area, sid, rid));
                 }
             }
         }
-        best.map(|(depth, _, s, r)| SketchRegionPickJs {
-            sketch: s.data().as_ffi(),
-            region: r.data().as_ffi(),
-            depth,
-        })
+        best_in_scope
+            .or(best)
+            .map(|(depth, _, s, r)| SketchRegionPickJs {
+                sketch: s.data().as_ffi(),
+                region: r.data().as_ffi(),
+                depth,
+                detached: self.doc.sketch(s).is_some_and(kernel::Sketch::detached),
+            })
     }
+
+    /// The placements [`Scene::pick_instance_sketch_edge`] and
+    /// [`Scene::pick_instance_sketch_region`] walk, each as (placement,
+    /// world pose, definition): every top-level instance not hidden by
+    /// [`Scene::set_hidden`], by eye or by tag. A caller that scopes the
+    /// picks (an open editing context) filters the ranked hits itself.
+    fn instance_sketch_roots(&self) -> Vec<(InstanceId, Transform, ComponentId)> {
+        self.doc
+            .instance_ids()
+            .into_iter()
+            .filter(|i| {
+                !self.hidden_instances.contains(i)
+                    && !self.doc.node_effectively_hidden(NodeId::Instance(*i))
+            })
+            .filter_map(|i| Some((i, self.doc.instance_pose(i)?, self.doc.instance_def(i)?)))
+            .collect()
+    }
+}
+
+/// One definition's drawing as the instance-sketch picks walk it: every
+/// sketch a placement shows with its transform into the definition's
+/// frame ([`Document::expanded_def_sketch_placements`]), and their bounds
+/// in that frame. `bounds` is `None` when nothing is drawn.
+struct DefLines {
+    placements: Vec<(SketchId, Transform)>,
+    bounds: Option<(Point3, Point3)>,
+}
+
+/// [`DefLines`] per definition, computed once per pick: many placements
+/// share a definition.
+#[derive(Default)]
+struct DefLinesMemo(std::collections::HashMap<ComponentId, std::rc::Rc<DefLines>>);
+
+impl DefLinesMemo {
+    fn get(&mut self, doc: &Document, def: ComponentId) -> std::rc::Rc<DefLines> {
+        self.0
+            .entry(def)
+            .or_insert_with(|| {
+                let placements = doc.expanded_def_sketch_placements(def);
+                let mut bounds: Option<(Point3, Point3)> = None;
+                for &(sid, to_def) in &placements {
+                    let Some((lo, hi)) = doc.sketch(sid).and_then(|s| s.bounds_under(&to_def))
+                    else {
+                        continue;
+                    };
+                    bounds = Some(match bounds {
+                        None => (lo, hi),
+                        Some((a, b)) => (
+                            Point3::new(a.x.min(lo.x), a.y.min(lo.y), a.z.min(lo.z)),
+                            Point3::new(b.x.max(hi.x), b.y.max(hi.y), b.z.max(hi.z)),
+                        ),
+                    });
+                }
+                std::rc::Rc::new(DefLines { placements, bounds })
+            })
+            .clone()
+    }
+}
+
+/// Whether a ray (unit `dir`) can reach a definition-frame box placed by
+/// `pose`, within a pick cone of half-angle `aperture`: the box's eight
+/// corners mapped into the world give a box that holds it, widened by the
+/// cone's reach at the farthest corner, then a slab test from the origin
+/// forward. A cheap, conservative cull — a `true` still needs the exact
+/// test.
+fn ray_meets_posed_box(
+    origin: Point3,
+    dir: kernel::Vec3,
+    (lo, hi): (Point3, Point3),
+    pose: &Transform,
+    aperture: f64,
+) -> bool {
+    let mut wlo = [f64::INFINITY; 3];
+    let mut whi = [f64::NEG_INFINITY; 3];
+    let mut reach: f64 = 0.0;
+    for i in 0..8 {
+        let p = pose.apply_point(Point3::new(
+            if i & 1 == 0 { lo.x } else { hi.x },
+            if i & 2 == 0 { lo.y } else { hi.y },
+            if i & 4 == 0 { lo.z } else { hi.z },
+        ));
+        for (k, c) in [p.x, p.y, p.z].into_iter().enumerate() {
+            wlo[k] = wlo[k].min(c);
+            whi[k] = whi[k].max(c);
+        }
+        reach = reach.max((p - origin).length());
+    }
+    let margin = reach * trig::tan(aperture) + kernel::tol::POINT_MERGE;
+    let o = [origin.x, origin.y, origin.z];
+    let d = [dir.x, dir.y, dir.z];
+    let (mut t0, mut t1) = (0.0_f64, f64::INFINITY);
+    for k in 0..3 {
+        let (a, b) = (wlo[k] - margin, whi[k] + margin);
+        if d[k].abs() < kernel::tol::NORMALIZE_MIN_LENGTH {
+            if o[k] < a || o[k] > b {
+                return false;
+            }
+            continue;
+        }
+        let (mut ta, mut tb) = ((a - o[k]) / d[k], (b - o[k]) / d[k]);
+        if ta > tb {
+            std::mem::swap(&mut ta, &mut tb);
+        }
+        t0 = t0.max(ta);
+        t1 = t1.min(tb);
+        if t0 > t1 {
+            return false;
+        }
+    }
+    true
 }
 
 #[wasm_bindgen]
@@ -7366,6 +11164,7 @@ impl Scene {
             sketch: s.data().as_ffi(),
             region: r.data().as_ffi(),
             depth: local_depth * kernel::Vec3::new(dx, dy, dz).length(),
+            detached: self.doc.sketch(s).is_some_and(kernel::Sketch::detached),
         })
     }
 
@@ -7431,11 +11230,271 @@ impl Scene {
             })
     }
 
+    /// The lines drawn inside components under the ray, RANKED: for every
+    /// shown top-level instance (not hidden by [`Scene::set_hidden`], by
+    /// eye or by tag) every line in the cone, walked into nested
+    /// definitions with the poses composed, the best
+    /// [`INSTANCE_PICK_HITS_PER_PLACEMENT`] of each placement kept, then
+    /// all of them in order, best first (so `instances()` repeats a
+    /// placement once per line). Every line, not one per placement: the
+    /// caller's occlusion and scope filters reject hits this pick cannot
+    /// judge (a line behind an opaque face), and a placement's visible
+    /// line must still be there when its better-ranked hidden one is
+    /// dropped. The drawing is exactly what the renderer draws for a
+    /// placement ([`Scene::instance_sketch_placements`]: the one kernel walk,
+    /// [`Document::expanded_def_sketch_placements`], so nothing hidden by
+    /// tag, under a hidden member, or off a definition on loan is ever
+    /// picked). The cone is [`Scene::pick_sketch_edge`]'s own
+    /// [`SKETCH_PICK_APERTURE`] — deliberately the same aperture, so a line
+    /// inside a component is exactly as easy to hit as one outside — in
+    /// world space, so a non-uniformly scaled placement keeps the
+    /// screen-angle meaning; the ranking is its angle from the ray, then
+    /// depth, with angles within [`inference::RANK_TIE_FRACTION`] of the
+    /// cone counted equal (the snap ranking's rule: the line in front
+    /// wins). Each placement is culled against the world box of its lines
+    /// first, and a document with no drawing inside any definition answers
+    /// at once, so a hover pays only for the instances near the ray.
+    ///
+    /// The global inference index leaves a definition's sketches out (they
+    /// would repeat per placement), so this is how a click on such a line
+    /// finds the component it belongs to. The ranking is unscoped: a caller
+    /// inside an editing context takes the first hit in its scope, so an
+    /// out-of-scope placement's nearer line never masks an in-scope one.
+    /// Each hit carries the top-level instance, the sketch, and the point
+    /// of the line the cone ranked it by (its smallest angle from the ray,
+    /// always in front of the eye) with that point's depth along the
+    /// normalized ray. Empty on a miss. Never throws. Read-only.
+    pub fn pick_instance_sketch_edge(
+        &self,
+        ox: f64,
+        oy: f64,
+        oz: f64,
+        dx: f64,
+        dy: f64,
+        dz: f64,
+    ) -> InstanceSketchHitsJs {
+        let mut out = InstanceSketchHitsJs::default();
+        if !self.doc.has_definition_drawing() {
+            return out;
+        }
+        let origin = Point3::new(ox, oy, oz);
+        let Ok(unit) = kernel::Vec3::new(dx, dy, dz).normalized() else {
+            return out;
+        };
+        let mut lines = DefLinesMemo::default();
+        // Angles within a pixel or so of each other are the same target, and
+        // the one in front wins (the snap ranking's rule): a bucket is an
+        // integer, so the order is total and a hair of pose noise between
+        // two placements never decides it.
+        let tie = SKETCH_PICK_APERTURE * inference::RANK_TIE_FRACTION;
+        // (angle bucket, depth, placement, sketch, cone point): every line
+        // in the cone, at the point and depth it ranks by.
+        type Hit = (i64, f64, InstanceId, SketchId, Point3);
+        let rank = |x: &Hit, y: &Hit| x.0.cmp(&y.0).then(x.1.total_cmp(&y.1));
+        let mut ranked: Vec<Hit> = Vec::new();
+        for (root, pose, def) in self.instance_sketch_roots() {
+            let entry = lines.get(&self.doc, def);
+            let Some(bounds) = entry.bounds else {
+                continue;
+            };
+            if !ray_meets_posed_box(origin, unit, bounds, &pose, SKETCH_PICK_APERTURE) {
+                continue;
+            }
+            let mut hits: Vec<Hit> = Vec::new();
+            for &(sid, to_def) in &entry.placements {
+                let Some(sketch) = self.doc.sketch(sid) else {
+                    continue;
+                };
+                let to_world = to_def.then(&pose);
+                for (_, edge) in sketch.edges().iter() {
+                    let a = to_world.apply_point(sketch.vertices()[edge.from].position);
+                    let b = to_world.apply_point(sketch.vertices()[edge.to].position);
+                    let Some((point, ang, depth)) = inference::segment_cone_hit(
+                        origin,
+                        unit,
+                        a,
+                        b,
+                        SKETCH_PICK_APERTURE,
+                        ApertureMode::Cone,
+                    ) else {
+                        continue;
+                    };
+                    let bucket = inference::rank_distance_bucket(ang, tie);
+                    hits.push((bucket, depth, root, sid, point));
+                }
+            }
+            hits.sort_by(rank);
+            hits.truncate(INSTANCE_PICK_HITS_PER_PLACEMENT);
+            ranked.extend(hits);
+        }
+        // Stable: equal ranks keep their placement's walk order.
+        ranked.sort_by(rank);
+        for (_, depth, root, sid, point) in ranked {
+            out.push(root, sid, depth, point);
+        }
+        out
+    }
+
+    /// The fills of regions drawn inside components under the ray, RANKED
+    /// as [`Scene::pick_instance_sketch_edge`] ranks lines (its walk, its
+    /// cull, its early answer, unscoped, and its per-placement list): for
+    /// every shown top-level instance each sketch whose fill the ray
+    /// enters, at the smallest of its regions there, the best
+    /// [`INSTANCE_PICK_HITS_PER_PLACEMENT`] of each placement kept, then
+    /// all of them nearest first, the smaller first among ties (so
+    /// `instances()` repeats a placement once per sketch, and a fill the
+    /// caller finds hidden does not mask the same placement's next one).
+    /// Areas compare in the WORLD: a region's own area
+    /// times its placement's in-plane area scale, so a scaled placement's
+    /// fill ranks by the size it is drawn at. A loop with no face and an
+    /// imported sketch (drawn as ink, no fill) are nothing to pick, and in
+    /// Wireframe nothing is ([`Scene::set_render_mode`]: a fill is a face).
+    /// Each hit carries the top-level instance, the sketch, the depth along
+    /// the normalized ray, and the world point where the ray meets the
+    /// fill. Empty on a miss. Never throws. Read-only.
+    pub fn pick_instance_sketch_region(
+        &self,
+        ox: f64,
+        oy: f64,
+        oz: f64,
+        dx: f64,
+        dy: f64,
+        dz: f64,
+    ) -> InstanceSketchHitsJs {
+        let mut out = InstanceSketchHitsJs::default();
+        if !self.inference.face_policy().faces_are_targets() || !self.doc.has_definition_drawing() {
+            return out;
+        }
+        let origin = Point3::new(ox, oy, oz);
+        let dir = kernel::Vec3::new(dx, dy, dz);
+        let Ok(unit) = dir.normalized() else {
+            return out;
+        };
+        let length = dir.length();
+        let ties = |a: f64, b: f64| (a - b).abs() < kernel::tol::PLANE_DIST;
+        // Nearest first; a run of hits within the tie distance of its first
+        // ranks smaller area first (a total order, so the sort is sound).
+        let rank = |hits: &mut [Hit]| {
+            hits.sort_by(|x, y| x.0.total_cmp(&y.0));
+            let mut start = 0;
+            while start < hits.len() {
+                let lead = hits[start].0;
+                let end = hits[start..]
+                    .iter()
+                    .position(|h| !ties(h.0, lead))
+                    .map_or(hits.len(), |k| start + k);
+                hits[start..end].sort_by(|x, y| x.1.total_cmp(&y.1));
+                start = end;
+            }
+        };
+        let mut lines = DefLinesMemo::default();
+        // (depth, world area, placement, sketch, world point): one per
+        // sketch whose fill the ray enters, its smallest region there.
+        type Hit = (f64, f64, InstanceId, SketchId, Point3);
+        let mut ranked: Vec<Hit> = Vec::new();
+        for (root, pose, def) in self.instance_sketch_roots() {
+            let entry = lines.get(&self.doc, def);
+            let Some(bounds) = entry.bounds else {
+                continue;
+            };
+            if !ray_meets_posed_box(origin, unit, bounds, &pose, 0.0) {
+                continue;
+            }
+            let mut hits: Vec<Hit> = Vec::new();
+            for &(sid, to_def) in &entry.placements {
+                let Some(sketch) = self.doc.sketch(sid) else {
+                    continue;
+                };
+                if sketch.imported() || sketch.regions().iter().all(|(_, r)| r.faceless) {
+                    continue;
+                }
+                let to_world = to_def.then(&pose);
+                let Ok(inv) = to_world.inverse() else {
+                    continue;
+                };
+                let o = inv.apply_point(origin);
+                let d = inv.apply_vector(dir);
+                let plane = sketch.plane();
+                let denom = plane.normal().dot(d);
+                if denom.abs() < kernel::tol::NORMAL_DIRECTION {
+                    continue; // ray parallel to (or grazing) this sketch plane
+                }
+                // The ray's own parameter: an affine map keeps it.
+                let t = -plane.signed_distance(o) / denom;
+                if t <= 0.0 {
+                    continue; // plane is behind the ray origin
+                }
+                let hit = o + d * t;
+                let depth = t * length;
+                let scale = in_plane_area_scale(&to_world, plane.normal());
+                // One hit per sketch: its regions share the hit point, so
+                // only the smallest one entered says anything.
+                let area = sketch
+                    .regions()
+                    .iter()
+                    .filter(|(rid, r)| {
+                        !r.faceless && sketch.region_contains_point(*rid, hit).unwrap_or(false)
+                    })
+                    .map(|(rid, _)| sketch.region_area(rid).unwrap_or(f64::INFINITY) * scale)
+                    .min_by(f64::total_cmp);
+                if let Some(area) = area {
+                    hits.push((depth, area, root, sid, origin + dir * t));
+                }
+            }
+            rank(&mut hits);
+            hits.truncate(INSTANCE_PICK_HITS_PER_PLACEMENT);
+            ranked.extend(hits);
+        }
+        rank(&mut ranked);
+        for (depth, _, root, sid, point) in ranked {
+            out.push(root, sid, depth, point);
+        }
+        out
+    }
+
+    /// The lines drawn inside one placement, as the renderer draws them and
+    /// the picks and marquee test them: every sketch the instance shows,
+    /// nested definitions included, each with the row-major 3×4 affine that
+    /// maps its stored coordinates into the instance's own frame (draw at
+    /// `instance_pose × pose`). The one kernel walk
+    /// ([`Document::expanded_def_sketch_placements`]): a sketch on a hidden
+    /// tag, and everything under a member group or nested instance hidden
+    /// by eye or tag, is left out; a definition on loan to an open session
+    /// shows the session's drawing at the inverse session pose. The
+    /// instance's OWN visibility is the caller's to apply, as for its
+    /// solids. Empty for a stale or hidden instance, or one drawing no
+    /// line. Read-only.
+    pub fn instance_sketch_placements(&self, instance: u64) -> InstanceSketchPlacementsJs {
+        let mut out = InstanceSketchPlacementsJs::default();
+        let Some(def) = self.doc.instance_def(instance_id(instance)) else {
+            return out;
+        };
+        for (sid, to_def) in self.doc.expanded_def_sketch_placements(def) {
+            out.sketches.push(sid.data().as_ffi());
+            out.poses.extend(to_def.to_affine());
+        }
+        out
+    }
+
+    /// World bounds `[minx, miny, minz, maxx, maxy, maxz]` of the lines
+    /// drawn inside an instance, nested definitions included, each curve at
+    /// its true extent ([`Document::instance_sketch_bounds`]) — what the
+    /// selection's bounding box and framing add to the instance's solids.
+    /// Empty when the instance is stale or hidden, or draws no line.
+    /// Read-only.
+    pub fn instance_sketch_bounds(&self, instance: u64) -> Vec<f64> {
+        match self.doc.instance_sketch_bounds(instance_id(instance)) {
+            Some((lo, hi)) => vec![lo.x, lo.y, lo.z, hi.x, hi.y, hi.z],
+            None => Vec::new(),
+        }
+    }
+
     /// Picks the committed sketch vertex nearest the ray (Phase D per-vertex
     /// edit), for the EditVertex tool. Uses the same fixed `SKETCH_PICK_APERTURE`
     /// as [`Scene::pick_sketch`] (a vertex is a point — exact ray intersection
     /// would be unhittable). Returns the sketch, the vertex handle to drag, and
     /// its world position, or `undefined` if no vertex is within the aperture.
+    /// Scoped like [`Scene::pick_sketch`].
     pub fn pick_sketch_vertex(
         &self,
         ox: f64,
@@ -7449,8 +11508,11 @@ impl Scene {
             origin: Point3::new(ox, oy, oz),
             direction: kernel::Vec3::new(dx, dy, dz),
         };
+        let scope = self.sketch_pick_scope();
         self.inference
-            .pick_sketch_vertex(&ray, SKETCH_PICK_APERTURE)
+            .pick_sketch_vertex_preferring(&ray, SKETCH_PICK_APERTURE, &|s| {
+                scope.as_ref().is_some_and(|sc| sc.contains(s))
+            })
             .map(|(sid, vid, pos)| SketchVertexPickJs {
                 sketch: sid.data().as_ffi(),
                 vertex: vid.data().as_ffi(),
@@ -7487,6 +11549,9 @@ impl Scene {
     pub fn set_hidden(&mut self, object_ids: &[u64], instance_ids: &[u64]) {
         self.hidden_objects = object_ids.iter().map(|&h| object_id(h)).collect();
         self.hidden_instances = instance_ids.iter().map(|&h| instance_id(h)).collect();
+        // A hidden solid never grows from faces closed against it.
+        self.doc
+            .set_view_hidden_objects(self.hidden_objects.iter().copied());
 
         // Rebuild inference registration to match the new sets: clear every
         // object/instance candidate wholesale, then register only the visible
@@ -7516,11 +11581,19 @@ impl Scene {
     /// Add a solid-color material to the palette and return its handle.
     /// Palette additions are not individually undoable — only face assignment
     /// via [`Scene::paint_face`] is.
-    pub fn add_material(&mut self, name: String, r: u8, g: u8, b: u8, a: u8) -> u64 {
+    pub fn add_material(
+        &mut self,
+        name: String,
+        r: u8,
+        g: u8,
+        b: u8,
+        a: u8,
+    ) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
         let mat = Material::solid(name.clone(), Rgba8::rgba(r, g, b, a));
         let id = self.doc.add_material(mat).data().as_ffi();
         recording::record(recording::RecordedCall::AddMaterial { name, r, g, b, a });
-        id
+        Ok(id)
     }
 
     /// Add a textured material to the palette and return its handle.
@@ -7539,6 +11612,7 @@ impl Scene {
         world_w: f64,
         world_h: f64,
     ) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
         let fmt = match format {
             0 => ImageFormat::Png,
             1 => ImageFormat::Jpeg,
@@ -7580,10 +11654,40 @@ impl Scene {
     /// # Errors
     /// - `UnknownMaterial` — material handle is not in the palette.
     pub fn set_material_alpha(&mut self, material: u64, alpha: u8) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let mid = MaterialId::from(KeyData::from_ffi(material));
         let change = self.doc.set_material_alpha(mid, alpha).map_err(doc_err)?;
         self.reconcile(&change);
         recording::record(recording::RecordedCall::SetMaterialAlpha { material, alpha });
+        Ok(())
+    }
+
+    /// Set a palette material's metallic and roughness factors (each 0 to
+    /// 1). Undoable; like opacity it is live render state, resolved from the
+    /// palette when the viewport refreshes its materials, so no mesh cache is
+    /// invalidated.
+    ///
+    /// # Errors
+    /// - `UnknownMaterial` — material handle is not in the palette.
+    /// - `InvalidMaterialPbr` — a factor is not a number from 0 to 1.
+    pub fn set_material_pbr(
+        &mut self,
+        material: u64,
+        metallic: f32,
+        roughness: f32,
+    ) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
+        let mid = MaterialId::from(KeyData::from_ffi(material));
+        let change = self
+            .doc
+            .set_material_pbr(mid, metallic, roughness)
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::SetMaterialPbr {
+            material,
+            metallic,
+            roughness,
+        });
         Ok(())
     }
 
@@ -7603,6 +11707,7 @@ impl Scene {
     /// # Errors
     /// - `UnknownMaterial` — stale or deleted material handle.
     pub fn set_material_name(&mut self, material: u64, name: String) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let mid = MaterialId::from(KeyData::from_ffi(material));
         let change = self
             .doc
@@ -7621,6 +11726,7 @@ impl Scene {
     /// # Errors
     /// - `UnknownMaterial` — stale or already-deleted material handle.
     pub fn delete_material(&mut self, material: u64) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let mid = MaterialId::from(KeyData::from_ffi(material));
         let change = self.doc.delete_material(mid).map_err(doc_err)?;
         self.reconcile(&change);
@@ -7656,6 +11762,8 @@ impl Scene {
             .as_ref()
             .map(|t| (t.world_size[0], t.world_size[1]))
             .unwrap_or((1.0, 1.0));
+        let plain = kernel::Pbr::PLAIN;
+        let pbr = mat.pbr.as_ref().unwrap_or(&plain);
         Some(MaterialJs {
             name: mat.name.clone(),
             r: mat.color.r,
@@ -7665,7 +11773,28 @@ impl Scene {
             has_texture: mat.has_texture(),
             world_w,
             world_h,
+            metallic: pbr.metallic,
+            roughness: pbr.roughness,
+            has_pbr: mat.pbr.is_some(),
+            has_maps: [
+                pbr.metallic_map.is_some(),
+                pbr.roughness_map.is_some(),
+                pbr.normal_map.is_some(),
+                pbr.occlusion_map.is_some(),
+            ],
         })
+    }
+
+    /// The raw encoded bytes of a material's normal map, or `undefined` if
+    /// the handle is stale or the material has none.
+    pub fn material_normal_map_bytes(&self, id: u64) -> Option<Vec<u8>> {
+        let mid = MaterialId::from(KeyData::from_ffi(id));
+        let mat = self.doc.material(mid)?;
+        mat.pbr
+            .as_ref()?
+            .normal_map
+            .as_ref()
+            .map(|m| m.image.clone())
     }
 
     /// The raw encoded image bytes of a textured material, or `undefined` if
@@ -7727,6 +11856,7 @@ impl Scene {
     /// - `UnknownMaterial` — material handle is not in the palette (and is not
     ///   the sentinel).
     pub fn paint_face(&mut self, object: u64, face: u64, material: u64) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let oid = object_id(object);
         let fid = FaceId::from(KeyData::from_ffi(face));
         let mid = material_id_opt(material);
@@ -7751,11 +11881,99 @@ impl Scene {
     /// - `UnknownMaterial` — material handle is not in the palette (and is not
     ///   the sentinel).
     pub fn set_object_material(&mut self, object: u64, material: u64) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let oid = object_id(object);
         let mid = material_id_opt(material);
         let change = self.doc.set_object_material(oid, mid).map_err(doc_err)?;
         self.reconcile(&change);
         recording::record(recording::RecordedCall::SetObjectMaterial { object, material });
+        Ok(())
+    }
+
+    /// A live instance's own material, or `u64::MAX` when it has none (or
+    /// the handle is stale or hidden).
+    pub fn instance_material(&self, instance: u64) -> u64 {
+        self.doc
+            .instance_material(instance_id(instance))
+            .flatten()
+            .map_or(u64::MAX, |m| m.data().as_ffi())
+    }
+
+    /// The material a new placement needs of its own to look like
+    /// `instance` (`u64::MAX`: none, or a stale or hidden handle): its own
+    /// material, except none for a copy of a linked set whose shared solid
+    /// has a base, which already shows on every copy
+    /// ([`kernel::Document::instance_appearance_material`]). A linked paste
+    /// paints its copy with this.
+    pub fn instance_appearance_material(&self, instance: u64) -> u64 {
+        self.doc
+            .instance_appearance_material(instance_id(instance))
+            .flatten()
+            .map_or(u64::MAX, |m| m.data().as_ffi())
+    }
+
+    /// Set a placement's own material (`u64::MAX` clears it): member faces
+    /// show it where neither the face nor its Object's base is painted,
+    /// the nearest painted placement winning. Undoable. World and nested
+    /// placements alike.
+    ///
+    /// A copy of a linked set whose shared solid has a base first hands
+    /// that base to every other copy as its own material (the kernel's
+    /// `set_instance_material`), so the painted copy shows its color and
+    /// the others look the same; one undo step either way.
+    ///
+    /// Returns the WORLD instances whose drawing changed — the instance
+    /// itself, or for a nested placement every world placement that draws
+    /// it, and after a base move every world placement of the set — so the
+    /// renderer re-pulls each of them, not just the one painted. The set's
+    /// member geometry changed then too: a caller painting a linked copy
+    /// re-pulls its definition's members.
+    ///
+    /// # Errors
+    /// - `UnknownInstance` — stale or hidden instance handle.
+    /// - `UnknownMaterial` — material handle is not a live palette entry.
+    pub fn set_instance_material(
+        &mut self,
+        instance: u64,
+        material: u64,
+    ) -> Result<Vec<u64>, ApiError> {
+        self.ensure_not_busy()?;
+        let change = self
+            .doc
+            .set_instance_material(instance_id(instance), material_id_opt(material))
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::SetInstanceMaterial { instance, material });
+        Ok(change
+            .instances_touched
+            .iter()
+            .filter(|&&i| self.doc.instance_is_world(i))
+            .map(|i| i.data().as_ffi())
+            .collect())
+    }
+
+    /// Set the base material of every object a definition owns (its
+    /// members and its member groups' leaves; `u64::MAX` clears), as one
+    /// undo entry.
+    ///
+    /// # Errors
+    /// - `UnknownComponent` — stale or hidden definition handle.
+    /// - `UnknownMaterial` — material handle is not a live palette entry.
+    pub fn set_definition_material(
+        &mut self,
+        component: u64,
+        material: u64,
+    ) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
+        let change = self
+            .doc
+            .set_definition_material(component_id(component), material_id_opt(material))
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::SetDefinitionMaterial {
+            component,
+            material,
+        });
         Ok(())
     }
 
@@ -7783,6 +12001,7 @@ impl Scene {
         from: u64,
         to: u64,
     ) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let scope = if document_wide {
             MaterialScope::Document
         } else {
@@ -7845,6 +12064,7 @@ impl Scene {
         face: u64,
         frame: Option<Vec<f64>>,
     ) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let oid = object_id(object);
         let fid = FaceId::from(KeyData::from_ffi(face));
         let uv_frame = match &frame {
@@ -7901,9 +12121,8 @@ impl Scene {
     pub fn face_mesh_range(&mut self, object: u64, face: u64) -> Option<Vec<u32>> {
         let id = object_id(object);
         if !self.face_range_cache.contains_key(id) {
-            let palette = self.doc.materials();
             let obj = self.doc.object(id)?;
-            let mesh = tessellate(obj, palette).ok()?;
+            let mesh = render_mesh(&self.doc, id, obj).ok()?;
             self.face_range_cache.insert(id, mesh.face_ranges);
         }
         let fid = FaceId::from(KeyData::from_ffi(face));
@@ -7932,6 +12151,7 @@ impl Scene {
         dy: f64,
         dz: f64,
     ) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
         let id = self
             .doc
             .add_guide_line(Point3::new(ox, oy, oz), kernel::Vec3::new(dx, dy, dz))
@@ -7952,6 +12172,7 @@ impl Scene {
     /// # Errors
     /// - `DegenerateGuide` — a non-finite coordinate.
     pub fn add_guide_point(&mut self, x: f64, y: f64, z: f64) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
         let id = self
             .doc
             .add_guide_point(Point3::new(x, y, z))
@@ -7970,6 +12191,7 @@ impl Scene {
     /// # Errors
     /// - `UnknownGuide` — stale, already-hidden, or foreign handle.
     pub fn delete_guide(&mut self, guide: u64) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let change = self.doc.delete_guide(guide_id(guide)).map_err(doc_err)?;
         self.reconcile(&change);
         recording::record(recording::RecordedCall::DeleteGuide { guide });
@@ -7980,10 +12202,92 @@ impl Scene {
     /// step (Edit ▸ Delete Guide Lines). A no-op (and not a separate undo
     /// entry) when there are no guides.
     pub fn delete_all_guides(&mut self) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let change = self.doc.delete_all_guides().map_err(doc_err)?;
         self.reconcile(&change);
         recording::record(recording::RecordedCall::DeleteAllGuides);
         Ok(())
+    }
+
+    /// Moves one construction guide through `affine` (undoable) — the Move
+    /// tool on a guide. `affine` is the same row-major 3×4 12-float matrix
+    /// as [`Scene::transform_object`]. The handle is unchanged; a point or
+    /// a line's origin moves like any point, a line's direction turns with
+    /// the pose. The guide's snap registration follows it.
+    ///
+    /// # Errors
+    /// - `BadAffine` — `affine` is not 12 floats.
+    /// - `UnknownGuide` — stale, hidden, or foreign handle.
+    /// - `Transform` — a singular `affine`.
+    /// - `DegenerateGuide` — the moved geometry is not a guide (a
+    ///   non-finite coordinate, or a line whose stretch collapses).
+    ///
+    /// On error the document is untouched.
+    pub fn transform_guide(&mut self, guide: u64, affine: &[f64]) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
+        let rows: &[f64; 12] = affine.try_into().map_err(|_| {
+            ApiError("BadAffine: transform must be 12 floats (row-major 3x4)".to_string())
+        })?;
+        let t = Transform::from_affine(rows);
+        let change = self
+            .doc
+            .transform_guide(guide_id(guide), &t)
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::TransformGuide {
+            guide,
+            affine: *rows,
+        });
+        Ok(())
+    }
+
+    /// Copies one construction guide `count` times along `affine` — the
+    /// Move tool's copy (count 1) and its ×N / /N array on a guide. Copy
+    /// `k` lands at `affine` composed `k` times, as in
+    /// [`Scene::duplicate_selection_array`]; each copy carries the source's
+    /// tags. The whole array is **one undoable step**. Returns the copies'
+    /// handles, copy 1 first.
+    ///
+    /// # Errors
+    /// - `BadCount` — `count` is zero or exceeds [`MAX_ARRAY_COUNT`]
+    ///   (enforced here, at the trust boundary, for the same reason as
+    ///   [`Scene::duplicate_selection_array`]).
+    /// - `BadAffine` — `affine` is not 12 floats.
+    /// - `UnknownGuide` — stale, hidden, or foreign handle.
+    /// - `Transform` — a singular `affine`.
+    /// - `DegenerateGuide` — a copy's geometry is not a guide.
+    ///
+    /// On error the document is untouched.
+    pub fn duplicate_guide_array(
+        &mut self,
+        guide: u64,
+        affine: &[f64],
+        count: u32,
+    ) -> Result<Vec<u64>, ApiError> {
+        self.ensure_not_busy()?;
+        let count_nz = std::num::NonZeroU32::new(count)
+            .filter(|c| c.get() <= MAX_ARRAY_COUNT)
+            .ok_or_else(|| {
+                ApiError::new(
+                    "BadCount",
+                    &format!("count must be between 1 and {MAX_ARRAY_COUNT}"),
+                )
+            })?;
+        let rows: &[f64; 12] = affine.try_into().map_err(|_| {
+            ApiError("BadAffine: transform must be 12 floats (row-major 3x4)".to_string())
+        })?;
+        let t = Transform::from_affine(rows);
+        let (copies, change) = self
+            .doc
+            .duplicate_guide_array(guide_id(guide), &t, count_nz)
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::DuplicateGuideArray {
+            guide,
+            affine: *rows,
+            count,
+        });
+        Ok(copies.into_iter().map(|g| g.data().as_ffi()).collect())
     }
 
     /// Enable/disable snapping to construction guides (View ▸ Guides). A hidden
@@ -8022,6 +12326,58 @@ impl Scene {
         };
         self.inference.set_face_policy(policy);
         Ok(())
+    }
+
+    /// Sets the editing scope, per window and never saved: the world
+    /// objects and component instances the open edit can touch — exactly
+    /// the set the viewport keeps lit while the rest dims — and whether the
+    /// innermost open session frame's own drawing is in it. Wherever faces
+    /// are targets (Shaded and X-ray, [`Scene::set_render_mode`])
+    /// `pick_face`, `pick_sketch_region`, `pick_sketch`, `pick_sketch_edge`
+    /// and `pick_sketch_vertex` then return the nearest candidate inside
+    /// the scope, passing over nearer ones outside it: the editing view
+    /// draws everything outside the scope translucent, so what is inside
+    /// it can be seen, and what can be seen can be picked. With nothing in
+    /// scope under the ray they answer exactly as without a scope.
+    /// Wireframe ignores the scope (faces are not targets there), as do
+    /// `snap` and the `_geometry` and `_in_instance` picks.
+    ///
+    /// A face is in scope when its object (a world object) or its instance
+    /// (a placement) is listed. A sketch is in scope when its owning object
+    /// is listed, or, with `frame_sketches`, when it is the innermost open
+    /// session frame's own drawing ([`Document::session_frame_sketches`]:
+    /// for a component frame the definition's drawing and every line drawn
+    /// since the open; for a group frame the drawing the group holds and
+    /// every line drawn since the open). Pass `frame_sketches` for a scope
+    /// that IS the open session; an object context pushed on top of a
+    /// session narrows the scope to that object and its own drawing, so it
+    /// passes `false`.
+    ///
+    /// Replaces the previous scope. Empty lists are a scope, not a clear:
+    /// a session with no solid yet still scopes to its drawing, and with
+    /// nothing in scope every pick answers as without one. Only
+    /// [`Scene::clear_pick_scope`] (and a document load) clears it. Ids
+    /// are only compared, so a stale or unknown id is harmless.
+    pub fn set_pick_scope(&mut self, objects: Vec<u64>, instances: Vec<u64>, frame_sketches: bool) {
+        let scope = PickScope {
+            objects: objects.iter().map(|&o| object_id(o)).collect(),
+            instances: instances.iter().map(|&i| instance_id(i)).collect(),
+        };
+        recording::record(recording::RecordedCall::SetPickScope {
+            objects,
+            instances,
+            frame_sketches: Some(frame_sketches),
+        });
+        self.inference.set_pick_scope(Some(scope));
+        self.pick_scope_frame_sketches = frame_sketches;
+    }
+
+    /// Clears the editing scope ([`Scene::set_pick_scope`]): the top level,
+    /// where every pick is the nearest candidate of any owner.
+    pub fn clear_pick_scope(&mut self) {
+        recording::record(recording::RecordedCall::ClearPickScope);
+        self.inference.set_pick_scope(None);
+        self.pick_scope_frame_sketches = false;
     }
 
     /// Handles of every construction guide to draw: live, and not hidden
@@ -8100,6 +12456,20 @@ impl Scene {
         }
     }
 
+    /// A line guide's dash as its 16-bit stipple mask, bit 0 first along the
+    /// line (`0x3333`, short dashes, for a guide Hew draws; `0xFFFF` is
+    /// solid), or `undefined` if `guide` is stale, hidden or not a line.
+    pub fn guide_dash(&self, guide: u64) -> Option<u16> {
+        let id = guide_id(guide);
+        if !self.doc.guide_shown(id) {
+            return None;
+        }
+        match self.doc.guide(id)? {
+            Guide::Line { .. } => Some(self.doc.guide_dash(id).mask()),
+            Guide::Point { .. } => None,
+        }
+    }
+
     // -------------------------------------------------------- annotations
     //
     // Dimension / leader-text annotations (docs/design/dimensions-text.md).
@@ -8135,6 +12505,7 @@ impl Scene {
         plane: &[f64],
         text_override: Option<String>,
     ) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
         let a = Anchor {
             node: anchor_node(a_node_kind, a_node_id)?,
             point: point3(a_point)?,
@@ -8189,6 +12560,7 @@ impl Scene {
         leader_dir: &[f64],
         text_override: Option<String>,
     ) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
         let anchor = Anchor {
             node: anchor_node(anchor_node_kind, anchor_node_id)?,
             point: point3(anchor_point)?,
@@ -8241,6 +12613,7 @@ impl Scene {
         offset: &[f64],
         text: String,
     ) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
         let anchor = Anchor {
             node: anchor_node(anchor_node_kind, anchor_node_id)?,
             point: point3(anchor_point)?,
@@ -8290,6 +12663,7 @@ impl Scene {
         plane: &[f64],
         text_override: Option<String>,
     ) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let a = Anchor {
             node: anchor_node(a_node_kind, a_node_id)?,
             point: point3(a_point)?,
@@ -8349,6 +12723,7 @@ impl Scene {
         leader_dir: &[f64],
         text_override: Option<String>,
     ) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let anchor = Anchor {
             node: anchor_node(anchor_node_kind, anchor_node_id)?,
             point: point3(anchor_point)?,
@@ -8404,6 +12779,7 @@ impl Scene {
         offset: &[f64],
         text: String,
     ) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let anchor = Anchor {
             node: anchor_node(anchor_node_kind, anchor_node_id)?,
             point: point3(anchor_point)?,
@@ -8436,6 +12812,7 @@ impl Scene {
     /// # Errors
     /// - `UnknownAnnotation` — stale, hidden, or foreign handle.
     pub fn delete_annotation(&mut self, id: u64) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let change = self
             .doc
             .delete_annotation(annotation_id(id))
@@ -8627,6 +13004,7 @@ impl Scene {
     /// # Errors
     /// Throws a `"DAE: <message>"` `JsError` on parse failure.
     pub fn import_dae(&mut self, dae_bytes: &[u8], images: JsValue) -> Result<JsValue, JsError> {
+        self.ensure_not_busy()?;
         // ── 1. Parse the images JS object into an ImageMap ────────────────────
         let mut image_map: ImageMap = ImageMap::new();
         if !images.is_null() && !images.is_undefined() {
@@ -8719,6 +13097,7 @@ impl Scene {
     /// # Errors
     /// Throws a `"glTF: <message>"` `JsError` on parse failure.
     pub fn import_gltf(&mut self, gltf_bytes: &[u8]) -> Result<JsValue, JsError> {
+        self.ensure_not_busy()?;
         let (report, warnings) = self
             .import_gltf_core(gltf_bytes)
             .map_err(|e| JsError::new(&e.0))?;
@@ -8750,7 +13129,7 @@ impl Scene {
 
     /// Import SketchUp `.skp` bytes into the current document — the 2026
     /// container every current SketchUp saves, or the 2017 format — through
-    /// the clean-room OpenSKP reader. Additive: existing geometry is
+    /// the clean-room Skpwright reader. Additive: existing geometry is
     /// untouched. Returns the same `ImportReport` JS shape as
     /// [`Scene::import_dae`], plus `warnings: [string]` — reader recovery
     /// notes (non-empty means a damaged or unknown record was skipped, or
@@ -8762,11 +13141,11 @@ impl Scene {
     ///
     /// # Errors
     /// Throws a `"SKP: <message>"` `JsError` on parse failure. A file in a
-    /// layout the reader has not decoded (a 2013–2016 or 2018–2025 stream)
-    /// throws with the file's own version and re-save guidance (a current
-    /// SketchUp, or "Save As ▸ SketchUp Version 2017") baked into the
-    /// message.
+    /// layout the reader has not decoded (a stream of a release outside 3 to
+    /// 8 and 2013 to 2020) throws with the file's own version and re-save
+    /// guidance (a current SketchUp) baked into the message.
     pub fn import_skp(&mut self, skp_bytes: &[u8]) -> Result<JsValue, JsError> {
+        self.ensure_not_busy()?;
         let (report, warnings) = self
             .import_skp_core(skp_bytes)
             .map_err(|e| JsError::new(&e.0))?;
@@ -8776,13 +13155,15 @@ impl Scene {
     /// Open a `.skp` file as this document's own file: [`Scene::import_skp`]
     /// into the (blank) document, keeping the file's bytes as the source a
     /// later [`Scene::save_skp`] builds on. The report is
-    /// [`Scene::import_skp`]'s plus `container`: `"skp2026"` or
-    /// `"skp2017"`, the format the file is in (and that a plain Save
-    /// writes back).
+    /// [`Scene::import_skp`]'s plus `container`: `"skp2026"`,
+    /// `"skp3"` to `"skp8"` or `"skp2013"` to `"skp2020"`, the format the file is in (and that a plain Save
+    /// writes back), and `compat`: the file is revision 17 of the
+    /// 2021-and-later container, which a plain Save keeps to.
     ///
     /// # Errors
     /// As [`Scene::import_skp`].
     pub fn open_skp(&mut self, skp_bytes: Vec<u8>) -> Result<JsValue, JsError> {
+        self.ensure_not_busy()?;
         self.open_skp_begin(skp_bytes)?;
         loop {
             let progress = self.open_skp_step(f64::INFINITY)?;
@@ -8809,6 +13190,7 @@ impl Scene {
     /// file for saving back, and `"done"` with the open report under
     /// `report`. See [`Scene::open_skp`] for what an open is.
     pub fn open_skp_begin(&mut self, skp_bytes: Vec<u8>) -> Result<JsValue, JsError> {
+        self.ensure_not_busy()?;
         // (Taken by value: the bytes cross into wasm memory once and the
         // save-back source keeps that copy, rather than a second one — on
         // a 400 MB file the difference is a good part of what the browser
@@ -8840,6 +13222,7 @@ impl Scene {
     /// open report. An error (a recipe the kernel refuses) ends the open
     /// with nothing pending.
     pub fn open_skp_step(&mut self, budget_ms: f64) -> Result<JsValue, JsError> {
+        self.ensure_not_busy()?;
         let Some(mut pending) = self.pending_open.take() else {
             return Err(JsError::new("SKP: no open under way"));
         };
@@ -8971,6 +13354,7 @@ impl Scene {
         self.doc
             .forget_history()
             .map_err(|e| JsError::new(&format!("SKP: {e}")))?;
+        let compat = skp_export::target_of(&skp_bytes) == skp_export::Target::Skp2026Compat;
         self.skp_source = Some(skp_export::SkpSource::after_open(
             skp_bytes, &self.doc, provenance, &report,
         ));
@@ -8982,32 +13366,52 @@ impl Scene {
             &JsValue::from_str(container),
         )
         .unwrap();
+        Reflect::set(
+            &report,
+            &JsValue::from_str("compat"),
+            &JsValue::from_bool(compat),
+        )
+        .unwrap();
         Ok(report)
     }
 
     /// Which `.skp` container `bytes` are: `"skp2026"` (the ZIP container
-    /// current SketchUp saves), `"skp2017"` (the 2017 format), or `""` for
+    /// current SketchUp saves), the stream release the header names
+    /// (`"skp3"` to `"skp8"`, `"skp2013"` to `"skp2020"`; a release Skpwright
+    /// does not list takes the nearest one it writes), or `""` for
     /// anything else.
     pub fn skp_container(bytes: &[u8]) -> String {
-        match skp_import::openskp::detect_container(bytes) {
-            skp_import::openskp::Container::Zip => "skp2026",
-            skp_import::openskp::Container::Carchive2017 => "skp2017",
-            skp_import::openskp::Container::Unknown => "",
+        match skp_import::skpwright::detect_container(bytes) {
+            skp_import::skpwright::Container::Zip | skp_import::skpwright::Container::Stream => {
+                skp_target_name(skp_export::target_of(bytes))
+            }
+            skp_import::skpwright::Container::Unknown => String::new(),
         }
-        .to_string()
     }
 
-    /// Save the document as a `.skp` file in `target` (`"skp2026"` or
-    /// `"skp2017"`): built on the document's source file when it has one
+    /// Whether `bytes` are a revision-17 file of the 2021-and-later
+    /// container: a save back keeps to revision 17 (the app's "avoid
+    /// features older SketchUp versions cannot open" choice) unless the
+    /// user turns that off. `false` for anything else.
+    pub fn skp_container_compat(bytes: &[u8]) -> bool {
+        skp_export::target_of(bytes) == skp_export::Target::Skp2026Compat
+    }
+
+    /// Save the document as a `.skp` file in `target` (`"skp2026"`, or
+    /// `"skp3"` to `"skp8"`, `"skp2013"` to `"skp2020"`): built on the document's source file when it has one
     /// (unchanged content and everything the document does not model kept
     /// as the file has it), written whole otherwise. Returns `{ bytes:
     /// Uint8Array, simplified: string[], writer_notes: string[] }`:
     /// `simplified` lists what the file could not hold exactly (the app's
-    /// one-time notice), `writer_notes` what a 2017 file dropped. The
+    /// one-time notice), `writer_notes` what a stream-release file dropped. The
     /// written file becomes the source of the next save once the app calls
     /// [`Scene::commit_skp_save`] after writing it — a canceled or failed
     /// write leaves the source as it was. While a session is open the file
     /// is written as if it were closed, as [`Scene::save`] does.
+    ///
+    /// `compat` (the 2021-and-later container only) writes revision 17,
+    /// leaving out what only newer SketchUp versions open, each kind itemised
+    /// in `writer_notes`; absent, the lowest revision that holds the content.
     ///
     /// `units` is a length format (`m`, `cm`, `mm`, `arch`, `frac_in`,
     /// `dec_in`): the app's display units, which a file written whole opens
@@ -9022,7 +13426,12 @@ impl Scene {
         target: &str,
         units: Option<String>,
         units_named: Option<bool>,
+        compat: Option<bool>,
     ) -> Result<JsValue, JsError> {
+        self.ensure_not_busy()?;
+        // A SketchUp file has no slot for the document id, but the save
+        // mints it on the document anyway so the next `.hew` save keeps it.
+        self.doc.ensure_document_id(live::random_16());
         let units = match skp_units(units.as_deref()) {
             None => skp_export::SaveUnits::Keep,
             Some(u) if units_named == Some(true) => skp_export::SaveUnits::Set(u),
@@ -9030,7 +13439,7 @@ impl Scene {
         };
         let saved = skp_export::save_in(
             &self.doc,
-            skp_target(target)?,
+            skp_target(target, compat == Some(true))?,
             write_env(),
             self.skp_source.as_ref(),
             units,
@@ -9054,8 +13463,17 @@ impl Scene {
     ///
     /// # Errors
     /// As [`Scene::save_skp`].
-    pub fn export_skp(&self, target: &str, units: Option<String>) -> Result<JsValue, JsError> {
-        Ok(skp_export_to_js(&self.write_skp(target, units.as_deref())?))
+    pub fn export_skp(
+        &self,
+        target: &str,
+        units: Option<String>,
+        compat: Option<bool>,
+    ) -> Result<JsValue, JsError> {
+        Ok(skp_export_to_js(&self.write_skp(
+            target,
+            units.as_deref(),
+            compat == Some(true),
+        )?))
     }
 
     /// The `.skp` source kept for the next save (see the field), as an
@@ -9075,10 +13493,15 @@ impl Scene {
         self.pending_skp_source = None;
     }
 
-    fn write_skp(&self, target: &str, units: Option<&str>) -> Result<skp_export::Export, JsError> {
+    fn write_skp(
+        &self,
+        target: &str,
+        units: Option<&str>,
+        compat: bool,
+    ) -> Result<skp_export::Export, JsError> {
         skp_export::export_in(
             &self.doc,
-            skp_target(target)?,
+            skp_target(target, compat)?,
             write_env(),
             skp_units(units),
         )
@@ -9132,6 +13555,7 @@ impl Scene {
         unit_scale: f64,
         name: Option<String>,
     ) -> Result<JsValue, JsError> {
+        self.ensure_not_busy()?;
         let (report, warnings) = self
             .import_stl_core(stl_bytes, unit_scale, name)
             .map_err(|e| JsError::new(&e.0))?;
@@ -9213,6 +13637,7 @@ impl Scene {
         v: &[f64],
         width: f64,
     ) -> Result<JsValue, ApiError> {
+        self.ensure_not_busy()?;
         let placed = self.place_image_core(image, format, name, origin, u, v, width)?;
         let out = JsObject::new();
         let set = |k: &str, v: JsValue| {
@@ -9344,8 +13769,28 @@ impl Scene {
     /// interrupt an edit to save — autosave included.
     ///
     /// wasm-bindgen marshals `Vec<u8>` to a JS `Uint8Array`.
+    ///
+    /// Never mints the document id: the app calls
+    /// [`Scene::ensure_document_id`] first on the paths that write a file
+    /// (Save, Save As, a copy, Open on Phone), and not for its other uses
+    /// of these bytes (the blank snapshot, autosave, bug reports).
     pub fn save(&self) -> Vec<u8> {
         self.doc.save_for_persistence()
+    }
+
+    /// Mints the document's persistent id (docs/dev/HEW_FILE_FORMAT.md §2
+    /// `document_id`) from `crypto.getRandomValues` if it has none, and
+    /// returns it as lowercase hyphenated UUID text. Idempotent: a
+    /// document's id never changes once set. Not undoable, and not a
+    /// document edit (nothing is recorded, nothing turns dirty).
+    pub fn ensure_document_id(&mut self) -> String {
+        self.doc.ensure_document_id(live::random_16())
+    }
+
+    /// The document's persistent id, or `undefined` until the first save
+    /// mints one ([`Scene::ensure_document_id`]).
+    pub fn document_id(&self) -> Option<String> {
+        self.doc.document_id()
     }
 
     // ------------------------------------------------------------- library
@@ -9361,6 +13806,16 @@ impl Scene {
     /// the single root node's. `meta_json`, when given, is a JSON object
     /// written verbatim into the item's document attrs under the
     /// `hew.library` namespace (id, category, keywords, collection, …).
+    ///
+    /// `origin`, when given, makes this a CLIPBOARD copy
+    /// ([`kernel::Document::extract_clipboard_item`]): the app's per-window
+    /// nonce, composed with this scene's document epoch
+    /// ([`Scene::clipboard_origin`]), is stamped on every definition the
+    /// copy carries so that [`Scene::insert_item`] with the same nonce,
+    /// into the same document, places the ORIGINAL definition (a linked
+    /// instance, as Move+copy makes) instead of a new one. A clipboard copy
+    /// is never wrapped (`wrap_as_component` is ignored). Save to Library
+    /// passes `None`: a library file carries no origin.
     pub fn extract_item(
         &self,
         kinds: &[u8],
@@ -9368,6 +13823,7 @@ impl Scene {
         wrap_as_component: bool,
         name: Option<String>,
         meta_json: Option<String>,
+        origin: Option<String>,
     ) -> Result<Vec<u8>, ApiError> {
         if kinds.len() != ids.len() {
             return Err(ApiError(
@@ -9379,10 +13835,16 @@ impl Scene {
             .zip(ids)
             .map(|(&k, &i)| node_id(k, i))
             .collect::<Result<Vec<_>, _>>()?;
-        let mut item = self
-            .doc
-            .extract_item(&nodes, wrap_as_component)
-            .map_err(doc_err)?;
+        let mut item = match origin {
+            Some(nonce) => self
+                .doc
+                .extract_clipboard_item(&nodes, &self.clipboard_origin(&nonce))
+                .map_err(doc_err)?,
+            None => self
+                .doc
+                .extract_item(&nodes, wrap_as_component)
+                .map_err(doc_err)?,
+        };
         if let Some(n) = name.filter(|n| !n.trim().is_empty()) {
             let cids = item.component_ids();
             if cids.len() == 1 {
@@ -9427,11 +13889,66 @@ impl Scene {
             .map(|t| t.to_affine().to_vec()))
     }
 
+    /// The clipboard copy of a selection of nodes AND drawing (v1.5
+    /// decisions D3, [`kernel::Document::extract_clipboard_item_with_drawing`]):
+    /// [`Scene::extract_item`] with `origin` for the nodes (`kinds`/`ids`,
+    /// which may be empty), with the drawing `drawing_json` names carried as
+    /// the item's world sketches, which [`Scene::insert_item`] with an
+    /// origin draws at the destination. `drawing_json` is a JSON array of
+    /// `{"sketch":id}` (a whole free sketch), `{"sketch":id,"islands":[..]}`
+    /// (some of its islands; how a detached shape is named), and
+    /// `{"ctx":<context>,"keys":["hex",..]}` (the edges a context's listing
+    /// names by key, `plane_units_json`'s context). Read-only, not recorded.
+    ///
+    /// # Errors
+    /// As [`Scene::extract_item`]; `EmptyComponent` when nothing is named
+    /// or the drawing names no edge; `ExplodeSessionScope` inside a
+    /// component session or for drawing inside a definition;
+    /// `UnknownSketch`, `Sketch` (a stale island or key), `BadDrawing`,
+    /// `BadContext`.
+    pub fn extract_clipboard(
+        &self,
+        kinds: &[u8],
+        ids: &[u64],
+        drawing_json: &str,
+        origin: String,
+    ) -> Result<Vec<u8>, ApiError> {
+        let nodes = node_list(kinds, ids)?;
+        let drawing = self.drawn_sources(drawing_json)?;
+        let item = self
+            .doc
+            .extract_clipboard_item_with_drawing(&nodes, &drawing, &self.clipboard_origin(&origin))
+            .map_err(doc_err)?;
+        Ok(item.save())
+    }
+
+    /// [`Scene::extract_item_placement`] for [`Scene::extract_clipboard`]'s
+    /// copy of nodes and drawing
+    /// ([`kernel::Document::extract_placement_with_drawing`]): Paste In
+    /// Place's affine. `undefined` when the selection resolves to nothing
+    /// under identity axes.
+    pub fn extract_clipboard_placement(
+        &self,
+        kinds: &[u8],
+        ids: &[u64],
+        drawing_json: &str,
+    ) -> Result<Option<Vec<f64>>, ApiError> {
+        let nodes = node_list(kinds, ids)?;
+        let drawing = self.drawn_sources(drawing_json)?;
+        Ok(self
+            .doc
+            .extract_placement_with_drawing(&nodes, &drawing)
+            .map(|t| t.to_affine().to_vec()))
+    }
+
     /// The whole document as a library "model item": a plain save (open
     /// sessions transparently closed, exactly like [`Scene::save`]) with
-    /// `meta_json` stamped into the `hew.library` document attrs.
+    /// `meta_json` stamped into the `hew.library` document attrs, and
+    /// without the document id (the item is a separate document).
     pub fn extract_document_item(&self, meta_json: Option<String>) -> Result<Vec<u8>, ApiError> {
-        let mut item = Document::load(&self.doc.save_for_persistence())
+        // Without the document id: an item is a new document, and every
+        // document opened from it must not share this one's identity.
+        let mut item = Document::load(&self.doc.save_for_persistence_without_document_id())
             .map_err(|e: LoadError| api_err(&e, &e))?;
         apply_library_meta(&mut item, meta_json.as_deref())?;
         Ok(item.save())
@@ -9468,44 +13985,129 @@ impl Scene {
     /// definitions/roots are stamped for future matches and for
     /// [`Scene::library_placements_json`].
     ///
+    /// `origin` is the paste half of the clipboard link: the app's
+    /// per-window nonce, the same one it gave [`Scene::extract_item`] when
+    /// copying. Composed with this scene's document epoch
+    /// ([`Scene::clipboard_origin`]) and handed to the kernel, which links
+    /// each definition in `bytes` stamped with that exact origin to the
+    /// live definition it was copied from ([`kernel::InsertOptions::origin`])
+    /// — so a component instance copied and pasted in one document stays
+    /// one definition, while the same bytes pasted in another window or
+    /// after this window opened another document copy as a new one.
+    /// Library placements pass `None`.
+    ///
+    /// With an `origin` the insert is a clipboard paste and the item's
+    /// world sketches (copied drawing, [`Scene::extract_clipboard`]) are
+    /// DRAWN at the destination ([`kernel::DrawingInsert::Draw`]): nodes
+    /// and drawing land as one undo step "Paste", and a refusal anywhere
+    /// leaves the document as it was. Without one they are skipped and
+    /// counted, as a Library insert always has.
+    ///
     /// Returns `{ rootKinds: number[], rootIds: string[] (decimal u64),
-    /// definitionsAdded, definitionsReused, materialsAdded, materialsReused,
-    /// objectsAdded, guidesAdded, worldSketchesSkipped, annotationsSkipped }`.
+    /// definitionsAdded, definitionsReused, definitionsLinked,
+    /// materialsAdded, materialsReused, objectsAdded, guidesAdded,
+    /// worldSketchesSkipped, annotationsSkipped, drawn, drawingUnchanged }`,
+    /// where `drawn` is one `{ plane: [px,py,pz,nx,ny,nz], detached: string
+    /// (decimal sketch id) | null, anchors: [[[x,y,z],[x,y,z]],..] }` per
+    /// pasted sketch (world coordinates; every pasted segment, for finding
+    /// the pasted shapes again by geometry) and `drawingUnchanged` is true
+    /// when every draw drew nothing new (Paste In Place exactly over the
+    /// original, which records no step when no node was pasted either).
     pub fn insert_item(
         &mut self,
         bytes: &[u8],
         affine: &[f64],
         source_id: Option<String>,
         content_hash: Option<String>,
+        origin: Option<String>,
     ) -> Result<JsValue, JsError> {
+        self.ensure_not_busy()?;
         let report = self
-            .insert_item_core(bytes, affine, source_id, content_hash)
+            .insert_item_composed(bytes, affine, source_id, content_hash, origin)
             .map_err(|e| JsError::new(&e.0))?;
         Ok(insert_report_to_js(&report))
+    }
+
+    /// What [`Scene::insert_item`] does minus the JS-value plumbing: composes
+    /// the app's window nonce with this scene's document epoch
+    /// ([`Scene::clipboard_origin`]) and inserts. The one place the
+    /// composition lives, so native tests exercise the same path the JS
+    /// entry point takes.
+    fn insert_item_composed(
+        &mut self,
+        bytes: &[u8],
+        affine: &[f64],
+        source_id: Option<String>,
+        content_hash: Option<String>,
+        nonce: Option<String>,
+    ) -> Result<kernel::InsertReport, ApiError> {
+        let origin = nonce.map(|n| self.clipboard_origin(&n));
+        self.insert_item_core(bytes, affine, source_id, content_hash, origin)
+    }
+
+    /// The document bytes of what pasting clipboard `bytes` (copied with
+    /// `origin`, [`Scene::extract_item`]) would place right now, for the
+    /// cursor-paste ghost: only the pasted roots, at the item's own
+    /// coordinates, with every linked definition showing its LIVE content
+    /// ([`kernel::Document::preview_clipboard_paste`]). `undefined` when
+    /// nothing links (the copy-time bytes are then already the paste) or
+    /// the preview cannot be built (for instance an open component
+    /// session); the caller falls back to the copy-time bytes. Read-only,
+    /// not recorded.
+    pub fn clipboard_paste_preview(
+        &self,
+        bytes: &[u8],
+        origin: String,
+    ) -> Result<Option<Vec<u8>>, ApiError> {
+        let item = Document::load(bytes).map_err(|e: LoadError| api_err(&e, &e))?;
+        Ok(self
+            .doc
+            .preview_clipboard_paste(&item, &self.clipboard_origin(&origin))
+            .ok()
+            .flatten()
+            .map(|d| d.save()))
     }
 
     /// [`Scene::insert_item`] minus the JS-value plumbing: load, insert
     /// (additive), reconcile, and record. The replay arm re-issues inserts
     /// through this (no `JsValue`, so it also runs in native tests).
+    /// `origin` arrives already composed ([`Scene::clipboard_origin`]) and
+    /// is recorded verbatim, so a replay compares the recorded origin with
+    /// the recorded bytes' stamps — never the replaying scene's own epoch.
     fn insert_item_core(
         &mut self,
         bytes: &[u8],
         affine: &[f64],
         source_id: Option<String>,
         content_hash: Option<String>,
+        origin: Option<String>,
     ) -> Result<kernel::InsertReport, ApiError> {
         let item = Document::load(bytes).map_err(|e: LoadError| api_err(&e, &e))?;
         let pose = affine_transform(affine)?;
+        // The prints come from the item itself, so the stamped base is what
+        // the copy really holds (OW-2).
         let provenance = match (&source_id, &content_hash) {
-            (Some(s), Some(h)) => Some(kernel::LibraryProvenance {
-                source_id: s.clone(),
-                content_hash: h.clone(),
-            }),
+            (Some(s), Some(h)) => Some(api::library_print::provenance(&item, s.clone(), h.clone())),
             _ => None,
         };
         let (report, change) = self
             .doc
-            .insert_document(&item, &kernel::InsertOptions { pose, provenance })
+            .insert_document(
+                &item,
+                &kernel::InsertOptions {
+                    pose,
+                    provenance,
+                    origin: origin.clone(),
+                    // The clipboard path (an origin) draws the copied
+                    // drawing; a Library insert skips it (v1.5 decisions D3).
+                    drawing: if origin.is_some() {
+                        kernel::DrawingInsert::Draw
+                    } else {
+                        kernel::DrawingInsert::Skip
+                    },
+                    hidden_objects: self.hidden_objects.iter().copied().collect(),
+                },
+            )
             .map_err(doc_err)?;
         // Reconcile caches (additive — do NOT clear like `load`).
         self.reconcile(&change);
@@ -9517,6 +14119,7 @@ impl Scene {
             affine: rec_affine,
             source_id,
             content_hash,
+            origin,
         });
         Ok(report)
     }
@@ -9528,6 +14131,7 @@ impl Scene {
     /// content-equal, fresh ones otherwise). Not undoable on its own,
     /// matching [`Scene::add_material`].
     pub fn insert_item_palette(&mut self, bytes: &[u8]) -> Result<Vec<u64>, ApiError> {
+        self.ensure_not_busy()?;
         self.insert_item_palette_core(bytes)
     }
 
@@ -9560,11 +14164,21 @@ impl Scene {
     }
 
     /// Marks the SOURCE of a just-saved library item
-    /// ([`kernel::Document::stamp_library_source`]): the saved selection —
-    /// and, for an instance, its definition (`def_sid` = the definition's
-    /// stable id in the item file, decimal) — gets the item's `hew.library`
-    /// provenance, so "in this model" counts it immediately and a later
-    /// insert of the item reuses the definition it was saved from. Not an
+    /// ([`kernel::Document::stamp_library_save`]): the saved selection —
+    /// and, for each instance, its definition — gets the item's
+    /// `hew.library` provenance, so "in this model" counts it immediately
+    /// and a later insert of the item reuses the definition it was saved
+    /// from. Each definition links to its OWN copy in the item: its stable
+    /// id there is worked out from the selection as it is now
+    /// ([`kernel::Document::library_save_def_sids`], the same extraction
+    /// `extract_item` made), with its print now as the base (OW-2), so
+    /// every part of a several-part save reads "in step".
+    ///
+    /// `def_sid` (decimal, the item's first definition id as callers pass
+    /// `summary.first_component_sid`) is validated and recorded but no
+    /// longer decides anything: one id cannot name every definition of a
+    /// several-part save. Call this right after writing the item, before
+    /// the model changes, so the ids worked out are the item's. Not an
     /// undo step (bookkeeping, not a model edit), but it IS a recorded,
     /// serialized mutation.
     pub fn stamp_library_source(
@@ -9575,6 +14189,7 @@ impl Scene {
         content_hash: &str,
         def_sid: Option<String>,
     ) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         self.stamp_library_source_core(kinds, ids, source_id, content_hash, def_sid)
     }
 
@@ -9598,18 +14213,28 @@ impl Scene {
             .zip(ids)
             .map(|(&k, &i)| node_id(k, i))
             .collect::<Result<Vec<_>, _>>()?;
+        if let Some(raw) = def_sid.as_deref() {
+            raw.parse::<u64>()
+                .map_err(|_| ApiError(format!("BadLibraryMeta: def_sid is not a u64: {raw:?}")))?;
+        }
+        // Each saved definition's own id in the item, and its base (OW-2):
+        // its print now, which is the print the item just written holds of
+        // its copy (the copy prints alike). A selection the extraction
+        // refuses (gone stale since) still stamps its live nodes, with no
+        // definition linked.
+        let def_sids = self.doc.library_save_def_sids(&nodes).unwrap_or_default();
+        let mut prints = std::collections::BTreeMap::new();
+        for (&def, &sid) in &def_sids {
+            if let Ok(print) = api::library_print::content_print(&self.doc, def) {
+                prints.insert(sid, print);
+            }
+        }
         let prov = kernel::LibraryProvenance {
             source_id: source_id.to_string(),
             content_hash: content_hash.to_string(),
+            prints,
         };
-        let def_sid_num =
-            match def_sid.as_deref() {
-                None => None,
-                Some(raw) => Some(raw.parse::<u64>().map_err(|_| {
-                    ApiError(format!("BadLibraryMeta: def_sid is not a u64: {raw:?}"))
-                })?),
-            };
-        self.doc.stamp_library_source(&nodes, &prov, def_sid_num);
+        self.doc.stamp_library_save(&nodes, &prov, &def_sids);
         recording::record(recording::RecordedCall::StampLibrarySource {
             kinds: kinds.to_vec(),
             ids: ids.to_vec(),
@@ -9617,6 +14242,351 @@ impl Scene {
             content_hash: content_hash.to_string(),
             def_sid,
         });
+        Ok(())
+    }
+
+    /// Where every definition linked to a Library item stands against the
+    /// item (OW-2, [`kernel::Document::library_links_as_if_closed`]), as
+    /// JSON. A part open for editing is reported as it would be saved.
+    /// Read-only, not recorded.
+    ///
+    /// `library` is what the Library says: a JS object keyed by item id,
+    /// one entry per item the Library holds now, each `{ prints?: { "<def
+    /// sid>": "p1:<hex>" }, bytes?: Uint8Array }`. Pass the `prints` an
+    /// item's metadata carries (`hew.library` / `prints` in its manifest
+    /// summary); for an item saved before prints existed (no `prints`, or
+    /// one under another scheme) pass its file `bytes` instead and the
+    /// prints are computed from it. An item missing from `library` is gone
+    /// from the Library: its links read `item_missing`.
+    ///
+    /// Returns `{ links: [{ definition: string (decimal handle), name?,
+    /// item, defSid?: string, state, copies, locked, mine, base?, theirs?
+    /// }], itemPrints: { "<item id>": { "<def sid>": "p1:<hex>" } } }`.
+    /// `state` is `in_step` | `library_newer` | `edited_here` |
+    /// `both_changed` | `different` | `item_missing`; `locked` is true when
+    /// a lock would make an update skip the part (the definition, or
+    /// something its contents hold, is locked: the update's own check,
+    /// [`kernel::Document::library_update_lock`]); `itemPrints`
+    /// holds the prints computed from `bytes`, for the caller to cache by
+    /// file hash.
+    ///
+    /// # Errors
+    /// `BadLibrary` for a malformed `library` object. Bytes that are not a
+    /// `.hew` file count as an item the Library does not hold.
+    pub fn library_status_json(&self, library: JsValue) -> Result<String, JsError> {
+        let items = library_items_from_js(&library).map_err(|e| JsError::new(&e.0))?;
+        let out = self
+            .library_status_core(&items)
+            .map_err(|e| JsError::new(&e.0))?;
+        Ok(out.to_string())
+    }
+
+    /// [`Scene::library_status_json`] minus the JS-value plumbing.
+    fn library_status_core(
+        &self,
+        items: &std::collections::BTreeMap<String, LibraryItemInput>,
+    ) -> Result<serde_json::Value, ApiError> {
+        let (prints, computed) = library_item_prints(items)?;
+        let links = self
+            .doc
+            .library_links_as_if_closed(&prints, api::library_print::sha256_digest);
+        let rows: Vec<serde_json::Value> = links
+            .iter()
+            .map(|l| {
+                let mut row = serde_json::json!({
+                    "definition": l.definition.data().as_ffi().to_string(),
+                    "item": l.source_id,
+                    "state": l.state.as_str(),
+                    "copies": l.copies,
+                    "locked": l.frozen,
+                    "mine": l.mine,
+                });
+                let obj = row.as_object_mut().expect("built as an object above");
+                if let Some(name) = self.doc.component_name(l.definition) {
+                    obj.insert("name".into(), name.into());
+                }
+                if let Some(sid) = l.def_sid {
+                    obj.insert("defSid".into(), sid.to_string().into());
+                }
+                if let Some(base) = &l.base {
+                    obj.insert("base".into(), base.clone().into());
+                }
+                if let Some(theirs) = &l.theirs {
+                    obj.insert("theirs".into(), theirs.clone().into());
+                }
+                row
+            })
+            .collect();
+        let item_prints: serde_json::Map<String, serde_json::Value> = computed
+            .into_iter()
+            .map(|(id, p)| (id, prints_json(&p)))
+            .collect();
+        Ok(serde_json::json!({ "links": rows, "itemPrints": item_prints }))
+    }
+
+    /// "Update from Library" (OW-2,
+    /// [`kernel::Document::update_definitions_from_items`]): replaces each
+    /// linked definition's contents with its Library item's, as ONE undo
+    /// step labeled "Update from Library"; every placement keeps its pose.
+    ///
+    /// `request` is `{ definitions?: string[] (decimal definition
+    /// handles), all?: boolean, items: { "<item id>": { bytes: Uint8Array,
+    /// contentHash: string } } }`, exactly one of `definitions` / `all:
+    /// true`. `items` holds the file of every item the update reads (each
+    /// linked definition names its item by id: `library_status_json`'s
+    /// `item`) and its content hash (the same fingerprint an insert
+    /// passes). `all` updates every linked definition whose state is
+    /// `library_newer` against those files; a part also changed here is
+    /// updated only when named.
+    ///
+    /// Returns `{ updated, alsoUpdated, unchanged, kept: string[] (decimal
+    /// handles), skipped: [{ definition, name?, code, message, lockedBy?:
+    /// { kind, id } }], definitionsAdded, materialsAdded }`. `alsoUpdated`
+    /// are nested parts from the same item replaced in the same step;
+    /// `kept` are definitions from the same item as a nested part that
+    /// were left exactly as they were (changed here, or held by a lock),
+    /// the updated part getting a fresh copy of the item's instead.
+    /// `skipped` names each part left exactly as it was and why: `code` is
+    /// `LockedNode` (or `LockedNodeViaSharedShape`, with `lockedBy` the
+    /// locked node), `ExplodeSessionScope`, `ComponentCycle`,
+    /// `ComponentDepthExceeded`, `ComponentExpansionExceeded`,
+    /// `UnknownLibraryItem` (no link, an item missing from `items`, or an
+    /// item that no longer holds the definition), `LoadFailed`, or
+    /// `UnknownComponent`. A call that changes nothing records no step.
+    ///
+    /// # Errors
+    /// `BadLibrary` for a malformed request; `UnknownComponent` for a
+    /// named handle that is not a live definition. A part's own refusal is
+    /// never thrown: it is in `skipped`.
+    pub fn update_definitions_from_items(&mut self, request: JsValue) -> Result<String, JsError> {
+        self.ensure_not_busy()?;
+        let get = |key: &str| {
+            Reflect::get(&request, &JsValue::from_str(key)).unwrap_or(JsValue::UNDEFINED)
+        };
+        let all = get("all").as_bool().unwrap_or(false);
+        let defs_val = get("definitions");
+        let definitions: Option<Vec<u64>> = if defs_val.is_undefined() || defs_val.is_null() {
+            None
+        } else {
+            let arr = js_sys::Array::from(&defs_val);
+            let mut out = Vec::with_capacity(arr.length() as usize);
+            for v in arr.iter() {
+                let text = v.as_string().ok_or_else(|| {
+                    JsError::new("BadLibrary: definitions must be decimal handle strings")
+                })?;
+                out.push(text.parse::<u64>().map_err(|_| {
+                    JsError::new(&format!("BadLibrary: {text:?} is not a definition handle"))
+                })?);
+            }
+            Some(out)
+        };
+        let items = library_items_from_js(&get("items")).map_err(|e| JsError::new(&e.0))?;
+        let out = self
+            .update_definitions_core(definitions, all, &items)
+            .map_err(|e| JsError::new(&e.0))?;
+        Ok(out.to_string())
+    }
+
+    /// [`Scene::update_definitions_from_items`] minus the JS-value
+    /// plumbing: resolve the parts, load each item once, update, reconcile
+    /// and record. The replay arm re-issues the resolved parts through
+    /// [`Scene::update_definitions_replay`].
+    fn update_definitions_core(
+        &mut self,
+        definitions: Option<Vec<u64>>,
+        all: bool,
+        items: &std::collections::BTreeMap<String, LibraryItemInput>,
+    ) -> Result<serde_json::Value, ApiError> {
+        if all == definitions.is_some() {
+            return Err(ApiError::new("BadLibrary", "give definitions or all: true"));
+        }
+        let targets: Vec<ComponentId> = match definitions {
+            Some(handles) => {
+                let mut out: Vec<ComponentId> = Vec::new();
+                for h in handles {
+                    let c = component_id(h);
+                    if self.doc.def_member_nodes(c).is_none() {
+                        return Err(ApiError::new(
+                            "UnknownComponent",
+                            &format!("{h} is not a live definition"),
+                        ));
+                    }
+                    if !out.contains(&c) {
+                        out.push(c);
+                    }
+                }
+                out
+            }
+            None => {
+                let (prints, _) = library_item_prints(items)?;
+                self.doc
+                    .library_links(&prints, api::library_print::sha256_digest)
+                    .into_iter()
+                    .filter(|l| l.state == kernel::LibraryLinkState::LibraryNewer)
+                    .map(|l| l.definition)
+                    .collect()
+            }
+        };
+
+        let mut skipped: Vec<(ComponentId, ApiError, Option<NodeId>)> = Vec::new();
+        let mut loaded: std::collections::BTreeMap<String, Result<Document, ApiError>> =
+            std::collections::BTreeMap::new();
+        let mut parts: Vec<(ComponentId, String)> = Vec::new();
+        for def in targets {
+            let missing = || {
+                ApiError::new(
+                    "UnknownLibraryItem",
+                    "the part is not linked to an item given, or the item no longer holds it",
+                )
+            };
+            let Some(stamp) = self.doc.library_stamp(def) else {
+                skipped.push((def, missing(), None));
+                continue;
+            };
+            let Some(input) = items.get(&stamp.source_id).filter(|i| i.bytes.is_some()) else {
+                skipped.push((def, missing(), None));
+                continue;
+            };
+            let item = loaded.entry(stamp.source_id.clone()).or_insert_with(|| {
+                Document::load(input.bytes.as_deref().expect("filtered above"))
+                    .map_err(|e: LoadError| ApiError::new("LoadFailed", &format!("{e:?}")))
+            });
+            match item {
+                Err(e) => skipped.push((def, ApiError(e.0.clone()), None)),
+                Ok(doc) => {
+                    let holds = stamp.def_sid.is_some_and(|sid| {
+                        doc.component_ids()
+                            .iter()
+                            .any(|&c| doc.sid_of(&kernel::EntityRef::Component(c)) == Some(sid))
+                    });
+                    if holds {
+                        parts.push((def, stamp.source_id.clone()));
+                    } else {
+                        skipped.push((def, missing(), None));
+                    }
+                }
+            }
+        }
+
+        // Each part by handle and item id; each item's file once, however
+        // many parts it updates.
+        let recorded_parts: Vec<recording::RecordedLibraryPart> = parts
+            .iter()
+            .map(|(def, id)| recording::RecordedLibraryPart {
+                definition: def.data().as_ffi(),
+                source_id: id.clone(),
+            })
+            .collect();
+        let mut recorded_ids: Vec<&String> = parts.iter().map(|(_, id)| id).collect();
+        recorded_ids.sort();
+        recorded_ids.dedup();
+        let item_len = |id: &String| items[id].bytes.as_ref().map_or(0, Vec::len);
+        let report = {
+            let updates: Vec<kernel::LibraryUpdate<'_>> = parts
+                .iter()
+                .filter_map(|(def, id)| {
+                    let doc = loaded.get(id)?.as_ref().ok()?;
+                    let hash = items[id].content_hash.clone().unwrap_or_default();
+                    Some(kernel::LibraryUpdate {
+                        definition: *def,
+                        item: doc,
+                        provenance: api::library_print::provenance(doc, id.clone(), hash),
+                    })
+                })
+                .collect();
+            let (report, change) = self
+                .doc
+                .update_definitions_from_items(&updates, api::library_print::sha256_digest)
+                .map_err(doc_err)?;
+            self.reconcile(&change);
+            report
+        };
+        if !report.updated.is_empty() {
+            let total = recorded_ids.iter().map(|id| item_len(id)).sum::<usize>();
+            recording::record_import_sized("update_definitions_from_items", total, || {
+                recording::RecordedCall::UpdateDefinitionsFromItems {
+                    parts: recorded_parts,
+                    items: recorded_ids
+                        .iter()
+                        .map(|&id| recording::RecordedLibraryItem {
+                            source_id: id.clone(),
+                            content_hash: items[id].content_hash.clone().unwrap_or_default(),
+                            bytes: items[id].bytes.clone().unwrap_or_default(),
+                        })
+                        .collect(),
+                }
+            });
+        }
+        for &(def, e) in &report.skipped {
+            let locked = match e {
+                DocumentError::LockedNode { node, .. } => Some(node),
+                _ => None,
+            };
+            skipped.push((def, doc_err(e), locked));
+        }
+
+        let handles = |defs: &[ComponentId]| -> Vec<String> {
+            defs.iter().map(|d| d.data().as_ffi().to_string()).collect()
+        };
+        let skipped_rows: Vec<serde_json::Value> = skipped
+            .iter()
+            .map(|(def, e, locked)| {
+                let (code, message) = e.0.split_once(": ").unwrap_or((e.0.as_str(), ""));
+                let mut row = serde_json::json!({
+                    "definition": def.data().as_ffi().to_string(),
+                    "code": code,
+                    "message": message,
+                });
+                let obj = row.as_object_mut().expect("built as an object above");
+                if let Some(name) = self.doc.component_name(*def) {
+                    obj.insert("name".into(), name.into());
+                }
+                if let Some(node) = locked {
+                    let n = node_js(*node);
+                    obj.insert(
+                        "lockedBy".into(),
+                        serde_json::json!({ "kind": n.kind, "id": n.id.to_string() }),
+                    );
+                }
+                row
+            })
+            .collect();
+        Ok(serde_json::json!({
+            "updated": handles(&report.updated),
+            "alsoUpdated": handles(&report.also_updated),
+            "unchanged": handles(&report.unchanged),
+            "kept": handles(&report.kept),
+            "skipped": skipped_rows,
+            "definitionsAdded": report.definitions_added,
+            "materialsAdded": report.materials_added,
+        }))
+    }
+
+    /// Replays a recorded [`Scene::update_definitions_from_items`]: the
+    /// parts exactly as the live call resolved them.
+    fn update_definitions_replay(
+        &mut self,
+        parts: &[recording::RecordedLibraryPart],
+        recorded: &[recording::RecordedLibraryItem],
+    ) -> Result<(), ApiError> {
+        let items: std::collections::BTreeMap<String, LibraryItemInput> = recorded
+            .iter()
+            .map(|i| {
+                (
+                    i.source_id.clone(),
+                    LibraryItemInput {
+                        prints: None,
+                        bytes: Some(i.bytes.clone()),
+                        content_hash: Some(i.content_hash.clone()),
+                    },
+                )
+            })
+            .collect();
+        self.update_definitions_core(
+            Some(parts.iter().map(|p| p.definition).collect()),
+            false,
+            &items,
+        )?;
         Ok(())
     }
 
@@ -9640,20 +14610,22 @@ impl Scene {
     /// `hew.library` stamp or whose definition's stamp names the source,
     /// or a live stamped group/object (each counted once, instances first).
     pub fn library_placements_json(&self) -> String {
+        // Model-wide: a part open for editing counts as it would once closed.
+        let doc = self.doc.session_closed();
         let mut counts: std::collections::BTreeMap<String, usize> = Default::default();
         let source_of = |target: &kernel::AttrTarget| -> Option<String> {
-            let dict = self.doc.attr_get(target).ok().flatten()?;
+            let dict = doc.attr_get(target).ok().flatten()?;
             match dict.get("hew.library")?.get("source_id")? {
                 kernel::AttrValue::Text(s) => Some(s.clone()),
                 _ => None,
             }
         };
-        for iid in self.doc.instance_ids() {
+        for iid in doc.instance_ids() {
             let own = source_of(&kernel::AttrTarget::Entity(kernel::EntityRef::Instance(
                 iid,
             )));
             let via_def = own.or_else(|| {
-                let def = self.doc.instance_def(iid)?;
+                let def = doc.instance_def(iid)?;
                 source_of(&kernel::AttrTarget::Entity(kernel::EntityRef::Component(
                     def,
                 )))
@@ -9662,12 +14634,12 @@ impl Scene {
                 *counts.entry(s).or_default() += 1;
             }
         }
-        for gid in self.doc.group_ids() {
+        for gid in doc.group_ids() {
             if let Some(s) = source_of(&kernel::AttrTarget::Entity(kernel::EntityRef::Group(gid))) {
                 *counts.entry(s).or_default() += 1;
             }
         }
-        for oid in self.doc.visible_object_ids() {
+        for oid in doc.visible_object_ids() {
             if let Some(s) = source_of(&kernel::AttrTarget::Entity(kernel::EntityRef::Object(oid)))
             {
                 *counts.entry(s).or_default() += 1;
@@ -9685,23 +14657,32 @@ impl Scene {
     /// stored facets).
     ///
     /// Returns `None` — never a refusal — when nothing survives the
-    /// traversal (an empty document, or every object collapsing to
-    /// degenerate triangles): the same "nothing to export" the app's own
-    /// retired writers reported, now [`mesh_export::ExportError::NothingToExport`]
+    /// traversal (an empty document, or no included objects): the same
+    /// "nothing to export" the app's retired writers reported, now
+    /// [`mesh_export::ExportError::NothingToExport`]
     /// underneath. Passes `solids_only: false` (`crates/mesh-export`'s
     /// module doc, "Non-solid inclusion"): the app's own solid-gating
     /// dialog (`collectNonSolidObjects`, `app/src/App.tsx`) warns about
     /// non-solid objects before an STL/3MF export, but the export itself
     /// has always included them regardless — this keeps that exact
     /// behavior rather than starting to silently drop geometry.
+    /// Non-finite coordinates, or a solid that millimeter f32 rounding
+    /// itself breaks, return `export_failed` with no partial file.
     ///
     /// wasm-bindgen marshals `Option<Vec<u8>>` to `Uint8Array | undefined`.
     pub fn export(
         &self,
         format: &str,
         segments_per_turn: u32,
+        cages: Option<bool>,
     ) -> Result<Option<Vec<u8>>, ApiError> {
-        match mesh_export::export(&self.doc, format, segments_per_turn, false) {
+        match mesh_export::export(
+            &self.doc,
+            format,
+            segments_per_turn,
+            false,
+            cages.unwrap_or(false),
+        ) {
             Ok(bytes) => Ok(Some(bytes)),
             Err(mesh_export::ExportError::NothingToExport) => Ok(None),
             Err(e) => Err(ApiError::new(e.name(), &e.message())),
@@ -9797,7 +14778,7 @@ impl Scene {
     ///
     /// [`Recording`]: recording::Recording
     pub fn replay(&mut self, json: &str) -> Result<u64, ApiError> {
-        use recording::RecordedCall::*;
+        self.ensure_not_busy()?;
         let rec: recording::Recording = serde_json::from_str(json)
             .map_err(|e| ApiError::new("REPLAY", &format!("malformed recording: {e}")))?;
         if rec.version != recording::RECORDING_FORMAT_VERSION {
@@ -9813,1079 +14794,1485 @@ impl Scene {
         // Opened on the first recorded API envelope, if any — a
         // recording with none pays nothing.
         let mut replay_conn: Option<u32> = None;
-        recording::without_capture(|| {
-            for call in rec.calls {
-                match call {
-                    BeginGroundSketch => {
-                        self.begin_ground_sketch();
-                    }
-                    BeginSketchOnPlane {
-                        px,
-                        py,
-                        pz,
-                        nx,
-                        ny,
-                        nz,
-                    } => {
-                        self.begin_sketch_on_plane(px, py, pz, nx, ny, nz)?;
-                    }
-                    SketchAddSegment { sketch, a, b } => {
-                        self.sketch_add_segment(sketch, a[0], a[1], a[2], b[0], b[1], b[2])?;
-                    }
-                    SketchRemoveEdge { sketch, edge } => {
-                        self.sketch_remove_edge(sketch, edge)?;
-                    }
-                    SketchBeginGesture { sketch } => {
-                        self.sketch_begin_gesture(sketch)?;
-                    }
-                    SketchBeginCurve { sketch } => {
-                        self.sketch_begin_curve(sketch)?;
-                    }
-                    SketchBeginCurveWith {
-                        sketch,
-                        center,
-                        radius,
-                    } => {
-                        self.sketch_begin_curve_with(
-                            sketch, center[0], center[1], center[2], radius,
-                        )?;
-                    }
-                    SketchBeginPolygonWith {
-                        sketch,
-                        center,
-                        radius,
-                    } => {
-                        self.sketch_begin_polygon_with(
-                            sketch, center[0], center[1], center[2], radius,
-                        )?;
-                    }
-                    SketchRefacetCurve {
-                        sketch,
-                        curve,
-                        segments,
-                    } => {
-                        self.sketch_refacet_curve(sketch, curve, segments)?;
-                    }
-                    SketchEndCurve { sketch } => {
-                        self.sketch_end_curve(sketch)?;
-                    }
-                    SketchEndGesture { sketch } => {
-                        self.sketch_end_gesture(sketch)?;
-                    }
-                    SketchCancelGesture => {
-                        self.sketch_cancel_gesture();
-                    }
-                    ExtrudeRegion {
-                        sketch,
-                        region,
-                        distance,
-                    } => {
-                        self.extrude_region(sketch, region, distance)?;
-                    }
-                    FollowMeAlongEdges {
-                        sketch,
-                        region,
-                        path_sketch,
-                        path_edges,
-                        stop_len,
-                        group,
-                    } => {
-                        self.follow_me_along_edges(
-                            sketch,
-                            region,
-                            path_sketch,
-                            path_edges,
-                            stop_len,
-                            group,
-                        )?;
-                    }
-                    FollowMeAroundFace {
-                        sketch,
-                        region,
-                        path_object,
-                        path_face,
-                        stop_len,
-                        group,
-                    } => {
-                        self.follow_me_around_face(
-                            sketch,
-                            region,
-                            path_object,
-                            path_face,
-                            stop_len,
-                            group,
-                        )?;
-                    }
-                    FollowMeAroundInstanceFace {
-                        sketch,
-                        region,
-                        instance,
-                        path_object,
-                        path_face,
-                        stop_len,
-                    } => {
-                        self.follow_me_around_instance_face(
-                            sketch,
-                            region,
-                            instance,
-                            path_object,
-                            path_face,
-                            stop_len,
-                        )?;
-                    }
-                    FollowMeMergedAroundFace {
-                        sketch,
-                        region,
-                        path_object,
-                        path_face,
-                        stop_len,
-                    } => {
-                        self.follow_me_merged_around_face(
-                            sketch,
-                            region,
-                            path_object,
-                            path_face,
-                            stop_len,
-                        )?;
-                    }
-                    FollowMeFaceAlongEdges {
-                        profile_object,
-                        profile_face,
-                        path_sketch,
-                        path_edges,
-                        stop_len,
-                    } => {
-                        self.follow_me_face_along_edges(
-                            profile_object,
-                            profile_face,
-                            path_sketch,
-                            path_edges,
-                            stop_len,
-                        )?;
-                    }
-                    FollowMeFaceAroundFace {
-                        profile_object,
-                        profile_face,
-                        path_object,
-                        path_face,
-                        stop_len,
-                    } => {
-                        self.follow_me_face_around_face(
-                            profile_object,
-                            profile_face,
-                            path_object,
-                            path_face,
-                            stop_len,
-                        )?;
-                    }
-                    SketchOffsetRegion {
-                        sketch,
-                        region,
-                        distance,
-                    } => {
-                        self.sketch_offset_region(sketch, region, distance)?;
-                    }
-                    Boolean { op, a, b } => {
-                        self.boolean(op, a, b)?;
-                    }
-                    BooleanNodes {
-                        op,
-                        a_kind,
-                        a,
-                        b_kind,
-                        b,
-                    } => {
-                        self.boolean_nodes(op, a_kind, a, b_kind, b)?;
-                    }
-                    GroupNodes { kinds, ids } => {
-                        self.group_nodes(&kinds, &ids)?;
-                    }
-                    DuplicateNode { kind, id, affine } => {
-                        self.duplicate_node(kind, id, &affine)?;
-                    }
-                    SliceObject { object, plane } => {
-                        self.slice_object(object, &plane)?;
-                    }
-                    TransformObject { object, affine } => {
-                        self.transform_object(object, &affine)?;
-                    }
-                    TransformSelection {
-                        kinds,
-                        ids,
-                        sketches,
-                        affine,
-                    } => {
-                        self.transform_selection(&kinds, &ids, &sketches, &affine)?;
-                    }
-                    RescaleDocument { factor } => {
-                        self.rescale_document(factor)?;
-                    }
-                    DeleteNode { kind, id } => {
-                        self.delete_node(kind, id)?;
-                    }
-                    DuplicateSelectionArray {
-                        kinds,
-                        ids,
-                        affine,
-                        count,
-                    } => {
-                        self.duplicate_selection_array(&kinds, &ids, &affine, count)?;
-                    }
-                    PushPull {
-                        object,
-                        face,
-                        distance,
-                    } => {
-                        self.push_pull(object, face, distance)?;
-                    }
-                    ExtrudeFaceAsNewObject {
-                        object,
-                        face,
-                        distance,
-                    } => {
-                        self.extrude_face_as_new_object(object, face, distance)?;
-                    }
-                    SceneUndo => {
-                        self.scene_undo()?;
-                    }
-                    SceneRedo => {
-                        self.scene_redo()?;
-                    }
-                    TransformSketch { sketch, affine } => {
-                        self.transform_sketch(sketch, &affine)?;
-                    }
-                    TransformSketchIsland {
-                        sketch,
-                        island,
-                        affine,
-                    } => {
-                        self.transform_sketch_island(sketch, island, &affine)?;
-                    }
-                    TransformSketchIslands {
-                        sketch,
-                        islands,
-                        affine,
-                    } => {
-                        self.transform_sketch_islands(sketch, &islands, &affine)?;
-                    }
-                    CopySketchIslands {
-                        sketch,
-                        islands,
-                        affine,
-                    } => {
-                        self.copy_sketch_islands(sketch, &islands, &affine)?;
-                    }
-                    MoveSketchVertex { sketch, vertex, p } => {
-                        self.move_sketch_vertex(sketch, vertex, p[0], p[1], p[2])?;
-                    }
-                    Ungroup { group } => {
-                        self.ungroup(group)?;
-                    }
-                    DeleteSketch { sketch } => {
-                        self.delete_sketch(sketch)?;
-                    }
-                    TransformGroup { group, affine } => {
-                        self.transform_group(group, &affine)?;
-                    }
-                    MakeComponent { kinds, ids } => {
-                        self.make_component(&kinds, &ids)?;
-                    }
-                    PlaceInstance { component, affine } => {
-                        self.place_instance(component, &affine)?;
-                    }
-                    PlaceText {
-                        sketch,
-                        regions,
-                        distance,
-                        name,
-                        group,
-                    } => {
-                        self.place_text(sketch, regions, distance, name, group)?;
-                    }
-                    TransformInstance { instance, affine } => {
-                        self.transform_instance(instance, &affine)?;
-                    }
-                    ExplodeInstance { instance } => {
-                        self.explode_instance(instance)?;
-                    }
-                    MakeUnique { instance } => {
-                        self.make_unique(instance)?;
-                    }
-                    OpenExplodeSession { instance } => {
-                        self.open_explode_session(instance)?;
-                    }
-                    CloseExplodeSession => {
-                        self.close_explode_session()?;
-                    }
-                    OpenGroupSession { group } => {
-                        self.open_group_session(group)?;
-                    }
-                    CloseGroupSession => {
-                        self.close_group_session()?;
-                    }
-                    RescaleSession { factor, anchor } => {
-                        self.rescale_session(factor, anchor[0], anchor[1], anchor[2])?;
-                    }
-                    PushPullInComponent {
-                        instance,
-                        object,
-                        face,
-                        distance,
-                    } => {
-                        self.push_pull_in_component(instance, object, face, distance)?;
-                    }
-                    BeginSketchOnPlaneInInstance {
-                        instance,
-                        px,
-                        py,
-                        pz,
-                        nx,
-                        ny,
-                        nz,
-                    } => {
-                        self.begin_sketch_on_plane_in_instance(instance, px, py, pz, nx, ny, nz)?;
-                    }
-                    ExtrudeRegionInInstance {
-                        instance,
-                        sketch,
-                        region,
-                        distance,
-                    } => {
-                        self.extrude_region_in_instance(instance, sketch, region, distance)?;
-                    }
-                    DeleteDefMember { component, object } => {
-                        self.delete_def_member(component, object)?;
-                    }
-                    CapRims { object, rims } => {
-                        self.cap_rims(object, rims)?;
-                    }
-                    DeleteFaces { object, faces } => {
-                        self.delete_faces(object, faces)?;
-                    }
-                    SetAcceptedSurface { object, accepted } => {
-                        self.set_accepted_surface(object, accepted)?;
-                    }
-                    ThickenSheet { object, start, end } => {
-                        self.thicken_sheet(object, start, end)?;
-                    }
-                    ThickenSheetInInstance {
-                        instance,
-                        object,
-                        distance,
-                    } => {
-                        self.thicken_sheet_in_instance(instance, object, distance)?;
-                    }
-                    DeleteDefinition { component } => {
-                        self.delete_definition(component)?;
-                    }
-                    PurgeUnused => {
-                        self.purge_unused()?;
-                    }
-                    SetNodeName { kind, id, name } => {
-                        self.set_node_name(kind, id, name)?;
-                    }
-                    AddNodeTag { kind, id, path } => {
-                        self.add_node_tag(kind, id, path)?;
-                    }
-                    RenameTag { path, new_path } => {
-                        self.rename_tag(path, new_path)?;
-                    }
-                    RemoveNodeTag { kind, id, path } => {
-                        self.remove_node_tag(kind, id, path)?;
-                    }
-                    AddNodeTagMany { kinds, ids, path } => {
-                        self.add_node_tag_many(&kinds, &ids, path)?;
-                    }
-                    RemoveNodeTagMany { kinds, ids, path } => {
-                        self.remove_node_tag_many(&kinds, &ids, path)?;
-                    }
-                    SetTagHidden { path, hidden } => {
-                        self.set_tag_hidden(path, hidden);
-                    }
-                    DeleteTag { path } => {
-                        self.delete_tag(path)?;
-                    }
-                    SetNodeUserHidden { kind, id, hidden } => {
-                        self.set_node_user_hidden(kind, id, hidden)?;
-                    }
-                    SetCameraState {
-                        projection,
-                        fov_deg,
-                        parallel_height,
-                        eye,
-                        target,
-                        up,
-                    } => {
-                        let parallel_height = parallel_height.unwrap_or_else(|| {
-                            kernel::CameraState::height_at_target(
-                                Point3::new(eye[0], eye[1], eye[2]),
-                                Point3::new(target[0], target[1], target[2]),
-                                fov_deg,
-                            )
-                        });
-                        self.set_camera_state(
-                            &projection,
-                            fov_deg,
-                            parallel_height,
-                            Box::new(eye),
-                            Box::new(target),
-                            Box::new(up),
-                        )?;
-                    }
-                    SetSectionPlane {
-                        origin,
-                        normal,
-                        active,
-                    } => {
-                        self.set_section_plane(
-                            origin[0], origin[1], origin[2], normal[0], normal[1], normal[2],
-                            active,
-                        )?;
-                    }
-                    ClearSectionPlane => {
-                        self.clear_section_plane();
-                    }
-                    SetViewStyle { json } => {
-                        self.set_view_style_json(json)?;
-                    }
-                    AddScene {
-                        name,
-                        props,
-                        camera_json,
-                        display_json,
-                        after,
-                    } => {
-                        self.add_scene(name, props, camera_json, display_json, after)?;
-                    }
-                    UpdateScene {
-                        sid,
-                        props,
-                        camera_json,
-                        display_json,
-                    } => {
-                        self.update_scene(sid, props, camera_json, display_json)?;
-                    }
-                    SetSceneProps {
-                        sid,
-                        props,
-                        camera_json,
-                        display_json,
-                    } => {
-                        self.set_scene_props(sid, props, camera_json, display_json)?;
-                    }
-                    RenameScene { sid, name } => {
-                        self.rename_scene(sid, name)?;
-                    }
-                    SetSceneDescription { sid, text } => {
-                        self.set_scene_description(sid, text)?;
-                    }
-                    MoveScene { sid, index } => {
-                        self.move_scene(sid, index)?;
-                    }
-                    RemoveScene { sid } => {
-                        self.remove_scene(sid)?;
-                    }
-                    ApplyScene { sid } => {
-                        self.apply_scene(sid)?;
-                    }
-                    AddMaterial { name, r, g, b, a } => {
-                        self.add_material(name, r, g, b, a);
-                    }
-                    AddTextureMaterial {
-                        name,
-                        r,
-                        g,
-                        b,
-                        a,
-                        image,
-                        format,
-                        world_w,
-                        world_h,
-                    } => {
-                        self.add_texture_material(
-                            name, r, g, b, a, &image, format, world_w, world_h,
-                        )?;
-                    }
-                    SetMaterialAlpha { material, alpha } => {
-                        self.set_material_alpha(material, alpha)?;
-                    }
-                    SetMaterialName { material, name } => {
-                        self.set_material_name(material, name)?;
-                    }
-                    DeleteMaterial { material } => {
-                        self.delete_material(material)?;
-                    }
-                    PaintFace {
-                        object,
-                        face,
-                        material,
-                    } => {
-                        self.paint_face(object, face, material)?;
-                    }
-                    SetObjectMaterial { object, material } => {
-                        self.set_object_material(object, material)?;
-                    }
-                    ReplaceMaterial {
-                        document_wide,
-                        scope_object,
-                        from,
-                        to,
-                    } => {
-                        self.replace_material(document_wide, scope_object, from, to)?;
-                    }
-                    SetFaceUvFrame {
-                        object,
-                        face,
-                        frame,
-                    } => {
-                        self.set_face_uv_frame(object, face, frame.map(uv_frame_recorded_to_vec))?;
-                    }
-                    AddGuideLine { origin, dir } => {
-                        self.add_guide_line(
-                            origin[0], origin[1], origin[2], dir[0], dir[1], dir[2],
-                        )?;
-                    }
-                    AddGuidePoint { p } => {
-                        self.add_guide_point(p[0], p[1], p[2])?;
-                    }
-                    DeleteGuide { guide } => {
-                        self.delete_guide(guide)?;
-                    }
-                    DeleteAllGuides => {
-                        self.delete_all_guides()?;
-                    }
-                    AddLinearDimension {
-                        a_node_kind,
-                        a_node_id,
-                        a_point,
-                        b_node_kind,
-                        b_node_id,
-                        b_point,
-                        offset,
-                        plane,
-                        text_override,
-                    } => {
-                        self.add_linear_dimension(
-                            a_node_kind,
-                            a_node_id,
-                            &a_point,
-                            b_node_kind,
-                            b_node_id,
-                            &b_point,
-                            &offset,
-                            &plane,
-                            text_override,
-                        )?;
-                    }
-                    AddRadialDimension {
-                        anchor_node_kind,
-                        anchor_node_id,
-                        anchor_point,
-                        kind,
-                        curve_center,
-                        curve_radius,
-                        curve_plane,
-                        leader_dir,
-                        text_override,
-                    } => {
-                        self.add_radial_dimension(
-                            anchor_node_kind,
-                            anchor_node_id,
-                            &anchor_point,
-                            &kind,
-                            &curve_center,
-                            curve_radius,
-                            &curve_plane,
-                            &leader_dir,
-                            text_override,
-                        )?;
-                    }
-                    AddLeaderText {
-                        anchor_node_kind,
-                        anchor_node_id,
-                        anchor_point,
-                        offset,
-                        text,
-                    } => {
-                        self.add_leader_text(
-                            anchor_node_kind,
-                            anchor_node_id,
-                            &anchor_point,
-                            &offset,
-                            text,
-                        )?;
-                    }
-                    UpdateLinearDimension {
-                        id,
-                        a_node_kind,
-                        a_node_id,
-                        a_point,
-                        b_node_kind,
-                        b_node_id,
-                        b_point,
-                        offset,
-                        plane,
-                        text_override,
-                    } => {
-                        self.update_linear_dimension(
-                            id,
-                            a_node_kind,
-                            a_node_id,
-                            &a_point,
-                            b_node_kind,
-                            b_node_id,
-                            &b_point,
-                            &offset,
-                            &plane,
-                            text_override,
-                        )?;
-                    }
-                    UpdateRadialDimension {
-                        id,
-                        anchor_node_kind,
-                        anchor_node_id,
-                        anchor_point,
-                        kind,
-                        curve_center,
-                        curve_radius,
-                        curve_plane,
-                        leader_dir,
-                        text_override,
-                    } => {
-                        self.update_radial_dimension(
-                            id,
-                            anchor_node_kind,
-                            anchor_node_id,
-                            &anchor_point,
-                            &kind,
-                            &curve_center,
-                            curve_radius,
-                            &curve_plane,
-                            &leader_dir,
-                            text_override,
-                        )?;
-                    }
-                    UpdateLeaderText {
-                        id,
-                        anchor_node_kind,
-                        anchor_node_id,
-                        anchor_point,
-                        offset,
-                        text,
-                    } => {
-                        self.update_leader_text(
-                            id,
-                            anchor_node_kind,
-                            anchor_node_id,
-                            &anchor_point,
-                            &offset,
-                            text,
-                        )?;
-                    }
-                    DeleteAnnotation { id } => {
-                        self.delete_annotation(id)?;
-                    }
-                    InsertItem {
-                        bytes,
-                        affine,
-                        source_id,
-                        content_hash,
-                    } => {
-                        self.insert_item_core(&bytes, &affine, source_id, content_hash)?;
-                    }
-                    InsertItemPalette { bytes } => {
-                        self.insert_item_palette_core(&bytes)?;
-                    }
-                    StampLibrarySource {
-                        kinds,
-                        ids,
-                        source_id,
-                        content_hash,
-                        def_sid,
-                    } => {
-                        self.stamp_library_source_core(
-                            &kinds,
-                            &ids,
-                            &source_id,
-                            &content_hash,
-                            def_sid,
-                        )?;
-                    }
-                    ImportDae { bytes, images } => {
-                        let mut image_map: ImageMap = ImageMap::new();
-                        for img in images {
-                            let format = if img.format == 1 {
-                                ImageFormat::Jpeg
-                            } else {
-                                ImageFormat::Png
-                            };
-                            image_map.insert(img.uri, (img.bytes, format));
-                        }
-                        self.import_dae_core(&bytes, &image_map)?;
-                    }
-                    ImportGltf { bytes } => {
-                        self.import_gltf_core(&bytes)?;
-                    }
-                    ImportSkp { bytes } => {
-                        self.import_skp_core(&bytes)?;
-                    }
-                    ImportOmitted { of, len } => {
-                        return Err(ApiError(format!(
-                            "recording cannot replay {of}: its {len}-byte source file was \
-                             too large to embed"
-                        )));
-                    }
-                    ImportStl {
-                        bytes,
-                        unit_scale,
-                        name,
-                    } => {
-                        self.import_stl_core(&bytes, unit_scale, name)?;
-                    }
-                    PlaceImage {
-                        image,
-                        format,
-                        name,
-                        origin,
-                        u,
-                        v,
-                        width,
-                    } => {
-                        self.place_image_core(&image, format, name, &origin, &u, &v, width)?;
-                    }
-                    SetAxes { origin, x, y } => {
-                        self.set_axes(
-                            origin[0], origin[1], origin[2], x[0], x[1], x[2], y[0], y[1], y[2],
-                        )?;
-                    }
-                    Load { bytes } => {
-                        self.load_core(&bytes)?;
-                    }
-                    FollowMeAlongEdgesInInstance {
-                        instance,
-                        sketch,
-                        region,
-                        path_sketch,
-                        path_edges,
-                        stop_len,
-                    } => {
-                        self.follow_me_along_edges_in_instance(
-                            instance,
-                            sketch,
-                            region,
-                            path_sketch,
-                            path_edges,
-                            stop_len,
-                        )?;
-                    }
-                    FollowMeAroundFaceInInstance {
-                        instance,
-                        sketch,
-                        region,
-                        path_object,
-                        path_face,
-                        stop_len,
-                    } => {
-                        self.follow_me_around_face_in_instance(
-                            instance,
-                            sketch,
-                            region,
-                            path_object,
-                            path_face,
-                            stop_len,
-                        )?;
-                    }
-                    FollowMeMergedAroundFaceInInstance {
-                        instance,
-                        sketch,
-                        region,
-                        path_object,
-                        path_face,
-                        stop_len,
-                    } => {
-                        self.follow_me_merged_around_face_in_instance(
-                            instance,
-                            sketch,
-                            region,
-                            path_object,
-                            path_face,
-                            stop_len,
-                        )?;
-                    }
-                    FollowMeFaceAlongEdgesInInstance {
-                        instance,
-                        profile_object,
-                        profile_face,
-                        path_sketch,
-                        path_edges,
-                        stop_len,
-                    } => {
-                        self.follow_me_face_along_edges_in_instance(
-                            instance,
-                            profile_object,
-                            profile_face,
-                            path_sketch,
-                            path_edges,
-                            stop_len,
-                        )?;
-                    }
-                    FollowMeFaceAroundFaceInInstance {
-                        instance,
-                        profile_object,
-                        profile_face,
-                        path_object,
-                        path_face,
-                        stop_len,
-                    } => {
-                        self.follow_me_face_around_face_in_instance(
-                            instance,
-                            profile_object,
-                            profile_face,
-                            path_object,
-                            path_face,
-                            stop_len,
-                        )?;
-                    }
-                    BooleanInComponent {
-                        component,
-                        op,
-                        a,
-                        b,
-                    } => {
-                        self.boolean_in_component(component, op, a, b)?;
-                    }
-                    SliceDefMember {
-                        instance,
-                        object,
-                        plane,
-                    } => {
-                        self.slice_def_member(instance, object, &plane)?;
-                    }
-                    TransformDefMember {
-                        instance,
-                        object,
-                        affine,
-                    } => {
-                        self.transform_def_member(instance, object, &affine)?;
-                    }
-                    TransformDefSketch {
-                        instance,
-                        sketch,
-                        affine,
-                    } => {
-                        self.transform_def_sketch(instance, sketch, &affine)?;
-                    }
-                    TransformDefSketchIsland {
-                        instance,
-                        sketch,
-                        island,
-                        affine,
-                    } => {
-                        self.transform_def_sketch_island(instance, sketch, island, &affine)?;
-                    }
-                    TransformDefSelection {
-                        instance,
-                        objects,
-                        sketches,
-                        island_sketches,
-                        islands,
-                        affine,
-                    } => {
-                        self.transform_def_selection(
-                            instance,
-                            &objects,
-                            &sketches,
-                            &island_sketches,
-                            &islands,
-                            &affine,
-                        )?;
-                    }
-                    DraftBeginPlane {
-                        draft,
-                        px,
-                        py,
-                        pz,
-                        nx,
-                        ny,
-                        nz,
-                        label,
-                    } => {
-                        self.draft_set_next_handle(draft);
-                        self.draft_begin_plane(px, py, pz, nx, ny, nz, &label)?;
-                    }
-                    DraftBeginPlaneInInstance {
-                        draft,
-                        instance,
-                        px,
-                        py,
-                        pz,
-                        nx,
-                        ny,
-                        nz,
-                        label,
-                    } => {
-                        self.draft_set_next_handle(draft);
-                        self.draft_begin_plane_in_instance(
-                            instance, px, py, pz, nx, ny, nz, &label,
-                        )?;
-                    }
-                    DraftBeginFace {
-                        draft,
-                        object,
-                        face,
-                        label,
-                    } => {
-                        self.draft_set_next_handle(draft);
-                        self.draft_begin_face(object, face, &label)?;
-                    }
-                    DraftBeginFaceInInstance {
-                        draft,
-                        instance,
-                        object,
-                        face,
-                        label,
-                    } => {
-                        self.draft_set_next_handle(draft);
-                        self.draft_begin_face_in_instance(instance, object, face, &label)?;
-                    }
-                    DraftBeginSketch {
-                        draft,
-                        sketch,
-                        label,
-                    } => {
-                        self.draft_set_next_handle(draft);
-                        self.draft_begin_sketch(sketch, &label)?;
-                    }
-                    DraftBeginCtx { draft, ctx, label } => {
-                        self.draft_set_next_handle(draft);
-                        self.draft_begin_ctx(&ctx, &label)?;
-                    }
-                    DraftEnd { draft } => {
-                        self.draft_end(draft)?;
-                    }
-                    DraftCancel { draft } => {
-                        self.draft_cancel(draft);
-                    }
-                    DraftAddSegment { draft, a, b } => {
-                        self.draft_add_segment(draft, a[0], a[1], a[2], b[0], b[1], b[2])?;
-                    }
-                    DraftBeginCurveWith {
-                        draft,
-                        center,
-                        radius,
-                    } => {
-                        self.draft_begin_curve_with(draft, &center, radius)?;
-                    }
-                    DraftBeginPolygonWith {
-                        draft,
-                        center,
-                        radius,
-                    } => {
-                        self.draft_begin_polygon_with(draft, &center, radius)?;
-                    }
-                    DraftBeginCurve { draft } => {
-                        self.draft_begin_curve(draft)?;
-                    }
-                    HistoryBracketOpen => {
-                        self.history_bracket_open()?;
-                    }
-                    HistoryBracketCommit { label } => {
-                        self.history_bracket_commit(&label)?;
-                    }
-                    HistoryBracketAbort => {
-                        self.history_bracket_abort();
-                    }
-                    DraftEndCurve { draft } => {
-                        self.draft_end_curve(draft)?;
-                    }
-                    DraftRemoveEdges { draft, keys } => {
-                        self.draft_remove_edges(draft, &keys)?;
-                    }
-                    DraftTransformEdges {
-                        draft,
-                        keys,
-                        affine,
-                    } => {
-                        self.draft_transform_edges(draft, &keys, &affine)?;
-                    }
-                    DraftCopyEdges {
-                        draft,
-                        keys,
-                        affine,
-                    } => {
-                        self.draft_copy_edges(draft, &keys, &affine)?;
-                    }
-                    DraftMoveVertex { draft, at, to } => {
-                        self.draft_move_vertex(draft, at[0], at[1], at[2], to[0], to[1], to[2])?;
-                    }
-                    DraftOffsetRegion {
-                        draft,
-                        region,
-                        distance,
-                    } => {
-                        self.draft_offset_region(draft, region, distance)?;
-                    }
-                    DraftRefacetCurve {
-                        draft,
-                        curve,
-                        segments,
-                    } => {
-                        self.draft_refacet_curve(draft, curve, segments)?;
-                    }
-                    ApiDispatch { frame } => {
-                        // Replayed through a real connection, so the
-                        // envelope takes exactly the path it took live —
-                        // including the transaction bracket that makes it
-                        // one compound undo entry. The connection is
-                        // opened lazily and primed once: only mutating
-                        // frames are recorded, and the handshake that
-                        // precedes them is read-only, so it is never in
-                        // the stream and has to be synthesized here.
-                        let conn = match replay_conn {
-                            Some(id) => id,
-                            None => {
-                                let id = self.api_connection_open();
-                                self.api_dispatch(
-                                    id,
-                                    r#"{"jsonrpc":"2.0","id":0,"method":"hew.meta.hello","params":{"protocol":1}}"#,
-                                );
-                                self.api_dispatch(
-                                    id,
-                                    r#"{"jsonrpc":"2.0","id":1,"method":"hew.doc.attach","params":{}}"#,
-                                );
-                                replay_conn = Some(id);
-                                id
-                            }
-                        };
-                        let reply = self.api_dispatch(conn, &frame);
-                        // A frame is only ever recorded once it has
-                        // succeeded, so a refusal here means the replay
-                        // has already diverged from the session — fail
-                        // loudly rather than hand back a wrong hash.
-                        if let Some(reply) = reply
-                            && let Ok(value) = serde_json::from_str::<serde_json::Value>(&reply)
-                            && let Some(err) = value.get("error")
-                        {
-                            return Err(ApiError::new(
-                                "REPLAY",
-                                &format!("recorded API envelope was refused on replay: {err}"),
-                            ));
-                        }
-                    }
-                    DeleteSelection { kinds, ids } => {
-                        self.delete_selection(&kinds, &ids)?;
-                    }
-                    ReparentNodes { kinds, ids, group } => {
-                        self.reparent_nodes(&kinds, &ids, group)?;
-                    }
-                }
-            }
-            Ok(())
-        })?;
+        let replayed =
+            recording::without_capture(|| self.replay_calls(rec.calls, &mut replay_conn));
         if let Some(id) = replay_conn {
             self.api_connection_close(id);
         }
+        replayed?;
         Ok(self.doc.state_hash())
+    }
+
+    /// Re-issues recorded `calls` in order ([`Scene::replay`]). API
+    /// envelopes go through `replay_conn`, opened on first use.
+    fn replay_calls(
+        &mut self,
+        calls: Vec<recording::RecordedCall>,
+        replay_conn: &mut Option<u32>,
+    ) -> Result<(), ApiError> {
+        use recording::RecordedCall::*;
+        for call in calls {
+            match call {
+                BeginGroundSketch => {
+                    self.begin_ground_sketch()?;
+                }
+                BeginSketchOnPlane {
+                    px,
+                    py,
+                    pz,
+                    nx,
+                    ny,
+                    nz,
+                } => {
+                    self.begin_sketch_on_plane(px, py, pz, nx, ny, nz)?;
+                }
+                SketchAddSegment { sketch, a, b } => {
+                    self.sketch_add_segment(sketch, a[0], a[1], a[2], b[0], b[1], b[2])?;
+                }
+                SketchRemoveEdge { sketch, edge } => {
+                    self.sketch_remove_edge(sketch, edge)?;
+                }
+                SketchBeginGesture { sketch } => {
+                    self.sketch_begin_gesture(sketch)?;
+                }
+                SketchBeginCurve { sketch } => {
+                    self.sketch_begin_curve(sketch)?;
+                }
+                SketchBeginCurveWith {
+                    sketch,
+                    center,
+                    radius,
+                } => {
+                    self.sketch_begin_curve_with(sketch, center[0], center[1], center[2], radius)?;
+                }
+                SketchBeginPolygonWith {
+                    sketch,
+                    center,
+                    radius,
+                } => {
+                    self.sketch_begin_polygon_with(
+                        sketch, center[0], center[1], center[2], radius,
+                    )?;
+                }
+                SketchRefacetCurve {
+                    sketch,
+                    curve,
+                    segments,
+                } => {
+                    self.sketch_refacet_curve(sketch, curve, segments)?;
+                }
+                SketchEndCurve { sketch } => {
+                    self.sketch_end_curve(sketch)?;
+                }
+                SketchEndGesture { sketch } => {
+                    self.sketch_end_gesture(sketch)?;
+                }
+                SketchCancelGesture => {
+                    self.sketch_cancel_gesture()?;
+                }
+                ExtrudeRegion {
+                    sketch,
+                    region,
+                    distance,
+                } => {
+                    self.extrude_region(sketch, region, distance)?;
+                }
+                FollowMeAlongEdges {
+                    sketch,
+                    region,
+                    path_sketch,
+                    path_edges,
+                    stop_len,
+                    twist,
+                    end_scale,
+                    stations,
+                    group,
+                } => {
+                    self.follow_me_along_edges_opts(
+                        sketch,
+                        region,
+                        path_sketch,
+                        path_edges,
+                        stop_len,
+                        group,
+                        recording::sweep_from(twist, end_scale, stations),
+                    )?;
+                }
+                FollowMeAroundFace {
+                    sketch,
+                    region,
+                    path_object,
+                    path_face,
+                    stop_len,
+                    twist,
+                    end_scale,
+                    stations,
+                    group,
+                } => {
+                    self.follow_me_around_face_opts(
+                        sketch,
+                        region,
+                        path_object,
+                        path_face,
+                        stop_len,
+                        group,
+                        recording::sweep_from(twist, end_scale, stations),
+                    )?;
+                }
+                FollowMeAroundInstanceFace {
+                    sketch,
+                    region,
+                    instance,
+                    path_object,
+                    path_face,
+                    stop_len,
+                    twist,
+                    end_scale,
+                    stations,
+                } => {
+                    self.follow_me_around_instance_face_opts(
+                        sketch,
+                        region,
+                        instance,
+                        path_object,
+                        path_face,
+                        stop_len,
+                        recording::sweep_from(twist, end_scale, stations),
+                    )?;
+                }
+                FollowMeMergedAroundFace {
+                    sketch,
+                    region,
+                    path_object,
+                    path_face,
+                    stop_len,
+                    twist,
+                    end_scale,
+                    stations,
+                } => {
+                    self.follow_me_merged_around_face_opts(
+                        sketch,
+                        region,
+                        path_object,
+                        path_face,
+                        stop_len,
+                        recording::sweep_from(twist, end_scale, stations),
+                    )?;
+                }
+                FollowMeFaceAlongEdges {
+                    profile_object,
+                    profile_face,
+                    path_sketch,
+                    path_edges,
+                    stop_len,
+                    twist,
+                    end_scale,
+                    stations,
+                } => {
+                    self.follow_me_face_along_edges_opts(
+                        profile_object,
+                        profile_face,
+                        path_sketch,
+                        path_edges,
+                        stop_len,
+                        recording::sweep_from(twist, end_scale, stations),
+                    )?;
+                }
+                FollowMeFaceAroundFace {
+                    profile_object,
+                    profile_face,
+                    path_object,
+                    path_face,
+                    stop_len,
+                    twist,
+                    end_scale,
+                    stations,
+                } => {
+                    self.follow_me_face_around_face_opts(
+                        profile_object,
+                        profile_face,
+                        path_object,
+                        path_face,
+                        stop_len,
+                        recording::sweep_from(twist, end_scale, stations),
+                    )?;
+                }
+                SketchOffsetRegion {
+                    sketch,
+                    region,
+                    distance,
+                } => {
+                    self.sketch_offset_region(sketch, region, distance)?;
+                }
+                Boolean { op, a, b } => {
+                    self.boolean(op, a, b)?;
+                }
+                BooleanNodes {
+                    op,
+                    a_kind,
+                    a,
+                    b_kind,
+                    b,
+                } => {
+                    self.boolean_nodes(op, a_kind, a, b_kind, b)?;
+                }
+                BooleanNodesMany { op, kinds, ids } => {
+                    self.boolean_nodes_many(op, &kinds, &ids)?;
+                }
+                GroupNodes { kinds, ids } => {
+                    self.group_nodes(&kinds, &ids)?;
+                }
+                DuplicateNode { kind, id, affine } => {
+                    self.duplicate_node(kind, id, &affine)?;
+                }
+                SliceObject { object, plane } => {
+                    self.slice_object(object, &plane)?;
+                }
+                TransformObject { object, affine } => {
+                    self.transform_object(object, &affine)?;
+                }
+                TransformSelection {
+                    kinds,
+                    ids,
+                    sketches,
+                    affine,
+                } => {
+                    self.transform_selection(&kinds, &ids, &sketches, &affine)?;
+                }
+                RescaleDocument { factor } => {
+                    self.rescale_document(factor)?;
+                }
+                DeleteNode { kind, id } => {
+                    self.delete_node(kind, id)?;
+                }
+                DuplicateSelectionArray {
+                    kinds,
+                    ids,
+                    affine,
+                    count,
+                    linked,
+                } => {
+                    self.duplicate_selection_array(&kinds, &ids, &affine, count, linked)?;
+                }
+                DuplicateSelectionPlacements {
+                    kinds,
+                    ids,
+                    affines,
+                    linked,
+                } => {
+                    self.duplicate_selection_placements(&kinds, &ids, &affines, linked)?;
+                }
+                WrapLinked { kind, id } => {
+                    self.wrap_linked(kind, id)?;
+                }
+                JoinLinked {
+                    set_instance,
+                    joiner,
+                    affine,
+                } => {
+                    self.join_linked(set_instance, joiner, &affine)?;
+                }
+                FlipSelection {
+                    kinds,
+                    ids,
+                    sketch_ids,
+                    normal,
+                    about_kind,
+                    about,
+                    copy,
+                } => {
+                    self.flip_selection(
+                        &kinds,
+                        &ids,
+                        &sketch_ids,
+                        normal[0],
+                        normal[1],
+                        normal[2],
+                        about_kind,
+                        about[0],
+                        about[1],
+                        about[2],
+                        copy,
+                    )?;
+                }
+                SetLinked { component, linked } => {
+                    self.set_linked(component, linked)?;
+                }
+                PushPull {
+                    object,
+                    face,
+                    distance,
+                } => {
+                    self.push_pull(object, face, distance)?;
+                }
+                ExtrudeFaceAsNewObject {
+                    object,
+                    face,
+                    distance,
+                } => {
+                    self.extrude_face_as_new_object(object, face, distance)?;
+                }
+                ExtrudeFaceAsNewObjectInInstance {
+                    instance,
+                    object,
+                    face,
+                    distance,
+                } => {
+                    self.extrude_face_as_new_object_in_instance(instance, object, face, distance)?;
+                }
+                UnlinkCopies { instances } => {
+                    self.unlink_copies(&instances)?;
+                }
+                SceneUndo => {
+                    self.scene_undo()?;
+                }
+                SceneRedo => {
+                    self.scene_redo()?;
+                }
+                TransformSketch { sketch, affine } => {
+                    self.transform_sketch(sketch, &affine)?;
+                }
+                TransformSketchIsland {
+                    sketch,
+                    island,
+                    affine,
+                } => {
+                    self.transform_sketch_island(sketch, island, &affine)?;
+                }
+                TransformSketchIslands {
+                    sketch,
+                    islands,
+                    affine,
+                } => {
+                    self.transform_sketch_islands(sketch, &islands, &affine)?;
+                }
+                CopySketchIslands {
+                    sketch,
+                    islands,
+                    affine,
+                } => {
+                    self.copy_sketch_islands(sketch, &islands, &affine)?;
+                }
+                MoveSketchVertex { sketch, vertex, p } => {
+                    self.move_sketch_vertex(sketch, vertex, p[0], p[1], p[2])?;
+                }
+                Ungroup { group } => {
+                    self.ungroup(group)?;
+                }
+                DeleteSketch { sketch } => {
+                    self.delete_sketch(sketch)?;
+                }
+                TransformGroup { group, affine } => {
+                    self.transform_group(group, &affine)?;
+                }
+                MakeComponent { kinds, ids } => {
+                    self.make_component(&kinds, &ids)?;
+                }
+                PlaceInstance { component, affine } => {
+                    self.place_instance(component, &affine)?;
+                }
+                PlaceText {
+                    sketch,
+                    regions,
+                    distance,
+                    name,
+                    group,
+                } => {
+                    self.place_text(sketch, regions, distance, name, group)?;
+                }
+                TransformInstance { instance, affine } => {
+                    self.transform_instance(instance, &affine)?;
+                }
+                ExplodeInstance { instance } => {
+                    self.explode_instance(instance)?;
+                }
+                MakeUnique { instance } => {
+                    self.make_unique(instance)?;
+                }
+                MakeUniqueByPath {
+                    path,
+                    cascade,
+                    deep,
+                } => {
+                    self.make_unique_by_path_json(path, cascade, deep)?;
+                }
+                OpenExplodeSession { instance } => {
+                    self.open_explode_session(instance)?;
+                }
+                CloseExplodeSession => {
+                    self.close_explode_session()?;
+                }
+                OpenGroupSession { group } => {
+                    self.open_group_session(group)?;
+                }
+                CloseGroupSession => {
+                    self.close_group_session()?;
+                }
+                RescaleSession { factor, anchor } => {
+                    self.rescale_session(factor, anchor[0], anchor[1], anchor[2])?;
+                }
+                PushPullInComponent {
+                    instance,
+                    object,
+                    face,
+                    distance,
+                } => {
+                    self.push_pull_in_component(instance, object, face, distance)?;
+                }
+                BeginSketchOnPlaneInInstance {
+                    instance,
+                    px,
+                    py,
+                    pz,
+                    nx,
+                    ny,
+                    nz,
+                } => {
+                    self.begin_sketch_on_plane_in_instance(instance, px, py, pz, nx, ny, nz)?;
+                }
+                ExtrudeRegionInInstance {
+                    instance,
+                    sketch,
+                    region,
+                    distance,
+                } => {
+                    self.extrude_region_in_instance(instance, sketch, region, distance)?;
+                }
+                DeleteDefMember { component, object } => {
+                    self.delete_def_member(component, object)?;
+                }
+                CapRims { object, rims } => {
+                    self.cap_rims(object, rims)?;
+                }
+                MakeSolidFromSketches { sketches } => {
+                    self.make_solid_from_sketches(sketches)?;
+                }
+                Mend { object, plan_json } => {
+                    self.mend(object, &plan_json)?;
+                }
+                DeleteFaces { object, faces } => {
+                    self.delete_faces(object, faces)?;
+                }
+                SetAcceptedSurface { object, accepted } => {
+                    self.set_accepted_surface(object, accepted)?;
+                }
+                ThickenSheet { object, start, end } => {
+                    self.thicken_sheet(object, start, end)?;
+                }
+                ThickenSheetInInstance {
+                    instance,
+                    object,
+                    distance,
+                } => {
+                    self.thicken_sheet_in_instance(instance, object, distance)?;
+                }
+                RejoinAsOneSolid { ids } => {
+                    self.rejoin_as_one_solid(&ids)?;
+                }
+                DeleteDefinition { component } => {
+                    self.delete_definition(component)?;
+                }
+                PurgeUnused => {
+                    self.purge_unused()?;
+                }
+                SetNodeName { kind, id, name } => {
+                    self.set_node_name(kind, id, name)?;
+                }
+                AddNodeTag { kind, id, path } => {
+                    self.add_node_tag(kind, id, path)?;
+                }
+                RenameTag { path, new_path } => {
+                    self.rename_tag(path, new_path)?;
+                }
+                RemoveNodeTag { kind, id, path } => {
+                    self.remove_node_tag(kind, id, path)?;
+                }
+                AddNodeTagMany { kinds, ids, path } => {
+                    self.add_node_tag_many(&kinds, &ids, path)?;
+                }
+                RemoveNodeTagMany { kinds, ids, path } => {
+                    self.remove_node_tag_many(&kinds, &ids, path)?;
+                }
+                SetNodesLocked { kinds, ids, locked } => {
+                    self.set_nodes_locked(&kinds, &ids, locked)?;
+                }
+                SetTagHidden { path, hidden } => {
+                    self.set_tag_hidden(path, hidden)?;
+                }
+                DeleteTag { path } => {
+                    self.delete_tag(path)?;
+                }
+                SetNodeUserHidden { kind, id, hidden } => {
+                    self.set_node_user_hidden(kind, id, hidden)?;
+                }
+                SetCameraState {
+                    projection,
+                    fov_deg,
+                    parallel_height,
+                    eye,
+                    target,
+                    up,
+                } => {
+                    let parallel_height = parallel_height.unwrap_or_else(|| {
+                        kernel::CameraState::height_at_target(
+                            Point3::new(eye[0], eye[1], eye[2]),
+                            Point3::new(target[0], target[1], target[2]),
+                            fov_deg,
+                        )
+                    });
+                    self.set_camera_state(
+                        &projection,
+                        fov_deg,
+                        parallel_height,
+                        Box::new(eye),
+                        Box::new(target),
+                        Box::new(up),
+                    )?;
+                }
+                SetSectionPlane {
+                    origin,
+                    normal,
+                    active,
+                } => {
+                    self.set_section_plane(
+                        origin[0], origin[1], origin[2], normal[0], normal[1], normal[2], active,
+                    )?;
+                }
+                ClearSectionPlane => {
+                    self.clear_section_plane()?;
+                }
+                SetViewStyle { json } => {
+                    self.set_view_style_json(json)?;
+                }
+                AddScene {
+                    name,
+                    props,
+                    camera_json,
+                    display_json,
+                    after,
+                } => {
+                    self.add_scene(name, props, camera_json, display_json, after)?;
+                }
+                UpdateScene {
+                    sid,
+                    props,
+                    camera_json,
+                    display_json,
+                } => {
+                    self.update_scene(sid, props, camera_json, display_json)?;
+                }
+                SetSceneProps {
+                    sid,
+                    props,
+                    camera_json,
+                    display_json,
+                } => {
+                    self.set_scene_props(sid, props, camera_json, display_json)?;
+                }
+                RenameScene { sid, name } => {
+                    self.rename_scene(sid, name)?;
+                }
+                SetSceneDescription { sid, text } => {
+                    self.set_scene_description(sid, text)?;
+                }
+                SetSceneTransition { sid, seconds } => {
+                    self.set_scene_transition(sid, seconds)?;
+                }
+                SetSceneDelay { sid, seconds } => {
+                    self.set_scene_delay(sid, seconds)?;
+                }
+                MoveScene { sid, index } => {
+                    self.move_scene(sid, index)?;
+                }
+                RemoveScene { sid } => {
+                    self.remove_scene(sid)?;
+                }
+                ApplyScene { sid } => {
+                    self.apply_scene(sid)?;
+                }
+                AddMaterial { name, r, g, b, a } => {
+                    self.add_material(name, r, g, b, a)?;
+                }
+                AddTextureMaterial {
+                    name,
+                    r,
+                    g,
+                    b,
+                    a,
+                    image,
+                    format,
+                    world_w,
+                    world_h,
+                } => {
+                    self.add_texture_material(name, r, g, b, a, &image, format, world_w, world_h)?;
+                }
+                SetMaterialAlpha { material, alpha } => {
+                    self.set_material_alpha(material, alpha)?;
+                }
+                SetMaterialPbr {
+                    material,
+                    metallic,
+                    roughness,
+                } => {
+                    self.set_material_pbr(material, metallic, roughness)?;
+                }
+                SetMaterialName { material, name } => {
+                    self.set_material_name(material, name)?;
+                }
+                DeleteMaterial { material } => {
+                    self.delete_material(material)?;
+                }
+                PaintFace {
+                    object,
+                    face,
+                    material,
+                } => {
+                    self.paint_face(object, face, material)?;
+                }
+                SetObjectMaterial { object, material } => {
+                    self.set_object_material(object, material)?;
+                }
+                SetInstanceMaterial { instance, material } => {
+                    let _ = self.set_instance_material(instance, material)?;
+                }
+                SetDefinitionMaterial {
+                    component,
+                    material,
+                } => {
+                    self.set_definition_material(component, material)?;
+                }
+                ReplaceMaterial {
+                    document_wide,
+                    scope_object,
+                    from,
+                    to,
+                } => {
+                    self.replace_material(document_wide, scope_object, from, to)?;
+                }
+                SetFaceUvFrame {
+                    object,
+                    face,
+                    frame,
+                } => {
+                    self.set_face_uv_frame(object, face, frame.map(uv_frame_recorded_to_vec))?;
+                }
+                AddGuideLine { origin, dir } => {
+                    self.add_guide_line(origin[0], origin[1], origin[2], dir[0], dir[1], dir[2])?;
+                }
+                AddGuidePoint { p } => {
+                    self.add_guide_point(p[0], p[1], p[2])?;
+                }
+                DeleteGuide { guide } => {
+                    self.delete_guide(guide)?;
+                }
+                DeleteAllGuides => {
+                    self.delete_all_guides()?;
+                }
+                AddLinearDimension {
+                    a_node_kind,
+                    a_node_id,
+                    a_point,
+                    b_node_kind,
+                    b_node_id,
+                    b_point,
+                    offset,
+                    plane,
+                    text_override,
+                } => {
+                    self.add_linear_dimension(
+                        a_node_kind,
+                        a_node_id,
+                        &a_point,
+                        b_node_kind,
+                        b_node_id,
+                        &b_point,
+                        &offset,
+                        &plane,
+                        text_override,
+                    )?;
+                }
+                AddRadialDimension {
+                    anchor_node_kind,
+                    anchor_node_id,
+                    anchor_point,
+                    kind,
+                    curve_center,
+                    curve_radius,
+                    curve_plane,
+                    leader_dir,
+                    text_override,
+                } => {
+                    self.add_radial_dimension(
+                        anchor_node_kind,
+                        anchor_node_id,
+                        &anchor_point,
+                        &kind,
+                        &curve_center,
+                        curve_radius,
+                        &curve_plane,
+                        &leader_dir,
+                        text_override,
+                    )?;
+                }
+                AddLeaderText {
+                    anchor_node_kind,
+                    anchor_node_id,
+                    anchor_point,
+                    offset,
+                    text,
+                } => {
+                    self.add_leader_text(
+                        anchor_node_kind,
+                        anchor_node_id,
+                        &anchor_point,
+                        &offset,
+                        text,
+                    )?;
+                }
+                UpdateLinearDimension {
+                    id,
+                    a_node_kind,
+                    a_node_id,
+                    a_point,
+                    b_node_kind,
+                    b_node_id,
+                    b_point,
+                    offset,
+                    plane,
+                    text_override,
+                } => {
+                    self.update_linear_dimension(
+                        id,
+                        a_node_kind,
+                        a_node_id,
+                        &a_point,
+                        b_node_kind,
+                        b_node_id,
+                        &b_point,
+                        &offset,
+                        &plane,
+                        text_override,
+                    )?;
+                }
+                UpdateRadialDimension {
+                    id,
+                    anchor_node_kind,
+                    anchor_node_id,
+                    anchor_point,
+                    kind,
+                    curve_center,
+                    curve_radius,
+                    curve_plane,
+                    leader_dir,
+                    text_override,
+                } => {
+                    self.update_radial_dimension(
+                        id,
+                        anchor_node_kind,
+                        anchor_node_id,
+                        &anchor_point,
+                        &kind,
+                        &curve_center,
+                        curve_radius,
+                        &curve_plane,
+                        &leader_dir,
+                        text_override,
+                    )?;
+                }
+                UpdateLeaderText {
+                    id,
+                    anchor_node_kind,
+                    anchor_node_id,
+                    anchor_point,
+                    offset,
+                    text,
+                } => {
+                    self.update_leader_text(
+                        id,
+                        anchor_node_kind,
+                        anchor_node_id,
+                        &anchor_point,
+                        &offset,
+                        text,
+                    )?;
+                }
+                DeleteAnnotation { id } => {
+                    self.delete_annotation(id)?;
+                }
+                SetPickScope {
+                    objects,
+                    instances,
+                    frame_sketches,
+                } => match frame_sketches {
+                    Some(frame_sketches) => {
+                        self.set_pick_scope(objects, instances, frame_sketches);
+                    }
+                    // A recording from before the flag: both lists
+                    // empty meant "clear", and the frame's drawing was
+                    // always in scope.
+                    None if objects.is_empty() && instances.is_empty() => {
+                        self.clear_pick_scope();
+                    }
+                    None => self.set_pick_scope(objects, instances, true),
+                },
+                ClearPickScope => {
+                    self.clear_pick_scope();
+                }
+                TransformGuide { guide, affine } => {
+                    self.transform_guide(guide, &affine)?;
+                }
+                DuplicateGuideArray {
+                    guide,
+                    affine,
+                    count,
+                } => {
+                    self.duplicate_guide_array(guide, &affine, count)?;
+                }
+                DraftBeginDetached { draft, ctx, label } => {
+                    self.draft_set_next_handle(draft);
+                    self.draft_begin_detached(&ctx, &label)?;
+                }
+                InsertItem {
+                    bytes,
+                    affine,
+                    source_id,
+                    content_hash,
+                    origin,
+                } => {
+                    self.insert_item_core(&bytes, &affine, source_id, content_hash, origin)?;
+                }
+                InsertItemPalette { bytes } => {
+                    self.insert_item_palette_core(&bytes)?;
+                }
+                UpdateDefinitionsFromItems { parts, items } => {
+                    self.update_definitions_replay(&parts, &items)?;
+                }
+                StampLibrarySource {
+                    kinds,
+                    ids,
+                    source_id,
+                    content_hash,
+                    def_sid,
+                } => {
+                    self.stamp_library_source_core(
+                        &kinds,
+                        &ids,
+                        &source_id,
+                        &content_hash,
+                        def_sid,
+                    )?;
+                }
+                ImportDae { bytes, images } => {
+                    let mut image_map: ImageMap = ImageMap::new();
+                    for img in images {
+                        let format = if img.format == 1 {
+                            ImageFormat::Jpeg
+                        } else {
+                            ImageFormat::Png
+                        };
+                        image_map.insert(img.uri, (img.bytes, format));
+                    }
+                    self.import_dae_core(&bytes, &image_map)?;
+                }
+                ImportGltf { bytes } => {
+                    self.import_gltf_core(&bytes)?;
+                }
+                ImportSkp { bytes } => {
+                    self.import_skp_core(&bytes)?;
+                }
+                ImportOmitted { of, len } => {
+                    return Err(ApiError(format!(
+                        "recording cannot replay {of}: its {len}-byte source file was \
+                         too large to embed"
+                    )));
+                }
+                ImportStl {
+                    bytes,
+                    unit_scale,
+                    name,
+                } => {
+                    self.import_stl_core(&bytes, unit_scale, name)?;
+                }
+                PlaceImage {
+                    image,
+                    format,
+                    name,
+                    origin,
+                    u,
+                    v,
+                    width,
+                } => {
+                    self.place_image_core(&image, format, name, &origin, &u, &v, width)?;
+                }
+                SetAxes { origin, x, y } => {
+                    self.set_axes(
+                        origin[0], origin[1], origin[2], x[0], x[1], x[2], y[0], y[1], y[2],
+                    )?;
+                }
+                Load { bytes } => {
+                    self.load_core(&bytes)?;
+                }
+                FollowMeAlongEdgesInInstance {
+                    instance,
+                    sketch,
+                    region,
+                    path_sketch,
+                    path_edges,
+                    stop_len,
+                    twist,
+                    end_scale,
+                    stations,
+                } => {
+                    self.follow_me_along_edges_in_instance_opts(
+                        instance,
+                        sketch,
+                        region,
+                        path_sketch,
+                        path_edges,
+                        stop_len,
+                        recording::sweep_from(twist, end_scale, stations),
+                    )?;
+                }
+                FollowMeAroundFaceInInstance {
+                    instance,
+                    sketch,
+                    region,
+                    path_object,
+                    path_face,
+                    stop_len,
+                    twist,
+                    end_scale,
+                    stations,
+                } => {
+                    self.follow_me_around_face_in_instance_opts(
+                        instance,
+                        sketch,
+                        region,
+                        path_object,
+                        path_face,
+                        stop_len,
+                        recording::sweep_from(twist, end_scale, stations),
+                    )?;
+                }
+                FollowMeMergedAroundFaceInInstance {
+                    instance,
+                    sketch,
+                    region,
+                    path_object,
+                    path_face,
+                    stop_len,
+                    twist,
+                    end_scale,
+                    stations,
+                } => {
+                    self.follow_me_merged_around_face_in_instance_opts(
+                        instance,
+                        sketch,
+                        region,
+                        path_object,
+                        path_face,
+                        stop_len,
+                        recording::sweep_from(twist, end_scale, stations),
+                    )?;
+                }
+                FollowMeFaceAlongEdgesInInstance {
+                    instance,
+                    profile_object,
+                    profile_face,
+                    path_sketch,
+                    path_edges,
+                    stop_len,
+                    twist,
+                    end_scale,
+                    stations,
+                } => {
+                    self.follow_me_face_along_edges_in_instance_opts(
+                        instance,
+                        profile_object,
+                        profile_face,
+                        path_sketch,
+                        path_edges,
+                        stop_len,
+                        recording::sweep_from(twist, end_scale, stations),
+                    )?;
+                }
+                FollowMeFaceAroundFaceInInstance {
+                    instance,
+                    profile_object,
+                    profile_face,
+                    path_object,
+                    path_face,
+                    stop_len,
+                    twist,
+                    end_scale,
+                    stations,
+                } => {
+                    self.follow_me_face_around_face_in_instance_opts(
+                        instance,
+                        profile_object,
+                        profile_face,
+                        path_object,
+                        path_face,
+                        stop_len,
+                        recording::sweep_from(twist, end_scale, stations),
+                    )?;
+                }
+                BooleanInComponent {
+                    component,
+                    op,
+                    a,
+                    b,
+                } => {
+                    self.boolean_in_component(component, op, a, b)?;
+                }
+                BooleanInComponentMany { component, op, ids } => {
+                    self.boolean_in_component_many(component, op, &ids)?;
+                }
+                BooleanThroughPlacement {
+                    path,
+                    host,
+                    tool,
+                    op,
+                } => {
+                    self.boolean_through_placement_json(path, host, tool, op)?;
+                }
+                SliceDefMember {
+                    instance,
+                    object,
+                    plane,
+                } => {
+                    self.slice_def_member(instance, object, &plane)?;
+                }
+                TransformDefMember {
+                    instance,
+                    object,
+                    affine,
+                } => {
+                    self.transform_def_member(instance, object, &affine)?;
+                }
+                TransformDefSketch {
+                    instance,
+                    sketch,
+                    affine,
+                } => {
+                    self.transform_def_sketch(instance, sketch, &affine)?;
+                }
+                TransformDefSketchIsland {
+                    instance,
+                    sketch,
+                    island,
+                    affine,
+                } => {
+                    self.transform_def_sketch_island(instance, sketch, island, &affine)?;
+                }
+                TransformDefSelection {
+                    instance,
+                    objects,
+                    sketches,
+                    island_sketches,
+                    islands,
+                    affine,
+                } => {
+                    self.transform_def_selection(
+                        instance,
+                        &objects,
+                        &sketches,
+                        &island_sketches,
+                        &islands,
+                        &affine,
+                    )?;
+                }
+                DraftBeginPlane {
+                    draft,
+                    px,
+                    py,
+                    pz,
+                    nx,
+                    ny,
+                    nz,
+                    label,
+                } => {
+                    self.draft_set_next_handle(draft);
+                    self.draft_begin_plane(px, py, pz, nx, ny, nz, &label)?;
+                }
+                DraftBeginPlaneInInstance {
+                    draft,
+                    instance,
+                    px,
+                    py,
+                    pz,
+                    nx,
+                    ny,
+                    nz,
+                    label,
+                } => {
+                    self.draft_set_next_handle(draft);
+                    self.draft_begin_plane_in_instance(instance, px, py, pz, nx, ny, nz, &label)?;
+                }
+                DraftBeginFace {
+                    draft,
+                    object,
+                    face,
+                    label,
+                } => {
+                    self.draft_set_next_handle(draft);
+                    self.draft_begin_face(object, face, &label)?;
+                }
+                DraftBeginFaceInInstance {
+                    draft,
+                    instance,
+                    object,
+                    face,
+                    label,
+                } => {
+                    self.draft_set_next_handle(draft);
+                    self.draft_begin_face_in_instance(instance, object, face, &label)?;
+                }
+                DraftBeginSketch {
+                    draft,
+                    sketch,
+                    label,
+                } => {
+                    self.draft_set_next_handle(draft);
+                    self.draft_begin_sketch(sketch, &label)?;
+                }
+                DraftBeginCtx { draft, ctx, label } => {
+                    self.draft_set_next_handle(draft);
+                    self.draft_begin_ctx(&ctx, &label)?;
+                }
+                DraftEnd { draft } => {
+                    self.draft_end(draft)?;
+                }
+                DraftCancel { draft } => {
+                    self.draft_cancel(draft)?;
+                }
+                DraftAddSegment { draft, a, b } => {
+                    self.draft_add_segment(draft, a[0], a[1], a[2], b[0], b[1], b[2])?;
+                }
+                DraftBeginCurveWith {
+                    draft,
+                    center,
+                    radius,
+                } => {
+                    self.draft_begin_curve_with(draft, &center, radius)?;
+                }
+                DraftBeginPolygonWith {
+                    draft,
+                    center,
+                    radius,
+                } => {
+                    self.draft_begin_polygon_with(draft, &center, radius)?;
+                }
+                DraftBeginCurve { draft } => {
+                    self.draft_begin_curve(draft)?;
+                }
+                HistoryBracketOpen => {
+                    self.history_bracket_open()?;
+                }
+                HistoryBracketCommit { label } => {
+                    self.history_bracket_commit(&label)?;
+                }
+                HistoryBracketAbort => {
+                    self.history_bracket_abort()?;
+                }
+                DraftEndCurve { draft } => {
+                    self.draft_end_curve(draft)?;
+                }
+                DraftRemoveEdges { draft, keys } => {
+                    self.draft_remove_edges(draft, &keys)?;
+                }
+                DraftTransformEdges {
+                    draft,
+                    keys,
+                    affine,
+                } => {
+                    self.draft_transform_edges(draft, &keys, &affine)?;
+                }
+                DraftCopyEdges {
+                    draft,
+                    keys,
+                    affine,
+                } => {
+                    self.draft_copy_edges(draft, &keys, &affine)?;
+                }
+                DraftMoveVertex { draft, at, to } => {
+                    self.draft_move_vertex(draft, at[0], at[1], at[2], to[0], to[1], to[2])?;
+                }
+                DraftOffsetRegion {
+                    draft,
+                    region,
+                    distance,
+                } => {
+                    self.draft_offset_region(draft, region, distance)?;
+                }
+                DraftRefacetCurve {
+                    draft,
+                    curve,
+                    segments,
+                } => {
+                    self.draft_refacet_curve(draft, curve, segments)?;
+                }
+                ApiDispatch { frame } => {
+                    // Replayed through a real connection, so the
+                    // envelope takes exactly the path it took live —
+                    // including the transaction bracket that makes it
+                    // one compound undo entry. The connection is
+                    // opened lazily and primed once: only mutating
+                    // frames are recorded, and the handshake that
+                    // precedes them is read-only, so it is never in
+                    // the stream and has to be synthesized here.
+                    // Inside a plugin compound it is the compound's
+                    // own connection, opened with the recorded grant.
+                    let conn = match *replay_conn {
+                        Some(id) => id,
+                        None => {
+                            let id = self.api_connection_open();
+                            self.prime_replay_connection(id);
+                            *replay_conn = Some(id);
+                            id
+                        }
+                    };
+                    self.replay_frame(conn, &frame)?;
+                }
+                PluginCompound {
+                    plugin: _,
+                    label,
+                    grant,
+                    calls,
+                } => {
+                    self.replay_plugin_compound(label, &grant, calls)?;
+                }
+                DeleteSelection { kinds, ids } => {
+                    self.delete_selection(&kinds, &ids)?;
+                }
+                DeleteMixedSelection {
+                    kinds,
+                    ids,
+                    guides,
+                    annotations,
+                } => {
+                    self.delete_mixed_selection(&kinds, &ids, &guides, &annotations)?;
+                }
+                CutSelection { kinds, ids } => {
+                    self.cut_selection(&kinds, &ids)?;
+                }
+                Shell { object, spec } => {
+                    self.shell(object, &spec)?;
+                }
+                ProjectImprint {
+                    object,
+                    sketch,
+                    regions,
+                } => {
+                    self.project_imprint(object, sketch, &regions)?;
+                }
+                ProjectDepth {
+                    object,
+                    sketch,
+                    faces,
+                    depth,
+                    mode,
+                } => {
+                    self.project_depth(object, sketch, &faces, depth, mode)?;
+                }
+                // ==== end true-curves: offset ====
+                // ==== true-curves: smooth ====
+                SetSmoothLevel { object, level } => {
+                    self.set_smooth_level(object, level)?;
+                }
+                SetCrease {
+                    object,
+                    edges,
+                    crease,
+                } => {
+                    self.set_crease(object, &edges, crease)?;
+                }
+                Bake { object } => {
+                    self.bake(object)?;
+                }
+                // ==== end true-curves: smooth ====
+                // ==== true-curves: imports ====
+                SoftenByAngle { object, max_angle } => {
+                    self.soften_by_angle(object, max_angle)?;
+                }
+                // ==== end true-curves: imports ====
+                DraftBlendCorner { draft, at, profile } => {
+                    self.draft_blend_corner(draft, at[0], at[1], at[2], &profile)?;
+                }
+                SketchBlendCorner {
+                    sketch,
+                    vertex,
+                    profile,
+                } => {
+                    self.sketch_blend_corner(sketch, vertex, &profile)?;
+                }
+                PaintLogicalFace {
+                    object,
+                    face,
+                    material,
+                } => {
+                    self.paint_logical_face(object, face, material)?;
+                }
+                BlendEdges { object, spec } => {
+                    self.blend_edges(object, &spec)?;
+                }
+                BlendEdgesInComponent {
+                    instance,
+                    object,
+                    spec,
+                } => {
+                    self.blend_edges_in_component(instance, object, &spec)?;
+                }
+                ResizeBlend {
+                    object,
+                    blend,
+                    profile,
+                } => {
+                    self.resize_blend(object, blend, &profile)?;
+                }
+                ResizeBlendInComponent {
+                    instance,
+                    object,
+                    blend,
+                    profile,
+                } => {
+                    self.resize_blend_in_component(instance, object, blend, &profile)?;
+                }
+                RemoveBlend { object, blend } => {
+                    self.remove_blend(object, blend)?;
+                }
+                RemoveBlendInComponent {
+                    instance,
+                    object,
+                    blend,
+                } => {
+                    self.remove_blend_in_component(instance, object, blend)?;
+                }
+                // ==== end true-curves: blend ====
+                // ==== true-curves: shapes ====
+                Revolve { profile, spec } => {
+                    self.revolve(&profile, &spec)?;
+                }
+                RevolveInInstance {
+                    instance,
+                    object,
+                    face,
+                    spec,
+                } => {
+                    self.revolve_in_instance(instance, object, face, &spec)?;
+                }
+                Deform { object, spec } => {
+                    self.deform(object, &spec)?;
+                }
+                Loft { spec } => {
+                    self.loft(&spec)?;
+                }
+                ArrayAlongPath {
+                    kinds,
+                    ids,
+                    path,
+                    count,
+                    scale_from,
+                    scale_to,
+                    align,
+                } => {
+                    self.array_along_path(&kinds, &ids, &path, count, scale_from, scale_to, align)?;
+                }
+                // ==== end true-curves: shapes ====
+                // ==== true-curves: smooth ====
+                // ==== end true-curves: smooth ====
+                // ==== true-curves: imports ====
+                // ==== end true-curves: imports ====
+                ReparentNodes { kinds, ids, group } => {
+                    self.reparent_nodes(&kinds, &ids, group)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The handshake a replay connection needs before its first recorded
+    /// envelope: hello and attach, which are read-only and so never
+    /// recorded themselves.
+    fn prime_replay_connection(&mut self, id: u32) {
+        for frame in [
+            r#"{"jsonrpc":"2.0","id":0,"method":"hew.meta.hello","params":{"protocol":1}}"#,
+            r#"{"jsonrpc":"2.0","id":1,"method":"hew.doc.attach","params":{}}"#,
+        ] {
+            self.api_dispatch_outcome(id, frame, DispatchScope::Replay);
+        }
+    }
+
+    /// Re-issues one recorded API envelope on `conn`. A frame is only ever
+    /// recorded once it has succeeded, so a refusal here means the replay
+    /// has already diverged from the session — fail loudly rather than
+    /// hand back a wrong hash.
+    fn replay_frame(&mut self, conn: u32, frame: &str) -> Result<(), ApiError> {
+        let reply = match self.api_dispatch_outcome(conn, frame, DispatchScope::Replay) {
+            None => None,
+            Some(FrameOutcome::Reply(reply) | FrameOutcome::DryRun(reply)) => Some(reply),
+            Some(FrameOutcome::Pending(forward)) => {
+                return Err(ApiError::new(
+                    "REPLAY",
+                    &format!(
+                        "recorded API envelope {} needs its plugin to replay",
+                        forward.method
+                    ),
+                ));
+            }
+        };
+        if let Some(reply) = reply
+            && let Ok(value) = serde_json::from_str::<serde_json::Value>(&reply)
+            && let Some(err) = value.get("error")
+        {
+            return Err(ApiError::new(
+                "REPLAY",
+                &format!("recorded API envelope was refused on replay: {err}"),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Replays one recorded plugin compound as one undo entry, exactly as
+    /// it landed live: a connection holding the recorded grant (identity
+    /// `plugin:<id>`), a kernel compound with that label and origin, the
+    /// recorded calls (nested compounds recursively), and the end.
+    fn replay_plugin_compound(
+        &mut self,
+        label: String,
+        grant: &serde_json::Value,
+        calls: Vec<recording::RecordedCall>,
+    ) -> Result<(), ApiError> {
+        let conn = self
+            .api_plugin_connection_open(&grant.to_string())
+            .map_err(|e| ApiError::new("REPLAY", &format!("recorded compound grant: {e}")))?;
+        self.prime_replay_connection(conn);
+        let identity = self
+            .api_connections
+            .get(&conn)
+            .expect("just opened")
+            .identity()
+            .to_string();
+        let token = self.doc.begin_compound(kernel::CompoundMeta {
+            label,
+            origin: kernel::HistoryOrigin::Connection(identity),
+            coalesce: None,
+        });
+        self.replay_compounds += 1;
+        let mut compound_conn = Some(conn);
+        let replayed = self.replay_calls(calls, &mut compound_conn);
+        self.replay_compounds -= 1;
+        self.api_connection_close(conn);
+        if let Err(e) = replayed {
+            let _ = self.doc.abort_compound(token);
+            self.full_resync();
+            return Err(e);
+        }
+        let ended = self.doc.end_compound(token);
+        self.full_resync();
+        ended
+            .map(|_| ())
+            .map_err(|e| ApiError::new("REPLAY", &format!("recorded compound did not end: {e}")))
     }
 
     /// Replace this scene's document with one deserialized from `bytes` (a
@@ -10907,16 +16294,26 @@ impl Scene {
     /// other typed error uses, so the UI's plain-language copy table can
     /// key on it.
     pub fn load(&mut self, bytes: &[u8]) -> Result<(), JsError> {
+        self.ensure_not_busy()?;
         self.load_core(bytes).map_err(|e| JsError::new(&e.0))
     }
 
     /// [`Scene::load`] minus the JS-error plumbing: parse, swap, rebuild
     /// caches, and record. The replay arm re-issues loads through this.
     fn load_core(&mut self, bytes: &[u8]) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let new_doc = Document::load(bytes).map_err(|e: LoadError| api_err(&e, &e))?;
 
-        // Swap is committed only after successful parse.
+        // Swap is committed only after successful parse. The new document's
+        // epoch starts above the old one's, so a reader keyed on it never
+        // sees time go back across an open.
+        let epoch = self.doc.document_epoch();
         self.doc = new_doc;
+        self.doc.raise_document_epoch_to(epoch + 1);
+        // The next drain tells every subscriber to read the document anew.
+        self.doc.record_reset();
+        self.last_active_scene = None;
+        self.doc_epoch += 1;
         self.skp_source = None;
         self.pending_skp_source = None;
         // The app reads (and so checks) a file before it loads the blank
@@ -10933,12 +16330,24 @@ impl Scene {
         // whatever the new one put in those slots.
         self.last_import_objects.clear();
         self.health_cache.clear();
+        self.rim_cache.borrow_mut().clear();
+        self.census_cache.borrow_mut().take();
         self.face_range_cache = SecondaryMap::new();
         self.inference = self.fresh_inference();
         // Hidden sets key by dense ids the new document reuses; drop them so a
-        // stale id can't keep a fresh object out of inference.
+        // stale id can't keep a fresh object out of inference. The editing
+        // scope keys the same way: a stale id would quietly favor whatever
+        // the new document put in that slot.
         self.hidden_objects.clear();
         self.hidden_instances.clear();
+        // So do the selection and isolation mirrors: the app clears both on
+        // a load and mirrors the empty state, but a read before that must
+        // not name the new document's entities through the old handles.
+        self.ui_selection.clear();
+        self.ui_isolation = None;
+        self.ui_context.clear();
+        self.inference.set_pick_scope(None);
+        self.pick_scope_frame_sketches = false;
         self.open_draft = None;
         self.active_inference_instance = None;
         self.active_inference_sketches.clear();
@@ -11041,7 +16450,7 @@ mod tests {
     #[test]
     fn load_registers_sketches_with_inference() {
         let mut scene = Scene::new();
-        let sketch = scene.begin_ground_sketch();
+        let sketch = scene.begin_ground_sketch().unwrap();
         scene.sketch_begin_gesture(sketch).unwrap();
         scene
             .sketch_begin_curve_with(sketch, 1.0, 1.0, 0.0, 0.1)
@@ -11049,7 +16458,7 @@ mod tests {
         let n = 24usize;
         let p = |i: usize| {
             let a = 2.0 * std::f64::consts::PI * (i as f64 + 0.5) / (n as f64);
-            (1.0 + 0.1 * a.cos(), 1.0 + 0.1 * a.sin())
+            (1.0 + 0.1 * trig::cos(a), 1.0 + 0.1 * trig::sin(a))
         };
         for i in 0..n {
             let (ax, ay) = p(i);
@@ -11070,7 +16479,7 @@ mod tests {
         let snap = loaded
             .snap(
                 vx, vy, 3.0, 0.0, 0.0, -1.0, 0.002, None, None, None, None, None, None, None, None,
-                None,
+                None, None,
             )
             .unwrap()
             .expect("loaded sketch vertex snaps");
@@ -11079,11 +16488,410 @@ mod tests {
         let snap = loaded
             .snap(
                 1.0, 1.0, 3.0, 0.0, 0.0, -1.0, 0.002, None, None, None, None, None, None, None,
-                None, None,
+                None, None, None,
             )
             .unwrap()
             .expect("loaded circle center snaps");
         assert_eq!(snap.kind(), "center");
+    }
+
+    /// Draws an axis-aligned box `[x0,x1]×[y0,y1]×[0,h]` through the same
+    /// ground-sketch + extrude calls the app makes, returning its handle.
+    fn scene_box(scene: &mut Scene, x0: f64, y0: f64, x1: f64, y1: f64, h: f64) -> u64 {
+        let sketch = scene.begin_ground_sketch().unwrap();
+        scene.sketch_begin_gesture(sketch).unwrap();
+        let corners = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)];
+        for i in 0..4 {
+            let (ax, ay) = corners[i];
+            let (bx, by) = corners[(i + 1) % 4];
+            scene
+                .sketch_add_segment(sketch, ax, ay, 0.0, bx, by, 0.0)
+                .unwrap();
+        }
+        scene.sketch_end_gesture(sketch).unwrap();
+        let region = scene.sketch_regions(sketch).unwrap()[0];
+        scene.extrude_region(sketch, region, h).unwrap()
+    }
+
+    /// Live sibling placements reach INFERENCE through the ordinary
+    /// placement registration (ARCHITECTURE.md 2.11): with a session open
+    /// on one copy, a pick onto the OTHER copy strikes the shared member
+    /// through that copy, and after a push/pull inside the session the pick
+    /// lands on the raised top — not on cached pre-edit geometry. Pins the
+    /// `reconcile` rule that drops a touched object's cached def-member
+    /// candidates whether or not it is a world object, and the
+    /// `session_placements` accessor the renderer re-pulls from.
+    #[test]
+    fn a_live_sibling_snaps_to_the_session_edit_not_to_stale_geometry() {
+        let mut scene = Scene::new();
+        let member = scene_box(&mut scene, 0.0, 0.0, 2.0, 1.0, 1.0);
+        let component = scene.make_component(&[0], &[member]).unwrap();
+        let sibling = scene
+            .place_instance(
+                component,
+                &[1.0, 0.0, 0.0, 4.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            )
+            .unwrap();
+        let entered = scene.instances_of(component)[0];
+        assert_ne!(entered, sibling);
+
+        // Before: a pick straight down onto the sibling's top strikes the
+        // member through the sibling at depth 4 (top at z = 1).
+        let pick = scene
+            .pick_face(5.0, 0.5, 5.0, 0.0, 0.0, -1.0)
+            .expect("hits the sibling");
+        assert_eq!(pick.instance(), Some(sibling));
+        assert!((pick.depth() - 4.0).abs() < 1e-6);
+
+        scene.open_explode_session(entered).unwrap();
+        assert_eq!(scene.session_placements(), vec![sibling]);
+        let pick = scene
+            .pick_face(5.0, 0.5, 5.0, 0.0, 0.0, -1.0)
+            .expect("the live sibling is still pickable mid-session");
+        assert_eq!(pick.instance(), Some(sibling));
+        assert_eq!(pick.object(), member);
+
+        // Raise the member's top by one meter inside the session.
+        let top = scene
+            .pick_face(1.0, 0.5, 5.0, 0.0, 0.0, -1.0)
+            .expect("the session's world member");
+        assert_eq!(top.instance(), None);
+        scene.push_pull(member, top.face(), 1.0).unwrap();
+
+        // The sibling's inference candidates follow: depth 3 (top at z = 2).
+        let pick = scene
+            .pick_face(5.0, 0.5, 5.0, 0.0, 0.0, -1.0)
+            .expect("still pickable after the edit");
+        assert_eq!(pick.instance(), Some(sibling));
+        assert!(
+            (pick.depth() - 3.0).abs() < 1e-6,
+            "sibling pick depth {} should reflect the raised top",
+            pick.depth()
+        );
+        // And an on-face snap over the sibling sits on the raised top.
+        let snap = scene
+            .snap(
+                5.0, 0.5, 5.0, 0.0, 0.0, -1.0, 0.002, None, None, None, None, None, None, None,
+                None, None, None,
+            )
+            .unwrap()
+            .expect("snaps on the sibling");
+        assert!(
+            (snap.z() - 2.0).abs() < 1e-6,
+            "snap z {} on the raised top",
+            snap.z()
+        );
+
+        scene.close_explode_session().unwrap();
+        assert!(scene.session_placements().is_empty());
+        let pick = scene
+            .pick_face(5.0, 0.5, 5.0, 0.0, 0.0, -1.0)
+            .expect("pickable after close");
+        assert!((pick.depth() - 3.0).abs() < 1e-6);
+    }
+
+    /// One row-major 3×4 affine per 12 floats of `session_sibling_frames`.
+    fn frames_of(scene: &Scene) -> Vec<[f64; 12]> {
+        let flat = scene.session_sibling_frames();
+        assert_eq!(flat.len() % 12, 0, "whole affines only");
+        flat.chunks(12)
+            .map(|c| <[f64; 12]>::try_from(c).unwrap())
+            .collect()
+    }
+
+    fn affine_close(a: &[f64; 12], b: &[f64; 12]) -> bool {
+        a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-9)
+    }
+
+    /// `affine` applied to a point, by hand (independent of `Transform`).
+    fn affine_apply(a: &[f64; 12], p: [f64; 3]) -> [f64; 3] {
+        [
+            a[0] * p[0] + a[1] * p[1] + a[2] * p[2] + a[3],
+            a[4] * p[0] + a[5] * p[1] + a[6] * p[2] + a[7],
+            a[8] * p[0] + a[9] * p[1] + a[10] * p[2] + a[11],
+        ]
+    }
+
+    fn point_close(a: [f64; 3], b: [f64; 3]) -> bool {
+        a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-9)
+    }
+
+    /// Where a sibling draws the session's world geometry
+    /// (`session_sibling_frames`, ARCHITECTURE.md 2.11): the inverse
+    /// session pose then the sibling's own. The entered copy is ROTATED
+    /// and uniformly scaled, so the two orders do not commute and a
+    /// swapped composition lands the frame elsewhere; one sibling is
+    /// non-uniformly scaled and one is mirrored (both legal for a
+    /// placement that is not entered). The entered copy is never listed,
+    /// a hidden sibling is not either, and there is nothing outside a
+    /// session.
+    #[test]
+    fn sibling_frames_map_session_world_coordinates_onto_each_other_copy() {
+        let mut scene = Scene::new();
+        assert!(scene.session_sibling_frames().is_empty());
+        let member = scene_box(&mut scene, 0.0, 0.0, 2.0, 1.0, 1.0);
+        let entered = scene.make_component(&[0], &[member]).unwrap();
+        let component = scene.instance_def(entered).unwrap();
+        // The copy to enter: scale 2, rotate 90° about Z, translate (4, 0, 0)
+        // — E(q) = (4 − 2·q.y, 2·q.x, 2·q.z). `transform_instance` composes
+        // onto the identity pose it was made with.
+        let e = [0.0, -2.0, 0.0, 4.0, 2.0, 0.0, 0.0, 0.0, 0.0, 0.0, 2.0, 0.0];
+        scene.transform_instance(entered, &e).unwrap();
+        // Siblings: the definition as authored, at the origin…
+        let plain = scene
+            .place_instance(
+                component,
+                &[1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            )
+            .unwrap();
+        // …stretched ×2 along Y at (0, 7, 0)…
+        let stretched = scene
+            .place_instance(
+                component,
+                &[1.0, 0.0, 0.0, 0.0, 0.0, 2.0, 0.0, 7.0, 0.0, 0.0, 1.0, 0.0],
+            )
+            .unwrap();
+        // …and mirrored across X at (10, 0, 0).
+        let mirrored = scene
+            .place_instance(
+                component,
+                &[-1.0, 0.0, 0.0, 10.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            )
+            .unwrap();
+        assert!(scene.session_sibling_frames().is_empty(), "no session open");
+
+        scene.open_explode_session(entered).unwrap();
+        let frames = frames_of(&scene);
+        assert_eq!(
+            frames.len(),
+            3,
+            "three siblings, the entered copy not among them: {frames:?}"
+        );
+        // The plain sibling's frame is E⁻¹ exactly: q = ((p.y)/2, (4 − p.x)/2, p.z/2).
+        let e_inv = [0.0, 0.5, 0.0, 0.0, -0.5, 0.0, 0.0, 2.0, 0.0, 0.0, 0.5, 0.0];
+        assert!(
+            frames.iter().any(|f| affine_close(f, &e_inv)),
+            "plain sibling frame = E⁻¹: {frames:?}"
+        );
+        // The mirrored sibling's frame is M∘E⁻¹ exactly.
+        let m_e_inv = [
+            0.0, -0.5, 0.0, 10.0, -0.5, 0.0, 0.0, 2.0, 0.0, 0.0, 0.5, 0.0,
+        ];
+        assert!(
+            frames.iter().any(|f| affine_close(f, &m_e_inv)),
+            "mirrored sibling frame = M∘E⁻¹: {frames:?}"
+        );
+        // Every frame maps the entered copy's image of the box corner
+        // q = (2, 1, 1) — session world point E(q) = (2, 4, 2) — onto that
+        // sibling's own image of q.
+        let p = [2.0, 4.0, 2.0];
+        let images: Vec<[f64; 3]> = frames.iter().map(|f| affine_apply(f, p)).collect();
+        for want in [[2.0, 1.0, 1.0], [2.0, 9.0, 1.0], [8.0, 1.0, 1.0]] {
+            assert!(
+                images.iter().any(|&got| point_close(got, want)),
+                "no frame maps E(q) onto {want:?}: {images:?}"
+            );
+        }
+
+        // A sibling hidden by eye or tag, or isolated away (the app pushes
+        // all three through `set_hidden`) draws nothing, so it has no frame.
+        scene.set_hidden(&[], &[stretched, mirrored]);
+        let frames = frames_of(&scene);
+        assert_eq!(frames.len(), 1);
+        assert!(affine_close(&frames[0], &e_inv));
+        scene.set_hidden(&[], &[]);
+        assert_eq!(frames_of(&scene).len(), 3);
+        let _ = plain;
+
+        scene.close_explode_session().unwrap();
+        assert!(scene.session_sibling_frames().is_empty());
+    }
+
+    /// A placement reached through ANOTHER definition that nests the one
+    /// on loan is an image too, at the nesting pose composed in: the
+    /// session's world coordinates, through the inverse session pose, the
+    /// nested placement's local pose, then the outer instance's own — the
+    /// outer pose is a rotation, so the order shows. A nested placement
+    /// hidden by eye or by tag inside its definition, and an outer
+    /// instance hidden or isolated away, have no frame.
+    #[test]
+    fn sibling_frames_compose_nesting_poses_for_placements_inside_other_definitions() {
+        let mut scene = Scene::new();
+        let member = scene_box(&mut scene, 0.0, 0.0, 2.0, 1.0, 1.0);
+        let inner_copy = scene.make_component(&[0], &[member]).unwrap();
+        let inner = scene.instance_def(inner_copy).unwrap();
+        // A second placement of the inner definition at L = (0, 3, 0),
+        // wrapped in an outer definition, whose instance is then posed at
+        // W = rotate 90° about Z, translate (10, 0, 0).
+        let nested = scene
+            .place_instance(
+                inner,
+                &[1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 3.0, 0.0, 0.0, 1.0, 0.0],
+            )
+            .unwrap();
+        let outer_copy = scene.make_component(&[2], &[nested]).unwrap();
+        let outer = scene.instance_def(outer_copy).unwrap();
+        scene
+            .transform_instance(
+                outer_copy,
+                &[0.0, -1.0, 0.0, 10.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            )
+            .unwrap();
+        assert_ne!(inner, outer);
+
+        // Enter the inner copy at the origin (session world = definition
+        // local): the one other image is W∘L, q ↦ (7 − q.y, q.x, q.z).
+        scene.open_explode_session(inner_copy).unwrap();
+        assert_eq!(scene.session_placements(), vec![outer_copy]);
+        let frames = frames_of(&scene);
+        assert_eq!(frames.len(), 1, "{frames:?}");
+        let w_l = [0.0, -1.0, 0.0, 7.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+        assert!(affine_close(&frames[0], &w_l), "{frames:?}");
+        assert!(point_close(
+            affine_apply(&frames[0], [2.0, 1.0, 1.0]),
+            [6.0, 2.0, 1.0]
+        ));
+
+        // The nested placement hidden inside its definition (eye): no image.
+        scene.set_node_user_hidden(2, nested, true).unwrap();
+        assert!(frames_of(&scene).is_empty(), "eye-hidden member");
+        scene.set_node_user_hidden(2, nested, false).unwrap();
+        assert_eq!(frames_of(&scene).len(), 1);
+        // The nested placement on a hidden tag: no image.
+        scene
+            .add_node_tag(2, nested, vec!["Fixtures".to_string()])
+            .unwrap();
+        scene.set_tag_hidden("Fixtures".to_string(), true).unwrap();
+        assert!(frames_of(&scene).is_empty(), "tag-hidden member");
+        scene.set_tag_hidden("Fixtures".to_string(), false).unwrap();
+        assert_eq!(frames_of(&scene).len(), 1);
+        // The outer instance hidden or isolated away (`set_hidden`): no image.
+        scene.set_hidden(&[], &[outer_copy]);
+        assert!(frames_of(&scene).is_empty(), "hidden outer placement");
+        scene.set_hidden(&[], &[]);
+        assert_eq!(frames_of(&scene).len(), 1);
+        scene.close_explode_session().unwrap();
+    }
+
+    /// `SnapJs::pierces_face` tells the app which Intersection it holds: an
+    /// edge passing through a face of another Object (the panel's top edge
+    /// entering the wall's face, as in e2e/edge-pierce-snap.spec.ts) is
+    /// one, a named point is not.
+    #[test]
+    fn a_snap_reports_whether_its_intersection_pierces_a_face() {
+        let mut scene = Scene::new();
+        let _wall = scene_box(&mut scene, 1.0, 0.0, 1.5, 2.0, 1.0);
+        let _panel = scene_box(&mut scene, 0.0, 0.9, 1.3, 1.0, 0.6);
+        // Aim at the piercing (1, 0.9, 0.6) from in front of the wall, left
+        // of the panel and above it, two metres out.
+        let pierce = [1.0, 0.9, 0.6];
+        let dir: [f64; 3] = [-2.0, -0.6, 0.9];
+        let n = (dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]).sqrt();
+        let d = [dir[0] / n, dir[1] / n, dir[2] / n];
+        let o = [
+            pierce[0] + d[0] * 2.0,
+            pierce[1] + d[1] * 2.0,
+            pierce[2] + d[2] * 2.0,
+        ];
+        let snap = scene
+            .snap(
+                o[0], o[1], o[2], -d[0], -d[1], -d[2], 0.002, None, None, None, None, None, None,
+                None, None, None, None,
+            )
+            .unwrap()
+            .expect("snaps at the piercing");
+        assert_eq!(snap.kind(), "intersection");
+        assert!(
+            snap.pierces_face(),
+            "the panel's edge pierces the wall's face"
+        );
+        assert!(point_close([snap.x(), snap.y(), snap.z()], pierce));
+
+        // The panel's top-front corner (0, 0.9, 0.6): an endpoint, no pierce.
+        let corner = [0.0, 0.9, 0.6];
+        let o = [
+            corner[0] + d[0] * 2.0,
+            corner[1] + d[1] * 2.0,
+            corner[2] + d[2] * 2.0,
+        ];
+        let snap = scene
+            .snap(
+                o[0], o[1], o[2], -d[0], -d[1], -d[2], 0.002, None, None, None, None, None, None,
+                None, None, None, None,
+            )
+            .unwrap()
+            .expect("snaps at the corner");
+        assert_eq!(snap.kind(), "endpoint");
+        assert!(!snap.pierces_face());
+    }
+
+    /// `SnapJs::kind` names the line where two Objects' faces meet, and
+    /// `SnapJs::meeting_line` hands the app its two ends for the cue; every
+    /// other snap has no line.
+    #[test]
+    fn a_snap_on_a_meeting_line_reports_the_lines_ends() {
+        let mut scene = Scene::new();
+        let _wall = scene_box(&mut scene, 1.0, 0.0, 1.5, 2.0, 1.0);
+        // A block half a metre tall standing through the wall's near face:
+        // its top meets the face along (1, 0.6..1.4, 0.5).
+        let _block = scene_box(&mut scene, 0.5, 0.6, 1.2, 1.4, 0.5);
+        // Aim at the top line a third of the way along, from in front of
+        // the wall and above.
+        let at = [1.0, 0.8667, 0.5];
+        let eye = [-1.0, 1.0, 1.4];
+        let d = [at[0] - eye[0] - 0.001, at[1] - eye[1], at[2] - eye[2]];
+        let snap = scene
+            .snap(
+                eye[0], eye[1], eye[2], d[0], d[1], d[2], 0.002, None, None, None, None, None,
+                None, None, None, None, None,
+            )
+            .unwrap()
+            .expect("snaps on the meeting line");
+        assert_eq!(snap.kind(), "on-intersection-line");
+        // On two faces at once: never reported as a face pick.
+        assert_eq!(snap.element_kind().as_deref(), Some("meeting-line"));
+        assert!(snap.object().is_some() && snap.element().is_some());
+        let line = snap.meeting_line().expect("the line's ends");
+        assert_eq!(line.len(), 6);
+        let mut ys = [line[1], line[4]];
+        ys.sort_by(f64::total_cmp);
+        assert!(
+            point_close([line[0], ys[0], line[2]], [1.0, 0.6, 0.5]),
+            "{line:?}"
+        );
+        assert!(
+            point_close([line[3], ys[1], line[5]], [1.0, 1.4, 0.5]),
+            "{line:?}"
+        );
+        assert!((snap.z() - 0.5).abs() < 1e-9 && (snap.x() - 1.0).abs() < 1e-9);
+        assert!(!snap.pierces_face());
+        // A plain face point carries no line.
+        let at = [1.0, 1.0, 0.8];
+        let d = [at[0] - eye[0] - 0.001, at[1] - eye[1], at[2] - eye[2]];
+        let snap = scene
+            .snap(
+                eye[0], eye[1], eye[2], d[0], d[1], d[2], 0.002, None, None, None, None, None,
+                None, None, None, None, None,
+            )
+            .unwrap()
+            .expect("snaps on the wall");
+        assert_eq!(snap.kind(), "on-face");
+        assert_eq!(snap.element_kind().as_deref(), Some("face"));
+        assert!(snap.meeting_line().is_none());
+        // The line's middle, a Midpoint carrying the line: no face pick
+        // either.
+        let at = [1.0, 1.0, 0.5];
+        let d = [at[0] - eye[0] - 0.001, at[1] - eye[1], at[2] - eye[2]];
+        let snap = scene
+            .snap(
+                eye[0], eye[1], eye[2], d[0], d[1], d[2], 0.002, None, None, None, None, None,
+                None, None, None, None, None,
+            )
+            .unwrap()
+            .expect("snaps on the line's middle");
+        assert_eq!(snap.kind(), "midpoint");
+        assert_eq!(snap.element_kind().as_deref(), Some("meeting-line"));
+        assert!(snap.meeting_line().is_some());
     }
 
     /// `Scene::export` reaches the exact same shared writer
@@ -11096,16 +16904,16 @@ mod tests {
     #[test]
     fn export_reaches_the_shared_writer_with_solids_only_false() {
         let mut scene = Scene::new();
-        let sketch = scene.begin_ground_sketch();
+        let sketch = scene.begin_ground_sketch().unwrap();
         draw_rect(&mut scene, sketch, 0.0, 0.0, 1.0, 1.0);
         let region = scene.sketch_regions(sketch).unwrap()[0];
         scene.extrude_region(sketch, region, 1.0).unwrap();
 
         let bytes = scene
-            .export("stl", 0)
+            .export("stl", 0, None)
             .expect("a solid box exports")
             .expect("bytes come back, not a nothing-to-export null");
-        let direct = mesh_export::export(&scene.doc, "stl", 0, false)
+        let direct = mesh_export::export(&scene.doc, "stl", 0, false, false)
             .expect("the same writer, called directly with the same solids_only");
         assert_eq!(
             bytes, direct,
@@ -11115,20 +16923,20 @@ mod tests {
         // USDZ reaches the same shared writer too — the newest format on
         // the same dispatch match arm.
         let usdz_bytes = scene
-            .export("usdz", 0)
+            .export("usdz", 0, None)
             .expect("a solid box exports to usdz")
             .expect("bytes come back, not a nothing-to-export null");
-        let usdz_direct = mesh_export::export(&scene.doc, "usdz", 0, false)
+        let usdz_direct = mesh_export::export(&scene.doc, "usdz", 0, false, false)
             .expect("the same writer, called directly with the same solids_only");
         assert_eq!(usdz_bytes, usdz_direct);
 
         // An unrecognized format still refuses, typed.
-        let err = scene.export("obj", 0).unwrap_err();
+        let err = scene.export("obj", 0, None).unwrap_err();
         assert!(format!("{err:?}").contains("host_capability_missing"));
 
         // Nothing at all: None, not a refusal.
         let empty = Scene::new();
-        assert_eq!(empty.export("stl", 0).unwrap(), None);
+        assert_eq!(empty.export("stl", 0, None).unwrap(), None);
     }
 
     /// Move+Alt's sketch copy is a translated replay through the drawing
@@ -11139,7 +16947,7 @@ mod tests {
     #[test]
     fn replay_copied_circle_keeps_center_snaps_even_overlapping() {
         let mut scene = Scene::new();
-        let sketch = scene.begin_ground_sketch();
+        let sketch = scene.begin_ground_sketch().unwrap();
         let (cx, cy, r, n) = (1.0f64, 1.0f64, 0.1f64, 24usize);
         // Draw the original circle inside a gesture, like CircleTool.
         scene.sketch_begin_gesture(sketch).unwrap();
@@ -11148,7 +16956,7 @@ mod tests {
             .unwrap();
         let p = |i: usize| {
             let a = 2.0 * std::f64::consts::PI * (i as f64 + 0.5) / (n as f64);
-            (cx + r * a.cos(), cy + r * a.sin())
+            (cx + r * trig::cos(a), cy + r * trig::sin(a))
         };
         for i in 0..n {
             let (ax, ay) = p(i);
@@ -11194,6 +17002,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .unwrap()
             .expect("something snaps at the copy center");
@@ -11204,7 +17013,7 @@ mod tests {
         let snap0 = scene
             .snap(
                 cx, cy, 3.0, 0.0, 0.0, -1.0, 0.002, None, None, None, None, None, None, None, None,
-                None,
+                None, None,
             )
             .unwrap()
             .expect("original center snaps");
@@ -11226,7 +17035,7 @@ mod tests {
     #[test]
     fn drawn_circle_rim_snaps_all_select_the_curve() {
         let mut scene = Scene::new();
-        let sketch = scene.begin_ground_sketch();
+        let sketch = scene.begin_ground_sketch().unwrap();
         let (cx, cy, r, n) = (1.0f64, 2.0f64, 0.5f64, 24usize);
         scene.sketch_begin_gesture(sketch).unwrap();
         scene
@@ -11236,7 +17045,7 @@ mod tests {
         // cardinal, so a Quadrant candidate is never shadowed by an Endpoint.
         let p = |i: usize| {
             let a = 2.0 * std::f64::consts::PI * (i as f64 + 0.5) / (n as f64);
-            (cx + r * a.cos(), cy + r * a.sin())
+            (cx + r * trig::cos(a), cy + r * trig::sin(a))
         };
         for i in 0..n {
             let (ax, ay) = p(i);
@@ -11259,7 +17068,7 @@ mod tests {
         let c = scene
             .snap(
                 cx, cy, 3.0, 0.0, 0.0, -1.0, 0.004, None, None, None, None, None, None, None, None,
-                None,
+                None, None,
             )
             .unwrap()
             .expect("center snaps");
@@ -11276,11 +17085,11 @@ mod tests {
         let mut endpoint_hits = 0usize;
         for k in 0..steps {
             let a = 2.0 * std::f64::consts::PI * (k as f64) / (steps as f64);
-            let (wx, wy) = (cx + r * a.cos(), cy + r * a.sin());
+            let (wx, wy) = (cx + r * trig::cos(a), cy + r * trig::sin(a));
             let snap = scene
                 .snap(
                     wx, wy, 3.0, 0.0, 0.0, -1.0, 0.01, None, None, None, None, None, None, None,
-                    None, None,
+                    None, None, None,
                 )
                 .unwrap()
                 .unwrap_or_else(|| panic!("a point on the rim always snaps (angle {a})"));
@@ -11344,7 +17153,7 @@ mod tests {
     #[test]
     fn drawn_polygon_center_selects_the_polygon_through_production_wiring() {
         let mut scene = Scene::new();
-        let sketch = scene.begin_ground_sketch();
+        let sketch = scene.begin_ground_sketch().unwrap();
         let (cx, cy, r, n) = (2.0f64, 1.0f64, 0.6f64, 6usize);
         scene.sketch_begin_gesture(sketch).unwrap();
         let curve = scene
@@ -11353,7 +17162,7 @@ mod tests {
         // A hexagon's six sides, drawn corner to corner exactly like the tool.
         let p = |i: usize| {
             let a = 2.0 * std::f64::consts::PI * (i as f64) / (n as f64);
-            (cx + r * a.cos(), cy + r * a.sin())
+            (cx + r * trig::cos(a), cy + r * trig::sin(a))
         };
         for i in 0..n {
             let (ax, ay) = p(i);
@@ -11369,7 +17178,7 @@ mod tests {
         let c = scene
             .snap(
                 cx, cy, 3.0, 0.0, 0.0, -1.0, 0.004, None, None, None, None, None, None, None, None,
-                None,
+                None, None,
             )
             .unwrap()
             .expect("polygon center snaps");
@@ -11420,7 +17229,7 @@ mod tests {
     #[test]
     fn drawn_rectangle_is_one_scene_undo_step() {
         let mut scene = Scene::new();
-        let sketch = scene.begin_ground_sketch();
+        let sketch = scene.begin_ground_sketch().unwrap();
         assert!(!scene.can_scene_undo(), "an empty sketch is not a step");
 
         scene.sketch_begin_gesture(sketch).unwrap();
@@ -11450,9 +17259,9 @@ mod tests {
     #[test]
     fn pick_sketch_region_targets_any_sketch() {
         let mut scene = Scene::new();
-        let s1 = scene.begin_ground_sketch();
+        let s1 = scene.begin_ground_sketch().unwrap();
         draw_rect(&mut scene, s1, 0.0, 0.0, 1.0, 1.0);
-        let s2 = scene.begin_ground_sketch();
+        let s2 = scene.begin_ground_sketch().unwrap();
         draw_rect(&mut scene, s2, 2.0, 0.0, 3.0, 1.0);
 
         // A downward ray over each rectangle finds its own sketch — including
@@ -11512,7 +17321,7 @@ mod tests {
     #[test]
     fn the_precision_flag_selects_uniform_snap_weights() {
         let mut scene = Scene::new();
-        let sketch = scene.begin_ground_sketch();
+        let sketch = scene.begin_ground_sketch().unwrap();
         let (cx, cy, r, n) = (1.0f64, 1.0f64, 0.1f64, 24usize);
         scene.sketch_begin_gesture(sketch).unwrap();
         scene
@@ -11522,7 +17331,7 @@ mod tests {
         // and the facet vertex beside it are distinct competing candidates.
         let p = |i: usize| {
             let a = 2.0 * std::f64::consts::PI * (i as f64 + 0.5) / (n as f64);
-            (cx + r * a.cos(), cy + r * a.sin())
+            (cx + r * trig::cos(a), cy + r * trig::sin(a))
         };
         for i in 0..n {
             let (ax, ay) = p(i);
@@ -11543,7 +17352,7 @@ mod tests {
         let default_snap = scene
             .snap(
                 ax, ay, 3.0, 0.0, 0.0, -1.0, 0.004, None, None, None, None, None, None, None, None,
-                None,
+                None, None,
             )
             .unwrap()
             .expect("something snaps");
@@ -11566,6 +17375,7 @@ mod tests {
                 None,
                 None,
                 Some(true),
+                None,
                 None,
                 None,
                 None,
@@ -11595,6 +17405,7 @@ mod tests {
                 None,
                 None,
                 Some(false),
+                None,
                 None,
                 None,
                 None,
@@ -11699,7 +17510,7 @@ mod tests {
     fn finding1_shared_partition_edge_resolves_to_the_edge() {
         use inference::{PickRay, SnapKind, SnapQuery};
         let mut scene = Scene::new();
-        let s = scene.begin_ground_sketch();
+        let s = scene.begin_ground_sketch().unwrap();
         // A 2×1 outer rectangle plus a partition at x=1 → two 1×1 regions
         // sharing that edge.
         for (a, b) in [
@@ -11773,14 +17584,14 @@ mod tests {
         use inference::{PickRay, SnapKind, SnapQuery};
         let mut scene = Scene::new();
         // A solid box on the ground (a face somewhere along z ≤ 1).
-        let s1 = scene.begin_ground_sketch();
+        let s1 = scene.begin_ground_sketch().unwrap();
         draw_rect(&mut scene, s1, 0.0, 0.0, 2.0, 2.0);
         let r1 = scene.sketch_regions(s1).unwrap()[0];
         let box_obj = scene.extrude_region(s1, r1, 1.0).unwrap();
 
         // A sketch region lifted to z = 2 — in FRONT of the box along a
         // downward ray.
-        let s2 = scene.begin_ground_sketch();
+        let s2 = scene.begin_ground_sketch().unwrap();
         draw_rect(&mut scene, s2, 0.5, 0.5, 1.5, 1.5);
         scene
             .transform_sketch(
@@ -11843,7 +17654,7 @@ mod tests {
         let mut scene = Scene::new();
         // A rectangle spanning the origin, extruded into a pit — its top face
         // lies on z = 0 through the origin, unoccluded from above.
-        let s = scene.begin_ground_sketch();
+        let s = scene.begin_ground_sketch().unwrap();
         draw_rect(&mut scene, s, -1.0, -1.0, 1.0, 1.0);
         let r = scene.sketch_regions(s).unwrap()[0];
         let pit = scene.extrude_region(s, r, -1.0).unwrap();
@@ -12006,6 +17817,7 @@ mod tests {
             section: None,
             view_style: None,
             extra: ImportSceneExtra::default(),
+            geo: None,
         };
 
         log::reset();
@@ -12172,6 +17984,442 @@ mod tests {
         assert!(!replayed.is_recording());
     }
 
+    /// A scene's own transition and delay are set through the wasm
+    /// surface, listed in `scenes_json`, recorded, and replayed.
+    #[test]
+    fn scene_timings_set_list_record_and_replay() {
+        recording::reset();
+        let mut scene = Scene::new();
+        scene.start_recording();
+        let sid = scene.add_scene(None, 0, None, None, None).unwrap();
+        let listed = |s: &Scene| -> serde_json::Value {
+            serde_json::from_str::<serde_json::Value>(&s.scenes_json()).unwrap()[0].clone()
+        };
+        assert!(listed(&scene)["transitionS"].is_null());
+        scene.set_scene_transition(sid, Some(1.5)).unwrap();
+        scene.set_scene_delay(sid, Some(0.25)).unwrap();
+        assert_eq!(listed(&scene)["transitionS"], 1.5);
+        assert_eq!(listed(&scene)["delayS"], 0.25);
+        // A negative or non-finite time is refused and leaves it alone.
+        assert!(scene.set_scene_transition(sid, Some(-1.0)).is_err());
+        assert!(scene.set_scene_delay(sid, Some(f64::NAN)).is_err());
+        assert_eq!(listed(&scene)["transitionS"], 1.5);
+        scene.set_scene_delay(sid, None).unwrap();
+        assert!(listed(&scene)["delayS"].is_null());
+        scene.stop_recording();
+        let golden = scene.state_hash();
+        let json = scene.take_recording();
+
+        let mut replayed = Scene::new();
+        assert_eq!(replayed.replay(&json).unwrap(), golden);
+        let again = listed(&replayed);
+        assert_eq!(again["transitionS"], 1.5);
+        assert!(again["delayS"].is_null());
+        // Saved in the document too.
+        let reloaded = kernel::Document::load(&scene.save()).unwrap();
+        assert_eq!(reloaded.scenes()[0].transition_s, Some(1.5));
+    }
+
+    /// The 2D corner blends record and replay: a world sketch corner and a
+    /// drafted face corner, replayed into a fresh scene, reproduce the
+    /// golden state hash and the saved bytes. Also pins the hover queries
+    /// and the typed refusals at the boundary.
+    #[test]
+    fn corner_blends_record_and_replay() {
+        recording::reset();
+        let mut scene = Scene::new();
+        scene.start_recording();
+
+        // A world sketch corner.
+        let (sketch, _region) = ground_unit_square_at(&mut scene, 5.0, 0.0);
+        let hit = scene
+            .pick_sketch_vertex(5.0, 0.0, 5.0, 0.0, 0.0, -1.0)
+            .expect("a vertex sits under the corner");
+        let corner = scene
+            .sketch_blendable_corner_at(sketch, 5.01, 0.01, 0.0, 0.1)
+            .unwrap()
+            .expect("the corner is blendable");
+        assert_eq!(corner, hit.vertex());
+        assert_eq!(
+            scene
+                .sketch_blendable_corner_at(sketch, 50.0, 0.0, 0.0, 0.1)
+                .unwrap(),
+            None
+        );
+        let round = r#"{"kind":"round","radius":0.2,"segments":6}"#;
+        let err = scene
+            .sketch_blend_corner(
+                sketch,
+                corner,
+                r#"{"kind":"round","radius":9.0,"segments":6}"#,
+            )
+            .unwrap_err();
+        assert!(err.0.starts_with("CornerRadiusTooLarge:"), "{}", err.0);
+        let err = scene.sketch_blend_corner(sketch, corner, "{").unwrap_err();
+        assert!(err.0.starts_with("BadSpec:"), "{}", err.0);
+        scene.sketch_blend_corner(sketch, corner, round).unwrap();
+        assert_eq!(
+            scene
+                .sketch_blendable_corner_at(sketch, 5.0, 0.0, 0.0, 0.1)
+                .unwrap(),
+            None,
+            "the rounded corner is gone"
+        );
+
+        // A drafted corner on a box top.
+        let (s1, r1) = ground_unit_square(&mut scene);
+        scene.extrude_region(s1, r1, 1.0).unwrap();
+        let ctx = r#"{"plane":[0,0,1,0,0,1]}"#;
+        assert_eq!(
+            scene
+                .draft_blendable_corner_at(ctx, 0.0, 0.0, 1.0, 0.1)
+                .unwrap(),
+            None,
+            "the solid's own corners never blend"
+        );
+        let draft = scene
+            .draft_begin_plane(0.0, 0.0, 1.0, 0.0, 0.0, 1.0, "Round corner")
+            .unwrap();
+        let pts = [(0.2, 0.2), (0.7, 0.2), (0.7, 0.7), (0.2, 0.7)];
+        for i in 0..4 {
+            let (a, b) = (pts[i], pts[(i + 1) % 4]);
+            scene
+                .draft_add_segment(draft, a.0, a.1, 1.0, b.0, b.1, 1.0)
+                .unwrap();
+        }
+        let err = scene
+            .draft_blend_corner(draft, 0.9, 0.9, 1.0, round)
+            .unwrap_err();
+        assert!(err.0.starts_with("UnknownVertex:"), "{}", err.0);
+        scene
+            .draft_blend_corner(draft, 0.7, 0.7, 1.0, round)
+            .unwrap();
+        scene.draft_end(draft).unwrap();
+        let near = scene
+            .draft_blendable_corner_at(ctx, 0.21, 0.19, 1.0, 0.1)
+            .unwrap()
+            .expect("the imprint's other corner is blendable");
+        assert!((near[0] - 0.2).abs() < 1e-9 && (near[1] - 0.2).abs() < 1e-9);
+
+        // A drafted corner in the face's own corner leaves the face.
+        let draft = scene
+            .draft_begin_plane(0.0, 0.0, 1.0, 0.0, 0.0, 1.0, "Round corner")
+            .unwrap();
+        for (a, b) in [
+            ((0.0, 0.0), (0.4, 0.0)),
+            ((0.4, 0.0), (0.4, 0.4)),
+            ((0.4, 0.4), (0.0, 0.4)),
+            ((0.0, 0.4), (0.0, 0.0)),
+        ] {
+            scene
+                .draft_add_segment(draft, a.0, a.1, 1.0, b.0, b.1, 1.0)
+                .unwrap();
+        }
+        let err = scene
+            .draft_blend_corner(draft, 0.0, 0.0, 1.0, round)
+            .unwrap_err();
+        assert!(err.0.starts_with("CornerLeavesFace:"), "{}", err.0);
+        assert!(scene.draft_cancel(draft).unwrap());
+
+        scene.stop_recording();
+        let golden = scene.state_hash();
+        let json = scene.take_recording();
+        assert!(json.contains("SketchBlendCorner") || json.contains("sketch_blend_corner"));
+        assert!(json.contains("DraftBlendCorner") || json.contains("draft_blend_corner"));
+
+        let mut replayed = Scene::new();
+        assert_eq!(replayed.replay(&json).unwrap(), golden);
+        assert_eq!(replayed.save(), scene.save());
+
+        // One undo takes the drafted corner back out; another the sketch's.
+        scene.scene_undo().unwrap();
+    }
+
+    /// The Fillet tool's wasm surface end to end: pick an edge, expand it,
+    /// preview, clamp, commit, resize, remove; then the recording replays
+    /// into a fresh scene with the same state hash and saved bytes.
+    #[test]
+    fn blend_calls_record_and_replay() {
+        recording::reset();
+        let mut scene = Scene::new();
+        scene.start_recording();
+        let (s, r) = ground_unit_square(&mut scene);
+        let obj = scene.extrude_region(s, r, 1.0).unwrap();
+
+        // A ray onto the top face near its y = 0 edge picks that edge.
+        let pick = scene
+            .pick_solid_edge(0.5, 0.02, 10.0, 0.0, 0.0, -1.0, 0.05)
+            .unwrap()
+            .expect("the top edge is in range");
+        assert_eq!(pick.object(), obj);
+        assert!(!pick.smooth());
+        assert!((pick.z() - 1.0).abs() < 1e-9);
+        // Out of range, nothing.
+        assert!(
+            scene
+                .pick_solid_edge(0.5, 0.5, 10.0, 0.0, 0.0, -1.0, 0.05)
+                .unwrap()
+                .is_none()
+        );
+        let chain = scene.logical_edge(obj, pick.edge(), true).unwrap();
+        assert_eq!(chain.edges(), vec![pick.edge()]);
+        assert_eq!(chain.segments().len(), 6);
+        assert_eq!(chain.convexity(), 0);
+        assert!(!chain.closed());
+        assert!((chain.dihedral() - std::f64::consts::FRAC_PI_2).abs() < 1e-9);
+        let face = scene.pick_face(0.5, 0.5, 10.0, 0.0, 0.0, -1.0).unwrap();
+        let ring = scene
+            .face_loop_edges(obj, face.face(), 0.5, 0.02, 1.0)
+            .unwrap();
+        assert_eq!(ring.edges().len(), 4);
+        assert!(ring.closed());
+        assert_eq!(scene.object_sharp_edges(obj).unwrap().len(), 12);
+        assert_eq!(scene.edge_faces(obj, pick.edge()).unwrap().len(), 2);
+        assert_eq!(
+            scene.objects_touching_point(0.5, 0.5, 1.0, 1e-6).unwrap(),
+            vec![obj]
+        );
+
+        let spec = |radius: f64| {
+            format!(
+                r#"{{"edges":["{}"],"profile":{{"kind":"round","radius":{radius},"segments":6}}}}"#,
+                pick.edge()
+            )
+        };
+        let max = scene.max_blend_size(obj, &spec(5.0)).unwrap();
+        assert!(max > 0.4 && max < 5.0, "{max}");
+
+        // A preview is pure and clamps an oversize request.
+        let preview = scene.blend_preview(obj, &spec(0.1)).unwrap();
+        assert!(!preview.clamped());
+        assert!((preview.applied_size() - 0.1).abs() < 1e-12);
+        assert!(!preview.replaced_faces().is_empty());
+        assert!(!preview.indices().is_empty());
+        assert!(!preview.rail_positions().is_empty());
+        assert_eq!(preview.three_way_corners(), 0);
+        // A typed size previews as the commit makes it: here, as the
+        // pointer preview does.
+        let typed = scene.blend_preview_typed(obj, &spec(0.1)).unwrap();
+        assert!(!typed.clamped());
+        assert!((typed.applied_size() - 0.1).abs() < 1e-12);
+        assert_eq!(typed.indices(), preview.indices());
+        assert_eq!(typed.replaced_faces(), preview.replaced_faces());
+        // The same clamp past the limit, and the same refusals.
+        let (q, t) = (
+            scene.blend_preview(obj, &spec(5.0)).unwrap(),
+            scene.blend_preview_typed(obj, &spec(5.0)).unwrap(),
+        );
+        assert!(t.clamped());
+        assert_eq!(t.max_size(), q.max_size());
+        assert_eq!(t.limited_by(), q.limited_by());
+        assert_eq!(t.indices(), q.indices());
+        for (o, json) in [(obj, "{".to_owned()), (obj + 999, spec(0.1))] {
+            let code = |e: ApiError| e.0.split(':').next().unwrap_or("").to_owned();
+            let quick = scene.blend_preview(o, &json).map(|_| ()).unwrap_err();
+            let typed = scene.blend_preview_typed(o, &json).map(|_| ()).unwrap_err();
+            assert_eq!(code(typed), code(quick), "{json}");
+        }
+        let big = scene.blend_preview(obj, &spec(5.0)).unwrap();
+        assert!(big.clamped());
+        assert!(big.max_size().is_finite() && big.max_size() < 5.0);
+        assert!(!big.limited_by().is_empty());
+        let err = scene.blend_edges(obj, &spec(5.0)).unwrap_err();
+        assert!(err.0.starts_with("RadiusTooLarge:"), "{}", err.0);
+        let err = scene.blend_edges(obj, "{").unwrap_err();
+        assert!(err.0.starts_with("BadSpec:"), "{}", err.0);
+
+        let hash_before = scene.state_hash();
+        let report = scene.blend_edges(obj, &spec(0.1)).unwrap();
+        assert_eq!(report.blend_ids().len(), 1);
+        assert!(!report.faces().is_empty());
+        assert!((report.size() - 0.1).abs() < 1e-12);
+        let blend = report.blend_ids()[0];
+        assert_eq!(scene.blend_faces(obj, blend).len(), report.faces().len());
+        assert_eq!(scene.blend_of_face(obj, report.faces()[0]), Some(blend));
+        let features = scene.blend_features_json(obj).unwrap();
+        assert!(features.contains("\"fillet\""), "{features}");
+        // One blend alone: exactly the list's row, `null` for an id the
+        // object does not carry, and the list's error for a bad object.
+        let rows = serde_json::from_str::<serde_json::Value>(&features).unwrap();
+        let one = serde_json::from_str::<serde_json::Value>(
+            &scene.blend_feature_json(obj, blend).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(one, rows[0]);
+        let mut keys: Vec<&str> = one
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["faces", "id", "intact", "kind", "size"]);
+        assert_eq!(scene.blend_feature_json(obj, blend + 1).unwrap(), "null");
+        let err = scene.blend_feature_json(obj + 999, blend).unwrap_err();
+        let list_err = scene.blend_features_json(obj + 999).unwrap_err();
+        assert_eq!(err.0, list_err.0);
+
+        let resized = scene
+            .resize_blend_preview(obj, blend, r#"{"kind":"round","radius":0.2,"segments":6}"#)
+            .unwrap();
+        assert!((resized.applied_size() - 0.2).abs() < 1e-12);
+        scene
+            .resize_blend(obj, blend, r#"{"kind":"round","radius":0.2,"segments":6}"#)
+            .unwrap();
+        let blend = scene.blend_features_json(obj).unwrap();
+        let id: u32 = serde_json::from_str::<serde_json::Value>(&blend).unwrap()[0]["id"]
+            .as_u64()
+            .unwrap() as u32;
+        scene.remove_blend(obj, id).unwrap();
+        let err = scene.remove_blend(obj, id).unwrap_err();
+        assert!(err.0.starts_with("UnknownBlend:"), "{}", err.0);
+
+        scene.stop_recording();
+        let golden = scene.state_hash();
+        let json = scene.take_recording();
+        for name in ["blend_edges", "resize_blend", "remove_blend"] {
+            assert!(json.contains(name), "{name} in the recording");
+        }
+        let mut replayed = Scene::new();
+        assert_eq!(replayed.replay(&json).unwrap(), golden);
+        assert_eq!(replayed.save(), scene.save());
+        // Undo goes back through remove, resize, commit.
+        for _ in 0..3 {
+            scene.scene_undo().unwrap();
+        }
+        assert_eq!(scene.state_hash(), hash_before);
+    }
+
+    /// Profile items across the boundary: the bundled list, an item built
+    /// from a bundled id and read back, a thumbnail PNG, and an item built
+    /// from a drawn chain.
+    #[test]
+    fn profile_items_round_trip_through_the_boundary() {
+        use crate::curves_api::{
+            bundled_profiles_json, profile_item_bytes_from_bundled, profile_shape_from_item,
+            render_profile_thumbnail,
+        };
+        let list: serde_json::Value = serde_json::from_str(&bundled_profiles_json()).unwrap();
+        assert_eq!(list.as_array().unwrap().len(), 7);
+        assert_eq!(list[0]["id"], "builtin:ogee");
+        let meta = r#"{"id":"abc","name":"Ogee copy","category":"profile"}"#;
+        let bytes = profile_item_bytes_from_bundled("builtin:ogee", meta).unwrap();
+        let back: serde_json::Value =
+            serde_json::from_str(&profile_shape_from_item(&bytes).unwrap()).unwrap();
+        assert!((back["width"].as_f64().unwrap() - 0.05).abs() < 1e-9);
+        assert_eq!(back["shape"]["b"], list[0]["shape"]["b"]);
+        assert!(
+            profile_item_bytes_from_bundled("builtin:nope", meta)
+                .unwrap_err()
+                .0
+                .starts_with("UnknownProfile:")
+        );
+        // Bytes that are not a profile are refused typed.
+        let mut scene = Scene::new();
+        let (_s, _r) = ground_unit_square(&mut scene);
+        let model = scene.save();
+        assert!(
+            profile_shape_from_item(&model)
+                .unwrap_err()
+                .0
+                .starts_with("InvalidProfile:")
+        );
+
+        let png = render_profile_thumbnail(&list[0]["shape"].to_string(), 64).unwrap();
+        assert_eq!(&png[..4], &[0x89, b'P', b'N', b'G']);
+        assert!(
+            render_profile_thumbnail("{", 64)
+                .unwrap_err()
+                .0
+                .starts_with("BadSpec:")
+        );
+
+        // A drawn chain: two segments in the ground plane.
+        let sketch = scene.begin_ground_sketch().unwrap();
+        for (a, b) in [((0.0, 0.05), (-0.02, 0.02)), ((-0.02, 0.02), (-0.05, 0.0))] {
+            scene
+                .sketch_add_segment(sketch, a.0 + 5.0, a.1, 0.0, b.0 + 5.0, b.1, 0.0)
+                .unwrap();
+        }
+        let edges = scene.sketch_edge_list(sketch).unwrap();
+        assert_eq!(edges.len(), 2);
+        let item = scene
+            .profile_item_bytes_from_chain(sketch, edges.clone(), meta)
+            .unwrap();
+        let read: serde_json::Value =
+            serde_json::from_str(&profile_shape_from_item(&item).unwrap()).unwrap();
+        assert!((read["width"].as_f64().unwrap() - 0.05).abs() < 1e-9);
+        // The same chain as a polyline (a chain drawn on a face).
+        let poly = crate::curves_api::profile_item_bytes_from_polyline(
+            vec![0.0, 0.0, 1.0],
+            vec![5.0, 0.05, 0.0, 4.98, 0.02, 0.0, 4.95, 0.0, 0.0],
+            vec![0.0; 6],
+            vec![f64::NAN, f64::NAN],
+            meta,
+        )
+        .unwrap();
+        let read2: serde_json::Value =
+            serde_json::from_str(&profile_shape_from_item(&poly).unwrap()).unwrap();
+        assert_eq!(read2["shape"], read["shape"]);
+        assert!(
+            scene
+                .profile_item_bytes_from_chain(sketch, vec![], meta)
+                .unwrap_err()
+                .0
+                .starts_with("InvalidProfile:")
+        );
+    }
+
+    /// Array along a path records its call (path JSON verbatim) and replays
+    /// into a fresh scene to the same state hash; the preview placements
+    /// match the committed copies and never record.
+    #[test]
+    fn array_along_path_records_and_replays() {
+        recording::reset();
+        let mut scene = Scene::new();
+        scene.start_recording();
+        let (s1, r1) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s1, r1, 1.0).unwrap();
+        let path_sketch = scene.begin_ground_sketch().unwrap();
+        let report = scene
+            .sketch_add_segment(path_sketch, 0.0, -2.0, 0.0, 4.0, -2.0, 0.0)
+            .unwrap();
+        let edge = report.inner.new_edges[0].data().as_ffi();
+        let path =
+            format!(r#"{{"kind":"sketch_edges","sketch":{path_sketch},"edges":["{edge}"]}}"#);
+
+        let preview = scene
+            .array_along_path_preview_transforms(&path, 4, 1.0, 0.5, true)
+            .unwrap();
+        assert_eq!(preview.len(), 36, "12 floats per copy");
+        let roots = scene
+            .array_along_path(&[0], &[o], &path, 4, 1.0, 0.5, true)
+            .unwrap();
+        assert_eq!(roots.len(), 3);
+        assert_eq!(scene.object_ids().len(), 4);
+
+        let err = scene
+            .array_along_path(&[0], &[o], &path, 1, 1.0, 1.0, true)
+            .unwrap_err();
+        assert!(err.0.starts_with("AmountOutOfRange"), "got {}", err.0);
+        let err = scene
+            .array_along_path(&[0], &[o], "{", 3, 1.0, 1.0, true)
+            .unwrap_err();
+        assert!(err.0.starts_with("BadSpec"), "got {}", err.0);
+
+        scene.stop_recording();
+        let golden = scene.state_hash();
+        let json = scene.take_recording();
+        assert_eq!(
+            json.matches("array_along_path").count(),
+            1,
+            "only the committed call was recorded"
+        );
+        let mut replayed = Scene::new();
+        assert_eq!(replayed.replay(&json).unwrap(), golden);
+        assert_eq!(replayed.save(), scene.save());
+    }
+
     /// A library insert is a committed document mutation: it must be
     /// captured with the item bytes, pose, and provenance embedded, so a
     /// recorded session replays self-contained and reproduces the same
@@ -12194,6 +18442,7 @@ mod tests {
                 true,
                 Some("Chair".to_string()),
                 Some(r#"{"id":"lib-1","category":"component"}"#.to_string()),
+                None,
             )
             .unwrap();
 
@@ -12209,6 +18458,7 @@ mod tests {
                 &identity,
                 Some("lib-1".into()),
                 Some("hash-1".into()),
+                None,
             )
             .unwrap();
         assert_eq!(first.definitions_added, 1);
@@ -12218,6 +18468,7 @@ mod tests {
                 &shifted,
                 Some("lib-1".into()),
                 Some("hash-1".into()),
+                None,
             )
             .unwrap();
         assert_eq!(second.definitions_reused, 1, "same item version → reuse");
@@ -12235,6 +18486,421 @@ mod tests {
         let final_hash = replayed.replay(&json).unwrap();
         assert_eq!(final_hash, golden, "insert+undo replays to the golden hash");
         assert_eq!(replayed.save(), scene.save());
+    }
+
+    /// Library updates (OW-2) through the wasm layer: a saved item carries
+    /// its prints; an inserted copy reads `in_step`, then `library_newer`
+    /// against an edited item (given as prints, or as bytes for an item
+    /// without prints); the update brings it in step as one undo step that
+    /// records and replays exactly; a locked part is skipped and named.
+    #[test]
+    fn library_status_and_update_from_items_replay() {
+        recording::reset();
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let obj = scene.extrude_region(s, r, 1.0).unwrap();
+        let instance = scene.make_component(&[0u8], &[obj]).unwrap();
+        let v1 = scene
+            .extract_item(
+                &[2u8],
+                &[instance],
+                true,
+                Some("Leg".into()),
+                Some(r#"{"id":"leg-1","category":"component"}"#.into()),
+                None,
+            )
+            .unwrap();
+        let summary = kernel::read_item_summary(&v1).unwrap();
+        let sid: u64 = summary
+            .first_component_sid
+            .clone()
+            .unwrap()
+            .parse()
+            .unwrap();
+        let prints = summary.doc_attrs["hew.library"]["prints"]
+            .as_object()
+            .expect("a saved item carries its prints")
+            .clone();
+        assert!(
+            prints[&sid.to_string()]
+                .as_str()
+                .unwrap()
+                .starts_with("p1:")
+        );
+
+        // A model with the item placed twice.
+        let mut model = Scene::new();
+        model.start_recording();
+        for x in [0.0, 3.0] {
+            let at = [1.0, 0.0, 0.0, x, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+            model
+                .insert_item_composed(&v1, &at, Some("leg-1".into()), Some("h1".into()), None)
+                .unwrap();
+        }
+        let def = model.component_ids()[0];
+
+        // v2: the item's leg made taller.
+        let mut v2_doc = Document::load(&v1).unwrap();
+        let c = v2_doc.component_ids()[0];
+        let o = v2_doc.def_members(c).unwrap()[0];
+        let top = v2_doc
+            .object(o)
+            .unwrap()
+            .faces()
+            .iter()
+            .find(|(_, f)| f.plane.normal().z > 0.9)
+            .map(|(id, _)| id)
+            .unwrap();
+        v2_doc
+            .apply_def_op(
+                c,
+                o,
+                kernel::KernelOp::PushPull {
+                    face: top,
+                    distance: 0.5,
+                },
+            )
+            .unwrap();
+        let v2 = v2_doc.save();
+
+        let by_prints = |bytes: &[u8]| {
+            let mut items = std::collections::BTreeMap::new();
+            let doc = Document::load(bytes).unwrap();
+            items.insert(
+                "leg-1".to_string(),
+                LibraryItemInput {
+                    prints: Some(api::library_print::item_prints(&doc)),
+                    ..Default::default()
+                },
+            );
+            items
+        };
+        let status = model.library_status_core(&by_prints(&v1)).unwrap();
+        assert_eq!(status["links"][0]["state"], "in_step");
+        assert_eq!(status["links"][0]["definition"], def.to_string());
+        assert_eq!(status["links"][0]["copies"], 2);
+        let status = model.library_status_core(&by_prints(&v2)).unwrap();
+        assert_eq!(status["links"][0]["state"], "library_newer");
+        // A part open for editing is still reported, as a save would write it.
+        let inst = model.instance_ids()[0];
+        model.open_explode_session(inst).unwrap();
+        let status = model.library_status_core(&by_prints(&v1)).unwrap();
+        assert_eq!(status["links"].as_array().unwrap().len(), 1);
+        assert_eq!(status["links"][0]["state"], "in_step");
+        model.close_explode_session().unwrap();
+        // An item without prints: its bytes are printed here.
+        let mut by_bytes = std::collections::BTreeMap::new();
+        by_bytes.insert(
+            "leg-1".to_string(),
+            LibraryItemInput {
+                bytes: Some(v2.clone()),
+                content_hash: Some("h2".into()),
+                ..Default::default()
+            },
+        );
+        let status = model.library_status_core(&by_bytes).unwrap();
+        assert_eq!(status["links"][0]["state"], "library_newer");
+        assert!(status["itemPrints"]["leg-1"].is_object());
+        // Nothing is said about an item the Library no longer holds.
+        let status = model
+            .library_status_core(&std::collections::BTreeMap::new())
+            .unwrap();
+        assert_eq!(status["links"][0]["state"], "item_missing");
+
+        let before = model.state_hash();
+        let out = model
+            .update_definitions_core(None, true, &by_bytes)
+            .unwrap();
+        assert_eq!(out["updated"], serde_json::json!([def.to_string()]));
+        assert_eq!(out["skipped"], serde_json::json!([]));
+        let status = model.library_status_core(&by_bytes).unwrap();
+        assert_eq!(status["links"][0]["state"], "in_step");
+        model.scene_undo().unwrap();
+        assert_eq!(model.state_hash(), before, "one undo step, exactly");
+        model.scene_redo().unwrap();
+
+        // A locked part is skipped and named, and nothing is recorded.
+        model.scene_undo().unwrap();
+        let inst = model.instance_ids()[0];
+        model.set_nodes_locked(&[2u8], &[inst], true).unwrap();
+        let locked_hash = model.state_hash();
+        let out = model
+            .update_definitions_core(Some(vec![def]), false, &by_bytes)
+            .unwrap();
+        assert_eq!(out["updated"], serde_json::json!([]));
+        assert_eq!(out["skipped"][0]["code"], "LockedNode");
+        assert_eq!(out["skipped"][0]["lockedBy"]["kind"], "instance");
+        assert_eq!(model.state_hash(), locked_hash);
+        model.scene_undo().unwrap();
+        model.stop_recording();
+
+        let json = model.take_recording();
+        assert!(
+            json.contains("update_definitions_from_items"),
+            "the update is recorded"
+        );
+        let mut replayed = Scene::new();
+        let final_hash = replayed.replay(&json).unwrap();
+        assert_eq!(final_hash, model.state_hash());
+        assert_eq!(replayed.save(), model.save());
+    }
+
+    /// A two-part Library item through the wasm layer: saving both parts
+    /// links each definition to its own copy (both read `in_step`), and an
+    /// update of both parts from the same item records that item's file
+    /// once, and replays exactly.
+    #[test]
+    fn a_two_part_item_stamps_each_part_and_records_its_file_once() {
+        recording::reset();
+        let raise_all = |bytes: &[u8]| -> Vec<u8> {
+            let mut doc = Document::load(bytes).unwrap();
+            for c in doc.component_ids() {
+                let o = doc.def_members(c).unwrap()[0];
+                let top = doc
+                    .object(o)
+                    .unwrap()
+                    .faces()
+                    .iter()
+                    .find(|(_, f)| f.plane.normal().z > 0.9)
+                    .map(|(id, _)| id)
+                    .unwrap();
+                doc.apply_def_op(
+                    c,
+                    o,
+                    kernel::KernelOp::PushPull {
+                        face: top,
+                        distance: 0.5,
+                    },
+                )
+                .unwrap();
+            }
+            doc.save()
+        };
+        let one_item = |bytes: &[u8]| {
+            let mut items = std::collections::BTreeMap::new();
+            items.insert(
+                "pair-1".to_string(),
+                LibraryItemInput {
+                    bytes: Some(bytes.to_vec()),
+                    content_hash: Some(format!("h{}", bytes.len())),
+                    ..Default::default()
+                },
+            );
+            items
+        };
+
+        // The source model: a unit box and a box twice as tall, saved
+        // together.
+        let mut src = Scene::new();
+        let (s, r) = ground_unit_square(&mut src);
+        let a = src.extrude_region(s, r, 1.0).unwrap();
+        let (s, r) = ground_unit_square_at(&mut src, 3.0, 0.0);
+        let b = src.extrude_region(s, r, 2.0).unwrap();
+        let ai = src.make_component(&[0u8], &[a]).unwrap();
+        let bi = src.make_component(&[0u8], &[b]).unwrap();
+        let v1 = src
+            .extract_item(
+                &[2u8, 2u8],
+                &[ai, bi],
+                true,
+                Some("Pair".into()),
+                Some(r#"{"id":"pair-1","category":"component"}"#.into()),
+                None,
+            )
+            .unwrap();
+        let first = kernel::read_item_summary(&v1).unwrap().first_component_sid;
+        src.stamp_library_source(&[2u8, 2u8], &[ai, bi], "pair-1", "h1", first)
+            .unwrap();
+        let status = src.library_status_core(&one_item(&v1)).unwrap();
+        let states: Vec<&str> = status["links"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|l| l["state"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            states,
+            ["in_step", "in_step"],
+            "each part links to its own copy"
+        );
+
+        // A model with the item placed; the Library raises both parts.
+        let mut model = Scene::new();
+        model.start_recording();
+        let at = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+        model
+            .insert_item_composed(&v1, &at, Some("pair-1".into()), Some("h1".into()), None)
+            .unwrap();
+        let v2 = raise_all(&v1);
+        let out = model
+            .update_definitions_core(None, true, &one_item(&v2))
+            .unwrap();
+        assert_eq!(out["updated"].as_array().unwrap().len(), 2);
+        assert_eq!(out["kept"], serde_json::json!([]));
+        model.stop_recording();
+        let json = model.take_recording();
+        let rec: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let call = rec["calls"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["method"] == "update_definitions_from_items")
+            .expect("the update is recorded");
+        assert_eq!(call["parts"].as_array().unwrap().len(), 2);
+        assert_eq!(call["items"].as_array().unwrap().len(), 1, "the file once");
+        let mut replayed = Scene::new();
+        assert_eq!(replayed.replay(&json).unwrap(), model.state_hash());
+        assert_eq!(replayed.save(), model.save());
+    }
+
+    /// Copy/paste of a component instance within one document: the copy
+    /// (`extract_item` with the window nonce) and the paste (`insert_item`
+    /// with the same nonce) agree on the composed origin, so the paste
+    /// LINKS to the original definition; the recording carries the
+    /// composed origin and replays to the golden hash. The same bytes
+    /// pasted after `load` replaced this scene's document (a new epoch)
+    /// no longer link — the collision guard for per-document stable ids.
+    #[test]
+    fn clipboard_paste_links_the_original_definition_and_replays() {
+        recording::reset();
+        let mut scene = Scene::new();
+        scene.start_recording();
+        let (s, r) = ground_unit_square(&mut scene);
+        let obj = scene.extrude_region(s, r, 1.0).unwrap();
+        let instance = scene.make_component(&[0u8], &[obj]).unwrap();
+        let def = scene.instance_def(instance).unwrap();
+
+        // Copy — with the window nonce, so the bytes carry the origin.
+        let bytes = scene
+            .extract_item(
+                &[2u8],
+                &[instance],
+                false,
+                None,
+                None,
+                Some("win".to_string()),
+            )
+            .unwrap();
+        // The paste composes the nonce exactly as the copy did — through
+        // the same composition `insert_item` (the JS entry) uses.
+        let origin = scene.clipboard_origin("win");
+        let shifted = [1.0, 0.0, 0.0, 3.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+        let report = scene
+            .insert_item_composed(
+                &bytes,
+                &shifted,
+                Some("clipboard:h".into()),
+                Some("h".into()),
+                Some("win".to_string()),
+            )
+            .unwrap();
+        assert_eq!(report.definitions_linked, 1);
+        assert_eq!(report.definitions_added, 0);
+        assert_eq!(scene.component_ids(), vec![def], "still one definition");
+        assert_eq!(scene.definition_usage(def), 2);
+        let pasted = match report.roots[0] {
+            NodeId::Instance(i) => i.data().as_ffi(),
+            _ => panic!("a pasted instance"),
+        };
+        assert_eq!(scene.instance_def(pasted), Some(def));
+        scene.stop_recording();
+
+        // The recording carries the composed origin and replays exactly.
+        let json = scene.take_recording();
+        assert!(json.contains(&origin), "the composed origin is recorded");
+        let mut replayed = Scene::new();
+        let final_hash = replayed.replay(&json).unwrap();
+        assert_eq!(final_hash, scene.state_hash());
+        assert_eq!(replayed.save(), scene.save());
+
+        // After `load` replaces the document, the epoch moves on: the same
+        // nonce composes a different origin and the bytes copy instead.
+        let saved = scene.save();
+        scene.load_core(&saved).unwrap();
+        assert_ne!(scene.clipboard_origin("win"), origin);
+        let foreign = scene
+            .insert_item_composed(
+                &bytes,
+                &shifted,
+                Some("clipboard:h".into()),
+                Some("h".into()),
+                Some("win".to_string()),
+            )
+            .unwrap();
+        assert_eq!(foreign.definitions_linked, 0);
+        assert_eq!(foreign.definitions_added, 1);
+        assert_eq!(scene.component_ids().len(), 2);
+    }
+
+    /// The cursor-paste ghost shows what the paste places: copy an
+    /// instance, edit its definition (taller), and the preview built for
+    /// the copy-time bytes has the EDITED bounds, equal to the bounds of
+    /// the instance the paste then places (the copy-time bytes alone
+    /// would show the old, shorter box). Nothing links, nothing to
+    /// refresh, for bytes from another window.
+    #[test]
+    fn clipboard_paste_preview_bounds_equal_the_placed_bounds() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let obj = scene.extrude_region(s, r, 1.0).unwrap();
+        let instance = scene.make_component(&[0u8], &[obj]).unwrap();
+        let def = scene.instance_def(instance).unwrap();
+        let bytes = scene
+            .extract_item(&[2u8], &[instance], false, None, None, Some("win".into()))
+            .unwrap();
+
+        // Edit the definition between Copy and Paste: pull the box up 1 m.
+        let _ = def;
+        let cid = scene.doc.component_ids()[0];
+        let member = scene.doc.def_members(cid).unwrap()[0];
+        let top = {
+            let o = scene.doc.object(member).unwrap();
+            o.faces()
+                .iter()
+                .max_by(|(_, a), (_, b)| {
+                    a.plane.normal().z.partial_cmp(&b.plane.normal().z).unwrap()
+                })
+                .map(|(id, _)| id)
+                .unwrap()
+        };
+        scene
+            .doc
+            .push_pull_through_in_component(cid, member, top, 1.0)
+            .unwrap();
+
+        let preview = scene
+            .clipboard_paste_preview(&bytes, "win".into())
+            .unwrap()
+            .expect("a linked paste has a preview");
+        let ghost = Document::load(&preview).unwrap();
+        let (glo, ghi) = softrender::document_bbox(&ghost);
+        let stale = Document::load(&bytes).unwrap();
+        let (_, shi) = softrender::document_bbox(&stale);
+        assert!(
+            (shi.z - 1.0).abs() < 1e-9,
+            "the copy-time bytes are 1 m tall"
+        );
+        assert!((ghi.z - 2.0).abs() < 1e-9, "the preview is the edited 2 m");
+
+        // Place it, shifted 10 m along x and y: the placed bounds are the ghost's
+        // bounds moved by exactly that.
+        let shifted = [1.0, 0.0, 0.0, 10.0, 0.0, 1.0, 0.0, 10.0, 0.0, 0.0, 1.0, 0.0];
+        let report = scene
+            .insert_item_composed(&bytes, &shifted, None, None, Some("win".into()))
+            .unwrap();
+        assert_eq!(report.definitions_linked, 1);
+        let (_, hi) = softrender::document_bbox(&scene.doc);
+        assert!((hi.x - (ghi.x + 10.0)).abs() < 1e-9);
+        assert!((hi.y - (ghi.y + 10.0)).abs() < 1e-9);
+        assert!((hi.z - ghi.z).abs() < 1e-9);
+        let _ = glo;
+
+        assert!(
+            scene
+                .clipboard_paste_preview(&bytes, "other-window".into())
+                .unwrap()
+                .is_none()
+        );
     }
 
     /// The UI routes EVERY boolean through `boolean_nodes` — plain
@@ -12385,6 +19051,115 @@ mod tests {
         assert_eq!(replayed.save(), scene.save());
     }
 
+    /// `delete_mixed_selection` removes nodes, guides, and annotations in ONE
+    /// undo step; a stale guide or annotation refuses typed with nothing
+    /// applied, and an empty selection refuses as `delete_selection` does.
+    #[test]
+    fn delete_mixed_selection_is_one_undo_step() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        let g = scene.add_guide_line(5.0, 0.0, 0.0, 0.0, 1.0, 0.0).unwrap();
+        let note = scene
+            .add_leader_text(0, o, &[0.0, 0.0, 0.0], &[0.0, 0.0, 1.0], "n".to_string())
+            .unwrap();
+        let on_guide = |scene: &Scene| {
+            scene
+                .snap(
+                    5.0, 5.0, 3.0, 0.0, 0.0, -1.0, 0.05, None, None, None, None, None, None, None,
+                    None, None, None,
+                )
+                .unwrap()
+                .is_some()
+        };
+        assert!(on_guide(&scene), "the guide snaps before the delete");
+        let hash_before = scene.state_hash();
+
+        scene
+            .delete_mixed_selection(&[0], &[o], &[g], &[note])
+            .unwrap();
+        assert!(scene.object_ids().is_empty());
+        assert!(scene.guide_ids().is_empty());
+        assert!(scene.annotation_ids().is_empty());
+        assert!(!on_guide(&scene), "the deleted guide no longer snaps");
+
+        scene.scene_undo().unwrap();
+        assert_eq!(scene.state_hash(), hash_before, "one undo restores all");
+        assert_eq!(scene.annotation_detached(note), Some(false));
+        assert!(on_guide(&scene), "the restored guide snaps again");
+
+        // Guides and annotations alone, with no nodes listed.
+        scene.delete_mixed_selection(&[], &[], &[g], &[]).unwrap();
+        assert!(scene.guide_ids().is_empty());
+        scene.scene_undo().unwrap();
+
+        let gone = scene.add_guide_point(0.0, 9.0, 0.0).unwrap();
+        scene.delete_guide(gone).unwrap();
+        let hash = scene.state_hash();
+        let err = scene
+            .delete_mixed_selection(&[0], &[o], &[g, gone], &[])
+            .unwrap_err();
+        assert!(err.0.starts_with("UnknownGuide"), "got {}", err.0);
+        assert_eq!(scene.state_hash(), hash, "nothing applied");
+        let err = scene
+            .delete_mixed_selection(&[0], &[o], &[], &[note, u64::MAX])
+            .unwrap_err();
+        assert!(err.0.starts_with("UnknownAnnotation"), "got {}", err.0);
+        assert_eq!(scene.state_hash(), hash, "nothing applied");
+        let err = scene
+            .delete_mixed_selection(&[0, 0], &[o], &[g], &[])
+            .unwrap_err();
+        assert!(err.0.starts_with("BadNodeList"), "got {}", err.0);
+        assert_eq!(scene.state_hash(), hash, "nothing applied");
+
+        let err = scene
+            .delete_mixed_selection(&[], &[], &[], &[])
+            .unwrap_err();
+        assert!(err.0.starts_with("BadNodeList"), "got {}", err.0);
+        assert_eq!(scene.state_hash(), hash, "nothing applied");
+    }
+
+    /// A mixed delete is part of the replay contract under its own method;
+    /// a node-only `delete_selection` still records as it always has.
+    #[test]
+    fn delete_mixed_selection_records_and_replays() {
+        recording::reset();
+        let mut scene = Scene::new();
+        scene.start_recording();
+
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        let (s2, r2) = ground_unit_square_at(&mut scene, 2.0, 0.0);
+        let o2 = scene.extrude_region(s2, r2, 1.0).unwrap();
+        let g = scene.add_guide_line(5.0, 0.0, 0.0, 0.0, 1.0, 0.0).unwrap();
+        let note = scene
+            .add_leader_text(0, o, &[0.0, 0.0, 0.0], &[0.0, 0.0, 1.0], "n".to_string())
+            .unwrap();
+        scene
+            .delete_mixed_selection(&[0], &[o], &[g], &[note])
+            .unwrap();
+        scene.scene_undo().unwrap();
+        scene.scene_redo().unwrap();
+        scene.delete_selection(&[0], &[o2]).unwrap();
+
+        scene.stop_recording();
+        let golden = scene.state_hash();
+        let json = scene.take_recording();
+        assert!(json.contains("\"method\":\"delete_mixed_selection\""));
+        assert!(
+            json.contains("\"method\":\"delete_selection\",\"kinds\":[0],\"ids\":["),
+            "a node-only delete keeps its recorded shape: {json}"
+        );
+
+        let mut replayed = Scene::new();
+        let final_hash = replayed.replay(&json).unwrap();
+        assert_eq!(
+            final_hash, golden,
+            "replay reproduces the golden state_hash"
+        );
+        assert_eq!(replayed.save(), scene.save(), "byte-identical document");
+    }
+
     /// The Move tool's array copy across the FFI: `duplicate_selection_array`
     /// creates `count` copies in creation order as ONE scene-level undo step,
     /// and rejects bad input with typed codes, the document untouched.
@@ -12401,7 +19176,7 @@ mod tests {
             0.0, 0.0, 1.0, 0.0,
         ];
         let roots = scene
-            .duplicate_selection_array(&[0], &[o], &step, 3)
+            .duplicate_selection_array(&[0], &[o], &step, 3, false)
             .unwrap();
         assert_eq!(roots.len(), 3);
         assert!(roots.iter().all(|n| n.kind == "object"));
@@ -12415,19 +19190,19 @@ mod tests {
 
         // Typed rejections, document untouched.
         let err = scene
-            .duplicate_selection_array(&[0], &[o], &step, 0)
+            .duplicate_selection_array(&[0], &[o], &step, 0, false)
             .unwrap_err();
         assert!(err.0.starts_with("BadCount"), "got {}", err.0);
         let err = scene
-            .duplicate_selection_array(&[0, 0], &[o], &step, 1)
+            .duplicate_selection_array(&[0, 0], &[o], &step, 1, false)
             .unwrap_err();
         assert!(err.0.starts_with("BadNodeList"), "got {}", err.0);
         let err = scene
-            .duplicate_selection_array(&[0], &[o], &step[..7], 1)
+            .duplicate_selection_array(&[0], &[o], &step[..7], 1, false)
             .unwrap_err();
         assert!(err.0.starts_with("BadAffine"), "got {}", err.0);
         let err = scene
-            .duplicate_selection_array(&[], &[], &step, 1)
+            .duplicate_selection_array(&[], &[], &step, 1, false)
             .unwrap_err();
         assert!(err.0.starts_with("EmptySelection"), "got {}", err.0);
         assert_eq!(scene.object_ids().len(), 4, "refusals mutate nothing");
@@ -12450,7 +19225,7 @@ mod tests {
 
         // cap + 1 refuses typed, document untouched.
         let err = scene
-            .duplicate_selection_array(&[0], &[o], &step, MAX_ARRAY_COUNT + 1)
+            .duplicate_selection_array(&[0], &[o], &step, MAX_ARRAY_COUNT + 1, false)
             .unwrap_err();
         assert!(err.0.starts_with("BadCount"), "got {}", err.0);
         assert_eq!(scene.object_ids().len(), 1, "refusal mutates nothing");
@@ -12464,7 +19239,7 @@ mod tests {
 
         // Exactly the cap succeeds.
         let roots = scene
-            .duplicate_selection_array(&[0], &[o], &step, MAX_ARRAY_COUNT)
+            .duplicate_selection_array(&[0], &[o], &step, MAX_ARRAY_COUNT, false)
             .unwrap();
         assert_eq!(roots.len(), MAX_ARRAY_COUNT as usize);
         assert_eq!(scene.object_ids().len(), 1 + MAX_ARRAY_COUNT as usize);
@@ -12476,6 +19251,882 @@ mod tests {
         );
         let err = Scene::new().replay(&rogue).unwrap_err();
         assert!(err.0.starts_with("BadCount"), "got {}", err.0);
+    }
+
+    const STEP_X2: [f64; 12] = [
+        1.0, 0.0, 0.0, 2.0, //
+        0.0, 1.0, 0.0, 0.0, //
+        0.0, 0.0, 1.0, 0.0,
+    ];
+
+    /// A linked array returns the new placements and reports each wrap as
+    /// JSON with decimal-string handles.
+    #[test]
+    fn duplicate_selection_array_linked_returns_placements_and_reports_wraps_as_json() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        let json = scene
+            .duplicate_selection_array_linked(&[0], &[o], &STEP_X2, 2)
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let nodes = v["nodes"].as_array().unwrap();
+        assert_eq!(nodes.len(), 2);
+        assert!(nodes.iter().all(|n| n["kind"] == "instance"));
+        let linked = v["linked"].as_array().unwrap();
+        assert_eq!(linked.len(), 1);
+        assert_eq!(linked[0]["source"]["kind"], "object");
+        assert_eq!(linked[0]["source"]["id"], o.to_string());
+        let wrap: u64 = linked[0]["instance"].as_str().unwrap().parse().unwrap();
+        let def: u64 = linked[0]["definition"].as_str().unwrap().parse().unwrap();
+        assert_eq!(scene.instance_def(wrap), Some(def));
+        for n in nodes {
+            let id: u64 = n["id"].as_str().unwrap().parse().unwrap();
+            assert_eq!(scene.instance_def(id), Some(def));
+            assert!(scene.is_linked(id));
+        }
+        // One undo step for the wraps and the copies.
+        scene.scene_undo().unwrap();
+        assert_eq!(scene.object_ids(), vec![o]);
+        assert!(!scene.is_linked(wrap));
+    }
+
+    /// `linked = false` is the old array copy exactly: baked objects, and
+    /// the same document as before the flag existed.
+    #[test]
+    fn duplicate_selection_array_independent_matches_the_old_behavior() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        let roots = scene
+            .duplicate_selection_array(&[0], &[o], &STEP_X2, 2, false)
+            .unwrap();
+        assert!(roots.iter().all(|n| n.kind == "object"));
+        assert_eq!(scene.object_ids().len(), 3);
+        // The same call with the flag on links instead.
+        let mut linked = Scene::new();
+        let (s, r) = ground_unit_square(&mut linked);
+        let o = linked.extrude_region(s, r, 1.0).unwrap();
+        let roots = linked
+            .duplicate_selection_array(&[0], &[o], &STEP_X2, 2, true)
+            .unwrap();
+        assert!(roots.iter().all(|n| n.kind == "instance"));
+        assert_ne!(linked.state_hash(), scene.state_hash());
+    }
+
+    #[test]
+    fn wrap_linked_is_linked_and_set_linked_false_round_trip() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        let ins = scene.wrap_linked(0, o).unwrap();
+        assert!(scene.is_linked(ins));
+        let def = scene.instance_def(ins).unwrap();
+        scene.set_linked(def, false).unwrap();
+        assert!(!scene.is_linked(ins));
+        let err = scene.set_linked(def, false).unwrap_err();
+        assert!(err.0.starts_with("NotLinked"), "got {}", err.0);
+        scene.scene_undo().unwrap();
+        assert!(scene.is_linked(ins));
+        let err = scene.wrap_linked(2, ins).unwrap_err();
+        assert!(err.0.starts_with("NotWrappable"), "got {}", err.0);
+        assert!(!scene.is_linked(u64::MAX), "a stale handle is not linked");
+    }
+
+    /// Row-major 3x4 translation by (5, 0, 0).
+    const STEP_X5: [f64; 12] = [
+        1.0, 0.0, 0.0, 5.0, //
+        0.0, 1.0, 0.0, 0.0, //
+        0.0, 0.0, 1.0, 0.0,
+    ];
+
+    #[test]
+    fn join_linked_replaces_the_joiner_with_a_linked_placement_and_undoes() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        let (s2, r2) = ground_unit_square_at(&mut scene, 5.0, 0.0);
+        let p = scene.extrude_region(s2, r2, 1.0).unwrap();
+        let set = scene.wrap_linked(0, o).unwrap();
+        let placed = scene.join_linked(set, p, &STEP_X5).unwrap();
+        assert!(scene.is_linked(placed));
+        assert_eq!(scene.instance_def(placed), scene.instance_def(set));
+        assert!(scene.node_is_live(2, placed));
+        assert!(!scene.node_is_live(0, p), "the joiner is hidden");
+        scene.scene_undo().unwrap();
+        assert!(scene.node_is_live(0, p));
+        assert!(!scene.node_is_live(2, placed));
+        scene.scene_redo().unwrap();
+        assert!(scene.node_is_live(2, placed));
+        assert!(!scene.node_is_live(0, p));
+    }
+
+    #[test]
+    fn join_linked_refuses_typed() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        let (s2, r2) = ground_unit_square_at(&mut scene, 5.0, 0.0);
+        let p = scene.extrude_region(s2, r2, 1.0).unwrap();
+        let (s3, r3) = ground_unit_square_at(&mut scene, 10.0, 0.0);
+        let q = scene.extrude_region(s3, r3, 1.0).unwrap();
+        let plain = scene.make_component(&[0], &[q]).unwrap();
+        let err = scene.join_linked(plain, p, &STEP_X5).unwrap_err();
+        assert!(err.0.starts_with("NotLinked"), "got {}", err.0);
+        let set = scene.wrap_linked(0, o).unwrap();
+        let err = scene.join_linked(set, p, &STEP_X5[..11]).unwrap_err();
+        assert!(err.0.starts_with("BadAffine"), "got {}", err.0);
+        scene.group_nodes(&[0], &[p]).unwrap();
+        let err = scene.join_linked(set, p, &STEP_X5).unwrap_err();
+        assert!(err.0.starts_with("GroupedOperand"), "got {}", err.0);
+        let err = scene.join_linked(set, o, &STEP_X5).unwrap_err();
+        assert!(err.0.starts_with("UnknownObject"), "got {}", err.0);
+    }
+
+    #[test]
+    fn join_linked_records_and_replays_to_the_same_state_hash() {
+        recording::reset();
+        let mut scene = Scene::new();
+        scene.start_recording();
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        let (s2, r2) = ground_unit_square_at(&mut scene, 5.0, 0.0);
+        let p = scene.extrude_region(s2, r2, 1.0).unwrap();
+        let set = scene.wrap_linked(0, o).unwrap();
+        scene.join_linked(set, p, &STEP_X5).unwrap();
+        scene.stop_recording();
+        let json = scene.take_recording();
+        assert!(json.contains("\"join_linked\""), "recorded: {json}");
+        let mut replayed = Scene::new();
+        assert_eq!(replayed.replay(&json).unwrap(), scene.state_hash());
+        recording::reset();
+    }
+
+    /// Two unit boxes five apart, the first wrapped as a linked set:
+    /// `(set placement, joiner)`.
+    fn join_linked_pair(scene: &mut Scene) -> (u64, u64) {
+        let (s, r) = ground_unit_square(scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        let (s2, r2) = ground_unit_square_at(scene, 5.0, 0.0);
+        let p = scene.extrude_region(s2, r2, 1.0).unwrap();
+        (scene.wrap_linked(0, o).unwrap(), p)
+    }
+
+    #[test]
+    fn join_linked_refuses_a_non_finite_affine_and_records_nothing() {
+        recording::reset();
+        let mut scene = Scene::new();
+        let (set, p) = join_linked_pair(&mut scene);
+        scene.start_recording();
+        let hash = scene.state_hash();
+        for bad in [f64::NAN, f64::INFINITY] {
+            let mut affine = STEP_X5;
+            affine[3] = bad;
+            let err = scene.join_linked(set, p, &affine).unwrap_err();
+            assert!(err.0.starts_with("BadAffine"), "got {}", err.0);
+            let err = scene.join_linked_report(set, p, &affine).unwrap_err();
+            assert!(err.0.starts_with("BadAffine"), "got {}", err.0);
+        }
+        assert_eq!(scene.state_hash(), hash);
+        scene.stop_recording();
+        let json = scene.take_recording();
+        assert!(!json.contains("join_linked"), "recorded: {json}");
+        recording::reset();
+    }
+
+    #[test]
+    fn join_linked_refuses_a_pose_that_misses_not_identical() {
+        let mut scene = Scene::new();
+        let (set, p) = join_linked_pair(&mut scene);
+        let mut affine = STEP_X5;
+        affine[3] = 6.0;
+        let err = scene.join_linked(set, p, &affine).unwrap_err();
+        assert!(err.0.starts_with("NotIdentical"), "got {}", err.0);
+        assert!(scene.node_is_live(0, p));
+    }
+
+    #[test]
+    fn join_linked_refuses_document_busy_during_a_compound() {
+        let (mut scene, caller, _provider) = compound_scene();
+        let (set, p) = join_linked_pair(&mut scene);
+        let forward = issue_forward(&mut scene, caller, "com.example.parts.cut", None);
+        let kt = scene.compound_begin(caller, forward).unwrap();
+        let busy = |e: ApiError| assert!(e.0.starts_with("DocumentBusy:"), "{}", e.0);
+        busy(scene.join_linked(set, p, &STEP_X5).unwrap_err());
+        busy(scene.join_linked_report(set, p, &STEP_X5).unwrap_err());
+        scene.compound_abort(kt).unwrap();
+        assert!(scene.node_is_live(0, p), "nothing joined");
+        assert!(scene.join_linked(set, p, &STEP_X5).is_ok());
+    }
+
+    #[test]
+    fn join_linked_report_says_what_was_dropped_and_replays() {
+        recording::reset();
+        let mut scene = Scene::new();
+        scene.start_recording();
+        let (set, p) = join_linked_pair(&mut scene);
+        let blue = scene.doc.add_material(kernel::Material::solid(
+            "Blue",
+            kernel::Rgba8::rgb(30, 30, 200),
+        ));
+        let joiner = object_id(p);
+        let face = scene
+            .doc
+            .object(joiner)
+            .unwrap()
+            .faces()
+            .keys()
+            .next()
+            .unwrap();
+        scene.doc.set_object_material(joiner, Some(blue)).unwrap();
+        scene.doc.paint_face(joiner, face, Some(blue)).unwrap();
+        scene
+            .doc
+            .attr_set(
+                kernel::AttrTarget::Entity(kernel::EntityRef::Object(joiner)),
+                "hew.part",
+                "frame",
+                kernel::AttrValue::Text("f".into()),
+            )
+            .unwrap();
+        let json = scene.join_linked_report(set, p, &STEP_X5).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let placed: u64 = v["instance"].as_str().unwrap().parse().unwrap();
+        assert_eq!(v["dropped_face_paint"], true, "{json}");
+        assert_eq!(v["frame_differed"], true, "{json}");
+        assert!(scene.node_is_live(2, placed));
+        assert_eq!(
+            scene.doc.instance_material(instance_id(placed)),
+            Some(Some(blue))
+        );
+        scene.stop_recording();
+        assert!(scene.take_recording().contains("\"join_linked\""));
+        recording::reset();
+
+        let mut scene = Scene::new();
+        let (set, p) = join_linked_pair(&mut scene);
+        let json = scene.join_linked_report(set, p, &STEP_X5).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["dropped_face_paint"], false, "{json}");
+        assert_eq!(v["frame_differed"], false, "{json}");
+    }
+
+    #[test]
+    fn node_is_live_follows_the_wrap_and_its_undo() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        assert!(scene.node_is_live(0, o));
+        let ins = scene.wrap_linked(0, o).unwrap();
+        assert!(
+            !scene.node_is_live(0, o),
+            "the wrapped object is now a member"
+        );
+        assert!(scene.node_is_live(2, ins));
+        scene.scene_undo().unwrap();
+        assert!(scene.node_is_live(0, o));
+        assert!(!scene.node_is_live(2, ins));
+        assert!(!scene.node_is_live(9, o), "a bad kind is not live");
+        assert!(!scene.node_is_live(0, u64::MAX));
+    }
+
+    #[test]
+    fn set_linked_true_is_refused_not_linkable() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        let ins = scene.make_component(&[0], &[o]).unwrap();
+        let def = scene.instance_def(ins).unwrap();
+        let hash = scene.state_hash();
+        let err = scene.set_linked(def, true).unwrap_err();
+        assert!(err.0.starts_with("NotLinkable"), "got {}", err.0);
+        assert!(!scene.is_linked(ins));
+        assert_eq!(scene.state_hash(), hash);
+    }
+
+    #[test]
+    fn owner_definition_answers_for_a_wrapped_node_and_none_for_a_world_node() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        let (s2, r2) = ground_unit_square_at(&mut scene, 3.0, 0.0);
+        let world = scene.extrude_region(s2, r2, 1.0).unwrap();
+        let ins = scene.wrap_linked(0, o).unwrap();
+        assert_eq!(scene.owner_definition(0, o), scene.instance_def(ins));
+        assert_eq!(scene.owner_definition(0, world), None);
+        assert_eq!(scene.owner_definition(2, ins), None, "a world placement");
+        assert_eq!(scene.owner_definition(9, o), None, "a bad kind");
+    }
+
+    /// A recording made before linked copies has no `linked` field on its
+    /// array copy; it replays as an independent copy.
+    #[test]
+    fn a_recording_without_linked_replays_as_independent() {
+        recording::reset();
+        let mut scene = Scene::new();
+        scene.start_recording();
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        scene
+            .duplicate_selection_array(&[0], &[o], &STEP_X2, 2, false)
+            .unwrap();
+        scene.stop_recording();
+        let json = scene.take_recording();
+        assert!(
+            !json.contains("\"linked\""),
+            "independent copies record as before"
+        );
+        let mut v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        // The old shape exactly: no `linked` key at all.
+        for call in v["calls"].as_array_mut().unwrap() {
+            if let Some(obj) = call.as_object_mut() {
+                obj.remove("linked");
+            }
+        }
+        let mut replayed = Scene::new();
+        assert_eq!(replayed.replay(&v.to_string()).unwrap(), scene.state_hash());
+        assert_eq!(replayed.object_ids().len(), 3);
+        recording::reset();
+    }
+
+    #[test]
+    fn a_linked_copy_records_and_replays_to_the_same_state_hash() {
+        recording::reset();
+        let mut scene = Scene::new();
+        scene.start_recording();
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        let (s2, r2) = ground_unit_square_at(&mut scene, 5.0, 0.0);
+        let p = scene.extrude_region(s2, r2, 1.0).unwrap();
+        scene
+            .duplicate_selection_array(&[0], &[o], &STEP_X2, 3, true)
+            .unwrap();
+        let ins = scene.wrap_linked(0, p).unwrap();
+        let def = scene.instance_def(ins).unwrap();
+        scene.set_linked(def, false).unwrap();
+        scene.stop_recording();
+        let golden = scene.state_hash();
+        let json = scene.take_recording();
+        assert!(json.contains("\"linked\":true"));
+        assert!(json.contains("wrap_linked") && json.contains("set_linked"));
+        let mut replayed = Scene::new();
+        assert_eq!(replayed.replay(&json).unwrap(), golden);
+        recording::reset();
+    }
+
+    /// 2x2 lattice minus the origin slot: +2 x, +2 y, +2 x and y.
+    const GRID_AFFINES: [f64; 36] = [
+        1.0, 0.0, 0.0, 2.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, //
+        1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 2.0, 0.0, 0.0, 1.0, 0.0, //
+        1.0, 0.0, 0.0, 2.0, 0.0, 1.0, 0.0, 2.0, 0.0, 0.0, 1.0, 0.0,
+    ];
+
+    #[test]
+    fn duplicate_selection_placements_makes_placement_major_copies_in_one_undo_step() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let a = scene.extrude_region(s, r, 1.0).unwrap();
+        let (s2, r2) = ground_unit_square_at(&mut scene, 10.0, 0.0);
+        let b = scene.extrude_region(s2, r2, 1.0).unwrap();
+        let roots = scene
+            .duplicate_selection_placements(&[0, 0], &[a, b], &GRID_AFFINES, false)
+            .unwrap();
+        assert_eq!(roots.len(), 6, "two sources by three placements");
+        assert_eq!(scene.object_ids().len(), 8);
+        // Placement-major: copies 0 and 1 are placement 0 of a and b.
+        let min_x = |id: u64| scene.object_bounds(id, None).unwrap()[0];
+        assert!((min_x(roots[0].id) - 2.0).abs() < 1e-9);
+        assert!((min_x(roots[1].id) - 12.0).abs() < 1e-9);
+        assert!((min_x(roots[2].id) - 0.0).abs() < 1e-9);
+        assert!((min_x(roots[4].id) - 2.0).abs() < 1e-9);
+        scene.scene_undo().unwrap();
+        assert_eq!(scene.object_ids().len(), 2, "one undo removes every copy");
+        scene.scene_redo().unwrap();
+        assert_eq!(scene.object_ids().len(), 8);
+    }
+
+    #[test]
+    fn duplicate_selection_placements_linked_wraps_each_object_once() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        let json = scene
+            .duplicate_selection_placements_linked(&[0], &[o], &GRID_AFFINES)
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let nodes = v["nodes"].as_array().unwrap();
+        assert_eq!(nodes.len(), 3);
+        assert!(nodes.iter().all(|n| n["kind"] == "instance"));
+        let linked = v["linked"].as_array().unwrap();
+        assert_eq!(linked.len(), 1, "one wrap for the one source");
+        let def: u64 = linked[0]["definition"].as_str().unwrap().parse().unwrap();
+        for n in nodes {
+            let id: u64 = n["id"].as_str().unwrap().parse().unwrap();
+            assert_eq!(scene.instance_def(id), Some(def));
+        }
+        // The plain method with linked = true agrees on the node count.
+        let mut other = Scene::new();
+        let (s, r) = ground_unit_square(&mut other);
+        let o2 = other.extrude_region(s, r, 1.0).unwrap();
+        let roots = other
+            .duplicate_selection_placements(&[0], &[o2], &GRID_AFFINES, true)
+            .unwrap();
+        assert_eq!(roots.len(), 3);
+        assert!(roots.iter().all(|n| n.kind == "instance"));
+    }
+
+    #[test]
+    fn duplicate_selection_placements_refuses_zero_over_cap_and_bad_affine() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        let err = scene
+            .duplicate_selection_placements(&[0], &[o], &[], false)
+            .unwrap_err();
+        assert!(err.0.starts_with("BadCount"), "got {}", err.0);
+        let over: Vec<f64> = GRID_AFFINES[..12]
+            .iter()
+            .copied()
+            .cycle()
+            .take(12 * (MAX_ARRAY_COUNT as usize + 1))
+            .collect();
+        let err = scene
+            .duplicate_selection_placements(&[0], &[o], &over, false)
+            .unwrap_err();
+        assert!(err.0.starts_with("BadCount"), "got {}", err.0);
+        let err = scene
+            .duplicate_selection_placements(&[0], &[o], &GRID_AFFINES[..13], false)
+            .unwrap_err();
+        assert!(err.0.starts_with("BadAffine"), "got {}", err.0);
+        let err = scene
+            .duplicate_selection_placements(&[0, 0], &[o], &GRID_AFFINES, false)
+            .unwrap_err();
+        assert!(err.0.starts_with("BadNodeList"), "got {}", err.0);
+        assert_eq!(scene.object_ids().len(), 1, "refusals mutate nothing");
+        scene.scene_undo().unwrap();
+        assert!(scene.object_ids().is_empty(), "no stray undo entry");
+    }
+
+    #[test]
+    fn duplicate_selection_placements_refuses_non_finite_affines_and_a_repeated_node() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let mut affines = GRID_AFFINES.to_vec();
+            affines[20] = bad;
+            let err = scene
+                .duplicate_selection_placements(&[0], &[o], &affines, false)
+                .unwrap_err();
+            assert!(err.0.starts_with("BadAffine"), "got {}", err.0);
+        }
+        let err = scene
+            .duplicate_selection_placements(&[0, 0], &[o, o], &GRID_AFFINES, false)
+            .unwrap_err();
+        assert!(err.0.starts_with("DuplicateMember"), "got {}", err.0);
+        assert_eq!(scene.object_ids().len(), 1, "refusals mutate nothing");
+    }
+
+    #[test]
+    fn duplicate_selection_array_refuses_a_non_finite_affine() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        for bad in [f64::NAN, f64::INFINITY] {
+            let mut step = STEP_X2;
+            step[3] = bad;
+            let err = scene
+                .duplicate_selection_array(&[0], &[o], &step, 2, false)
+                .unwrap_err();
+            assert!(err.0.starts_with("BadAffine"), "got {}", err.0);
+        }
+        assert_eq!(scene.object_ids().len(), 1, "refusals mutate nothing");
+    }
+
+    #[test]
+    fn a_placements_recording_replays_to_the_same_state_hash() {
+        recording::reset();
+        let mut scene = Scene::new();
+        scene.start_recording();
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        let (s2, r2) = ground_unit_square_at(&mut scene, 10.0, 0.0);
+        let p = scene.extrude_region(s2, r2, 1.0).unwrap();
+        scene
+            .duplicate_selection_placements(&[0], &[o], &GRID_AFFINES, true)
+            .unwrap();
+        scene
+            .duplicate_selection_placements(&[0], &[p], &GRID_AFFINES, false)
+            .unwrap();
+        scene.stop_recording();
+        let golden = scene.state_hash();
+        let json = scene.take_recording();
+        assert!(json.contains("duplicate_selection_placements"));
+        let mut replayed = Scene::new();
+        assert_eq!(replayed.replay(&json).unwrap(), golden);
+        recording::reset();
+    }
+
+    #[test]
+    fn flip_selection_copy_modes_return_the_right_nodes() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square_at(&mut scene, 2.0, 0.0);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        // In place: the same handle back, mirrored across x = 0.
+        let flipped = scene
+            .flip_selection(&[0], &[o], &[], 1.0, 0.0, 0.0, 1, 0.0, 0.0, 0.0, 0)
+            .unwrap();
+        assert_eq!(flipped.len(), 1);
+        assert_eq!((flipped[0].kind.as_str(), flipped[0].id), ("object", o));
+        let b = scene.object_bounds(o, None).unwrap();
+        assert!((b[0] + 3.0).abs() < 1e-12 && (b[3] + 2.0).abs() < 1e-12);
+        // A linked copy: a new placement with a mirrored pose; the board is
+        // wrapped, so it is no longer a world object.
+        let linked = scene
+            .flip_selection(&[0], &[o], &[], 1.0, 0.0, 0.0, 1, 0.0, 0.0, 0.0, 1)
+            .unwrap();
+        assert_eq!(linked.len(), 1);
+        assert_eq!(linked[0].kind, "instance");
+        let pose = scene.instance_pose(linked[0].id).unwrap();
+        let det = pose[0] * (pose[5] * pose[10] - pose[6] * pose[9])
+            - pose[1] * (pose[4] * pose[10] - pose[6] * pose[8])
+            + pose[2] * (pose[4] * pose[9] - pose[5] * pose[8]);
+        assert!(det < 0.0, "a mirrored placement");
+        assert!(!scene.object_ids().contains(&o));
+        scene.scene_undo().unwrap();
+        assert!(
+            scene.object_ids().contains(&o),
+            "one undo returns the loose board"
+        );
+        // An independent copy: a new object.
+        let indep = scene
+            .flip_selection(&[0], &[o], &[], 0.0, 1.0, 0.0, 0, 0.0, 0.0, 0.0, 2)
+            .unwrap();
+        assert_eq!(indep.len(), 1);
+        assert_eq!(indep[0].kind, "object");
+        assert_ne!(indep[0].id, o);
+        assert_eq!(scene.object_ids().len(), 2);
+        // Refusals at the boundary mutate nothing.
+        let hash = scene.state_hash();
+        for (about_kind, copy, nx) in [(3, 0, 1.0), (0, 3, 1.0), (0, 0, f64::NAN)] {
+            let err = scene
+                .flip_selection(
+                    &[0],
+                    &[o],
+                    &[],
+                    nx,
+                    0.0,
+                    0.0,
+                    about_kind,
+                    0.0,
+                    0.0,
+                    0.0,
+                    copy,
+                )
+                .unwrap_err();
+            assert!(err.0.starts_with("BadFlip"), "got {}", err.0);
+        }
+        let err = scene
+            .flip_selection(&[0, 0], &[o], &[], 1.0, 0.0, 0.0, 0, 0.0, 0.0, 0.0, 0)
+            .unwrap_err();
+        assert!(err.0.starts_with("BadNodeList"), "got {}", err.0);
+        let err = scene
+            .flip_selection(&[], &[], &[], 1.0, 0.0, 0.0, 0, 0.0, 0.0, 0.0, 0)
+            .unwrap_err();
+        assert!(err.0.starts_with("EmptySelection"), "got {}", err.0);
+        let err = scene
+            .flip_selection(&[0], &[o], &[], 0.0, 0.0, 0.0, 0, 0.0, 0.0, 0.0, 0)
+            .unwrap_err();
+        assert!(err.0.starts_with("Singular"), "got {}", err.0);
+        assert_eq!(scene.state_hash(), hash);
+    }
+
+    #[test]
+    fn flip_refuses_a_non_finite_about_point_even_when_unused() {
+        recording::reset();
+        let mut scene = Scene::new();
+        scene.start_recording();
+        let (s, r) = ground_unit_square_at(&mut scene, 2.0, 0.0);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        let hash = scene.state_hash();
+        for about_kind in [0u8, 1, 2] {
+            for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+                let err = scene
+                    .flip_selection(&[0], &[o], &[], 1.0, 0.0, 0.0, about_kind, 0.0, bad, 0.0, 0)
+                    .unwrap_err();
+                assert!(err.0.starts_with("BadFlip"), "got {}", err.0);
+                let err = scene
+                    .flip_matrix(&[0], &[o], &[], 1.0, 0.0, 0.0, about_kind, bad, 0.0, 0.0)
+                    .unwrap_err();
+                assert!(err.0.starts_with("BadFlip"), "got {}", err.0);
+            }
+        }
+        assert_eq!(scene.state_hash(), hash, "refusals mutate nothing");
+        // Only what landed is recorded, so the recording replays.
+        scene
+            .flip_selection(&[0], &[o], &[], 1.0, 0.0, 0.0, 0, 0.0, 0.0, 0.0, 0)
+            .unwrap();
+        scene.stop_recording();
+        let golden = scene.state_hash();
+        let json = scene.take_recording();
+        assert!(!json.contains("null"), "no unreplayable values: {json}");
+        let mut replayed = Scene::new();
+        assert_eq!(replayed.replay(&json).unwrap(), golden);
+        recording::reset();
+    }
+
+    #[test]
+    fn flip_matrix_matches_the_kernel_matrix() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square_at(&mut scene, 2.0, 1.0);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        let id = node_id(0, o).unwrap();
+        for (about_kind, about, normal) in [
+            (0u8, [0.0, 0.0, 0.0], [1.0, 0.0, 0.0]),
+            (1, [0.0, 0.0, 0.0], [0.0, 2.0, 0.0]),
+            (2, [1.0, 2.0, 3.0], [1.0, 1.0, 1.0]),
+        ] {
+            let got = scene
+                .flip_matrix(
+                    &[0],
+                    &[o],
+                    &[],
+                    normal[0],
+                    normal[1],
+                    normal[2],
+                    about_kind,
+                    about[0],
+                    about[1],
+                    about[2],
+                )
+                .unwrap();
+            let which = match about_kind {
+                0 => kernel::FlipAbout::Center,
+                1 => kernel::FlipAbout::Origin,
+                _ => kernel::FlipAbout::Point(kernel::Point3::new(about[0], about[1], about[2])),
+            };
+            let want = scene
+                .doc
+                .flip_matrix(
+                    &[id],
+                    &[],
+                    kernel::Vec3::new(normal[0], normal[1], normal[2]),
+                    which,
+                )
+                .unwrap()
+                .to_affine();
+            assert_eq!(got, want.to_vec());
+        }
+        // The center of a unit square at (2, 1): the x plane is x = 2.5.
+        let m = scene
+            .flip_matrix(&[0], &[o], &[], 1.0, 0.0, 0.0, 0, 0.0, 0.0, 0.0)
+            .unwrap();
+        assert!((m[0] + 1.0).abs() < 1e-12 && (m[3] - 5.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn a_flip_recording_replays_to_the_same_state_hash() {
+        recording::reset();
+        let mut scene = Scene::new();
+        scene.start_recording();
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        let (s2, r2) = ground_unit_square_at(&mut scene, 5.0, 0.0);
+        let p = scene.extrude_region(s2, r2, 1.0).unwrap();
+        let (s3, r3) = ground_unit_square_at(&mut scene, 9.0, 0.0);
+        let q = scene.extrude_region(s3, r3, 1.0).unwrap();
+        scene
+            .flip_selection(&[0], &[o], &[], 0.0, 0.0, 1.0, 0, 0.0, 0.0, 0.0, 0)
+            .unwrap();
+        scene
+            .flip_selection(&[0], &[p], &[], 1.0, 0.0, 0.0, 2, 7.0, 0.0, 0.0, 1)
+            .unwrap();
+        scene
+            .flip_selection(&[0], &[q], &[], 0.0, 1.0, 0.0, 1, 0.0, 0.0, 0.0, 2)
+            .unwrap();
+        scene.stop_recording();
+        let golden = scene.state_hash();
+        let json = scene.take_recording();
+        assert!(json.contains("flip_selection"));
+        let mut replayed = Scene::new();
+        assert_eq!(replayed.replay(&json).unwrap(), golden);
+        recording::reset();
+    }
+
+    /// ASCII STLs of the box from x = 0 to 2 split at x = 1, as the
+    /// importer's split leaves it: the two open halves and the partition
+    /// sheet, one file each (one seam family once imported).
+    fn split_box_stls() -> Vec<Vec<u8>> {
+        let p = |x: f64, y: f64, z: f64| [x, y, z];
+        let half = |x0: f64, x1: f64, end: f64| {
+            let mut quads = vec![
+                [
+                    p(x0, 0.0, 0.0),
+                    p(x0, 1.0, 0.0),
+                    p(x1, 1.0, 0.0),
+                    p(x1, 0.0, 0.0),
+                ],
+                [
+                    p(x0, 0.0, 1.0),
+                    p(x1, 0.0, 1.0),
+                    p(x1, 1.0, 1.0),
+                    p(x0, 1.0, 1.0),
+                ],
+                [
+                    p(x0, 0.0, 0.0),
+                    p(x1, 0.0, 0.0),
+                    p(x1, 0.0, 1.0),
+                    p(x0, 0.0, 1.0),
+                ],
+                [
+                    p(x1, 1.0, 0.0),
+                    p(x0, 1.0, 0.0),
+                    p(x0, 1.0, 1.0),
+                    p(x1, 1.0, 1.0),
+                ],
+            ];
+            quads.push(if end == 0.0 {
+                [
+                    p(0.0, 1.0, 0.0),
+                    p(0.0, 0.0, 0.0),
+                    p(0.0, 0.0, 1.0),
+                    p(0.0, 1.0, 1.0),
+                ]
+            } else {
+                [
+                    p(2.0, 0.0, 0.0),
+                    p(2.0, 1.0, 0.0),
+                    p(2.0, 1.0, 1.0),
+                    p(2.0, 0.0, 1.0),
+                ]
+            });
+            quads
+        };
+        let wall = vec![[
+            p(1.0, 0.0, 0.0),
+            p(1.0, 1.0, 0.0),
+            p(1.0, 1.0, 1.0),
+            p(1.0, 0.0, 1.0),
+        ]];
+        [half(0.0, 1.0, 0.0), half(1.0, 2.0, 2.0), wall]
+            .into_iter()
+            .map(stl_of)
+            .collect()
+    }
+
+    /// An ASCII STL of `quads`, two triangles each.
+    fn stl_of(quads: Vec<[[f64; 3]; 4]>) -> Vec<u8> {
+        let mut s = String::from("solid split\n");
+        for q in quads {
+            for t in [[q[0], q[1], q[2]], [q[0], q[2], q[3]]] {
+                s.push_str("facet normal 0 0 0\nouter loop\n");
+                for v in t {
+                    s.push_str(&format!("vertex {} {} {}\n", v[0], v[1], v[2]));
+                }
+                s.push_str("endloop\nendfacet\n");
+            }
+        }
+        s.push_str("endsolid split\n");
+        s.into_bytes()
+    }
+
+    /// [`split_box_stls`] imported; returns the family's member handles.
+    fn import_split_box(scene: &mut Scene) -> Vec<u64> {
+        for (bytes, name) in split_box_stls().iter().zip(["Left", "Right", "Wall"]) {
+            scene
+                .import_stl_core(bytes, 1.0, Some(name.into()))
+                .unwrap();
+        }
+        let report = scene.doc.health_report(None);
+        assert_eq!(report.families.len(), 1, "the import is one split shape");
+        assert_eq!(report.families[0].members.len(), 3);
+        report.families[0]
+            .members
+            .iter()
+            .map(|o| o.data().as_ffi())
+            .collect()
+    }
+
+    #[test]
+    fn rejoin_as_one_solid_returns_the_result_handle() {
+        let mut scene = Scene::new();
+        let members = import_split_box(&mut scene);
+        let depth = scene.undo_depth();
+        let result = scene.rejoin_as_one_solid(&members).unwrap();
+        let id = object_id(result);
+        let obj = scene.doc.object(id).expect("the handle is the live result");
+        assert_eq!(obj.watertight(), kernel::WatertightState::Watertight);
+        assert!((obj.volume().unwrap() - 2.0).abs() < 1e-9);
+        assert_eq!(scene.doc.live_object_ids(), vec![id]);
+        assert_eq!(scene.undo_depth(), depth + 1);
+        scene.scene_undo().unwrap();
+        assert!(scene.doc.object(id).is_none());
+        assert_eq!(scene.doc.health_report(None).families.len(), 1);
+    }
+
+    #[test]
+    fn rejoin_refusal_leaves_the_document_untouched() {
+        let mut scene = Scene::new();
+        let members = import_split_box(&mut scene);
+        let (before, depth) = (scene.state_hash(), scene.undo_depth());
+        // One piece and the wall are not two pieces.
+        let walls: Vec<u64> = members
+            .iter()
+            .copied()
+            .filter(|&m| {
+                scene.doc.object_health(object_id(m)).unwrap().verdict
+                    == kernel::health::Verdict::FlatSheet { holes: 0 }
+            })
+            .collect();
+        assert_eq!(walls.len(), 1);
+        let piece = *members.iter().find(|m| !walls.contains(m)).unwrap();
+        let err = scene.rejoin_as_one_solid(&[piece, walls[0]]).unwrap_err();
+        assert!(err.0.starts_with("RejoinNotPossible"), "got {}", err.0);
+        // A stale handle refuses typed too.
+        let err = scene.rejoin_as_one_solid(&[piece, u64::MAX]).unwrap_err();
+        assert!(err.0.starts_with("UnknownObject"), "got {}", err.0);
+        assert_eq!((scene.state_hash(), scene.undo_depth()), (before, depth));
+    }
+
+    #[test]
+    fn a_rejoin_recording_replays_to_the_same_state_hash() {
+        recording::reset();
+        let mut scene = Scene::new();
+        scene.start_recording();
+        let members = import_split_box(&mut scene);
+        scene.rejoin_as_one_solid(&members).unwrap();
+        scene.stop_recording();
+        let golden = scene.state_hash();
+        let json = scene.take_recording();
+        assert!(json.contains("rejoin_as_one_solid"));
+        let mut replayed = Scene::new();
+        assert_eq!(replayed.replay(&json).unwrap(), golden);
+        recording::reset();
+    }
+
+    #[test]
+    fn a_rejoin_over_the_bus_replays_to_the_same_state_hash() {
+        recording::reset();
+        let mut scene = Scene::new();
+        scene.start_recording();
+        import_split_box(&mut scene);
+        let conn = scene.api_connection_open();
+        hello_and_attach(&mut scene, conn);
+        let reply = scene
+            .api_dispatch_reply(
+                conn,
+                r#"{"jsonrpc":"2.0","id":2,"method":"hew.solid.rejoin","params":{"family":0,"as":"one_solid"}}"#,
+            )
+            .expect("rejoin replies");
+        assert!(reply.contains("\"result\""), "rejoin succeeds: {reply}");
+        assert_eq!(scene.doc.live_object_ids().len(), 1);
+        scene.stop_recording();
+        let golden = scene.state_hash();
+        let json = scene.take_recording();
+        assert!(json.contains("hew.solid.rejoin"));
+        let mut replayed = Scene::new();
+        assert_eq!(replayed.replay(&json).unwrap(), golden);
+        recording::reset();
     }
 
     /// `history_generation` crosses the FFI with the kernel's semantics: it
@@ -12499,12 +20150,61 @@ mod tests {
 
         scene.set_node_user_hidden(0, o, true).unwrap();
         scene.set_node_user_hidden(0, o, false).unwrap();
-        scene.set_tag_hidden("walls".to_string(), true);
+        scene.set_tag_hidden("walls".to_string(), true).unwrap();
         assert_eq!(
             scene.history_generation(),
             g3,
             "view-state toggles leave the generation untouched"
         );
+    }
+
+    /// The undo-memory budget crosses the FFI: a bad budget is refused
+    /// typed, the default trims nothing on an ordinary model, and a budget
+    /// of zero trims after the next mutation down to `min_steps`, reporting
+    /// the trim once.
+    #[test]
+    fn history_budget_crosses_the_ffi() {
+        let mut scene = Scene::new();
+        assert!(
+            scene
+                .set_history_budget(f64::NAN, 1)
+                .unwrap_err()
+                .0
+                .starts_with("BadHistoryBudget")
+        );
+        assert!(scene.set_history_budget(-1.0, 1).is_err());
+        let m = scene.history_memory();
+        assert_eq!(m.budget_bytes(), (1u64 << 30) as f64);
+        assert_eq!(m.min_steps(), 3);
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        let shift = [1.0, 0.0, 0.0, 0.5, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+        for _ in 0..4 {
+            scene.transform_object(o, &shift).unwrap();
+        }
+        assert!(
+            scene.take_history_trim().is_none(),
+            "an ordinary model never trims"
+        );
+        scene.set_history_budget(0.0, 2).unwrap();
+        let generation = scene.history_generation();
+        scene.transform_object(o, &shift).unwrap();
+        let trim = scene.take_history_trim().expect("over a zero budget");
+        assert_eq!(trim.kept(), 2);
+        assert!(trim.dropped() > 0);
+        assert!(scene.take_history_trim().is_none(), "reported once");
+        assert_eq!(scene.undo_depth(), 2);
+        assert_eq!(
+            scene.history_generation(),
+            generation + 1,
+            "only the Move counts"
+        );
+        let m = scene.history_memory();
+        assert_eq!(
+            (m.undo_steps(), m.min_steps(), m.budget_bytes()),
+            (2, 2, 0.0)
+        );
+        assert_eq!(m.trimmed_total(), f64::from(trim.dropped()));
     }
 
     /// The saved mark round-trips across the FFI exactly as `kernel`'s own
@@ -12529,7 +20229,7 @@ mod tests {
             "the fresh sketch's creation folds into extrude's one entry"
         );
 
-        scene.mark_saved();
+        scene.mark_saved().unwrap();
         assert!(scene.at_saved_mark());
         assert_eq!(scene.saved_depth(), Some(1));
 
@@ -12564,7 +20264,7 @@ mod tests {
         let mut scene = Scene::new();
         let (s, r) = ground_unit_square(&mut scene);
         scene.extrude_region(s, r, 1.0).unwrap();
-        scene.mark_saved();
+        scene.mark_saved().unwrap();
         let (s2, r2) = ground_unit_square_at(&mut scene, 5.0, 0.0);
         scene.extrude_region(s2, r2, 1.0).unwrap();
         scene.scene_undo().unwrap();
@@ -12614,7 +20314,7 @@ mod tests {
             0.0, 0.0, 1.0, 0.0,
         ];
         scene
-            .duplicate_selection_array(&[0, 0], &[o, copy.id], &step, 2)
+            .duplicate_selection_array(&[0, 0], &[o, copy.id], &step, 2, false)
             .unwrap();
         assert_eq!(scene.object_ids().len(), 6);
 
@@ -12665,8 +20365,8 @@ mod tests {
         let mut loop_pts = Vec::with_capacity(n * 3);
         for i in 0..n {
             let a = 2.0 * std::f64::consts::PI * (i as f64) / (n as f64);
-            loop_pts.push(cx + r * a.cos());
-            loop_pts.push(cy + r * a.sin());
+            loop_pts.push(cx + r * trig::cos(a));
+            loop_pts.push(cy + r * trig::sin(a));
             loop_pts.push(cz);
         }
         let disk = draft_loop_on_face(
@@ -12852,7 +20552,7 @@ mod tests {
         let mut scene = Scene::new();
         scene.start_recording();
 
-        let sketch = scene.begin_ground_sketch();
+        let sketch = scene.begin_ground_sketch().unwrap();
         scene
             .sketch_begin_curve_with(sketch, 0.0, 0.0, 0.0, 1.0)
             .unwrap();
@@ -12896,7 +20596,7 @@ mod tests {
         let (s, r) = ground_unit_square(&mut scene);
         let obj = scene.extrude_region(s, r, 2.0).unwrap();
         scene.add_node_tag(0, obj, vec!["A".to_string()]).unwrap();
-        scene.set_tag_hidden("A".to_string(), true);
+        scene.set_tag_hidden("A".to_string(), true).unwrap();
         scene.delete_tag("A".to_string()).unwrap();
         // Undoes the TAG DELETE — not the extrude. If delete_tag were not
         // recorded, the replayed undo would hit the extrude instead.
@@ -12939,7 +20639,7 @@ mod tests {
         scene
             .add_node_tag(0, obj, vec!["Hardware".to_string()])
             .unwrap();
-        scene.set_tag_hidden("Hardware".to_string(), true);
+        scene.set_tag_hidden("Hardware".to_string(), true).unwrap();
         scene
             .set_section_plane(0.5, 0.5, 1.0, 0.0, 0.0, 1.0, true)
             .unwrap();
@@ -12959,8 +20659,8 @@ mod tests {
             .set_scene_description(a, "Everything.".to_string())
             .unwrap();
         // Drift, then a second Scene without the section, then apply the first.
-        scene.set_tag_hidden("Hardware".to_string(), false);
-        scene.clear_section_plane();
+        scene.set_tag_hidden("Hardware".to_string(), false).unwrap();
+        scene.clear_section_plane().unwrap();
         let b = scene
             .add_scene(
                 Some("Cam only".to_string()),
@@ -12973,9 +20673,9 @@ mod tests {
         scene.move_scene(b, 0).unwrap();
         scene.set_scene_props(a, 31 - 16, None, None).unwrap();
         scene.update_scene(a, 4, None, None).unwrap(); // re-capture visible tags (now none hidden)
-        scene.set_tag_hidden("Hardware".to_string(), true);
+        scene.set_tag_hidden("Hardware".to_string(), true).unwrap();
         scene.update_scene(a, 4, None, None).unwrap(); // hidden again
-        scene.set_tag_hidden("Hardware".to_string(), false);
+        scene.set_tag_hidden("Hardware".to_string(), false).unwrap();
         let resolved = scene.apply_scene(a).unwrap();
         assert!(resolved.has_hidden());
         assert_eq!(resolved.hidden_object_ids(), vec![obj]);
@@ -13081,7 +20781,9 @@ mod tests {
         scene
             .add_node_tag(0, a, vec!["Hardware".to_string(), "Screws".to_string()])
             .unwrap();
-        scene.set_tag_hidden("Hardware/Screws".to_string(), true);
+        scene
+            .set_tag_hidden("Hardware/Screws".to_string(), true)
+            .unwrap();
         let sid_before = scene
             .doc
             .sid_of(&kernel::EntityRef::Tag(vec![
@@ -13304,10 +21006,18 @@ mod tests {
         // group transform moved it); (1.0, 0.5, 10.0) straight down lands
         // safely inside its top face, well clear of any edge — the
         // `pick.object()` assert makes that assumption self-checking.
-        let m = scene.add_material("Red".to_string(), 255, 0, 0, 255);
-        let m2 = scene.add_material("Blue".to_string(), 0, 0, 255, 255);
+        let m = scene
+            .add_material("Red".to_string(), 255, 0, 0, 255)
+            .unwrap();
+        let m2 = scene
+            .add_material("Blue".to_string(), 0, 0, 255, 255)
+            .unwrap();
         scene.set_object_material(a, m).unwrap();
         scene.set_material_alpha(m, 128).unwrap();
+        scene.set_material_pbr(m, 0.6, 0.3).unwrap();
+        assert!(scene.set_material_pbr(m, 2.0, 0.3).is_err());
+        let info = scene.material_info(m).unwrap();
+        assert!(info.has_pbr() && info.metallic() == 0.6 && info.roughness() == 0.3);
         let pick = scene.pick_face(1.0, 0.5, 10.0, 0.0, 0.0, -1.0).unwrap();
         assert_eq!(pick.object(), a, "picked object `a`'s top face as expected");
         scene.paint_face(pick.object(), pick.face(), m2).unwrap();
@@ -13350,6 +21060,67 @@ mod tests {
         assert_eq!(replayed.save(), scene.save(), "byte-identical document");
     }
 
+    /// Lock over the boundary (OW-1): `set_nodes_locked` is one undo entry
+    /// for the whole call, an instance stands for its definition so every
+    /// copy reports locked, `node_frozen` names the locked node behind a
+    /// freeze, malformed lists refuse with nothing applied, and the session
+    /// records and replays to the same state.
+    #[test]
+    fn lock_and_unlock_over_the_boundary_record_and_replay() {
+        recording::reset();
+        const SHIFT_X3: [f64; 12] = [1.0, 0.0, 0.0, 3.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+        let mut scene = Scene::new();
+        scene.start_recording();
+
+        let (s1, r1) = ground_unit_square(&mut scene);
+        let a = scene.extrude_region(s1, r1, 1.0).unwrap();
+        let (s2, r2) = ground_unit_square_at(&mut scene, 6.0, 0.0);
+        let b = scene.extrude_region(s2, r2, 1.0).unwrap();
+        let g = scene.group_nodes(&[0], &[b]).unwrap();
+        let inst = scene.make_component(&[0], &[a]).unwrap();
+        let def = scene.instance_def(inst).unwrap();
+        let copy = scene.place_instance(def, &SHIFT_X3).unwrap();
+
+        assert!(!scene.node_locked(2, inst).unwrap());
+        assert!(scene.node_frozen(2, inst).unwrap().is_none());
+        let depth = scene.doc.undo_depth();
+        scene.set_nodes_locked(&[2, 1], &[inst, g], true).unwrap();
+        assert_eq!(scene.doc.undo_depth(), depth + 1, "one entry for the call");
+        assert!(scene.node_locked(2, copy).unwrap(), "every copy is locked");
+        assert!(scene.node_locked(1, g).unwrap());
+        let cause = scene
+            .node_frozen(0, b)
+            .unwrap()
+            .expect("frozen by its group");
+        assert_eq!((cause.kind().as_str(), cause.id()), ("group", g));
+        assert!(!scene.node_locked(0, b).unwrap(), "frozen, not locked");
+
+        // Malformed or stale input refuses whole.
+        assert!(scene.set_nodes_locked(&[2], &[inst, g], false).is_err());
+        assert!(scene.set_nodes_locked(&[], &[], false).is_err());
+        let err = scene.set_nodes_locked(&[0, 2], &[u64::MAX, inst], false);
+        assert!(err.unwrap_err().0.starts_with("UnknownObject"));
+        assert!(scene.node_locked(2, inst).unwrap(), "nothing applied");
+        assert!(scene.node_locked(9, inst).is_err(), "bad kind");
+
+        scene.set_nodes_locked(&[2], &[copy], false).unwrap();
+        assert!(
+            !scene.node_locked(2, inst).unwrap(),
+            "unlock any copy, all unlock"
+        );
+        scene.scene_undo().unwrap();
+        assert!(scene.node_locked(2, inst).unwrap());
+
+        scene.stop_recording();
+        let golden = scene.state_hash();
+        let json = scene.take_recording();
+        assert!(json.contains("set_nodes_locked"), "{json}");
+        let mut replayed = Scene::new();
+        assert_eq!(replayed.replay(&json).unwrap(), golden);
+        assert_eq!(replayed.save(), scene.save(), "byte-identical document");
+        assert!(replayed.node_locked(2, copy).unwrap());
+    }
+
     /// `object_materials` lists each distinct material once: base plus face
     /// paint, empty when unpainted, and drops a deleted material.
     #[test]
@@ -13359,8 +21130,12 @@ mod tests {
         let a = scene.extrude_region(s1, r1, 1.0).unwrap();
         assert!(scene.object_materials(a).is_empty(), "unpainted");
 
-        let red = scene.add_material("Red".to_string(), 220, 30, 30, 255);
-        let blue = scene.add_material("Blue".to_string(), 30, 30, 220, 255);
+        let red = scene
+            .add_material("Red".to_string(), 220, 30, 30, 255)
+            .unwrap();
+        let blue = scene
+            .add_material("Blue".to_string(), 30, 30, 220, 255)
+            .unwrap();
         scene.set_object_material(a, red).unwrap();
         let pick = scene.pick_face(0.5, 0.5, 10.0, 0.0, 0.0, -1.0).unwrap();
         scene.paint_face(pick.object(), pick.face(), blue).unwrap();
@@ -13430,6 +21205,7 @@ mod tests {
             scenes: Vec::new(),
             section: None,
             view_style: None,
+            geo: None,
             extra: ImportSceneExtra::default(),
         };
         let mut scene = Scene::new();
@@ -13472,7 +21248,9 @@ mod tests {
 
         // A material renamed, then painted onto a live face and set as an
         // object's base — both references must unpaint on delete.
-        let m = scene.add_material("Red".to_string(), 220, 30, 30, 255);
+        let m = scene
+            .add_material("Red".to_string(), 220, 30, 30, 255)
+            .unwrap();
         scene.set_material_name(m, "Brick".to_string()).unwrap();
         scene.set_material_name(m, "Brick".to_string()).unwrap(); // no-op rename records nothing extra
         let pick = scene.pick_face(0.5, 0.5, 10.0, 0.0, 0.0, -1.0).unwrap();
@@ -13497,7 +21275,9 @@ mod tests {
         let def_b = scene.instance_def(inst_of_b).unwrap();
         scene.delete_node(2, inst_of_b).unwrap();
         assert_eq!(scene.unused_definitions(), vec![def_b]);
-        let stray = scene.add_material("Stray".to_string(), 1, 2, 3, 255);
+        let stray = scene
+            .add_material("Stray".to_string(), 1, 2, 3, 255)
+            .unwrap();
         assert_eq!(scene.unused_materials(), vec![stray]);
 
         let report = scene.purge_unused().unwrap();
@@ -13522,6 +21302,180 @@ mod tests {
             "replaying a material/definition lifecycle session reproduces the golden state_hash"
         );
         assert_eq!(replayed.save(), scene.save(), "byte-identical document");
+    }
+
+    /// Painting one linked copy whose shared solid has a base moves the
+    /// base onto the other copies first: every copy redraws, the painted
+    /// one shows its color, one undo restores it all, and the session
+    /// replays to the same state.
+    #[test]
+    fn painting_a_linked_copy_moves_the_member_base_and_redraws_every_copy() {
+        recording::reset();
+        let mut scene = Scene::new();
+        scene.start_recording();
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        let first = scene.wrap_linked(0, o).unwrap();
+        let def = scene.instance_def(first).unwrap();
+        let at = |x: f64| [1.0, 0.0, 0.0, x, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+        let second = scene.place_instance(def, &at(3.0)).unwrap();
+        let third = scene.place_instance(def, &at(6.0)).unwrap();
+        let red = scene
+            .add_material("Red".to_string(), 220, 30, 30, 255)
+            .unwrap();
+        let blue = scene
+            .add_material("Blue".to_string(), 30, 30, 220, 255)
+            .unwrap();
+        scene.set_object_material(o, red).unwrap();
+        let before = scene.state_hash();
+
+        let mut touched = scene.set_instance_material(second, blue).unwrap();
+        touched.sort_unstable();
+        let mut all = vec![first, second, third];
+        all.sort_unstable();
+        assert_eq!(touched, all, "every copy redraws");
+        assert_eq!(scene.instance_material(second), blue);
+        assert_eq!(scene.instance_material(first), red);
+        assert_eq!(scene.instance_material(third), red);
+        assert_eq!(scene.instance_expanded_inherited(second), vec![blue]);
+        scene.stop_recording();
+        let golden = scene.state_hash();
+        let json = scene.take_recording();
+        let mut replayed = Scene::new();
+        assert_eq!(replayed.replay(&json).unwrap(), golden);
+
+        scene.scene_undo().unwrap();
+        assert_eq!(scene.state_hash(), before, "one undo restores it all");
+        assert_eq!(scene.instance_material(first), u64::MAX);
+    }
+
+    /// A linked paste paints its new copy with the source's
+    /// `instance_appearance_material`: a source whose own green is covered
+    /// by the shared solid's red base lends nothing (every copy stays red,
+    /// nothing moves), and an ordinarily painted source lends its color.
+    #[test]
+    fn a_linked_paste_copies_what_the_source_looks_like() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        let first = scene.wrap_linked(0, o).unwrap();
+        let def = scene.instance_def(first).unwrap();
+        let at = |x: f64| [1.0, 0.0, 0.0, x, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+        let source = scene.place_instance(def, &at(3.0)).unwrap();
+        let red = scene
+            .add_material("Red".to_string(), 220, 30, 30, 255)
+            .unwrap();
+        let green = scene
+            .add_material("Green".to_string(), 30, 220, 30, 255)
+            .unwrap();
+        let paste = |scene: &mut Scene, from: u64, x: f64| {
+            let id = scene.place_instance(def, &at(x)).unwrap();
+            let m = scene.instance_appearance_material(from);
+            if m != u64::MAX {
+                scene.set_instance_material(id, m).unwrap();
+            }
+            id
+        };
+
+        // Ordinary: the paste takes the source's own color.
+        scene.set_instance_material(source, green).unwrap();
+        let plain = paste(&mut scene, source, 6.0);
+        assert_eq!(scene.instance_material(plain), green);
+        assert_eq!(scene.instance_material(first), u64::MAX);
+
+        // Covered: the solid's red base shows on every copy.
+        scene.set_object_material(o, red).unwrap();
+        assert_eq!(scene.instance_appearance_material(source), u64::MAX);
+        let covered = paste(&mut scene, source, 9.0);
+        assert_eq!(scene.instance_material(covered), u64::MAX);
+        assert_eq!(scene.instance_material(source), green, "nothing moved");
+        assert_eq!(scene.instance_material(first), u64::MAX, "nothing moved");
+        assert_eq!(scene.object_materials(o), vec![red], "the base stays");
+    }
+
+    /// Painting a placement and a whole definition records and replays,
+    /// and the expanded inherited materials follow the instance's paint.
+    #[test]
+    fn record_then_replay_covers_instance_and_definition_materials() {
+        recording::reset();
+
+        let mut scene = Scene::new();
+        scene.start_recording();
+        let (s1, r1) = ground_unit_square(&mut scene);
+        let a = scene.extrude_region(s1, r1, 1.0).unwrap();
+        let inst = scene.make_component(&[0], &[a]).unwrap();
+        let def = scene.instance_def(inst).unwrap();
+        let second = scene
+            .place_instance(
+                def,
+                &[1.0, 0.0, 0.0, 3.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            )
+            .unwrap();
+        let red = scene
+            .add_material("Red".to_string(), 220, 30, 30, 255)
+            .unwrap();
+        let blue = scene
+            .add_material("Blue".to_string(), 30, 30, 220, 255)
+            .unwrap();
+        assert_eq!(scene.instance_material(second), u64::MAX);
+        assert_eq!(
+            scene.set_instance_material(second, red).unwrap(),
+            vec![second],
+            "a world placement redraws itself"
+        );
+        assert_eq!(scene.instance_material(second), red);
+        assert_eq!(scene.instance_expanded_inherited(second), vec![red]);
+        assert_eq!(scene.instance_expanded_inherited(inst), vec![u64::MAX]);
+        let member = scene.instance_expanded_members(second)[0];
+        let painted = scene.member_mesh(member, red).unwrap();
+        assert!(
+            painted.mesh.groups.iter().all(|g| g.material.is_some()),
+            "an unpainted member drawn through a painted placement takes its material"
+        );
+        scene.set_definition_material(def, blue).unwrap();
+        assert_eq!(scene.material_usage(red), 1);
+        scene.stop_recording();
+        let golden = scene.state_hash();
+        let json = scene.take_recording();
+        assert!(
+            json.contains("\"set_instance_material\"")
+                && json.contains("\"set_definition_material\"")
+        );
+
+        let mut replayed = Scene::new();
+        assert_eq!(replayed.replay(&json).unwrap(), golden);
+        assert_eq!(replayed.save(), scene.save(), "byte-identical document");
+    }
+
+    /// Painting a NESTED placement reports every world placement that draws
+    /// it, so the renderer re-pulls the outer placements' inherited
+    /// materials too.
+    #[test]
+    fn painting_a_nested_placement_reports_its_outer_world_placements() {
+        let mut scene = Scene::new();
+        let (s1, r1) = ground_unit_square(&mut scene);
+        let a = scene.extrude_region(s1, r1, 1.0).unwrap();
+        let inner = scene.make_component(&[0], &[a]).unwrap();
+        let outer = scene.make_component(&[2], &[inner]).unwrap();
+        let outer_def = scene.instance_def(outer).unwrap();
+        let second = scene
+            .place_instance(
+                outer_def,
+                &[1.0, 0.0, 0.0, 3.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            )
+            .unwrap();
+        let red = scene
+            .add_material("Red".to_string(), 220, 30, 30, 255)
+            .unwrap();
+        let mut touched = scene.set_instance_material(inner, red).unwrap();
+        touched.sort_unstable();
+        let mut want = vec![outer, second];
+        want.sort_unstable();
+        assert_eq!(
+            touched, want,
+            "the nested placement itself is not a world instance"
+        );
+        assert_eq!(scene.instance_expanded_inherited(second), vec![red]);
     }
 
     /// The byte-embedding arms replay: a session containing a glTF import
@@ -13582,6 +21536,153 @@ mod tests {
         assert_eq!(replayed.save(), scene.save(), "byte-identical document");
     }
 
+    /// A binary STL (millimeters) of a 1 × 1 × 5 box standing on its
+    /// base, its top left out: a hole small against the box.
+    fn bottle_stl() -> Vec<u8> {
+        let c = |x: f32, y: f32, z: f32| [x, y, z];
+        let v = [
+            c(0.0, 0.0, 0.0),
+            c(1.0, 0.0, 0.0),
+            c(1.0, 1.0, 0.0),
+            c(0.0, 1.0, 0.0),
+            c(0.0, 0.0, 5.0),
+            c(1.0, 0.0, 5.0),
+            c(1.0, 1.0, 5.0),
+            c(0.0, 1.0, 5.0),
+        ];
+        let quads = [
+            [0, 3, 2, 1],
+            [0, 1, 5, 4],
+            [1, 2, 6, 5],
+            [2, 3, 7, 6],
+            [3, 0, 4, 7],
+        ];
+        let mut tris = Vec::new();
+        for q in quads {
+            tris.push([v[q[0]], v[q[1]], v[q[2]]]);
+            tris.push([v[q[0]], v[q[2]], v[q[3]]]);
+        }
+        let mut out = vec![0u8; 80];
+        out.extend((tris.len() as u32).to_le_bytes());
+        for t in &tris {
+            out.extend([0f32; 3].iter().flat_map(|x| x.to_le_bytes()));
+            for p in t {
+                out.extend(p.iter().flat_map(|x| x.to_le_bytes()));
+            }
+            out.extend([0u8; 2]);
+        }
+        out
+    }
+
+    /// `RecordedCall::Mend`: a recorded one-click Mend replays to the same
+    /// document, and its report and preview read as the kernel's.
+    /// The rim overlay's per-object cache follows edits: a rim drawn before
+    /// a Mend is gone after it, and back on undo.
+    #[test]
+    fn the_rim_highlight_follows_mend_and_undo() {
+        let mut scene = Scene::new();
+        scene
+            .import_stl_core(&bottle_stl(), 0.001, Some("bottle".into()))
+            .expect("the bottle imports");
+        let id = scene.object_ids()[0];
+        let before = scene.health_rim_highlight(id, 0);
+        assert_eq!(before.len(), 4 * 6, "the open top's four edges");
+        assert_eq!(scene.health_rim_highlight(id, 0), before, "cached");
+        scene.mend(id, "{}").unwrap();
+        assert!(scene.health_rim_highlight(id, 0).is_empty());
+        assert!(scene.health_rim_segments(vec![id]).is_empty());
+        scene.scene_undo().unwrap();
+        assert_eq!(scene.health_rim_highlight(id, 0), before);
+    }
+
+    /// One census serves the preview line and the hover points, and an
+    /// edit retires it.
+    #[test]
+    fn the_mend_preview_is_computed_once_per_revision() {
+        let mut scene = Scene::new();
+        scene
+            .import_stl_core(&bottle_stl(), 0.001, Some("bottle".into()))
+            .expect("the bottle imports");
+        let id = scene.object_ids()[0];
+        let first = scene.mend_census_json(id, "{}").unwrap();
+        let cached = scene
+            .census_cache
+            .borrow()
+            .as_ref()
+            .map(|e| e.census.clone())
+            .unwrap();
+        let _ = scene.mend_census_points(id, "{}", 0);
+        let again = scene
+            .census_cache
+            .borrow()
+            .as_ref()
+            .map(|e| e.census.clone())
+            .unwrap();
+        assert!(
+            std::rc::Rc::ptr_eq(&cached, &again),
+            "the points reuse the census"
+        );
+        assert_eq!(scene.mend_census_json(id, "{}").unwrap(), first);
+        scene.mend(id, "{}").unwrap();
+        assert!(scene.census_cache.borrow().is_none(), "the Mend retires it");
+        assert!(scene.mend_census_json(id, "{}").is_ok());
+    }
+
+    #[test]
+    fn record_then_replay_covers_mend() {
+        recording::reset();
+        let mut scene = Scene::new();
+        scene.start_recording();
+        scene
+            .import_stl_core(&bottle_stl(), 0.001, Some("bottle".into()))
+            .expect("the bottle imports");
+        let id = scene.object_ids()[0];
+        let census: serde_json::Value =
+            serde_json::from_str(&scene.mend_census_json(id, "{}").unwrap()).unwrap();
+        assert_eq!(census["fill_rims"], serde_json::json!([0]));
+        assert!(census["weld"].as_f64().unwrap() > 0.0);
+        let range = scene.weld_range(id);
+        assert_eq!(range.len(), 2);
+        let d = scene.default_weld_distance(id);
+        assert!(range[0] <= d && d <= range[1]);
+        let report: serde_json::Value =
+            serde_json::from_str(&scene.mend(id, "{}").unwrap()).unwrap();
+        assert_eq!(report["closed"], true);
+        assert_eq!(report["filled_rims"], 1);
+        assert_eq!(census["filled_rims"], report["filled_rims"]);
+        assert_eq!(census["skipped_rims"], 0);
+        assert!(
+            scene
+                .mend(id, r#"{"weld": 1.0}"#)
+                .unwrap_err()
+                .0
+                .starts_with("WeldDistanceOutOfRange:")
+        );
+        assert!(
+            scene
+                .mend(id, "{\"split\": 3}")
+                .unwrap_err()
+                .0
+                .starts_with("BadMendPlan:")
+        );
+        assert!(
+            scene
+                .mend(id, "{}")
+                .unwrap_err()
+                .0
+                .starts_with("NothingToMend:")
+        );
+        let artifact = scene.take_recording();
+        scene.stop_recording();
+        assert!(
+            artifact.contains(r#""method":"mend""#),
+            "the Mend is recorded"
+        );
+        let golden = scene.state_hash();
+        let mut fresh = Scene::new();
+        assert_eq!(fresh.replay(&artifact).expect("replay succeeds"), golden);
+    }
+
     /// `RecordedCall::ImportStl` — the merge hazard the STL importer's design
     /// specifically calls out: a dropped match arm anywhere in the
     /// record/serialize/replay-dispatch chain builds locally but breaks
@@ -13616,7 +21717,7 @@ mod tests {
             let name = scene.object_name(id).unwrap();
             let tris = scene.object_export_triangles(id, 0).unwrap();
             let mut b = [f32::MAX, f32::MAX, f32::MAX, f32::MIN, f32::MIN, f32::MIN];
-            for v in tris.chunks_exact(3) {
+            for v in tris.as_chunks::<3>().0 {
                 for a in 0..3 {
                     b[a] = b[a].min(v[a]);
                     b[a + 3] = b[a + 3].max(v[a]);
@@ -13731,7 +21832,7 @@ mod tests {
     #[test]
     fn analytic_curve_bracket_rejects_degenerate_radius() {
         let mut scene = Scene::new();
-        let sketch = scene.begin_ground_sketch();
+        let sketch = scene.begin_ground_sketch().unwrap();
         let err = scene
             .sketch_begin_curve_with(sketch, 0.0, 0.0, 0.0, 0.0)
             .unwrap_err();
@@ -13855,6 +21956,19 @@ mod tests {
         assert_eq!(scene.face_uv_frame(object, face), Some(frame));
     }
 
+    /// `face_is_curved` is false for a box face and true for a cylinder
+    /// wall facet; a stale handle is refused.
+    #[test]
+    fn face_is_curved_tells_walls_from_planes() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let a = scene.extrude_region(s, r, 1.0).unwrap();
+        let pick = scene.pick_face(0.5, 0.5, 10.0, 0.0, 0.0, -1.0).unwrap();
+        assert_eq!(pick.object(), a);
+        assert!(!scene.face_is_curved(pick.object(), pick.face()).unwrap());
+        assert!(scene.face_is_curved(u64::MAX, pick.face()).is_err());
+    }
+
     /// `face_mesh_range` gives a `[base, count]` vertex range that actually
     /// indexes into `object_mesh`'s `uvs`/`positions` — the Position Texture
     /// tool's live-preview patch target (paint-tool design §3).
@@ -13885,6 +21999,25 @@ mod tests {
 
         // Stale object/face reads back undefined, not a stale range.
         assert_eq!(scene.face_mesh_range(u64::MAX, face), None);
+    }
+
+    /// A smoothed Object draws its Smooth surface, so a face range asked for
+    /// on a cold cache indexes that mesh, not the cage's.
+    #[test]
+    fn face_mesh_range_of_a_smoothed_object_indexes_the_smooth_mesh() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let a = scene.extrude_region(s, r, 1.0).unwrap();
+        let pick = scene.pick_face(0.5, 0.5, 10.0, 0.0, 0.0, -1.0).unwrap();
+        let face = pick.face();
+        scene.set_smooth_level(a, 2).unwrap();
+
+        scene.object_mesh(a).unwrap();
+        let warm = scene.face_mesh_range(a, face).expect("live face");
+        scene.face_range_cache.clear();
+        let cold = scene.face_mesh_range(a, face).expect("live face");
+        assert_eq!(cold, warm, "the cold-cache range is the drawn mesh's");
+        assert!(cold[1] > 6, "a smoothed face spans more than its cage quad");
     }
 
     /// A session co-authored by the user and an agent — UI gestures
@@ -13928,11 +22061,11 @@ mod tests {
             r#"{"jsonrpc":"2.0","id":0,"method":"hew.meta.hello","params":{"protocol":1}}"#,
             r#"{"jsonrpc":"2.0","id":1,"method":"hew.doc.attach","params":{}}"#,
         ] {
-            scene.api_dispatch(conn, frame);
+            scene.api_dispatch_reply(conn, frame);
         }
         let unit = |scene: &mut Scene, params: &str| {
             let reply = scene
-                .api_dispatch(
+                .api_dispatch_reply(
                     conn,
                     &format!(
                         r#"{{"jsonrpc":"2.0","id":2,"method":"hew.doc.export","params":{params}}}"#
@@ -13941,7 +22074,7 @@ mod tests {
                 .expect("a reply");
             let v: serde_json::Value = serde_json::from_str(&reply).unwrap();
             let b64 = v["result"]["bytes_base64"].as_str().expect(&reply);
-            skp_import::openskp::Model::parse(&unbase64(b64))
+            skp_import::skpwright::Model::parse(&unbase64(b64))
                 .unwrap()
                 .units
                 .length_unit
@@ -13962,6 +22095,63 @@ mod tests {
     }
 
     #[test]
+    fn a_pair_through_the_list_boolean_records_the_two_operand_call() {
+        fn row_box(scene: &mut Scene, x0: f64) -> u64 {
+            let sketch = scene
+                .begin_sketch_on_plane(0.0, 0.0, 0.0, 0.0, 0.0, 1.0)
+                .unwrap();
+            let c = [(x0, 0.0), (x0 + 1.0, 0.0), (x0 + 1.0, 1.0), (x0, 1.0)];
+            for i in 0..4 {
+                let (a, b) = (c[i], c[(i + 1) % 4]);
+                scene
+                    .sketch_add_segment(sketch, a.0, a.1, 0.0, b.0, b.1, 0.0)
+                    .unwrap();
+            }
+            let region = scene.sketch_regions(sketch).unwrap()[0];
+            scene.extrude_region(sketch, region, 1.0).unwrap()
+        }
+        let mut scene = Scene::new();
+        recording::start();
+        let ids: Vec<u64> = [0.0, 0.5, 1.0, 1.5, 2.0]
+            .iter()
+            .map(|&x| row_box(&mut scene, x))
+            .collect();
+        recording::take_calls();
+
+        // Two operands: the call older builds already read.
+        scene
+            .boolean_nodes_many(0, &[0, 0], &ids[..2])
+            .expect("union of a pair");
+        let pair = recording::take_calls();
+        assert!(
+            matches!(
+                pair.as_slice(),
+                [recording::RecordedCall::BooleanNodes { op: 0, a, b, .. }]
+                    if *a == ids[0] && *b == ids[1]
+            ),
+            "a pair records the two-operand call"
+        );
+
+        // Three: the list call.
+        scene
+            .boolean_nodes_many(0, &[0, 0, 0], &ids[2..])
+            .expect("union of three");
+        let three = recording::take_calls();
+        assert!(matches!(
+            three.as_slice(),
+            [recording::RecordedCall::BooleanNodesMany { op: 0, ids: got, .. }] if got == &ids[2..]
+        ));
+        recording::stop();
+
+        assert!(
+            scene
+                .boolean_nodes_many(0, &[0, 0, 0], &ids[..2])
+                .is_err_and(|e| e.0.starts_with("BadNodeList")),
+            "arrays of different lengths are a bad node list"
+        );
+    }
+
+    #[test]
     fn a_session_mixing_ui_gestures_and_live_api_envelopes_replays_whole() {
         let mut scene = Scene::new();
         recording::start();
@@ -13974,16 +22164,16 @@ mod tests {
         // inside one transaction ($ref chaining, exactly as an MCP client
         // drives it).
         let conn = scene.api_connection_open();
-        scene.api_dispatch(
+        scene.api_dispatch_reply(
             conn,
             r#"{"jsonrpc":"2.0","id":0,"method":"hew.meta.hello","params":{"protocol":1}}"#,
         );
-        scene.api_dispatch(
+        scene.api_dispatch_reply(
             conn,
             r#"{"jsonrpc":"2.0","id":1,"method":"hew.doc.attach","params":{}}"#,
         );
         let reply = scene
-            .api_dispatch(
+            .api_dispatch_reply(
                 conn,
                 r#"{"jsonrpc":"2.0","id":2,"method":"hew.doc.transact","params":{"label":"Agent box","commands":[
                     {"method":"hew.sketch.draw_rect","as":"s1","params":{"plane":{"origin":[5,0,0],"normal":[0,0,1]},"corner_a":[5,0,0],"corner_b":[6,1,0]}},
@@ -14031,11 +22221,11 @@ mod tests {
         let mut scene = Scene::new();
         recording::start();
         let conn = scene.api_connection_open();
-        scene.api_dispatch(
+        scene.api_dispatch_reply(
             conn,
             r#"{"jsonrpc":"2.0","id":0,"method":"hew.meta.hello","params":{"protocol":1}}"#,
         );
-        scene.api_dispatch(
+        scene.api_dispatch_reply(
             conn,
             r#"{"jsonrpc":"2.0","id":1,"method":"hew.doc.attach","params":{}}"#,
         );
@@ -14049,7 +22239,9 @@ mod tests {
                 {{"method":"hew.material.set_default","params":{{"id":{{"$ref":"box#/object_id"}},"material":{{"$ref":"m#/material"}}}}}},
                 {{"method":"hew.material.position_texture","params":{{"face":{{"object":{{"$ref":"box#/object_id"}},"at":[0.5,0.5,0.5]}},"pins":{{"origin":[0,0,0.5],"u":[0.2,0,0.5],"v":[0,1,0.5]}}}}}}]}}}}"#
         );
-        let reply = scene.api_dispatch(conn, &frame).expect("transact replies");
+        let reply = scene
+            .api_dispatch_reply(conn, &frame)
+            .expect("transact replies");
         assert!(
             !reply.contains("\"error\""),
             "the transaction must succeed: {reply}"
@@ -14063,7 +22255,7 @@ mod tests {
             .expect("the material's id")
             .to_string();
         let saved = scene
-            .api_dispatch(
+            .api_dispatch_reply(
                 conn,
                 &format!(
                     r#"{{"jsonrpc":"2.0","id":3,"method":"hew.library.save","params":{{"material":"{material}","name":"Bamboo","return_bytes":true}}}}"#
@@ -14080,7 +22272,7 @@ mod tests {
         let item = Document::load(&item).unwrap();
         assert_eq!(item.materials().len(), 1, "the material alone");
         let replaced = scene
-            .api_dispatch(
+            .api_dispatch_reply(
                 conn,
                 &format!(
                     r#"{{"jsonrpc":"2.0","id":4,"method":"hew.material.replace","params":{{"from":"{material}","to":null}}}}"#
@@ -14144,16 +22336,16 @@ mod tests {
         scene.extrude_region(sketch, region, 0.5).expect("extrude");
 
         let conn = scene.api_connection_open();
-        scene.api_dispatch(
+        scene.api_dispatch_reply(
             conn,
             r#"{"jsonrpc":"2.0","id":0,"method":"hew.meta.hello","params":{"protocol":1}}"#,
         );
-        scene.api_dispatch(
+        scene.api_dispatch_reply(
             conn,
             r#"{"jsonrpc":"2.0","id":1,"method":"hew.doc.attach","params":{}}"#,
         );
         let reply = scene
-            .api_dispatch(
+            .api_dispatch_reply(
                 conn,
                 r#"{"jsonrpc":"2.0","id":2,"method":"hew.history.undo","params":{}}"#,
             )
@@ -14193,15 +22385,15 @@ mod tests {
         let mut scene = Scene::new();
         recording::start();
         let conn = scene.api_connection_open();
-        scene.api_dispatch(
+        scene.api_dispatch_reply(
             conn,
             r#"{"jsonrpc":"2.0","id":0,"method":"hew.meta.hello","params":{"protocol":1}}"#,
         );
-        scene.api_dispatch(
+        scene.api_dispatch_reply(
             conn,
             r#"{"jsonrpc":"2.0","id":1,"method":"hew.doc.attach","params":{}}"#,
         );
-        scene.api_dispatch(
+        scene.api_dispatch_reply(
             conn,
             r#"{"jsonrpc":"2.0","id":2,"method":"hew.query.scene","params":{}}"#,
         );
@@ -14258,7 +22450,7 @@ mod tests {
     /// second solid drawn clear of the first (its position is otherwise
     /// incidental; overlapping regions extrude directly now).
     fn ground_unit_square_at(scene: &mut Scene, x: f64, y: f64) -> (u64, u64) {
-        let sketch = scene.begin_ground_sketch();
+        let sketch = scene.begin_ground_sketch().unwrap();
         let corners = [
             (0.0, 0.0, 1.0, 0.0),
             (1.0, 0.0, 1.0, 1.0),
@@ -14420,6 +22612,137 @@ mod tests {
         assert!(scene.extrude_face_as_new_object(obj, 999_999, 1.0).is_err());
     }
 
+    /// The top face (+z) of `obj`, an ffi handle.
+    fn top_face_of(scene: &Scene, obj: u64) -> u64 {
+        scene
+            .doc
+            .object(object_id(obj))
+            .unwrap()
+            .faces()
+            .iter()
+            .find(|(_, f)| f.plane.normal().z > 0.9)
+            .map(|(fid, _)| fid.data().as_ffi())
+            .unwrap()
+    }
+
+    /// A unit box made a linked pair (the copy 3 m along +x): the box's
+    /// member id, the original placement, and the copy.
+    fn linked_pair(scene: &mut Scene) -> (u64, u64, u64) {
+        const SHIFT_X3: [f64; 12] = [1.0, 0.0, 0.0, 3.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+        let (sketch, region) = ground_unit_square(scene);
+        let b = scene.extrude_region(sketch, region, 1.0).unwrap();
+        let copies = scene
+            .duplicate_selection_array(&[0], &[b], &SHIFT_X3, 1, true)
+            .unwrap();
+        let copy = copies[0].id();
+        let all = scene.instance_ids();
+        let first = *all.iter().find(|&&i| i != copy).unwrap();
+        (b, first, copy)
+    }
+
+    /// Ctrl/Cmd Push/Pull through a linked copy: the plain entry point
+    /// answers `UnknownObject` for the copy's member (the face is not a
+    /// world Object's), the in-instance one makes a new plain Object on the
+    /// clicked copy, the set is untouched, and the call records and replays.
+    #[test]
+    fn a_new_object_from_a_linked_copys_face_records_and_replays() {
+        recording::reset();
+        let mut scene = Scene::new();
+        scene.start_recording();
+        let (member, _, copy) = linked_pair(&mut scene);
+        let face = top_face_of(&scene, member);
+        let err = scene
+            .extrude_face_as_new_object(member, face, 0.5)
+            .unwrap_err();
+        assert!(err.0.starts_with("UnknownObject"), "{}", err.0);
+        let made = scene
+            .extrude_face_as_new_object_in_instance(copy, member, face, 0.5)
+            .unwrap();
+        let bb = scene.object_bounds(made, None).unwrap();
+        assert!(
+            (bb[0] - 3.0).abs() < 1e-9 && (bb[3] - 4.0).abs() < 1e-9,
+            "{bb:?}"
+        );
+        assert!(
+            (bb[2] - 1.0).abs() < 1e-9 && (bb[5] - 1.5).abs() < 1e-9,
+            "{bb:?}"
+        );
+        assert_eq!(scene.instance_ids().len(), 2, "the set is as it was");
+        let hash = scene.doc.state_hash();
+        let rec = scene.take_recording();
+        assert!(
+            rec.contains("\"method\":\"extrude_face_as_new_object_in_instance\""),
+            "{rec}"
+        );
+        let mut fresh = Scene::new();
+        assert_eq!(fresh.replay(&rec).unwrap(), hash);
+    }
+
+    /// Unlink over the boundary: one of two copies leaves two plain
+    /// Objects and no placement, the node the copy became comes back, a
+    /// component placement answers `NotLinked`, undo restores the pair, and
+    /// the call records and replays.
+    #[test]
+    fn unlink_copies_leaves_plain_objects_and_records_and_replays() {
+        recording::reset();
+        let mut scene = Scene::new();
+        scene.start_recording();
+        let (_, first, copy) = linked_pair(&mut scene);
+        let before = scene.doc.state_hash();
+        let nodes = scene.unlink_copies(&[copy]).unwrap();
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].kind(), "object");
+        assert!(scene.instance_ids().is_empty(), "no copy is left linked");
+        assert!(!scene.is_linked(first));
+        assert_eq!(scene.object_ids().len(), 2);
+        let hash = scene.doc.state_hash();
+
+        let rec = scene.take_recording();
+        assert!(rec.contains("\"method\":\"unlink_copies\""), "{rec}");
+        let mut fresh = Scene::new();
+        assert_eq!(fresh.replay(&rec).unwrap(), hash);
+
+        scene.scene_undo().unwrap();
+        assert_eq!(scene.doc.state_hash(), before);
+        assert!(scene.is_linked(first) && scene.is_linked(copy));
+
+        let (sketch, region) = ground_unit_square_at(&mut scene, 9.0, 0.0);
+        let b = scene.extrude_region(sketch, region, 1.0).unwrap();
+        let comp = scene.make_component(&[0], &[b]).unwrap();
+        let err = scene.unlink_copies(&[comp]).unwrap_err();
+        assert!(err.0.starts_with("NotLinked"), "{}", err.0);
+        let err = scene.unlink_copies(&[]).unwrap_err();
+        assert!(err.0.starts_with("EmptySelection"), "{}", err.0);
+    }
+
+    /// Cut over the boundary: cutting one of two copies leaves the other a
+    /// placement (a Delete makes it plain), and the call records and
+    /// replays.
+    #[test]
+    fn cut_selection_keeps_the_copy_left_a_placement_and_records_and_replays() {
+        recording::reset();
+        let mut scene = Scene::new();
+        scene.start_recording();
+        let (_, first, copy) = linked_pair(&mut scene);
+        let before = scene.doc.state_hash();
+        scene.cut_selection(&[2], &[copy]).unwrap();
+        assert_eq!(scene.instance_ids(), vec![first], "not made plain");
+        assert!(scene.is_linked(first));
+        let hash = scene.doc.state_hash();
+
+        let rec = scene.take_recording();
+        assert!(rec.contains("\"method\":\"cut_selection\""), "{rec}");
+        let mut fresh = Scene::new();
+        assert_eq!(fresh.replay(&rec).unwrap(), hash);
+
+        scene.scene_undo().unwrap();
+        assert_eq!(scene.doc.state_hash(), before);
+        scene.delete_selection(&[2], &[copy]).unwrap();
+        assert!(scene.instance_ids().is_empty(), "a Delete makes it plain");
+        let err = scene.cut_selection(&[2], &[copy]).unwrap_err();
+        assert!(err.0.starts_with("UnknownInstance"), "{}", err.0);
+    }
+
     /// `rescale_document` scales the model about the origin, refuses bad
     /// factors typed, and undoes/redoes bit-exact.
     #[test]
@@ -14501,6 +22824,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .expect("snap call succeeds")
             .expect("axis lock with an anchor always resolves");
@@ -14522,6 +22846,86 @@ mod tests {
             0.0,
             "redo reproduces the moved frame's x.x"
         );
+    }
+
+    /// A direction lock (`lock_direction`) holds the snap to the line
+    /// through the anchor along that direction, normalized at the boundary,
+    /// and wins over an axis lock given alongside it.
+    #[test]
+    fn a_direction_lock_snaps_onto_its_line_through_the_anchor() {
+        let scene = Scene::new();
+        let anchor = [1.0, 2.0, 0.0];
+        let d = [1.0, 1.0, 0.0];
+        let s = std::f64::consts::FRAC_1_SQRT_2;
+        let on_line = |snap: &SnapJs| {
+            let p = [
+                snap.x() - anchor[0],
+                snap.y() - anchor[1],
+                snap.z() - anchor[2],
+            ];
+            // Perpendicular distance from the line through the anchor.
+            let t = p[0] * s + p[1] * s;
+            let off = [p[0] - t * s, p[1] - t * s, p[2]];
+            (off[0] * off[0] + off[1] * off[1] + off[2] * off[2]).sqrt()
+        };
+        for lock_axis in [None, Some(0), Some(2)] {
+            // A ray straight down at a point off the line.
+            let snap = scene
+                .snap(
+                    3.5,
+                    3.1,
+                    8.0,
+                    0.0,
+                    0.0,
+                    -1.0,
+                    0.3,
+                    Some(anchor.to_vec().into_boxed_slice()),
+                    lock_axis,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    Some(d.to_vec().into_boxed_slice()),
+                )
+                .expect("snap call succeeds")
+                .expect("a direction lock with an anchor resolves");
+            assert!(on_line(&snap) < 1e-9, "{lock_axis:?}: off the line");
+            let dir = snap
+                .direction()
+                .expect("a locked snap reports its direction");
+            assert!((dir[0] - s).abs() < 1e-12 && (dir[1] - s).abs() < 1e-12);
+            assert!(
+                snap.x() > anchor[0],
+                "the point lies along +d from the anchor"
+            );
+        }
+        // An unusable direction (zero length) leaves the axis lock in force.
+        let snap = scene
+            .snap(
+                3.5,
+                3.1,
+                8.0,
+                0.0,
+                0.0,
+                -1.0,
+                0.3,
+                Some(anchor.to_vec().into_boxed_slice()),
+                Some(0),
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(vec![0.0, 0.0, 0.0].into_boxed_slice()),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(snap.direction(), Some(vec![1.0, 0.0, 0.0]));
     }
 
     #[test]
@@ -14619,7 +23023,7 @@ mod tests {
         let mut scene = Scene::new();
         let (s, r) = ground_unit_square(&mut scene);
         scene.extrude_region(s, r, 1.0).unwrap();
-        let s2 = scene.begin_ground_sketch();
+        let s2 = scene.begin_ground_sketch().unwrap();
         draw_rect(&mut scene, s2, 3.0, 0.0, 4.0, 1.0);
 
         // Eye in front of and above the box, aimed at the back-bottom edge's
@@ -14629,7 +23033,7 @@ mod tests {
             scene
                 .snap(
                     ex, ey, ez, 0.0, 4.0, -3.0, 0.01, None, None, None, None, None, None, None,
-                    None, None,
+                    None, None, None,
                 )
                 .unwrap()
                 .map(|snap| snap.kind())
@@ -14862,7 +23266,7 @@ mod tests {
         let mut loop_pts = Vec::new();
         for i in 0..=18 {
             let a = std::f64::consts::PI * i as f64 / 18.0;
-            loop_pts.extend([0.5 + 0.3 * a.cos(), 0.5 + 0.3 * a.sin(), 1.0]);
+            loop_pts.extend([0.5 + 0.3 * trig::cos(a), 0.5 + 0.3 * trig::sin(a), 1.0]);
         }
         let seg = draft_loop_on_face(
             &mut scene,
@@ -14918,9 +23322,9 @@ mod tests {
     #[test]
     fn ground_sketches_are_additive_and_coexist() {
         let mut scene = Scene::new();
-        let first = scene.begin_ground_sketch();
+        let first = scene.begin_ground_sketch().unwrap();
         assert_eq!(scene.sketch_lines(first).unwrap().len(), 0);
-        let second = scene.begin_ground_sketch();
+        let second = scene.begin_ground_sketch().unwrap();
         // : beginning a new sketch is additive — the first handle stays live,
         // so independent coplanar sketches coexist.
         assert_ne!(first, second);
@@ -15020,7 +23424,7 @@ mod tests {
     }
 
     #[test]
-    fn transform_object_rejects_bad_affine_and_reflection() {
+    fn transform_object_rejects_bad_affine_and_bakes_reflection() {
         let mut scene = Scene::new();
         let (s, r) = ground_unit_square(&mut scene);
         let o = scene.extrude_region(s, r, 1.0).unwrap();
@@ -15033,14 +23437,26 @@ mod tests {
                 .0
                 .starts_with("BadAffine")
         );
-        // Negative scale on every axis flips orientation → refused.
+        // Negative scale on every axis flips orientation → baked: the faces
+        // are turned over, so the solid stays watertight and outward-facing.
         let reflect = [
             -1.0, 0.0, 0.0, 0.0, //
             0.0, -1.0, 0.0, 0.0, //
             0.0, 0.0, -1.0, 0.0,
         ];
-        let err = scene.transform_object(o, &reflect).unwrap_err();
-        assert!(err.0.starts_with("Reflection"), "got {}", err.0);
+        scene
+            .transform_object(o, &reflect)
+            .expect("a reflection is baked, not refused");
+        let obj = scene.doc.object(object_id(o)).expect("object live");
+        assert!(obj.signed_volume() > 0.0, "got {}", obj.signed_volume());
+        assert!(scene.object_watertight(o).unwrap());
+        let zero = [
+            0.0, 0.0, 0.0, 0.0, //
+            0.0, 1.0, 0.0, 0.0, //
+            0.0, 0.0, 1.0, 0.0,
+        ];
+        let err = scene.transform_object(o, &zero).unwrap_err();
+        assert!(err.0.starts_with("Singular"), "got {}", err.0);
     }
 
     /// After extruding one of two wall-sharing squares, the surviving
@@ -15101,7 +23517,9 @@ mod tests {
             0.0, 1.0, 0.0, 0.0, //
             0.0, 0.0, 1.0, 0.1,
         ];
-        let copy = scene.copy_sketch_islands(s, &islands, &up).unwrap();
+        let report = scene.copy_sketch_islands(s, &islands, &up).unwrap();
+        let report: serde_json::Value = serde_json::from_str(&report).unwrap();
+        let copy = report["sketches"][0].as_u64().unwrap();
         assert_ne!(copy, s, "the copy is its own sketch");
 
         // Both sketches are live; the source is unchanged on the ground.
@@ -15283,7 +23701,7 @@ mod tests {
     }
 
     #[test]
-    fn transform_sketch_rejects_bad_affine_and_reflection() {
+    fn transform_sketch_rejects_bad_affine_and_accepts_reflection() {
         let mut scene = Scene::new();
         let (s, _r) = ground_unit_square(&mut scene);
 
@@ -15300,8 +23718,22 @@ mod tests {
             0.0, -1.0, 0.0, 0.0, //
             0.0, 0.0, -1.0, 0.0,
         ];
-        let err = scene.transform_sketch(s, &reflect).unwrap_err();
-        assert!(err.0.starts_with("Reflection"), "got {}", err.0);
+        scene
+            .transform_sketch(s, &reflect)
+            .expect("a reflection is baked, not refused");
+        // The mirrored unit square still bounds one extrudable region, and
+        // extruding it yields a positive-volume solid.
+        let r = scene.sketch_regions(s).expect("sketch live")[0];
+        let o = scene.extrude_region(s, r, 1.0).expect("extrude mirrored");
+        let obj = scene.doc.object(object_id(o)).expect("object live");
+        assert!(obj.signed_volume() > 0.0, "got {}", obj.signed_volume());
+        let zero = [
+            0.0, 0.0, 0.0, 0.0, //
+            0.0, 1.0, 0.0, 0.0, //
+            0.0, 0.0, 1.0, 0.0,
+        ];
+        let err = scene.transform_sketch(s, &zero).unwrap_err();
+        assert!(err.0.starts_with("Singular"), "got {}", err.0);
     }
 
     #[test]
@@ -15406,7 +23838,7 @@ mod tests {
     #[test]
     fn transform_sketch_islands_moves_two_islands_together() {
         let mut scene = Scene::new();
-        let s = scene.begin_ground_sketch();
+        let s = scene.begin_ground_sketch().unwrap();
         add_unit_square_to(&mut scene, s, 0.0, 0.0);
         add_unit_square_to(&mut scene, s, 3.0, 0.0);
         let islands = scene.sketch_island_ids(s);
@@ -15449,7 +23881,7 @@ mod tests {
     #[test]
     fn transform_sketch_islands_arranges_onto_another_shape() {
         let mut scene = Scene::new();
-        let s = scene.begin_ground_sketch();
+        let s = scene.begin_ground_sketch().unwrap();
         add_unit_square_to(&mut scene, s, 0.0, 0.0);
         add_unit_square_to(&mut scene, s, 3.0, 0.0);
         let left = scene
@@ -15484,7 +23916,7 @@ mod tests {
     fn transform_sketch_islands_recording_round_trips() {
         let mut scene = Scene::new();
         scene.start_recording();
-        let s = scene.begin_ground_sketch();
+        let s = scene.begin_ground_sketch().unwrap();
         add_unit_square_to(&mut scene, s, 0.0, 0.0);
         add_unit_square_to(&mut scene, s, 3.0, 0.0);
         let left = scene
@@ -15502,7 +23934,7 @@ mod tests {
     #[test]
     fn sketch_unit_keys_json_shape_and_stability() {
         let mut scene = Scene::new();
-        let s = scene.begin_ground_sketch();
+        let s = scene.begin_ground_sketch().unwrap();
         add_unit_square_to(&mut scene, s, 0.0, 0.0);
         let before: serde_json::Value =
             serde_json::from_str(&scene.sketch_unit_keys(s).unwrap()).unwrap();
@@ -15593,7 +24025,7 @@ mod tests {
         let (s2, r2) = ground_unit_square_at(&mut scene, 2.0, 0.0);
         let o2 = scene.extrude_region(s2, r2, 1.0).unwrap();
         let g = scene.group_nodes(&[0], &[o2]).unwrap();
-        let free = scene.begin_ground_sketch();
+        let free = scene.begin_ground_sketch().unwrap();
 
         let hash_before = scene.state_hash();
         let affine = [
@@ -15635,6 +24067,121 @@ mod tests {
 
         let err = scene.group_nodes(&[7], &[o]).unwrap_err();
         assert!(err.0.starts_with("BadNodeKind"), "got {}", err.0);
+    }
+
+    /// `part_frame_json` answers `hew.query.part_frame`'s shape for a world
+    /// node: a unit-square footprint extruded 0.25 m reads longest first,
+    /// thickness last, from its largest face; a stale handle refuses typed.
+    #[test]
+    fn part_frame_json_measures_a_world_node_along_its_own_axes() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 0.25).unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&scene.part_frame_json(0, o).unwrap()).unwrap();
+        assert_eq!(v["source"], "face");
+        let ext: Vec<f64> = v["extents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|x| x.as_f64().unwrap())
+            .collect();
+        assert!((ext[0] - 1.0).abs() < 1e-9 && (ext[1] - 1.0).abs() < 1e-9);
+        assert!((ext[2] - 0.25).abs() < 1e-9);
+        assert!(v["generation"].is_u64() && v["epoch"].is_u64());
+        let err = scene.part_frame_json(0, o ^ 0xffff_0000_0000).unwrap_err();
+        assert!(err.0.starts_with("NotPlaced"), "got {}", err.0);
+    }
+
+    /// `measure_json` answers `hew.query.measure`'s result for a world node
+    /// (the same builder the bus uses) and refuses a stale handle typed.
+    #[test]
+    fn measure_json_reports_a_single_object() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 0.25).unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&scene.measure_json(0, o).unwrap()).unwrap();
+        assert!((v["volume"].as_f64().unwrap() - 0.25).abs() < 1e-9);
+        assert!((v["area"].as_f64().unwrap() - 3.0).abs() < 1e-9);
+        assert_eq!(v["leaf_count"], 1);
+        assert_eq!(v["open_leaves"], 0);
+    }
+
+    #[test]
+    fn measure_json_refuses_a_stale_handle_not_placed() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 0.25).unwrap();
+        let err = scene.measure_json(0, o ^ 0xffff_0000_0000).unwrap_err();
+        assert!(err.0.starts_with("NotPlaced"), "got {}", err.0);
+    }
+
+    /// A group (kind 1) sums its leaves.
+    #[test]
+    fn measure_json_group_sums_two_leaves() {
+        let mut scene = Scene::new();
+        let (s1, r1) = ground_unit_square(&mut scene);
+        let o1 = scene.extrude_region(s1, r1, 1.0).unwrap();
+        let (s2, r2) = ground_unit_square_at(&mut scene, 2.0, 0.0);
+        let o2 = scene.extrude_region(s2, r2, 2.0).unwrap();
+        let g = scene.group_nodes(&[0, 0], &[o1, o2]).unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&scene.measure_json(1, g).unwrap()).unwrap();
+        assert!((v["volume"].as_f64().unwrap() - 3.0).abs() < 1e-9);
+        // 6 faces of the unit cube + (2*1 + 4*(1*2)) for the 1x1x2 box.
+        assert!((v["area"].as_f64().unwrap() - 16.0).abs() < 1e-9);
+        assert_eq!(v["leaf_count"], 2);
+        assert_eq!(v["open_leaves"], 0);
+    }
+
+    /// An instance (kind 2) measures through its pose: a 2x scale multiplies
+    /// volume by 8 and area by 4, and a mirror leaves both positive.
+    #[test]
+    fn measure_json_instance_applies_scaled_and_flipped_poses() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        let inst = scene.make_component(&[0], &[o]).unwrap();
+        let comp = scene.instance_def(inst).unwrap();
+        let scaled = scene
+            .place_instance(
+                comp,
+                &[2.0, 0.0, 0.0, 5.0, 0.0, 2.0, 0.0, 0.0, 0.0, 0.0, 2.0, 0.0],
+            )
+            .unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&scene.measure_json(2, scaled).unwrap()).unwrap();
+        assert!((v["volume"].as_f64().unwrap() - 8.0).abs() < 1e-9, "{v}");
+        assert!((v["area"].as_f64().unwrap() - 24.0).abs() < 1e-9, "{v}");
+        let flipped = scene
+            .place_instance(
+                comp,
+                &[-1.0, 0.0, 0.0, 9.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            )
+            .unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&scene.measure_json(2, flipped).unwrap()).unwrap();
+        assert!((v["volume"].as_f64().unwrap() - 1.0).abs() < 1e-9, "{v}");
+        assert!((v["area"].as_f64().unwrap() - 6.0).abs() < 1e-9, "{v}");
+    }
+
+    /// A group with no leaves holds no geometry: `NoGeometry`.
+    #[test]
+    fn measure_json_empty_group_is_no_geometry() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        let g = scene.group_nodes(&[0], &[o]).unwrap();
+        scene.delete_node(0, o).unwrap();
+        let err = scene.measure_json(1, g).unwrap_err();
+        assert!(err.0.starts_with("NoGeometry"), "got {}", err.0);
+    }
+
+    #[test]
+    fn document_epoch_is_exposed() {
+        let scene = Scene::new();
+        assert_eq!(scene.document_epoch(), scene.doc.document_epoch());
     }
 
     /// `reparent_nodes` moves a live node into a group across the FFI as
@@ -15742,6 +24289,49 @@ mod tests {
 
         // A stale/unknown handle: no thumbnail, no panic.
         assert!(scene.render_definition_thumbnail(comp + 999, 32).is_none());
+    }
+
+    /// The Library "in this model" count is model-wide: entering one of two
+    /// placements of a stamped part (which hides that instance while the
+    /// session is open) must not drop the count.
+    #[test]
+    fn library_placements_count_is_model_wide_inside_a_part() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        let inst = scene.make_component(&[0], &[o]).unwrap();
+        let comp = scene.instance_def(inst).unwrap();
+        scene
+            .stamp_library_source(&[2u8], &[inst], "leg-1", "h1", None)
+            .unwrap();
+        let shifted = [1.0, 0.0, 0.0, 3.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+        scene.place_instance(comp, &shifted).unwrap();
+        let count = |scene: &Scene| -> serde_json::Value {
+            serde_json::from_str::<serde_json::Value>(&scene.library_placements_json()).unwrap()
+                ["leg-1"]
+                .clone()
+        };
+        assert_eq!(count(&scene), serde_json::json!(2));
+        scene.open_explode_session(inst).unwrap();
+        assert_eq!(count(&scene), serde_json::json!(2), "same inside the part");
+    }
+
+    /// Inside a part open for editing the Components row keeps its model-wide
+    /// count and still gets a thumbnail.
+    #[test]
+    fn components_row_survives_an_open_component_session() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        let inst = scene.make_component(&[0], &[o]).unwrap();
+        let comp = scene.instance_def(inst).unwrap();
+        assert_eq!(scene.definition_usage(comp), 1);
+        scene.open_explode_session(inst).unwrap();
+        assert_eq!(scene.definition_usage(comp), 1, "count is model-wide");
+        assert!(
+            scene.render_definition_thumbnail(comp, 32).is_some(),
+            "thumbnail renders from the closed view"
+        );
     }
 
     /// `component_member_objects` must filter out a member whose birth was
@@ -15871,7 +24461,7 @@ mod tests {
         let posed = scene
             .snap(
                 7.0, 0.0, 5.0, 0.0, 0.0, -1.0, 0.02, None, None, None, None, None, None, None,
-                None, None,
+                None, None, None,
             )
             .unwrap()
             .expect("posed definition endpoint must snap");
@@ -15882,7 +24472,7 @@ mod tests {
         let hidden = scene
             .snap(
                 7.0, 0.0, 5.0, 0.0, 0.0, -1.0, 0.02, None, None, None, None, None, None, None,
-                None, None,
+                None, None, None,
             )
             .unwrap();
         assert_ne!(
@@ -15894,7 +24484,7 @@ mod tests {
         let shown = scene
             .snap(
                 7.0, 0.0, 5.0, 0.0, 0.0, -1.0, 0.02, None, None, None, None, None, None, None,
-                None, None,
+                None, None, None,
             )
             .unwrap()
             .expect("showing the active instance restores its posed sketch inference");
@@ -15904,7 +24494,7 @@ mod tests {
         let after_exit = scene
             .snap(
                 7.0, 0.0, 5.0, 0.0, 0.0, -1.0, 0.02, None, None, None, None, None, None, None,
-                None, None,
+                None, None, None,
             )
             .unwrap();
         assert_ne!(
@@ -15915,7 +24505,7 @@ mod tests {
         let local = scene
             .snap(
                 2.0, 0.0, 5.0, 0.0, 0.0, -1.0, 0.02, None, None, None, None, None, None, None,
-                None, None,
+                None, None, None,
             )
             .unwrap();
         assert_ne!(
@@ -15952,7 +24542,7 @@ mod tests {
         let mirrored = scene
             .snap(
                 3.0, 0.0, 5.0, 0.0, 0.0, -1.0, 0.02, None, None, None, None, None, None, None,
-                None, None,
+                None, None, None,
             )
             .unwrap()
             .expect("mirrored definition endpoint must snap");
@@ -15987,7 +24577,7 @@ mod tests {
     #[test]
     fn place_text_o_glyph_via_full_gesture_pipeline_is_watertight() {
         let mut scene = Scene::new();
-        let sketch = scene.begin_ground_sketch();
+        let sketch = scene.begin_ground_sketch().unwrap();
         scene.sketch_begin_gesture(sketch).unwrap();
         let outer = [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)];
         for i in 0..4 {
@@ -16043,7 +24633,7 @@ mod tests {
         let mut scene = Scene::new();
         scene.start_recording();
 
-        let sketch = scene.begin_ground_sketch();
+        let sketch = scene.begin_ground_sketch().unwrap();
         scene.sketch_begin_gesture(sketch).unwrap();
         let outer = [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)];
         for i in 0..4 {
@@ -16129,6 +24719,112 @@ mod tests {
         assert_ne!(new_comp, comp);
         assert_eq!(scene.instance_def(inst2), Some(new_comp));
         assert_eq!(scene.instance_def(inst), Some(comp));
+    }
+
+    /// A world box folded into a component holding a nested instance: the
+    /// outer instance, the nested member instance, and the two definitions.
+    fn nested_scene(scene: &mut Scene) -> (u64, u64, u64, u64) {
+        let (s1, r1) = ground_unit_square(scene);
+        let inner_box = scene.extrude_region(s1, r1, 1.0).unwrap();
+        let inner = scene.make_component(&[0], &[inner_box]).unwrap();
+        let inner_def = scene.instance_def(inner).unwrap();
+        let (s2, r2) = ground_unit_square_at(scene, 3.0, 0.0);
+        let outer_box = scene.extrude_region(s2, r2, 1.0).unwrap();
+        let outer = scene.make_component(&[0, 2], &[outer_box, inner]).unwrap();
+        let outer_def = scene.instance_def(outer).unwrap();
+        (outer, inner, outer_def, inner_def)
+    }
+
+    #[test]
+    fn make_unique_by_path_json_returns_decimal_string_ids_and_the_remap() {
+        let mut scene = Scene::new();
+        let (outer, inner, outer_def, inner_def) = nested_scene(&mut scene);
+        let json = scene
+            .make_unique_by_path_json(vec![outer, inner], true, false)
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let handle = |x: &serde_json::Value| -> u64 {
+            x.as_str()
+                .expect("every handle is a decimal string")
+                .parse()
+                .unwrap()
+        };
+        let component = handle(&v["component"]);
+        let instance = handle(&v["instance"]);
+        let components: Vec<(u64, u64)> = v["remap"]["components"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| (handle(&p[0]), handle(&p[1])))
+            .collect();
+        assert_eq!(components.len(), 2, "both definitions on the path fork");
+        assert!(components.contains(&(inner_def, component)));
+        let new_outer = components
+            .iter()
+            .find(|(old, _)| *old == outer_def)
+            .unwrap()
+            .1;
+        assert_eq!(scene.instance_def(outer), Some(new_outer));
+        let instances: Vec<(u64, u64)> = v["remap"]["instances"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| (handle(&p[0]), handle(&p[1])))
+            .collect();
+        assert!(
+            instances.contains(&(inner, instance)),
+            "the returned placement is the nested instance's copy"
+        );
+        assert_eq!(scene.instance_def(instance), Some(component));
+        assert_eq!(scene.instance_def(inner), Some(inner_def));
+        assert_eq!(v["remap"]["objects"].as_array().unwrap().len(), 2);
+        assert!(v["remap"]["groups"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn make_unique_by_path_json_refuses_an_empty_path_with_bad_node_list() {
+        let mut scene = Scene::new();
+        let before = scene.state_hash();
+        let err = scene
+            .make_unique_by_path_json(Vec::new(), true, false)
+            .unwrap_err();
+        assert!(err.to_string().starts_with("BadNodeList"), "{err}");
+        assert_eq!(scene.state_hash(), before);
+    }
+
+    #[test]
+    fn make_unique_by_path_records_and_replays_to_the_same_state_hash() {
+        let mut scene = Scene::new();
+        scene.start_recording();
+        let (outer, inner, outer_def, _) = nested_scene(&mut scene);
+        const SHIFT_X6: [f64; 12] = [1.0, 0.0, 0.0, 6.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+        scene.place_instance(outer_def, &SHIFT_X6).unwrap();
+        scene
+            .make_unique_by_path_json(vec![outer, inner], true, true)
+            .unwrap();
+        // The old one-instance call still records its own variant.
+        let other = scene.place_instance(outer_def, &SHIFT_X6).unwrap();
+        scene.make_unique(other).unwrap();
+        scene.scene_undo().unwrap();
+        scene.scene_redo().unwrap();
+        scene.stop_recording();
+        let golden = scene.state_hash();
+        let json = scene.take_recording();
+        assert!(json.contains("\"make_unique_by_path\""), "{json}");
+        assert!(json.contains("\"make_unique\""), "{json}");
+
+        let mut replayed = Scene::new();
+        assert_eq!(replayed.replay(&json).unwrap(), golden);
+        assert_eq!(replayed.save(), scene.save(), "byte-identical document");
+    }
+
+    #[test]
+    fn make_unique_still_returns_the_new_component_handle() {
+        let mut scene = Scene::new();
+        let (outer, _, outer_def, _) = nested_scene(&mut scene);
+        let new_comp = scene.make_unique(outer).unwrap();
+        assert_ne!(new_comp, outer_def);
+        assert_eq!(scene.instance_def(outer), Some(new_comp));
     }
 
     /// `sketch_edge_endpoints` promises WORLD endpoints, but a def-owned
@@ -16422,7 +25118,21 @@ mod tests {
         curve: Option<([f64; 3], f64, usize)>,
     ) -> Result<u64, ApiError> {
         draft_loop(scene, instance, obj, face, pts, curve)?;
-        Ok(draft_loop_region_face(scene, instance, pts))
+        // The face's outward side in world space: its local normal mapped
+        // through the instance pose (a mirrored pose keeps the side).
+        let local = scene.doc.object(object_id(obj)).unwrap().faces()
+            [kernel::FaceId::from(KeyData::from_ffi(face))]
+        .plane
+        .normal();
+        let outward = match instance {
+            Some(i) => scene
+                .doc
+                .instance_pose(instance_id(i))
+                .unwrap()
+                .apply_normal(local),
+            None => local,
+        };
+        Ok(draft_loop_region_face(scene, instance, pts, outward))
     }
 
     /// The drawing half of [`draft_loop_on_face`]: opens the face draft,
@@ -16458,15 +25168,22 @@ mod tests {
             scene.draft_end(d)
         })();
         if let Err(e) = result {
-            scene.draft_cancel(d);
+            scene.draft_cancel(d).unwrap();
             return Err(e);
         }
         Ok(())
     }
 
     /// The face of the object covered by the region of the drawn loop
-    /// `pts`, from `plane_units_json`.
-    fn draft_loop_region_face(scene: &Scene, instance: Option<u64>, pts: &[f64]) -> u64 {
+    /// `pts`, from `plane_units_json`, read on the plane context facing
+    /// `outward` (the face's world outward side; the loop's own winding
+    /// does not say which side that is — a mirrored pose reverses it).
+    fn draft_loop_region_face(
+        scene: &Scene,
+        instance: Option<u64>,
+        pts: &[f64],
+        outward: kernel::Vec3,
+    ) -> u64 {
         let n = pts.len() / 3;
         let p = |i: usize| &pts[(i % n) * 3..(i % n) * 3 + 3];
         // The drawn region: pick the loop's vertex centroid straight down
@@ -16474,6 +25191,11 @@ mod tests {
         let v = |i: usize| kernel::Vec3::new(p(i)[0], p(i)[1], p(i)[2]);
         let nrm = (v(1) - v(0)).cross(v(2) - v(0));
         let nrm = nrm * (1.0 / nrm.length());
+        let nrm = if nrm.dot(outward) < 0.0 {
+            nrm * -1.0
+        } else {
+            nrm
+        };
         let cen = (0..n).fold([0.0; 3], |mut c, i| {
             for (k, ck) in c.iter_mut().enumerate() {
                 *ck += p(i)[k] / n as f64;
@@ -16779,6 +25501,109 @@ mod tests {
         let _ = e;
     }
 
+    /// `boolean_through_placement_json`: a world cutter over a mirrored
+    /// placement of a one-member definition cuts the member (host taken as
+    /// the definition's only part), every placement shows it, one undo
+    /// entry; a two-part definition refuses `AmbiguousHost` without a
+    /// host; and the call records and replays to the same state.
+    #[test]
+    fn boolean_through_placement_cuts_the_definition_and_replays() {
+        recording::reset();
+        let mut scene = Scene::new();
+        scene.start_recording();
+        let (s, r) = ground_unit_square(&mut scene);
+        let a = scene.extrude_region(s, r, 1.0).unwrap();
+        let inst = scene.make_component(&[0], &[a]).unwrap();
+        // A mirrored placement at x ∈ [19, 20].
+        let mirrored = scene
+            .place_instance(
+                scene.instance_def(inst).unwrap(),
+                &[
+                    -1.0, 0.0, 0.0, 20.0, //
+                    0.0, 1.0, 0.0, 0.0, //
+                    0.0, 0.0, 1.0, 0.0,
+                ],
+            )
+            .unwrap();
+        let (ts, tr) = ground_unit_square_at(&mut scene, 19.5, 0.0);
+        let tool = scene.extrude_region(ts, tr, 2.0).unwrap();
+        let depth = scene.doc.undo_depth();
+        let json = scene
+            .boolean_through_placement_json(vec![mirrored], None, tool, 1)
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let result: u64 = v["result"].as_str().unwrap().parse().unwrap();
+        assert_eq!(scene.doc.undo_depth(), depth + 1);
+        assert_eq!(
+            scene.doc.object_owner_component(object_id(result)),
+            scene.instance_def(inst).map(component_id)
+        );
+        assert!(!scene.doc.is_world_object(object_id(tool)));
+
+        // Two parts: the host must be named.
+        let (s2, r2) = ground_unit_square_at(&mut scene, 40.0, 0.0);
+        let b = scene.extrude_region(s2, r2, 1.0).unwrap();
+        let (s3, r3) = ground_unit_square_at(&mut scene, 42.0, 0.0);
+        let c = scene.extrude_region(s3, r3, 1.0).unwrap();
+        let pair = scene.make_component(&[0, 0], &[b, c]).unwrap();
+        let (s4, r4) = ground_unit_square_at(&mut scene, 40.5, 0.0);
+        let cutter = scene.extrude_region(s4, r4, 2.0).unwrap();
+        let err = scene
+            .boolean_through_placement_json(vec![pair], None, cutter, 1)
+            .unwrap_err();
+        assert!(err.0.starts_with("AmbiguousHost"), "{}", err.0);
+        scene
+            .boolean_through_placement_json(vec![pair], Some(b), cutter, 1)
+            .unwrap();
+
+        scene.stop_recording();
+        let golden = scene.state_hash();
+        let recorded = scene.take_recording();
+        let mut replayed = Scene::new();
+        assert_eq!(replayed.replay(&recorded).unwrap(), golden);
+        assert_eq!(replayed.save(), scene.save());
+    }
+
+    /// `boolean_through_placement_json` without a host names why no part
+    /// can be taken: a definition whose one part is a group refuses
+    /// `GroupedOperand`, one whose one part is a nested placement
+    /// `BooleanOperandHasInstance`, never `AmbiguousHost`; a union or
+    /// intersect with a world tool refuses `BooleanOperandHasInstance`.
+    /// Nothing changes on any refusal.
+    #[test]
+    fn boolean_through_placement_without_a_host_names_the_reason() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let a = scene.extrude_region(s, r, 1.0).unwrap();
+        let g = scene.group_nodes(&[0], &[a]).unwrap();
+        let grouped = scene.make_component(&[1], &[g]).unwrap();
+        let (ts, tr) = ground_unit_square_at(&mut scene, 0.5, 0.0);
+        let tool = scene.extrude_region(ts, tr, 2.0).unwrap();
+
+        let (s2, r2) = ground_unit_square_at(&mut scene, 10.0, 0.0);
+        let inner_obj = scene.extrude_region(s2, r2, 1.0).unwrap();
+        let inner = scene.make_component(&[0], &[inner_obj]).unwrap();
+        let nested = scene.make_component(&[2], &[inner]).unwrap();
+
+        let (s3, r3) = ground_unit_square_at(&mut scene, 20.0, 0.0);
+        let solo_obj = scene.extrude_region(s3, r3, 1.0).unwrap();
+        let solo = scene.make_component(&[0], &[solo_obj]).unwrap();
+
+        let before = scene.save();
+        let depth = scene.doc.undo_depth();
+        let code = |r: Result<String, ApiError>| r.unwrap_err().0;
+        let e = code(scene.boolean_through_placement_json(vec![grouped], None, tool, 1));
+        assert!(e.starts_with("GroupedOperand"), "{e}");
+        let e = code(scene.boolean_through_placement_json(vec![nested], None, tool, 1));
+        assert!(e.starts_with("BooleanOperandHasInstance"), "{e}");
+        for op in [0, 2] {
+            let e = code(scene.boolean_through_placement_json(vec![solo], None, tool, op));
+            assert!(e.starts_with("BooleanOperandHasInstance"), "op {op}: {e}");
+        }
+        assert_eq!(scene.doc.undo_depth(), depth);
+        assert_eq!(scene.save(), before);
+    }
+
     /// `draft_loop_in_instance` maps a WORLD-space loop through the
     /// instance's pose⁻¹ before imprinting — proven with a genuinely
     /// non-identity (translated) pose, unlike `component_edit_k2_session_
@@ -16962,8 +25787,8 @@ mod tests {
         let mut world_loop = Vec::new();
         for i in 0..8 {
             let theta = std::f64::consts::TAU * (i as f64) / 8.0;
-            world_loop.push(0.5 + 0.3 * theta.cos());
-            world_loop.push(0.5 + 0.3 * theta.sin());
+            world_loop.push(0.5 + 0.3 * trig::cos(theta));
+            world_loop.push(0.5 + 0.3 * trig::sin(theta));
             world_loop.push(1.0);
         }
         let sub_face = draft_loop_on_face(
@@ -17015,8 +25840,8 @@ mod tests {
         for i in 0..8 {
             let theta = std::f64::consts::TAU * (i as f64) / 8.0;
             let local_pt = Point3::new(
-                local_center.x + local_radius * theta.cos(),
-                local_center.y + local_radius * theta.sin(),
+                local_center.x + local_radius * trig::cos(theta),
+                local_center.y + local_radius * trig::sin(theta),
                 1.0,
             );
             let w = pose.apply_point(local_pt);
@@ -17069,8 +25894,8 @@ mod tests {
         for i in 0..8 {
             let theta = std::f64::consts::TAU * (i as f64) / 8.0;
             let local_pt = Point3::new(
-                local_center.x + local_radius * theta.cos(),
-                local_center.y + local_radius * theta.sin(),
+                local_center.x + local_radius * trig::cos(theta),
+                local_center.y + local_radius * trig::sin(theta),
                 1.0,
             );
             let w = pose.apply_point(local_pt);
@@ -17457,6 +26282,613 @@ mod tests {
         );
     }
 
+    /// A unit-cube component whose definition also holds one line beside
+    /// the cube, LOCAL (1.3, 0, 0)–(1.3, 1, 0), drawn through an
+    /// identity placement that is then removed. Returns the definition and
+    /// the line's sketch.
+    fn component_with_a_line_beside_it(scene: &mut Scene) -> (u64, u64) {
+        let (s, r) = ground_unit_square(scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        let inst = scene.make_component(&[0], &[o]).unwrap();
+        let comp = scene.instance_def(inst).unwrap();
+        let line = scene
+            .begin_sketch_on_plane_in_instance(inst, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0)
+            .unwrap();
+        scene
+            .sketch_add_segment(line, 1.3, 0.0, 0.0, 1.3, 1.0, 0.0)
+            .unwrap();
+        scene.delete_node(2, inst).unwrap();
+        (comp, line)
+    }
+
+    /// A ranked hit list as `(instance, sketch, depth, point)` rows.
+    fn hit_rows(hits: &InstanceSketchHitsJs) -> Vec<(u64, u64, f64, Point3)> {
+        let (inst, sk, dep, pts) = (
+            hits.instances(),
+            hits.sketches(),
+            hits.depths(),
+            hits.points(),
+        );
+        assert_eq!(hits.len(), inst.len());
+        assert_eq!(
+            (sk.len(), dep.len(), pts.len()),
+            (inst.len(), inst.len(), 3 * inst.len())
+        );
+        (0..inst.len())
+            .map(|k| {
+                (
+                    inst[k],
+                    sk[k],
+                    dep[k],
+                    Point3::new(pts[3 * k], pts[3 * k + 1], pts[3 * k + 2]),
+                )
+            })
+            .collect()
+    }
+
+    /// The best line under a straight-down ray at world (x, y) from z = 10.
+    fn down_edge_pick(scene: &Scene, x: f64, y: f64) -> Option<(u64, u64, f64, Point3)> {
+        hit_rows(&scene.pick_instance_sketch_edge(x, y, 10.0, 0.0, 0.0, -1.0))
+            .into_iter()
+            .next()
+    }
+
+    /// The ranked fills under a vertical ray at world (x, y) from z = `z`
+    /// heading `dz`.
+    fn region_rows(scene: &Scene, x: f64, y: f64, z: f64, dz: f64) -> Vec<(u64, u64, f64, Point3)> {
+        hit_rows(&scene.pick_instance_sketch_region(x, y, z, 0.0, 0.0, dz))
+    }
+
+    fn near3(a: Point3, b: Point3) -> bool {
+        (a - b).length() < 1e-9
+    }
+
+    /// The top-level pick finds a line drawn inside a component through a
+    /// translated placement, names that placement, and reports the depth
+    /// and the world point on the line; the world sketch pick stays blind
+    /// to it, and the line's local position is a miss. A document with no
+    /// drawing in any definition answers empty.
+    #[test]
+    fn pick_instance_sketch_edge_finds_a_definition_line_through_a_translated_pose() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        scene.make_component(&[0], &[o]).unwrap();
+        assert!(!scene.doc.has_definition_drawing());
+        assert!(
+            scene
+                .pick_instance_sketch_edge(0.5, 0.0, 10.0, 0.0, 0.0, -1.0)
+                .is_empty()
+        );
+
+        let mut scene = Scene::new();
+        let (comp, line) = component_with_a_line_beside_it(&mut scene);
+        let pose = kernel::Transform::translation(kernel::Vec3::new(5.0, 2.0, 0.0));
+        let inst = scene.place_instance(comp, &pose.to_affine()).unwrap();
+
+        assert!(
+            scene
+                .pick_sketch_edge(6.3, 2.5, 10.0, 0.0, 0.0, -1.0)
+                .is_none(),
+            "the world sketch pick leaves definition sketches out"
+        );
+        let (i, s, depth, at) = down_edge_pick(&scene, 6.3, 2.5).expect("the posed line");
+        assert_eq!((i, s), (inst, line));
+        assert!((depth - 10.0).abs() < 1e-9, "depth {depth}");
+        assert!(near3(at, Point3::new(6.3, 2.5, 0.0)), "{at:?}");
+        assert!(down_edge_pick(&scene, 1.3, 0.5).is_none(), "local position");
+    }
+
+    /// Mirrored and non-uniformly scaled placements map the line too.
+    #[test]
+    fn pick_instance_sketch_edge_maps_mirrored_and_non_uniform_poses() {
+        let mut scene = Scene::new();
+        let (comp, line) = component_with_a_line_beside_it(&mut scene);
+        let mirrored = kernel::Transform::scale(kernel::Vec3::new(-1.0, 1.0, 1.0)).then(
+            &kernel::Transform::translation(kernel::Vec3::new(7.0, 4.0, 0.0)),
+        );
+        let stretched = kernel::Transform::scale(kernel::Vec3::new(2.0, 1.0, 3.0)).then(
+            &kernel::Transform::translation(kernel::Vec3::new(20.0, 0.0, 0.0)),
+        );
+        let m = scene.place_instance(comp, &mirrored.to_affine()).unwrap();
+        let s = scene.place_instance(comp, &stretched.to_affine()).unwrap();
+
+        let at_m = mirrored.apply_point(Point3::new(1.3, 0.5, 0.0));
+        let hit = down_edge_pick(&scene, at_m.x, at_m.y).expect("mirrored line");
+        assert_eq!((hit.0, hit.1), (m, line));
+        assert!(near3(hit.3, at_m));
+        let at_s = stretched.apply_point(Point3::new(1.3, 0.5, 0.0));
+        let hit = down_edge_pick(&scene, at_s.x, at_s.y).expect("stretched line");
+        assert_eq!((hit.0, hit.1), (s, line));
+        // The stretched placement's line is NOT at its unscaled offset.
+        assert!(down_edge_pick(&scene, 21.3, 0.5).is_none());
+    }
+
+    /// A line drawn inside a NESTED definition picks through the outer
+    /// placement and names the outermost (top-level) instance; the
+    /// placements export lists it at the nesting pose in the outer
+    /// instance's frame, the same walk the pick reads.
+    #[test]
+    fn a_nested_line_picks_through_the_outer_placement_and_exports_its_nesting_pose() {
+        let mut scene = Scene::new();
+        let (comp, line) = component_with_a_line_beside_it(&mut scene);
+        let inner = scene
+            .place_instance(
+                comp,
+                &kernel::Transform::translation(kernel::Vec3::new(0.0, 3.0, 0.0)).to_affine(),
+            )
+            .unwrap();
+        let outer = scene.make_component(&[2], &[inner]).unwrap();
+        let outer_comp = scene.instance_def(outer).unwrap();
+        // A line of the outer definition's own, beside the nested one.
+        let own = scene
+            .begin_sketch_on_plane_in_instance(outer, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0)
+            .unwrap();
+        scene
+            .sketch_add_segment(own, 5.0, 0.0, 0.0, 5.0, 1.0, 0.0)
+            .unwrap();
+        scene.delete_node(2, outer).unwrap();
+        let pose = kernel::Transform::translation(kernel::Vec3::new(10.0, 0.0, 0.0));
+        let outer = scene.place_instance(outer_comp, &pose.to_affine()).unwrap();
+
+        let hit = down_edge_pick(&scene, 11.3, 3.5).expect("nested line through both poses");
+        assert_eq!((hit.0, hit.1), (outer, line));
+
+        let placements = scene.instance_sketch_placements(outer);
+        let (sketches, poses) = (placements.sketches(), placements.poses());
+        assert_eq!(placements.len(), 2);
+        assert_eq!(poses.len(), 24, "12 floats per sketch");
+        let pose_of = |s: u64| {
+            let k = sketches.iter().position(|&x| x == s).expect("listed");
+            poses[12 * k..12 * k + 12].to_vec()
+        };
+        let identity = kernel::Transform::IDENTITY.to_affine().to_vec();
+        let nested = kernel::Transform::translation(kernel::Vec3::new(0.0, 3.0, 0.0))
+            .to_affine()
+            .to_vec();
+        assert_eq!(pose_of(own), identity, "the outer definition's own line");
+        assert_eq!(pose_of(line), nested, "the nested line at its nesting pose");
+        // The direct placement of the inner definition shows only its line.
+        let direct = scene
+            .place_instance(comp, &kernel::Transform::IDENTITY.to_affine())
+            .unwrap();
+        let direct = scene.instance_sketch_placements(direct);
+        assert_eq!(direct.sketches(), vec![line]);
+        assert_eq!(direct.poses(), identity);
+        assert!(
+            scene.instance_sketch_placements(999_999).is_empty(),
+            "stale"
+        );
+
+        // Hiding the nested member by eye drops its line from both.
+        let member = scene
+            .doc
+            .def_member_nodes(component_id(outer_comp))
+            .unwrap_or_default()
+            .into_iter()
+            .find_map(|n| match n {
+                NodeId::Instance(i) => Some(i.data().as_ffi()),
+                _ => None,
+            })
+            .expect("the nested placement");
+        scene.set_node_user_hidden(2, member, true).unwrap();
+        assert_eq!(
+            scene.instance_sketch_placements(outer).sketches(),
+            vec![own]
+        );
+        assert!(down_edge_pick(&scene, 11.3, 3.5).is_none(), "hidden member");
+    }
+
+    /// Hidden placements are skipped: by `set_hidden`, and by eye.
+    #[test]
+    fn pick_instance_sketch_edge_skips_a_hidden_instance() {
+        let mut scene = Scene::new();
+        let (comp, _) = component_with_a_line_beside_it(&mut scene);
+        let inst = scene
+            .place_instance(comp, &kernel::Transform::IDENTITY.to_affine())
+            .unwrap();
+        assert!(down_edge_pick(&scene, 1.3, 0.5).is_some());
+        scene.set_hidden(&[], &[inst]);
+        assert!(down_edge_pick(&scene, 1.3, 0.5).is_none(), "set_hidden");
+        scene.set_hidden(&[], &[]);
+        scene.set_node_user_hidden(2, inst, true).unwrap();
+        assert!(down_edge_pick(&scene, 1.3, 0.5).is_none(), "hidden by eye");
+        scene.set_node_user_hidden(2, inst, false).unwrap();
+        assert!(down_edge_pick(&scene, 1.3, 0.5).is_some());
+    }
+
+    /// One sketch to draw: a point on its plane, the plane's normal, and
+    /// its segments.
+    type Drawing<'a> = (Point3, kernel::Vec3, &'a [(Point3, Point3)]);
+
+    /// A component whose definition holds a unit cube at x = 20 (out of
+    /// the way) and one sketch per `(plane point, plane normal, segments)`
+    /// entry, drawn through an identity placement that is then removed.
+    /// Returns the definition and the sketches, in order.
+    fn component_with_drawings(scene: &mut Scene, drawings: &[Drawing<'_>]) -> (u64, Vec<u64>) {
+        let (s, r) = ground_unit_square_at(scene, 20.0, 0.0);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        let inst = scene.make_component(&[0], &[o]).unwrap();
+        let comp = scene.instance_def(inst).unwrap();
+        let mut sketches = Vec::new();
+        for (p, n, segments) in drawings {
+            let sketch = scene
+                .begin_sketch_on_plane_in_instance(inst, p.x, p.y, p.z, n.x, n.y, n.z)
+                .unwrap();
+            for (a, b) in *segments {
+                scene
+                    .sketch_add_segment(sketch, a.x, a.y, a.z, b.x, b.y, b.z)
+                    .unwrap();
+            }
+            sketches.push(sketch);
+        }
+        scene.delete_node(2, inst).unwrap();
+        (comp, sketches)
+    }
+
+    /// Every line of a placement in the cone is listed, not only its
+    /// best-ranked one: a line H straight under the ray (the smaller angle)
+    /// and a line V nearer the eye but a little off the ray both come back,
+    /// H first. A caller that rejects H (say, behind an opaque face) still
+    /// finds V of the same component next in the list.
+    #[test]
+    fn pick_instance_sketch_edge_lists_every_line_of_a_placement_in_the_cone() {
+        let mut scene = Scene::new();
+        let up = kernel::Vec3::new(0.0, 0.0, 1.0);
+        let h_seg = [(Point3::new(1.3, 0.0, 0.0), Point3::new(1.3, 1.0, 0.0))];
+        let v_seg = [(Point3::new(1.4, 0.0, 0.5), Point3::new(1.4, 1.0, 0.5))];
+        let (comp, sk) = component_with_drawings(
+            &mut scene,
+            &[
+                (Point3::new(0.0, 0.0, 0.0), up, &h_seg),
+                (Point3::new(0.0, 0.0, 0.5), up, &v_seg),
+            ],
+        );
+        let (h, v) = (sk[0], sk[1]);
+        let inst = scene
+            .place_instance(comp, &kernel::Transform::IDENTITY.to_affine())
+            .unwrap();
+
+        let rows = hit_rows(&scene.pick_instance_sketch_edge(1.3, 0.5, 10.0, 0.0, 0.0, -1.0));
+        assert_eq!(
+            rows.iter().map(|r| (r.0, r.1)).collect::<Vec<_>>(),
+            vec![(inst, h), (inst, v)],
+            "both lines, the smaller angle first"
+        );
+        assert!((rows[0].2 - 10.0).abs() < 1e-9);
+        assert!(near3(rows[0].3, Point3::new(1.3, 0.5, 0.0)));
+        // The app drops H as hidden: V is the same placement's next hit.
+        let visible = rows
+            .iter()
+            .find(|r| r.0 == inst && r.1 != h)
+            .expect("V survives H's rejection");
+        assert_eq!(visible.1, v);
+        assert!((visible.2 - 9.5).abs() < 1e-9, "depth {}", visible.2);
+        assert!(
+            near3(visible.3, Point3::new(1.4, 0.5, 0.5)),
+            "{:?}",
+            visible.3
+        );
+    }
+
+    /// The reported point and depth are the ones the cone ranked the line
+    /// by (its point of smallest angle from the ray), not the line's
+    /// perpendicular-nearest point, which can sit elsewhere on the line or
+    /// even behind the eye.
+    #[test]
+    fn pick_instance_sketch_edge_reports_the_cone_point_it_ranked_by() {
+        for (a, label) in [
+            (Point3::new(0.05, 0.0, 9.0), "a line rising toward the eye"),
+            (
+                Point3::new(0.01, 0.0, 11.0),
+                "a line passing behind the eye",
+            ),
+        ] {
+            let mut scene = Scene::new();
+            let seg = [(a, Point3::new(0.1, 0.0, 0.0))];
+            let (comp, sk) = component_with_drawings(
+                &mut scene,
+                &[(
+                    Point3::new(0.0, 0.0, 0.0),
+                    kernel::Vec3::new(0.0, 1.0, 0.0),
+                    &seg,
+                )],
+            );
+            let inst = scene
+                .place_instance(comp, &kernel::Transform::IDENTITY.to_affine())
+                .unwrap();
+            let rows = hit_rows(&scene.pick_instance_sketch_edge(0.0, 0.0, 10.0, 0.0, 0.0, -1.0));
+            assert_eq!(rows.len(), 1, "{label}: {rows:?}");
+            let (i, s, depth, at) = rows[0];
+            assert_eq!((i, s), (inst, sk[0]), "{label}");
+            assert!((depth - 10.0).abs() < 1e-9, "{label}: depth {depth}");
+            assert!(near3(at, Point3::new(0.1, 0.0, 0.0)), "{label}: {at:?}");
+        }
+    }
+
+    /// The fill pick lists every sketch of a placement whose fill the ray
+    /// enters, not only the nearest: two stacked squares in one definition
+    /// both come back, the nearer first, so a caller that finds the upper
+    /// one hidden still reaches the lower.
+    #[test]
+    fn pick_instance_sketch_region_lists_every_fill_of_a_placement() {
+        let mut scene = Scene::new();
+        let square = |z: f64| {
+            let c = [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)];
+            (0..4)
+                .map(|k| {
+                    let ((ax, ay), (bx, by)) = (c[k], c[(k + 1) % 4]);
+                    (Point3::new(ax, ay, z), Point3::new(bx, by, z))
+                })
+                .collect::<Vec<_>>()
+        };
+        let (low, high) = (square(0.0), square(0.5));
+        let up = kernel::Vec3::new(0.0, 0.0, 1.0);
+        let (comp, sk) = component_with_drawings(
+            &mut scene,
+            &[
+                (Point3::new(0.0, 0.0, 0.0), up, &low),
+                (Point3::new(0.0, 0.0, 0.5), up, &high),
+            ],
+        );
+        let inst = scene
+            .place_instance(comp, &kernel::Transform::IDENTITY.to_affine())
+            .unwrap();
+        let rows = region_rows(&scene, 0.5, 0.5, 10.0, -1.0);
+        assert_eq!(
+            rows.iter().map(|r| (r.0, r.1)).collect::<Vec<_>>(),
+            vec![(inst, sk[1]), (inst, sk[0])]
+        );
+        assert!((rows[0].2 - 9.5).abs() < 1e-9 && (rows[1].2 - 10.0).abs() < 1e-9);
+        assert!(near3(rows[1].3, Point3::new(0.5, 0.5, 0.0)));
+    }
+
+    /// A placement with more lines in the cone than the per-placement cap
+    /// lists only its best-ranked ones, best first.
+    #[test]
+    fn pick_instance_sketch_edge_caps_the_lines_one_placement_lists() {
+        let mut scene = Scene::new();
+        // Twelve lines straight under the ray, one per sketch at heights
+        // 0, 0.1, ... 1.1: the same angle, so the nearer (higher) ranks
+        // first.
+        let segs: Vec<[(Point3, Point3); 1]> = (0..12)
+            .map(|k| {
+                let z = 0.1 * f64::from(k);
+                [(Point3::new(1.0, 0.0, z), Point3::new(1.0, 1.0, z))]
+            })
+            .collect();
+        let up = kernel::Vec3::new(0.0, 0.0, 1.0);
+        let drawings: Vec<Drawing<'_>> = segs.iter().map(|s| (s[0].0, up, s.as_slice())).collect();
+        let (comp, _) = component_with_drawings(&mut scene, &drawings);
+        scene
+            .place_instance(comp, &kernel::Transform::IDENTITY.to_affine())
+            .unwrap();
+        let rows = hit_rows(&scene.pick_instance_sketch_edge(1.0, 0.5, 10.0, 0.0, 0.0, -1.0));
+        assert_eq!(rows.len(), INSTANCE_PICK_HITS_PER_PLACEMENT, "{rows:?}");
+        for (k, row) in rows.iter().enumerate() {
+            let z = 0.1 * (11 - k) as f64;
+            assert!((row.2 - (10.0 - z)).abs() < 1e-9, "{rows:?}");
+        }
+    }
+
+    /// A component whose definition holds a filled square drawn on its
+    /// ground, LOCAL x in [x0, x0 + side], y in [0, side], beside a unit
+    /// cube at x = 20 (out of the way), drawn through an identity placement
+    /// that is then removed. Returns the definition and the square's
+    /// sketch.
+    fn component_with_a_square(scene: &mut Scene, x0: f64, side: f64) -> (u64, u64) {
+        let (s, r) = ground_unit_square_at(scene, 20.0, 0.0);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        let inst = scene.make_component(&[0], &[o]).unwrap();
+        let comp = scene.instance_def(inst).unwrap();
+        let drawn = scene
+            .begin_sketch_on_plane_in_instance(inst, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0)
+            .unwrap();
+        let x1 = x0 + side;
+        for (ax, ay, bx, by) in [
+            (x0, 0.0, x1, 0.0),
+            (x1, 0.0, x1, side),
+            (x1, side, x0, side),
+            (x0, side, x0, 0.0),
+        ] {
+            scene
+                .sketch_add_segment(drawn, ax, ay, 0.0, bx, by, 0.0)
+                .unwrap();
+        }
+        scene.delete_node(2, inst).unwrap();
+        (comp, drawn)
+    }
+
+    /// Two placements under one ray: both are listed, the nearer first,
+    /// for lines and fills alike; Wireframe drops the fills, not the lines.
+    #[test]
+    fn instance_sketch_picks_rank_every_placement_nearest_first() {
+        let mut scene = Scene::new();
+        let (comp, drawn) = component_with_a_square(&mut scene, 2.0, 1.0);
+        let low = scene
+            .place_instance(comp, &kernel::Transform::IDENTITY.to_affine())
+            .unwrap();
+        let high = scene
+            .place_instance(
+                comp,
+                &kernel::Transform::translation(kernel::Vec3::new(0.0, 0.0, 2.0)).to_affine(),
+            )
+            .unwrap();
+
+        let edges = hit_rows(&scene.pick_instance_sketch_edge(3.0, 0.5, 10.0, 0.0, 0.0, -1.0));
+        assert_eq!(
+            edges.iter().map(|h| h.0).collect::<Vec<_>>(),
+            vec![high, low]
+        );
+        assert!((edges[0].2 - 8.0).abs() < 1e-9 && (edges[1].2 - 10.0).abs() < 1e-9);
+        assert!(near3(edges[0].3, Point3::new(3.0, 0.5, 2.0)));
+        let fills = region_rows(&scene, 2.5, 0.5, 10.0, -1.0);
+        assert_eq!(
+            fills.iter().map(|h| (h.0, h.1)).collect::<Vec<_>>(),
+            vec![(high, drawn), (low, drawn)]
+        );
+        assert!((fills[0].2 - 8.0).abs() < 1e-9);
+        assert!(near3(fills[0].3, Point3::new(2.5, 0.5, 2.0)));
+        // From below, the low placement is the nearer.
+        let below = region_rows(&scene, 2.5, 0.5, -10.0, 1.0);
+        assert_eq!(
+            below.iter().map(|h| h.0).collect::<Vec<_>>(),
+            vec![low, high]
+        );
+
+        scene.set_render_mode("wireframe").unwrap();
+        assert!(
+            region_rows(&scene, 2.5, 0.5, 10.0, -1.0).is_empty(),
+            "wireframe: a fill is no target"
+        );
+        assert!(down_edge_pick(&scene, 3.0, 0.5).is_some(), "lines stay");
+    }
+
+    /// Ranking is unscoped, so a caller scoped to one placement still finds
+    /// its line when ANOTHER placement's line is nearer under the ray: the
+    /// out-of-scope hit ranks first but does not mask the in-scope one.
+    #[test]
+    fn an_out_of_scope_nearer_line_does_not_mask_an_in_scope_one() {
+        let mut scene = Scene::new();
+        let (near_comp, near_line) = component_with_a_line_beside_it(&mut scene);
+        let (far_comp, far_line) = component_with_a_square(&mut scene, 0.0, 2.0);
+        // The square's side x = 0 runs under the ray at (1.3, 0.5) only if
+        // moved there: place it so its x = 0 side lies along x = 1.3.
+        let far = scene
+            .place_instance(
+                far_comp,
+                &kernel::Transform::translation(kernel::Vec3::new(1.3, -0.5, 0.0)).to_affine(),
+            )
+            .unwrap();
+        let near = scene
+            .place_instance(
+                near_comp,
+                &kernel::Transform::translation(kernel::Vec3::new(0.0, 0.0, 3.0)).to_affine(),
+            )
+            .unwrap();
+        let rows = hit_rows(&scene.pick_instance_sketch_edge(1.3, 0.5, 10.0, 0.0, 0.0, -1.0));
+        assert_eq!(
+            rows.iter().map(|h| (h.0, h.1)).collect::<Vec<_>>(),
+            vec![(near, near_line), (far, far_line)]
+        );
+        // Scoped to `far` (say, inside a group that holds only it), the
+        // first in-scope hit is its own line, at its own depth.
+        let scoped = rows.iter().find(|h| h.0 == far).expect("in scope");
+        assert!((scoped.2 - 10.0).abs() < 1e-9);
+        assert!(near3(scoped.3, Point3::new(1.3, 0.5, 0.0)));
+    }
+
+    /// Coplanar fills from two placements tie on depth and rank by WORLD
+    /// area: a unit square placed at 3x scale (world area 9) ranks after a
+    /// 2 x 2 square at identity (world area 4), though its own area (1) is
+    /// the smaller.
+    #[test]
+    fn coplanar_fills_tie_break_on_world_area_not_local_area() {
+        let mut scene = Scene::new();
+        let (small_comp, small) = component_with_a_square(&mut scene, 0.0, 1.0);
+        let (big_comp, big) = component_with_a_square(&mut scene, 0.0, 2.0);
+        let scaled = scene
+            .place_instance(
+                small_comp,
+                &kernel::Transform::scale(kernel::Vec3::new(3.0, 3.0, 1.0)).to_affine(),
+            )
+            .unwrap();
+        let plain = scene
+            .place_instance(big_comp, &kernel::Transform::IDENTITY.to_affine())
+            .unwrap();
+        let rows = region_rows(&scene, 0.5, 0.5, 10.0, -1.0);
+        assert_eq!(
+            rows.iter().map(|h| (h.0, h.1)).collect::<Vec<_>>(),
+            vec![(plain, big), (scaled, small)]
+        );
+        // Grow the plain one past the scaled one's world area: the order
+        // flips.
+        scene
+            .transform_instance(
+                plain,
+                &kernel::Transform::scale(kernel::Vec3::new(2.0, 2.0, 1.0)).to_affine(),
+            )
+            .unwrap();
+        let rows = region_rows(&scene, 0.5, 0.5, 10.0, -1.0);
+        assert_eq!(
+            rows.iter().map(|h| h.0).collect::<Vec<_>>(),
+            vec![scaled, plain]
+        );
+    }
+
+    /// An instance whose definition holds only a line has bounds, and a
+    /// drawn circle counts at its true extent through a rotation, past
+    /// its facet corners.
+    #[test]
+    fn instance_sketch_bounds_cover_lines_only_instances_and_true_curves() {
+        let mut scene = Scene::new();
+        let (comp, _) = component_with_a_line_beside_it(&mut scene);
+        // Empty the definition of its cube through a session, leaving the line.
+        let inst = scene
+            .place_instance(comp, &kernel::Transform::IDENTITY.to_affine())
+            .unwrap();
+        scene.open_explode_session(inst).unwrap();
+        for o in scene.explode_session_objects().unwrap() {
+            scene.delete_node(0, o).unwrap();
+        }
+        scene.close_explode_session().unwrap();
+        assert!(scene.component_member_objects(comp).is_empty());
+        let b = scene.instance_sketch_bounds(inst);
+        assert_eq!(b.len(), 6, "a lines-only instance has bounds");
+        for (got, want) in b.iter().zip([1.3, 0.0, 0.0, 1.3, 1.0, 0.0]) {
+            assert!((got - want).abs() < 1e-9, "{b:?}");
+        }
+
+        // A full circle of radius 1 in 16 facets, rotated a part-facet
+        // turn: its corners fall short of ±1, the circle does not.
+        let (s, r) = ground_unit_square_at(&mut scene, 20.0, 0.0);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        let ring = scene.make_component(&[0], &[o]).unwrap();
+        let ring_comp = scene.instance_def(ring).unwrap();
+        let circle = scene
+            .begin_sketch_on_plane_in_instance(ring, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0)
+            .unwrap();
+        scene
+            .sketch_begin_curve_with(circle, 0.0, 0.0, 0.0, 1.0)
+            .unwrap();
+        let n = 16;
+        for i in 0..n {
+            let a = std::f64::consts::TAU * i as f64 / n as f64;
+            let b = std::f64::consts::TAU * (i + 1) as f64 / n as f64;
+            scene
+                .sketch_add_segment(
+                    circle,
+                    trig::cos(a),
+                    trig::sin(a),
+                    0.0,
+                    trig::cos(b),
+                    trig::sin(b),
+                    0.0,
+                )
+                .unwrap();
+        }
+        scene.sketch_end_curve(circle).unwrap();
+        scene.delete_node(2, ring).unwrap();
+        let turn = kernel::Transform::rotation(
+            kernel::Vec3::new(0.0, 0.0, 1.0),
+            std::f64::consts::TAU / 32.0,
+        )
+        .unwrap()
+        .then(&kernel::Transform::translation(kernel::Vec3::new(
+            50.0, 0.0, 0.0,
+        )));
+        let placed = scene.place_instance(ring_comp, &turn.to_affine()).unwrap();
+        let b = scene.instance_sketch_bounds(placed);
+        assert!(
+            (b[0] - 49.0).abs() < 1e-9 && (b[3] - 51.0).abs() < 1e-9,
+            "{b:?}"
+        );
+        assert!(
+            (b[1] + 1.0).abs() < 1e-9 && (b[4] - 1.0).abs() < 1e-9,
+            "{b:?}"
+        );
+    }
+
     // -------------------------------------------------------------------
     // : guides as inference snap targets
     // -------------------------------------------------------------------
@@ -17471,7 +26903,7 @@ mod tests {
             .snap(
                 5.0, 5.0, 3.0, // ray origin
                 0.0, 0.0, -1.0, // ray direction (-Z)
-                0.05, None, None, None, None, None, None, None, None, None,
+                0.05, None, None, None, None, None, None, None, None, None, None,
             )
             .unwrap()
             .expect("ray crosses the guide line");
@@ -17488,7 +26920,7 @@ mod tests {
         let snap = scene
             .snap(
                 5.0, 5.0, 3.0, 0.0, 0.0, -1.0, 0.05, None, None, None, None, None, None, None,
-                None, None,
+                None, None, None,
             )
             .unwrap();
         assert!(
@@ -17510,7 +26942,7 @@ mod tests {
             scene
                 .snap(
                     ray.0, ray.1, ray.2, ray.3, ray.4, ray.5, ray.6, None, None, None, None, None,
-                    None, None, None, None,
+                    None, None, None, None, None,
                 )
                 .unwrap()
         };
@@ -17534,6 +26966,66 @@ mod tests {
         );
     }
 
+    /// A moved guide snaps where it went, not where it was — and back
+    /// again across undo/redo.
+    #[test]
+    fn transform_guide_moves_its_snap_registration() {
+        let mut scene = Scene::new();
+        let g = scene.add_guide_line(5.0, 0.0, 0.0, 0.0, 1.0, 0.0).unwrap();
+        let on_guide_at = |scene: &Scene, x: f64| {
+            scene
+                .snap(
+                    x, 5.0, 3.0, 0.0, 0.0, -1.0, 0.05, None, None, None, None, None, None, None,
+                    None, None, None,
+                )
+                .unwrap()
+                .is_some_and(|s| s.kind() == "on-guide")
+        };
+        let move_x = kernel::Transform::translation(kernel::Vec3::new(2.0, 0.0, 0.0)).to_affine();
+        scene.transform_guide(g, &move_x).unwrap();
+        assert!(on_guide_at(&scene, 7.0) && !on_guide_at(&scene, 5.0));
+
+        scene.scene_undo().unwrap();
+        assert!(on_guide_at(&scene, 5.0) && !on_guide_at(&scene, 7.0));
+        scene.scene_redo().unwrap();
+        assert!(on_guide_at(&scene, 7.0) && !on_guide_at(&scene, 5.0));
+
+        assert!(
+            scene
+                .transform_guide(g, &move_x[..11])
+                .unwrap_err()
+                .0
+                .starts_with("BadAffine:")
+        );
+    }
+
+    /// Copies of a guide are guides of their own: listed, snappable, and
+    /// gone again in one undo. A count past the cap refuses typed.
+    #[test]
+    fn duplicate_guide_array_adds_snappable_copies_in_one_step() {
+        let mut scene = Scene::new();
+        let g = scene.add_guide_line(5.0, 0.0, 0.0, 0.0, 1.0, 0.0).unwrap();
+        let step = kernel::Transform::translation(kernel::Vec3::new(1.0, 0.0, 0.0)).to_affine();
+        let copies = scene.duplicate_guide_array(g, &step, 3).unwrap();
+        assert_eq!(copies.len(), 3);
+        assert_eq!(scene.guide_ids().len(), 4);
+        let hit = scene
+            .snap(
+                8.0, 5.0, 3.0, 0.0, 0.0, -1.0, 0.05, None, None, None, None, None, None, None,
+                None, None, None,
+            )
+            .unwrap();
+        assert_eq!(hit.map(|s| s.kind()), Some("on-guide".to_string()));
+
+        scene.scene_undo().unwrap();
+        assert_eq!(scene.guide_ids(), vec![g]);
+
+        for bad in [0, MAX_ARRAY_COUNT + 1] {
+            let err = scene.duplicate_guide_array(g, &step, bad).unwrap_err();
+            assert!(err.0.starts_with("BadCount"), "{}", err.0);
+        }
+    }
+
     /// A guide point registers as an `"endpoint"` snap (Endpoint-tier, like a
     /// real vertex) through the same wasm `snap` surface.
     #[test]
@@ -17544,7 +27036,7 @@ mod tests {
         let snap = scene
             .snap(
                 2.0, 3.0, 5.0, 0.0, 0.0, -1.0, 0.05, None, None, None, None, None, None, None,
-                None, None,
+                None, None, None,
             )
             .unwrap()
             .expect("ray points straight at the guide point");
@@ -17567,7 +27059,7 @@ mod tests {
         let cone_miss = scene
             .snap(
                 2.0, 3.0, 5.0, 0.0, 0.0, -1.0, 0.05, None, None, None, None, None, None, None,
-                None, None,
+                None, None, None,
             )
             .unwrap();
         assert!(
@@ -17589,6 +27081,7 @@ mod tests {
                 None,
                 None,
                 Some(true),
+                None,
                 None,
                 None,
                 None,
@@ -17750,7 +27243,7 @@ mod tests {
     #[test]
     fn linear_dimension_anchored_to_object_detaches_on_delete() {
         let mut scene = Scene::new();
-        let sketch = scene.begin_ground_sketch();
+        let sketch = scene.begin_ground_sketch().unwrap();
         scene
             .sketch_add_segment(sketch, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0)
             .unwrap();
@@ -17830,7 +27323,8 @@ mod tests {
         let base = scene.extrude_region(s2, r2, 1.0).unwrap();
         let instance = scene.make_component(&[0], &[base]).unwrap();
         // Reflect across X (determinant < 0) — `transform_instance` allows a
-        // mirrored pose (only explode/make_unique refuse one).
+        // mirrored pose, and neither explode nor make_unique refuses one (a
+        // reflection bakes).
         const MIRROR_X: [f64; 12] = [-1.0, 0.0, 0.0, 6.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0];
         scene.transform_instance(instance, &MIRROR_X).unwrap();
 
@@ -18127,10 +27621,779 @@ mod tests {
 
     // ------------------------------------------------------------ live API
 
+    /// The tagged `api_dispatch` return, a forward through
+    /// `api_complete_forward`, and plugin registration on the shared
+    /// registry.
+    #[test]
+    fn api_dispatch_tags_replies_and_forwards_plugin_commands() {
+        let mut scene = Scene::new();
+        assert!(
+            scene
+                .register_plugin_commands("com.example.lib", "not json")
+                .is_err()
+        );
+        let decls = r#"[{"id":"sum","class":"read_only","summary":"Adds."},{"id":"mut","class":"mutating","summary":"Mutates."}]"#;
+        scene
+            .register_plugin_commands("com.example.lib", decls)
+            .expect("registers");
+        assert_eq!(
+            scene
+                .register_plugin_commands("com.example.lib", decls)
+                .unwrap_err()
+                .0,
+            "REGISTER: duplicate_command"
+        );
+        assert!(scene.api_method_mutates("com.example.lib.mut"));
+        assert!(!scene.api_method_mutates("com.example.lib.sum"));
+
+        let conn = scene.api_connection_open();
+        let hello: serde_json::Value = serde_json::from_str(
+            &scene
+                .api_dispatch(
+                    conn,
+                    r#"{"jsonrpc":"2.0","id":0,"method":"hew.meta.hello","params":{"protocol":1}}"#,
+                )
+                .unwrap(),
+        )
+        .unwrap();
+        let frame: serde_json::Value =
+            serde_json::from_str(hello["reply"].as_str().expect("a tagged reply")).unwrap();
+        assert_eq!(frame["result"]["profile"], "app");
+        scene.api_dispatch(
+            conn,
+            r#"{"jsonrpc":"2.0","id":1,"method":"hew.doc.attach","params":{}}"#,
+        );
+        assert_eq!(
+            scene.api_dispatch(conn, r#"{"jsonrpc":"2.0","method":"hew.query.scene"}"#),
+            None,
+            "a notification answers nothing"
+        );
+
+        let pending: serde_json::Value = serde_json::from_str(
+            &scene
+                .api_dispatch(
+                    conn,
+                    r#"{"jsonrpc":"2.0","id":7,"method":"com.example.lib.mut","params":{}}"#,
+                )
+                .unwrap(),
+        )
+        .unwrap();
+        let token = pending["pending"]["token"]
+            .as_u64()
+            .expect("a pending token");
+        assert_eq!(pending["pending"]["forward"]["local"], "mut");
+        assert_eq!(pending["pending"]["forward"]["mutating"], true);
+        assert!(scene.api_complete_forward(conn, token, "{").is_err());
+        assert!(
+            scene
+                .api_complete_forward(conn + 1, token, r#"{"failed":"timeout"}"#)
+                .is_err()
+        );
+        let done: serde_json::Value = serde_json::from_str(
+            &scene
+                .api_complete_forward(conn, token, r#"{"failed":"unavailable"}"#)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(done["id"], 7);
+        assert_eq!(done["error"]["data"]["refusal"], "plugin_unavailable");
+        assert_eq!(
+            scene
+                .api_complete_forward(conn, token, r#"{"failed":"unavailable"}"#)
+                .unwrap_err()
+                .0,
+            "FORWARD: unknown forward token"
+        );
+
+        scene.unregister_plugin_commands("com.example.lib");
+        assert!(!scene.api_method_mutates("com.example.lib.mut"));
+        let gone: serde_json::Value = serde_json::from_str(
+            &scene
+                .api_dispatch(
+                    conn,
+                    r#"{"jsonrpc":"2.0","id":8,"method":"com.example.lib.mut","params":{}}"#,
+                )
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(gone["reply"].as_str().unwrap().contains("-32601"));
+    }
+
+    /// A completed forward never records its own frame (no plugin runs at
+    /// replay time; its compound's children are the record), and resync
+    /// follows the forwarded plugin command's own flag, fixed at dispatch
+    /// so a plugin unregistered meanwhile does not change it.
+    #[test]
+    fn completed_forwards_record_by_the_plugin_commands_own_flag() {
+        let mut scene = Scene::new();
+        scene
+            .register_plugin_commands(
+                "com.example.lib",
+                r#"[{"id":"sum","class":"read_only","summary":"Adds."},{"id":"mut","class":"mutating","summary":"Mutates."}]"#,
+            )
+            .unwrap();
+        let conn = scene.api_connection_open();
+        hello_and_attach(&mut scene, conn);
+        let issue = |scene: &mut Scene, frame: &str| -> u64 {
+            let tagged: serde_json::Value =
+                serde_json::from_str(&scene.api_dispatch(conn, frame).unwrap()).unwrap();
+            tagged["pending"]["token"].as_u64().expect("forwarded")
+        };
+        recording::reset();
+        recording::start();
+        let read_tx = r#"{"jsonrpc":"2.0","id":2,"method":"hew.doc.transact","params":{"commands":[{"method":"com.example.lib.sum"}]}}"#;
+        let token = issue(&mut scene, read_tx);
+        let done = scene
+            .api_complete_forward(conn, token, r#"{"ok":{}}"#)
+            .unwrap();
+        assert!(done.contains("\"results\""), "{done}");
+        assert!(
+            recording::peek_calls().is_empty(),
+            "a read-only plugin command is not a mutation, even inside a transaction"
+        );
+
+        let write = r#"{"jsonrpc":"2.0","id":3,"method":"com.example.lib.mut","params":{}}"#;
+        let token = issue(&mut scene, write);
+        scene.unregister_plugin_commands("com.example.lib");
+        let done = scene
+            .api_complete_forward(conn, token, r#"{"ok":{}}"#)
+            .unwrap();
+        assert!(!done.contains("\"error\""), "{done}");
+        let calls = recording::take_calls();
+        recording::reset();
+        assert!(
+            calls.is_empty(),
+            "the forwarded frame itself is never recorded"
+        );
+    }
+
+    // ------------------------------------------------------------ compounds
+
+    /// A scene with plugin `com.example.parts` registered (mutating `cut`,
+    /// labeled "Cut list"), a first-party caller connection, and the
+    /// provider's own connection (model write and `documents.save`), both
+    /// hello'd and attached. Returns `(scene, caller, provider)`.
+    fn compound_scene() -> (Scene, u32, u32) {
+        let mut scene = Scene::new();
+        scene
+            .register_plugin_commands(
+                "com.example.parts",
+                r#"[{"id":"cut","class":"mutating","summary":"Cuts.","label":"Cut list","permission":"model.write"},
+                    {"id":"inner","class":"mutating","summary":"Inner.","label":"Inner","permission":"model.write"}]"#,
+            )
+            .unwrap();
+        let caller = scene.api_connection_open();
+        hello_and_attach(&mut scene, caller);
+        let provider = scene
+            .api_plugin_connection_open(&provider_grant().to_string())
+            .unwrap();
+        for frame in [
+            r#"{"jsonrpc":"2.0","id":0,"method":"hew.meta.hello","params":{"protocol":1}}"#,
+            r#"{"jsonrpc":"2.0","id":1,"method":"hew.doc.attach","params":{}}"#,
+        ] {
+            let reply = scene.api_dispatch_reply(provider, frame).unwrap();
+            assert!(!reply.contains("\"error\""), "{reply}");
+        }
+        (scene, caller, provider)
+    }
+
+    fn provider_grant() -> serde_json::Value {
+        serde_json::json!({
+            "ceiling": "app",
+            "permissions": ["model.read", "model.write", "documents.save"],
+            "plugin": "com.example.parts",
+            "app": null,
+            "document": null
+        })
+    }
+
+    /// Issues `method` on `conn` (plainly, or inside forward `within`) and
+    /// returns the pending forward's token.
+    fn issue_forward(scene: &mut Scene, conn: u32, method: &str, within: Option<u64>) -> u64 {
+        let frame = format!(r#"{{"jsonrpc":"2.0","id":9,"method":"{method}","params":{{}}}}"#);
+        let tagged = match within {
+            None => scene.api_dispatch(conn, &frame),
+            Some(t) => scene.api_dispatch_in_forward(conn, t, &frame),
+        }
+        .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&tagged).unwrap();
+        v["pending"]["token"]
+            .as_u64()
+            .unwrap_or_else(|| panic!("forwarded: {tagged}"))
+    }
+
+    fn rect_frame(id: u32, x: f64) -> String {
+        format!(
+            r#"{{"jsonrpc":"2.0","id":{id},"method":"hew.sketch.draw_rect","params":{{"plane":{{"ground":true}},"corner_a":[{x},0.0,0.0],"corner_b":[{},1.0,0.0]}}}}"#,
+            x + 1.0
+        )
+    }
+
+    /// The reply frame inside a tagged `api_dispatch` answer.
+    fn tagged_reply(tagged: Option<String>) -> serde_json::Value {
+        let v: serde_json::Value = serde_json::from_str(&tagged.expect("an answer")).unwrap();
+        serde_json::from_str(v["reply"].as_str().expect("a reply")).unwrap()
+    }
+
+    #[test]
+    fn compound_begin_end_round_trip() {
+        let (mut scene, caller, provider) = compound_scene();
+        let before = scene.doc.undo_depth();
+        let forward = issue_forward(&mut scene, caller, "com.example.parts.cut", None);
+        assert!(!scene.busy());
+        let kt = scene.compound_begin(caller, forward).unwrap();
+        assert!(scene.busy());
+        assert_eq!(scene.compound_depth(), 1);
+        for (id, x) in [(10, 0.0), (11, 3.0)] {
+            let reply =
+                tagged_reply(scene.api_dispatch_in_forward(provider, forward, &rect_frame(id, x)));
+            assert!(reply.get("error").is_none(), "{reply}");
+        }
+        assert_eq!(
+            scene.doc.undo_depth(),
+            before + 2,
+            "two children while open"
+        );
+        let ended: serde_json::Value =
+            serde_json::from_str(&scene.compound_end(kt).unwrap()).unwrap();
+        assert_eq!(ended["committed"], true);
+        assert_eq!(ended["generation"], scene.doc.history_generation());
+        assert_eq!(ended["epoch"], scene.doc.document_epoch());
+        assert!(!scene.busy());
+        assert_eq!(scene.doc.undo_depth(), before + 1, "one entry");
+        let meta = scene.doc.peek_undo_meta().unwrap();
+        assert_eq!(meta.label, "Cut list");
+        assert_eq!(
+            meta.origin,
+            kernel::HistoryOrigin::Connection("plugin:com.example.parts".into())
+        );
+        let done = scene
+            .api_complete_forward(caller, forward, r#"{"ok":{}}"#)
+            .unwrap();
+        assert!(!done.contains("\"error\""), "{done}");
+        // A wrong or spent token is a mismatch, and changes nothing.
+        assert!(
+            scene
+                .compound_end(kt)
+                .unwrap_err()
+                .0
+                .starts_with("CompoundTokenMismatch:")
+        );
+        // A read-only or unknown forward opens nothing.
+        assert!(
+            scene
+                .compound_begin(caller, 999)
+                .unwrap_err()
+                .0
+                .starts_with("FORWARD:")
+        );
+    }
+
+    #[test]
+    fn plain_dispatch_during_compound_is_document_busy() {
+        let (mut scene, caller, _provider) = compound_scene();
+        let forward = issue_forward(&mut scene, caller, "com.example.parts.cut", None);
+        let kt = scene.compound_begin(caller, forward).unwrap();
+        let reply = tagged_reply(scene.api_dispatch(caller, &rect_frame(12, 0.0)));
+        assert_eq!(reply["id"], 12);
+        assert_eq!(reply["error"]["code"], -32000);
+        assert_eq!(reply["error"]["data"]["refusal"], "document_busy");
+        assert_eq!(
+            reply["error"]["data"]["failed_method"],
+            "hew.sketch.draw_rect"
+        );
+        // Reads wait too: the host queues every plain frame.
+        let read = tagged_reply(scene.api_dispatch(
+            caller,
+            r#"{"jsonrpc":"2.0","id":13,"method":"hew.query.scene","params":{}}"#,
+        ));
+        assert_eq!(read["error"]["data"]["refusal"], "document_busy");
+        // A notification still answers nothing.
+        assert_eq!(
+            scene.api_dispatch(caller, r#"{"jsonrpc":"2.0","method":"hew.query.scene"}"#),
+            None
+        );
+        scene.compound_abort(kt).unwrap();
+        let read = tagged_reply(scene.api_dispatch(
+            caller,
+            r#"{"jsonrpc":"2.0","id":14,"method":"hew.query.scene","params":{}}"#,
+        ));
+        assert!(read.get("error").is_none(), "{read}");
+    }
+
+    #[test]
+    fn dispatch_in_forward_with_wrong_token_is_document_busy() {
+        let (mut scene, caller, provider) = compound_scene();
+        let forward = issue_forward(&mut scene, caller, "com.example.parts.cut", None);
+        let kt = scene.compound_begin(caller, forward).unwrap();
+        let reply = tagged_reply(scene.api_dispatch_in_forward(
+            provider,
+            forward + 1,
+            &rect_frame(15, 0.0),
+        ));
+        assert_eq!(reply["error"]["data"]["refusal"], "document_busy");
+        assert!(scene.doc.sketch_ids().is_empty(), "nothing ran");
+        scene.compound_abort(kt).unwrap();
+    }
+
+    /// A dry run (docs/agents/HEW_API.md §6.6) touches only a clone: the
+    /// tagged answer says so, nothing is recorded, no resync runs (the face
+    /// range cache and the health cache keep their entries), the selection
+    /// mirror is not written back, and no view directive is left.
+    #[test]
+    fn a_dry_run_records_nothing_and_skips_every_post_dispatch_step() {
+        recording::reset();
+        recording::start();
+        let mut scene = Scene::new();
+        let conn = scene.api_connection_open();
+        hello_and_attach(&mut scene, conn);
+        let made = tagged_reply(scene.api_dispatch(
+            conn,
+            r#"{"jsonrpc":"2.0","id":2,"method":"hew.doc.transact","params":{"commands":[
+                {"method":"hew.sketch.draw_rect","as":"p","params":{"plane":{"ground":true},"corner_a":[0,0,0],"corner_b":[1,1,0]}},
+                {"method":"hew.solid.extrude","params":{"region":{"$ref":"p#/region_id"},"distance":1.0}}]}}"#,
+        ));
+        assert!(made.get("error").is_none(), "{made}");
+        let calls_before = recording::peek_calls().len();
+        let objects = scene.doc.live_object_ids();
+        let sketch_count = scene.doc.sketch_ids().len();
+        // A cache entry a resync would drop.
+        scene.face_range_cache.insert(objects[0], Vec::new());
+        let cache_len = scene.face_range_cache.len();
+        scene
+            .set_ui_selection(r#"[{"kind":"sketch","id":"1"}]"#)
+            .unwrap();
+        let selection = scene.ui_selection.clone();
+        let generation = scene.doc.history_generation();
+        let write_backs = WRITE_BACKS.with(std::cell::Cell::get);
+        let frame = r#"{"jsonrpc":"2.0","id":3,"method":"hew.doc.transact","params":{"dry_run":true,"commands":[
+            {"method":"hew.sketch.draw_rect","as":"p","params":{"plane":{"ground":true},"corner_a":[5,5,0],"corner_b":[6,6,0]}},
+            {"method":"hew.solid.extrude","params":{"region":{"$ref":"p#/region_id"},"distance":1.0}}]}}"#;
+        let tagged: serde_json::Value =
+            serde_json::from_str(&scene.api_dispatch(conn, frame).unwrap()).unwrap();
+        assert_eq!(tagged["dry_run"], true, "{tagged}");
+        let reply: serde_json::Value =
+            serde_json::from_str(tagged["reply"].as_str().unwrap()).unwrap();
+        assert_eq!(reply["result"]["dry_run"], true, "{reply}");
+        assert_eq!(
+            recording::peek_calls().len(),
+            calls_before,
+            "nothing recorded"
+        );
+        assert_eq!(scene.face_range_cache.len(), cache_len, "no resync");
+        assert_eq!(
+            scene.ui_selection, selection,
+            "the selection mirror is untouched"
+        );
+        // The selection a rehearsal hands back is the seed it was given, so
+        // the mirror comparing equal cannot tell a write-back from none;
+        // the count can.
+        assert_eq!(
+            WRITE_BACKS.with(std::cell::Cell::get),
+            write_backs,
+            "no selection, isolation, or directive write-back"
+        );
+        assert_eq!(scene.take_pending_view_directives(), "[]");
+        assert_eq!(scene.doc.history_generation(), generation);
+        assert_eq!(scene.doc.live_object_ids(), objects);
+        assert_eq!(scene.doc.sketch_ids().len(), sketch_count);
+        recording::reset();
+    }
+
+    /// The host's busy backstop answers a dry run like any other frame
+    /// while a plugin command holds the document.
+    #[test]
+    fn a_dry_run_during_a_compound_is_document_busy() {
+        let (mut scene, caller, _provider) = compound_scene();
+        let forward = issue_forward(&mut scene, caller, "com.example.parts.cut", None);
+        let kt = scene.compound_begin(caller, forward).unwrap();
+        let frame = r#"{"jsonrpc":"2.0","id":16,"method":"hew.doc.transact","params":{"dry_run":true,"commands":[
+            {"method":"hew.query.scene","params":{}}]}}"#;
+        let tagged: serde_json::Value =
+            serde_json::from_str(&scene.api_dispatch(caller, frame).unwrap()).unwrap();
+        assert_eq!(tagged["dry_run"], true, "still answered as a dry run");
+        let reply = tagged_reply(Some(tagged.to_string()));
+        assert_eq!(
+            reply["error"]["data"]["refusal"], "document_busy",
+            "{reply}"
+        );
+        scene.compound_abort(kt).unwrap();
+        let reply = tagged_reply(scene.api_dispatch(caller, frame));
+        assert!(reply.get("error").is_none(), "{reply}");
+    }
+
+    /// Every compute command answers on the live host too.
+    #[test]
+    fn compute_commands_answer_on_the_live_host() {
+        let mut scene = Scene::new();
+        let conn = scene.api_connection_open();
+        hello_and_attach(&mut scene, conn);
+        let made = tagged_reply(scene.api_dispatch(conn, &rect_frame(2, 0.0)));
+        assert!(made.get("error").is_none(), "{made}");
+        let generation = scene.doc.history_generation();
+        let unit = r#"{"box":{"min":[0,0,0],"max":[1,1,1]}}"#;
+        for (method, params) in [
+            ("hew.compute.measure", format!(r#"{{"solid":{unit}}}"#)),
+            (
+                "hew.compute.boolean",
+                format!(
+                    r#"{{"op":"subtract","a":{unit},"b":{{"box":{{"min":[0.5,0,0],"max":[2,1,1]}}}}}}"#
+                ),
+            ),
+            (
+                "hew.compute.slice",
+                format!(r#"{{"solid":{unit},"plane":{{"origin":[0.5,0,0],"normal":[1,0,0]}}}}"#),
+            ),
+            ("hew.compute.shells", format!(r#"{{"solid":{unit}}}"#)),
+            (
+                "hew.compute.offset",
+                r#"{"loops":[[[0,0],[1,0],[1,1],[0,1]]],"distance":0.1}"#.to_string(),
+            ),
+        ] {
+            let frame =
+                format!(r#"{{"jsonrpc":"2.0","id":4,"method":"{method}","params":{params}}}"#);
+            let reply = tagged_reply(scene.api_dispatch(conn, &frame));
+            assert!(reply.get("error").is_none(), "{method}: {reply}");
+        }
+        assert_eq!(scene.doc.history_generation(), generation);
+    }
+
+    /// Every document-mutating `Scene` method refuses while a compound is
+    /// open; the shape is `DocumentBusy: ...`.
+    #[test]
+    fn scene_mutators_refuse_document_busy_during_a_compound() {
+        let (mut scene, caller, _provider) = compound_scene();
+        let bytes = scene.doc.save();
+        let forward = issue_forward(&mut scene, caller, "com.example.parts.cut", None);
+        let kt = scene.compound_begin(caller, forward).unwrap();
+        let busy = |e: ApiError| assert!(e.0.starts_with("DocumentBusy:"), "{}", e.0);
+        busy(scene.scene_undo().err().expect("refused"));
+        busy(scene.begin_ground_sketch().unwrap_err());
+        // `load` throws the same text as a `JsError`, which only exists in
+        // a wasm runtime; its guard is the same call.
+        busy(scene.load_core(&bytes).unwrap_err());
+        busy(scene.replay("{}").unwrap_err());
+        scene.compound_abort(kt).unwrap();
+        assert!(scene.begin_ground_sketch().is_ok());
+    }
+
+    /// Abort restores the whole document and the epoch still moves on; a
+    /// document replacement starts the new document above the old epoch.
+    #[test]
+    fn compound_abort_restores_and_load_raises_the_epoch() {
+        let (mut scene, caller, provider) = compound_scene();
+        let hash = scene.doc.state_hash();
+        let forward = issue_forward(&mut scene, caller, "com.example.parts.cut", None);
+        let kt = scene.compound_begin(caller, forward).unwrap();
+        tagged_reply(scene.api_dispatch_in_forward(provider, forward, &rect_frame(16, 0.0)));
+        let epoch = scene.doc.document_epoch();
+        scene.compound_abort(kt).unwrap();
+        assert_eq!(scene.doc.state_hash(), hash);
+        assert!(scene.doc.document_epoch() > epoch);
+        let epoch = scene.doc.document_epoch();
+        let bytes = Document::new().save();
+        scene.load_core(&bytes).unwrap();
+        assert!(scene.doc.document_epoch() > epoch);
+    }
+
+    /// An aborted plugin command puts back the selection and isolation its
+    /// frames changed, and leaves the directives that show them again; a
+    /// committed one keeps them.
+    #[test]
+    fn compound_abort_restores_the_selection_and_isolation() {
+        // The frames run on the first-party connection, which holds `view`.
+        let (mut scene, caller, _provider) = compound_scene();
+        let (a_id, a) = scene_box_at(&mut scene, 0.0);
+        let (_, b) = scene_box_at(&mut scene, 3.0);
+        let before = format!(r#"[{{"kind":"object","id":"{}"}}]"#, a_id.data().as_ffi());
+        scene.set_ui_selection(&before).unwrap();
+        let before = scene.ui_selection.clone();
+        let forward = issue_forward(&mut scene, caller, "com.example.parts.cut", None);
+        let kt = scene.compound_begin(caller, forward).unwrap();
+        for (id, method, params) in [
+            (30, "hew.selection.set", serde_json::json!({ "ids": [b] })),
+            (31, "hew.view.isolate", serde_json::json!({ "ids": [a] })),
+        ] {
+            let reply = tagged_reply(scene.api_dispatch_in_forward(
+                caller,
+                forward,
+                &frame(id, method, params),
+            ));
+            assert!(reply.get("error").is_none(), "{reply}");
+            directives(&mut scene);
+        }
+        assert_ne!(scene.ui_selection, before);
+        assert!(scene.ui_isolation.is_some());
+        scene.compound_abort(kt).unwrap();
+        assert_eq!(scene.ui_selection, before);
+        assert_eq!(scene.ui_isolation, None);
+        let got = directives(&mut scene);
+        assert_eq!(
+            got,
+            vec![
+                serde_json::json!({
+                    "kind": "selection",
+                    "mode": "replace",
+                    "entries": [{ "kind": "object", "id": a_id.data().as_ffi().to_string() }],
+                }),
+                serde_json::json!({ "kind": "clear_isolation" }),
+            ]
+        );
+
+        // An abort that changed neither leaves no directive.
+        let forward = issue_forward(&mut scene, caller, "com.example.parts.cut", None);
+        let kt = scene.compound_begin(caller, forward).unwrap();
+        scene.compound_abort(kt).unwrap();
+        assert!(directives(&mut scene).is_empty());
+
+        // Isolation on at begin comes back unframed.
+        let isolate = frame(32, "hew.view.isolate", serde_json::json!({ "ids": [b] }));
+        scene.api_dispatch_reply(caller, &isolate).unwrap();
+        directives(&mut scene);
+        let forward = issue_forward(&mut scene, caller, "com.example.parts.cut", None);
+        let kt = scene.compound_begin(caller, forward).unwrap();
+        let clear = frame(33, "hew.view.clear_isolation", serde_json::json!({}));
+        tagged_reply(scene.api_dispatch_in_forward(caller, forward, &clear));
+        directives(&mut scene);
+        scene.compound_abort(kt).unwrap();
+        let got = directives(&mut scene);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0]["kind"], "isolate");
+        assert_eq!(got[0]["frame"], false);
+    }
+
+    #[test]
+    fn plugin_compound_records_children_once_and_replays_as_one_entry() {
+        recording::reset();
+        recording::start();
+        let (mut scene, caller, provider) = compound_scene();
+        let forward = issue_forward(&mut scene, caller, "com.example.parts.cut", None);
+        let kt = scene.compound_begin(caller, forward).unwrap();
+        for (id, x) in [(20, 0.0), (21, 3.0)] {
+            tagged_reply(scene.api_dispatch_in_forward(provider, forward, &rect_frame(id, x)));
+        }
+        assert!(
+            recording::peek_calls().is_empty(),
+            "children wait in the buffer"
+        );
+        scene.compound_end(kt).unwrap();
+        scene
+            .api_complete_forward(caller, forward, r#"{"ok":{}}"#)
+            .unwrap();
+        let calls = recording::peek_calls();
+        assert_eq!(calls.len(), 1, "{calls:?}");
+        let recording::RecordedCall::PluginCompound {
+            plugin,
+            label,
+            grant,
+            calls: children,
+        } = &calls[0]
+        else {
+            panic!("a plugin compound: {calls:?}")
+        };
+        assert_eq!(plugin, "com.example.parts");
+        assert_eq!(label, "Cut list");
+        assert_eq!(grant["plugin"], "com.example.parts");
+        assert_eq!(children.len(), 2);
+        assert!(
+            children
+                .iter()
+                .all(|c| matches!(c, recording::RecordedCall::ApiDispatch { frame } if frame.contains("draw_rect")))
+        );
+        let rec = scene.take_recording();
+        recording::reset();
+        let mut replayed = Scene::new();
+        let hash = replayed.replay(&rec).unwrap();
+        assert_eq!(hash, scene.doc.state_hash());
+        assert_eq!(replayed.doc.undo_depth(), scene.doc.undo_depth());
+        let meta = replayed.doc.peek_undo_meta().unwrap();
+        assert_eq!(meta.label, "Cut list");
+        assert_eq!(
+            meta.origin,
+            kernel::HistoryOrigin::Connection("plugin:com.example.parts".into())
+        );
+        assert!(!replayed.busy());
+    }
+
+    #[test]
+    fn aborted_compound_records_nothing() {
+        recording::reset();
+        recording::start();
+        let (mut scene, caller, provider) = compound_scene();
+        let forward = issue_forward(&mut scene, caller, "com.example.parts.cut", None);
+        let kt = scene.compound_begin(caller, forward).unwrap();
+        tagged_reply(scene.api_dispatch_in_forward(provider, forward, &rect_frame(22, 0.0)));
+        scene.compound_abort(kt).unwrap();
+        scene
+            .api_complete_forward(caller, forward, r#"{"failed":"cancelled"}"#)
+            .unwrap();
+        let calls = recording::take_calls();
+        recording::reset();
+        assert!(calls.is_empty(), "{calls:?}");
+    }
+
+    /// A plugin command that calls another plugin command: the inner
+    /// compound lands as one child of the outer, records inside it, and
+    /// the whole replays as one entry.
+    #[test]
+    fn nested_compound_round_trips() {
+        recording::reset();
+        recording::start();
+        let (mut scene, caller, provider) = compound_scene();
+        let before = scene.doc.undo_depth();
+        let outer = issue_forward(&mut scene, caller, "com.example.parts.cut", None);
+        let okt = scene.compound_begin(caller, outer).unwrap();
+        tagged_reply(scene.api_dispatch_in_forward(provider, outer, &rect_frame(30, 0.0)));
+        // The provider calls a command of its own while serving `outer`.
+        let inner = issue_forward(&mut scene, provider, "com.example.parts.inner", Some(outer));
+        let ikt = scene.compound_begin(provider, inner).unwrap();
+        assert_eq!(scene.compound_depth(), 2);
+        // Only the innermost forward's frames run now.
+        let refused =
+            tagged_reply(scene.api_dispatch_in_forward(provider, outer, &rect_frame(31, 3.0)));
+        assert_eq!(refused["error"]["data"]["refusal"], "document_busy");
+        tagged_reply(scene.api_dispatch_in_forward(provider, inner, &rect_frame(32, 6.0)));
+        // The outer compound cannot end before the inner one.
+        assert!(
+            scene
+                .compound_end(okt)
+                .unwrap_err()
+                .0
+                .starts_with("CompoundTokenMismatch:")
+        );
+        scene.compound_end(ikt).unwrap();
+        scene
+            .api_complete_forward(provider, inner, r#"{"ok":{}}"#)
+            .unwrap();
+        tagged_reply(scene.api_dispatch_in_forward(provider, outer, &rect_frame(33, 9.0)));
+        scene.compound_end(okt).unwrap();
+        scene
+            .api_complete_forward(caller, outer, r#"{"ok":{}}"#)
+            .unwrap();
+        assert_eq!(scene.doc.undo_depth(), before + 1);
+        assert_eq!(scene.doc.peek_undo_meta().unwrap().label, "Cut list");
+
+        let calls = recording::peek_calls();
+        let [
+            recording::RecordedCall::PluginCompound {
+                calls: children, ..
+            },
+        ] = calls.as_slice()
+        else {
+            panic!("one compound: {calls:?}")
+        };
+        assert_eq!(children.len(), 3);
+        assert!(matches!(
+            &children[1],
+            recording::RecordedCall::PluginCompound { label, calls, .. } if label == "Inner" && calls.len() == 1
+        ));
+        let rec = scene.take_recording();
+        recording::reset();
+        let mut replayed = Scene::new();
+        assert_eq!(replayed.replay(&rec).unwrap(), scene.doc.state_hash());
+        assert_eq!(replayed.doc.undo_depth(), before + 1);
+        assert_eq!(replayed.doc.peek_undo_meta().unwrap().label, "Cut list");
+        // One undo takes the whole nested command back.
+        replayed.scene_undo().unwrap();
+        assert_eq!(replayed.doc.undo_depth(), before);
+        assert!(replayed.doc.sketch_ids().is_empty());
+    }
+
+    /// `hew.doc.import` records itself (as the file it merged); inside a
+    /// compound that record lands in the compound, not beside it.
+    #[test]
+    fn import_inside_compound_is_buffered() {
+        recording::reset();
+        recording::start();
+        let (mut scene, caller, _provider) = compound_scene();
+        let forward = issue_forward(&mut scene, caller, "com.example.parts.cut", None);
+        let kt = scene.compound_begin(caller, forward).unwrap();
+        let stl = include_bytes!("../../../app/e2e/fixtures/stl/cube_open.stl");
+        let frame = serde_json::json!({
+            "jsonrpc": "2.0", "id": 40, "method": "hew.doc.import",
+            "params": { "path": "cube_open.stl", "units": "mm", "bytes_base64": api::commands::doc::encode_base64(stl) },
+        })
+        .to_string();
+        // A plugin grant may not name a path, so a first-party connection
+        // issues it here; what is under test is where the record lands.
+        let reply = tagged_reply(scene.api_dispatch_in_forward(caller, forward, &frame));
+        assert!(reply.get("error").is_none(), "{reply}");
+        assert!(
+            recording::peek_calls().is_empty(),
+            "the import waits in the buffer"
+        );
+        scene.compound_end(kt).unwrap();
+        let calls = recording::peek_calls();
+        let [
+            recording::RecordedCall::PluginCompound {
+                calls: children, ..
+            },
+        ] = calls.as_slice()
+        else {
+            panic!("one compound: {calls:?}")
+        };
+        assert!(
+            matches!(
+                children.as_slice(),
+                [recording::RecordedCall::ImportStl { .. }]
+            ),
+            "{children:?}"
+        );
+        let rec = scene.take_recording();
+        recording::reset();
+        let mut replayed = Scene::new();
+        assert_eq!(replayed.replay(&rec).unwrap(), scene.doc.state_hash());
+        assert_eq!(replayed.doc.undo_depth(), scene.doc.undo_depth());
+    }
+
+    /// A live `hew.component.import_definition` is recorded as its whole
+    /// frame (the scratch-document import inside it must not also record a
+    /// world merge), replays to the same document, and the second import
+    /// of the same bytes is a reuse that adds no undo entry.
+    #[test]
+    fn live_import_definition_is_recorded_whole_and_replays() {
+        recording::reset();
+        recording::start();
+        let mut scene = Scene::new();
+        let conn = scene.api_connection_open();
+        hello_and_attach(&mut scene, conn);
+        let stl = include_bytes!("../../../app/e2e/fixtures/stl/cube_open.stl");
+        let frame = serde_json::json!({
+            "jsonrpc": "2.0", "id": 40, "method": "hew.component.import_definition",
+            "params": { "format": "stl", "units": "mm", "name": "Cube",
+                        "bytes_base64": api::commands::doc::encode_base64(stl) },
+        })
+        .to_string();
+        let first: serde_json::Value =
+            serde_json::from_str(&scene.api_dispatch_reply(conn, &frame).unwrap()).unwrap();
+        assert!(first.get("error").is_none(), "{first}");
+        assert_eq!(first["result"]["reused"], false, "{first}");
+        let calls = recording::peek_calls();
+        assert!(
+            matches!(
+                calls.as_slice(),
+                [recording::RecordedCall::ApiDispatch { .. }]
+            ),
+            "one whole-frame record, no world merge: {calls:?}"
+        );
+        assert!(scene.doc.top_level_nodes().is_empty());
+        let depth = scene.doc.undo_depth();
+        let again: serde_json::Value =
+            serde_json::from_str(&scene.api_dispatch_reply(conn, &frame).unwrap()).unwrap();
+        assert_eq!(again["result"]["reused"], true, "{again}");
+        assert_eq!(scene.doc.undo_depth(), depth);
+        let rec = scene.take_recording();
+        recording::reset();
+        let mut replayed = Scene::new();
+        assert_eq!(replayed.replay(&rec).unwrap(), scene.doc.state_hash());
+        assert!(replayed.doc.top_level_nodes().is_empty());
+        assert_eq!(replayed.doc.component_ids().len(), 1);
+    }
+
     fn hello_and_attach(scene: &mut Scene, conn: u32) {
         assert!(
             scene
-                .api_dispatch(
+                .api_dispatch_reply(
                     conn,
                     r#"{"jsonrpc":"2.0","id":0,"method":"hew.meta.hello","params":{"protocol":1}}"#,
                 )
@@ -18138,7 +28401,7 @@ mod tests {
                 .contains("\"profile\":\"app\"")
         );
         let reply = scene
-            .api_dispatch(
+            .api_dispatch_reply(
                 conn,
                 r#"{"jsonrpc":"2.0","id":1,"method":"hew.doc.attach","params":{}}"#,
             )
@@ -18153,7 +28416,7 @@ mod tests {
         hello_and_attach(&mut scene, conn);
 
         let reply = scene
-            .api_dispatch(
+            .api_dispatch_reply(
                 conn,
                 r#"{"jsonrpc":"2.0","id":2,"method":"hew.sketch.draw_rect",
                     "params":{"plane":{"ground":true},"corner_a":[0.0,0.0,0.0],"corner_b":[1.0,1.0,0.0]}}"#,
@@ -18165,6 +28428,899 @@ mod tests {
             1,
             "the sketch dispatched over the live API is the SAME document the viewport reads"
         );
+    }
+
+    /// Subscribes `conn` to `events` (hello and attach first).
+    fn subscribed(scene: &mut Scene, conn: u32, events: &[&str]) {
+        for frame in [
+            r#"{"jsonrpc":"2.0","id":0,"method":"hew.meta.hello","params":{"protocol":1}}"#,
+            r#"{"jsonrpc":"2.0","id":1,"method":"hew.doc.attach","params":{}}"#,
+        ] {
+            let reply = scene.api_dispatch_reply(conn, frame).unwrap();
+            assert!(reply.contains("\"result\""), "{reply}");
+        }
+        let frame = serde_json::json!({
+            "jsonrpc": "2.0", "id": 90, "method": "hew.event.subscribe",
+            "params": { "events": events },
+        })
+        .to_string();
+        let reply = scene.api_dispatch_reply(conn, &frame).unwrap();
+        assert!(reply.contains("\"subscribed\""), "{reply}");
+    }
+
+    /// The frames each connection got, parsed: conn id → frames.
+    fn drained(scene: &mut Scene) -> std::collections::BTreeMap<u32, Vec<serde_json::Value>> {
+        let out: serde_json::Value = serde_json::from_str(&scene.drain_events()).unwrap();
+        out.as_array()
+            .unwrap()
+            .iter()
+            .filter(|batch| !batch["conn"].is_null())
+            .map(|batch| {
+                let conn = batch["conn"].as_u64().unwrap() as u32;
+                let frames = batch["frames"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|f| serde_json::from_str(f.as_str().unwrap()).unwrap())
+                    .collect();
+                (conn, frames)
+            })
+            .collect()
+    }
+
+    fn draw_rect_frame(id: u32, x: f64) -> String {
+        serde_json::json!({
+            "jsonrpc": "2.0", "id": id, "method": "hew.sketch.draw_rect",
+            "params": { "plane": { "ground": true }, "corner_a": [x, 0.0, 0.0], "corner_b": [x + 1.0, 1.0, 0.0] },
+        })
+        .to_string()
+    }
+
+    /// A box at `x` in the scene's document (a rectangle extruded half a
+    /// meter), and its public id.
+    fn scene_box_at(scene: &mut Scene, x: f64) -> (ObjectId, String) {
+        let s = scene.doc.add_sketch(ground_plane());
+        scene.doc.begin_sketch_gesture(s).unwrap();
+        let sk = scene.doc.sketch_mut(s).unwrap();
+        let c = [
+            Point3::new(x, 0.0, 0.0),
+            Point3::new(x + 1.0, 0.0, 0.0),
+            Point3::new(x + 1.0, 1.0, 0.0),
+            Point3::new(x, 1.0, 0.0),
+        ];
+        for i in 0..4 {
+            sk.add_segment(c[i], c[(i + 1) % 4]).unwrap();
+        }
+        scene.doc.end_sketch_gesture(s).unwrap();
+        let regions = scene.doc.extrudable_regions(s).unwrap();
+        scene.doc.extrude_region(s, regions[0], 0.5).unwrap();
+        let id = *scene.doc.live_object_ids().last().unwrap();
+        let public = api::IdResolver::new(&scene.doc)
+            .public_of(&scene.doc, &kernel::EntityRef::Object(id))
+            .unwrap();
+        (id, public)
+    }
+
+    fn frame(id: u32, method: &str, params: serde_json::Value) -> String {
+        serde_json::json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params })
+            .to_string()
+    }
+
+    fn directives(scene: &mut Scene) -> Vec<serde_json::Value> {
+        serde_json::from_str(&scene.take_pending_view_directives()).unwrap()
+    }
+
+    #[test]
+    fn selection_set_updates_the_mirror_and_leaves_a_directive() {
+        let mut scene = Scene::new();
+        let (a_id, a) = scene_box_at(&mut scene, 0.0);
+        let (b_id, b) = scene_box_at(&mut scene, 3.0);
+        let conn = scene.api_connection_open();
+        hello_and_attach(&mut scene, conn);
+        // The app mirrored a selection of b.
+        scene
+            .set_ui_selection(&format!(
+                r#"[{{"kind":"object","id":"{}"}}]"#,
+                b_id.data().as_ffi()
+            ))
+            .unwrap();
+        let reply = scene
+            .api_dispatch_reply(
+                conn,
+                &frame(
+                    5,
+                    "hew.selection.set",
+                    serde_json::json!({ "ids": [a], "mode": "add" }),
+                ),
+            )
+            .unwrap();
+        let reply: serde_json::Value = serde_json::from_str(&reply).unwrap();
+        assert_eq!(reply["result"]["ids"], serde_json::json!([b, a]), "{reply}");
+        assert_eq!(
+            scene.ui_selection,
+            vec![
+                live::UiSelectionEntry::Object {
+                    id: b_id.data().as_ffi()
+                },
+                live::UiSelectionEntry::Object {
+                    id: a_id.data().as_ffi()
+                },
+            ]
+        );
+        let got = directives(&mut scene);
+        assert_eq!(
+            got,
+            vec![serde_json::json!({
+                "kind": "selection",
+                "mode": "replace",
+                "entries": [
+                    { "kind": "object", "id": b_id.data().as_ffi().to_string() },
+                    { "kind": "object", "id": a_id.data().as_ffi().to_string() },
+                ],
+            })]
+        );
+        assert!(directives(&mut scene).is_empty(), "take, not peek");
+
+        // A refused set leaves the mirror and no directive.
+        scene.doc.set_node_user_hidden(NodeId::Object(a_id), true);
+        let reply = scene
+            .api_dispatch_reply(
+                conn,
+                &frame(6, "hew.selection.set", serde_json::json!({ "ids": [a] })),
+            )
+            .unwrap();
+        assert!(reply.contains("selection_target_not_visible"), "{reply}");
+        assert_eq!(scene.ui_selection.len(), 2);
+        assert!(directives(&mut scene).is_empty());
+
+        // A malformed mirror is refused and the old one kept.
+        assert!(
+            scene
+                .set_ui_selection(r#"[{"kind":"draft-edge","id":"1"}]"#)
+                .is_err()
+        );
+        assert!(
+            scene
+                .set_ui_selection(r#"[{"kind":"object","id":7}]"#)
+                .is_err()
+        );
+        assert_eq!(scene.ui_selection.len(), 2);
+    }
+
+    #[test]
+    fn two_view_commands_in_one_transact_leave_two_directives() {
+        let mut scene = Scene::new();
+        let (a_id, a) = scene_box_at(&mut scene, 0.0);
+        let (_, b) = scene_box_at(&mut scene, 3.0);
+        let conn = scene.api_connection_open();
+        hello_and_attach(&mut scene, conn);
+        let reply = scene
+            .api_dispatch_reply(
+                conn,
+                &frame(
+                    5,
+                    "hew.doc.transact",
+                    serde_json::json!({ "commands": [
+                        { "method": "hew.view.hide", "params": { "ids": [b] } },
+                        { "method": "hew.view.isolate", "params": { "ids": [a] } },
+                        { "method": "hew.view.zoom_to", "params": { "ids": [a], "padding": 0 } }
+                    ] }),
+                ),
+            )
+            .unwrap();
+        assert!(reply.contains("\"results\""), "{reply}");
+        let kinds: Vec<String> = directives(&mut scene)
+            .iter()
+            .map(|d| d["kind"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(kinds, vec!["hidden_changed", "isolate", "zoom_to"]);
+        assert_eq!(
+            scene.ui_isolation,
+            Some(vec![live::UiIsolationEntry::Object {
+                id: a_id.data().as_ffi()
+            }])
+        );
+
+        // An envelope that aborts leaves no directive, no isolation change,
+        // and no hide.
+        let reply = scene
+            .api_dispatch_reply(
+                conn,
+                &frame(
+                    6,
+                    "hew.doc.transact",
+                    serde_json::json!({ "commands": [
+                        { "method": "hew.view.clear_isolation", "params": {} },
+                        { "method": "hew.view.hide", "params": { "ids": [a] } },
+                        { "method": "hew.view.zoom_to", "params": { "ids": ["obj_ffffff"] } }
+                    ] }),
+                ),
+            )
+            .unwrap();
+        assert!(reply.contains("unknown_entity"), "{reply}");
+        assert!(directives(&mut scene).is_empty());
+        assert!(scene.ui_isolation.is_some(), "the isolation stays");
+        assert!(!scene.doc.node_user_hidden(NodeId::Object(a_id)));
+    }
+
+    /// A component of two boxes placed twice: the second placement mirrored.
+    fn mirrored_pair(scene: &mut Scene) -> (kernel::InstanceId, kernel::InstanceId) {
+        let (a, _) = scene_box_at(scene, 0.0);
+        let (b, _) = scene_box_at(scene, 2.0);
+        let (comp, i1, _) = scene
+            .doc
+            .make_component(&[NodeId::Object(a), NodeId::Object(b)])
+            .unwrap();
+        let mirror = kernel::Transform::scale(kernel::Vec3::new(-1.0, 1.0, 1.0)).then(
+            &kernel::Transform::translation(kernel::Vec3::new(20.0, 0.0, 0.0)),
+        );
+        let (i2, _) = scene.doc.place_instance(comp, mirror).unwrap();
+        (i1, i2)
+    }
+
+    #[test]
+    fn set_ui_context_drains_one_context_changed_with_the_fallback() {
+        let mut scene = Scene::new();
+        let (_i1, i2) = mirrored_pair(&mut scene);
+        let conn = scene.api_connection_open();
+        subscribed(&mut scene, conn, &["context_changed"]);
+        drained(&mut scene);
+
+        scene
+            .set_ui_context(&format!(
+                r#"[{{"kind":"instance","id":"{}"}}]"#,
+                i2.data().as_ffi()
+            ))
+            .unwrap();
+        let got = drained(&mut scene);
+        assert_eq!(got[&conn].len(), 1, "{got:?}");
+        assert_eq!(got[&conn][0]["method"], "hew.event.context_changed");
+        let public = api::ids::public_id(
+            &kernel::EntityRef::Instance(i2),
+            scene.doc.sid_of(&kernel::EntityRef::Instance(i2)).unwrap(),
+        );
+        assert_eq!(
+            got[&conn][0]["params"]["fallback"],
+            serde_json::json!([{ "kind": "instance", "id": public }])
+        );
+        assert_eq!(got[&conn][0]["params"]["stack"], serde_json::json!([]));
+        assert!(drained(&mut scene).is_empty(), "no change, no event");
+
+        // The read agrees, and the mirror clearing is a change too.
+        hello_and_attach(&mut scene, conn);
+        let reply = scene
+            .api_dispatch_reply(conn, &frame(5, "hew.query.context", serde_json::json!({})))
+            .unwrap();
+        let reply: serde_json::Value = serde_json::from_str(&reply).unwrap();
+        assert_eq!(
+            reply["result"]["fallback"],
+            serde_json::json!([{ "kind": "instance", "id": public }])
+        );
+        assert_eq!(reply["result"]["armed"], false);
+        scene.set_ui_context("[]").unwrap();
+        assert_eq!(drained(&mut scene)[&conn].len(), 1);
+        assert!(scene.set_ui_context("not json").is_err());
+    }
+
+    #[test]
+    fn view_enter_leaves_the_resolved_directive_and_exits_follow_the_window() {
+        recording::reset();
+        recording::start();
+        let mut scene = Scene::new();
+        let (_, i2) = mirrored_pair(&mut scene);
+        let conn = scene.api_connection_open();
+        hello_and_attach(&mut scene, conn);
+        let ins = |scene: &Scene, i| {
+            api::ids::public_id(
+                &kernel::EntityRef::Instance(i),
+                scene.doc.sid_of(&kernel::EntityRef::Instance(i)).unwrap(),
+            )
+        };
+        let public = ins(&scene, i2);
+
+        let reply = scene
+            .api_dispatch_reply(
+                conn,
+                &frame(5, "hew.view.enter", serde_json::json!({ "id": public })),
+            )
+            .unwrap();
+        let reply: serde_json::Value = serde_json::from_str(&reply).unwrap();
+        assert_eq!(reply["result"], serde_json::json!({}), "{reply}");
+        assert_eq!(
+            directives(&mut scene),
+            vec![serde_json::json!({
+                "kind": "enter_context",
+                "path": [],
+                "leaf": { "kind": "instance", "id": i2.data().as_ffi().to_string() },
+            })]
+        );
+
+        // An armed gesture refuses before any directive exists.
+        scene.set_ui_gesture_armed(true);
+        let reply = scene
+            .api_dispatch_reply(
+                conn,
+                &frame(6, "hew.view.enter", serde_json::json!({ "id": public })),
+            )
+            .unwrap();
+        assert!(reply.contains("gesture_in_progress"), "{reply}");
+        assert!(directives(&mut scene).is_empty());
+        scene.set_ui_gesture_armed(false);
+
+        // At the top level there is nothing to pop; exit_all is still fine.
+        let reply = scene
+            .api_dispatch_reply(conn, &frame(7, "hew.view.exit", serde_json::json!({})))
+            .unwrap();
+        assert!(reply.contains("nothing_to_exit"), "{reply}");
+        assert!(directives(&mut scene).is_empty());
+        let reply = scene
+            .api_dispatch_reply(conn, &frame(8, "hew.view.exit_all", serde_json::json!({})))
+            .unwrap();
+        assert!(reply.contains("\"result\""), "{reply}");
+        assert_eq!(directives(&mut scene)[0]["kind"], "exit_all_contexts");
+
+        // With a fallback entry open, exit pops it.
+        scene
+            .set_ui_context(&format!(
+                r#"[{{"kind":"instance","id":"{}"}}]"#,
+                i2.data().as_ffi()
+            ))
+            .unwrap();
+        let reply = scene
+            .api_dispatch_reply(conn, &frame(9, "hew.view.exit", serde_json::json!({})))
+            .unwrap();
+        assert!(reply.contains("\"result\""), "{reply}");
+        assert_eq!(directives(&mut scene)[0]["kind"], "exit_context");
+
+        // Host effects on the window are not replayable kernel calls.
+        scene
+            .api_dispatch_reply(conn, &draw_rect_frame(20, 50.0))
+            .unwrap();
+        let rec = scene.take_recording();
+        recording::reset();
+        assert!(
+            rec.contains("draw_rect"),
+            "ordinary mutations record: {rec}"
+        );
+        assert!(!rec.contains("hew.view.enter"), "{rec}");
+        assert!(!rec.contains("hew.view.exit"), "{rec}");
+    }
+
+    #[test]
+    fn view_commands_leave_the_last_import_scope_alone() {
+        let mut scene = Scene::new();
+        let (a_id, _) = scene_box_at(&mut scene, 0.0);
+        let (_i1, i2) = mirrored_pair(&mut scene);
+        let conn = scene.api_connection_open();
+        hello_and_attach(&mut scene, conn);
+        scene.last_import_objects = vec![a_id];
+        let public = api::ids::public_id(
+            &kernel::EntityRef::Instance(i2),
+            scene.doc.sid_of(&kernel::EntityRef::Instance(i2)).unwrap(),
+        );
+        for (id, method, params) in [
+            (5, "hew.view.enter", serde_json::json!({ "id": public })),
+            (6, "hew.view.exit_all", serde_json::json!({})),
+        ] {
+            let reply = scene
+                .api_dispatch_reply(conn, &frame(id, method, params))
+                .unwrap();
+            assert!(reply.contains("\"result\""), "{reply}");
+            assert_eq!(scene.last_import_objects, vec![a_id], "{method}");
+        }
+        // Nor as the sole command of a transaction (which refuses these, but
+        // the scope must not move on the refusal either).
+        let _ = scene.api_dispatch_reply(
+            conn,
+            &frame(
+                7,
+                "hew.doc.transact",
+                serde_json::json!({ "commands": [{ "method": "hew.view.exit_all", "params": {} }] }),
+            ),
+        );
+        assert_eq!(scene.last_import_objects, vec![a_id]);
+    }
+
+    #[test]
+    fn view_exit_with_only_a_session_open_leaves_an_exit_directive() {
+        let mut scene = Scene::new();
+        let (a, _) = scene_box_at(&mut scene, 0.0);
+        let (b, _) = scene_box_at(&mut scene, 3.0);
+        let _ = (a, b);
+        let objects = scene.doc.top_level_nodes();
+        let (g, _) = scene.doc.group_nodes(&objects).unwrap();
+        scene.doc.open_group_session(g).unwrap();
+        // No fallback entry mirrored: the session alone is something to exit.
+        let conn = scene.api_connection_open();
+        hello_and_attach(&mut scene, conn);
+        let reply = scene
+            .api_dispatch_reply(conn, &frame(5, "hew.view.exit", serde_json::json!({})))
+            .unwrap();
+        assert!(reply.contains("\"result\""), "{reply}");
+        assert_eq!(directives(&mut scene)[0]["kind"], "exit_context");
+    }
+
+    #[test]
+    fn drain_emits_selection_changed_once_per_change() {
+        let mut scene = Scene::new();
+        scene.set_host_document_id("doc_3");
+        let (a_id, a) = scene_box_at(&mut scene, 0.0);
+        let watcher = scene.api_connection_open();
+        let actor = scene.api_connection_open();
+        subscribed(&mut scene, watcher, &["selection_changed", "tool_changed"]);
+        hello_and_attach(&mut scene, actor);
+        drained(&mut scene);
+
+        // The app mirrors a selection: one event, then nothing until it
+        // changes again.
+        let mirror = format!(r#"[{{"kind":"object","id":"{}"}}]"#, a_id.data().as_ffi());
+        scene.set_ui_selection(&mirror).unwrap();
+        let got = drained(&mut scene);
+        let frames = &got[&watcher];
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0]["method"], "hew.event.selection_changed");
+        let params = &frames[0]["params"];
+        assert_eq!(params["document"], "doc_3");
+        assert_eq!(params["ids"], serde_json::json!([a]));
+        assert_eq!(params["primary"], serde_json::json!(a));
+        assert!(params["generation"].is_u64() && params["epoch"].is_u64());
+        scene.set_ui_selection(&mirror).unwrap();
+        assert!(drained(&mut scene).is_empty(), "the same selection again");
+
+        // A bus clear changes it once; the app's echo of the same state
+        // adds nothing.
+        scene
+            .api_dispatch_reply(
+                actor,
+                &frame(7, "hew.selection.clear", serde_json::json!({})),
+            )
+            .unwrap();
+        let got = drained(&mut scene);
+        assert_eq!(got[&watcher][0]["params"]["ids"], serde_json::json!([]));
+        assert_eq!(
+            got[&watcher][0]["params"]["primary"],
+            serde_json::Value::Null
+        );
+        scene.set_ui_selection("[]").unwrap();
+        assert!(drained(&mut scene).is_empty());
+
+        // The tool: once per change.
+        scene.note_tool_changed("Line");
+        scene.note_tool_changed("Line");
+        let got = drained(&mut scene);
+        assert_eq!(got[&watcher].len(), 1);
+        assert_eq!(
+            got[&watcher][0]["params"],
+            serde_json::json!({ "tool": "Line" })
+        );
+        scene.note_tool_changed("Line");
+        assert!(drained(&mut scene).is_empty());
+
+        // An entry whose object is gone is left out.
+        scene.set_ui_selection(&mirror).unwrap();
+        drained(&mut scene);
+        scene.doc.undo().unwrap();
+        scene
+            .set_ui_selection(&format!(
+                r#"[{{"kind":"object","id":"{}"}},{{"kind":"guide","id":"1"}}]"#,
+                a_id.data().as_ffi()
+            ))
+            .unwrap();
+        let got = drained(&mut scene);
+        let change = got[&watcher]
+            .iter()
+            .find(|f| f["method"] == "hew.event.selection_changed")
+            .expect("the mirror changed");
+        assert_eq!(change["params"]["ids"], serde_json::json!([]));
+    }
+
+    /// A bare hide over the bus writes persisted view state outside the
+    /// history; it is recorded like a mutation so a replay matches.
+    #[test]
+    fn a_bare_hide_is_recorded() {
+        let mut scene = Scene::new();
+        let (_, a) = scene_box_at(&mut scene, 0.0);
+        let conn = scene.api_connection_open();
+        hello_and_attach(&mut scene, conn);
+        recording::start();
+        scene
+            .api_dispatch_reply(
+                conn,
+                &frame(5, "hew.view.hide", serde_json::json!({ "ids": [a] })),
+            )
+            .unwrap();
+        scene
+            .api_dispatch_reply(conn, &frame(6, "hew.view.hidden", serde_json::json!({})))
+            .unwrap();
+        recording::stop();
+        let calls = recording::take_calls();
+        let frames: Vec<&str> = calls
+            .iter()
+            .filter_map(|c| match c {
+                recording::RecordedCall::ApiDispatch { frame } => Some(frame.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(frames.len(), 1, "{frames:?}");
+        assert!(frames[0].contains("hew.view.hide"));
+    }
+
+    #[test]
+    fn drain_emits_one_frame_per_record_per_subscriber() {
+        let mut scene = Scene::new();
+        scene.set_host_document_id("doc_7");
+        let a = scene.api_connection_open();
+        let b = scene.api_connection_open();
+        let quiet = scene.api_connection_open();
+        subscribed(&mut scene, a, &["document_changed"]);
+        subscribed(&mut scene, b, &["document_changed"]);
+        hello_and_attach(&mut scene, quiet);
+        assert_eq!(drained(&mut scene).len(), 0, "nothing happened yet");
+
+        scene
+            .api_dispatch_reply(a, &draw_rect_frame(1, 0.0))
+            .unwrap();
+        scene
+            .api_dispatch_reply(a, &draw_rect_frame(2, 3.0))
+            .unwrap();
+        scene
+            .api_dispatch_reply(
+                a,
+                r#"{"jsonrpc":"2.0","id":3,"method":"hew.history.undo","params":{}}"#,
+            )
+            .unwrap();
+        let got = drained(&mut scene);
+        assert_eq!(got.keys().copied().collect::<Vec<_>>(), vec![a, b]);
+        for frames in got.values() {
+            let kinds: Vec<&str> = frames
+                .iter()
+                .map(|f| f["params"]["kind"].as_str().unwrap())
+                .collect();
+            assert_eq!(kinds, vec!["commit", "commit", "undo"]);
+            assert!(
+                frames
+                    .iter()
+                    .all(|f| f["method"] == "hew.event.document_changed"
+                        && f.get("id").is_none()
+                        && f["params"]["document"] == "doc_7")
+            );
+            assert_eq!(
+                frames[2]["params"]["changes"]["removed"],
+                frames[1]["params"]["changes"]["added"]
+            );
+            assert_eq!(
+                frames[0]["params"]["origin"]["connection"],
+                format!("live:{a}")
+            );
+        }
+        assert!(drained(&mut scene).is_empty(), "take, not peek");
+        // A UI-side commit drains the same way.
+        scene
+            .doc
+            .add_guide_line(Point3::ORIGIN, Vec3::new(1.0, 0.0, 0.0))
+            .unwrap();
+        let got = drained(&mut scene);
+        assert_eq!(got[&a].len(), 1);
+        assert_eq!(got[&a][0]["params"]["origin"], "user");
+    }
+
+    #[test]
+    fn the_document_id_is_minted_by_its_own_call_and_rides_the_lifecycle_events() {
+        let mut scene = Scene::new();
+        let first = scene.api_connection_open();
+        subscribed(&mut scene, first, &["document_saved", "document_opened"]);
+        drained(&mut scene);
+        // `save` alone never mints (the blank snapshot, autosave, reports).
+        let before = scene.save();
+        assert_eq!(scene.save(), before);
+        assert_eq!(scene.document_id(), None);
+        scene.note_document_event("opened", "Untitled", None, None);
+        let id = scene.ensure_document_id();
+        assert_eq!(scene.ensure_document_id(), id, "idempotent");
+        assert_eq!(scene.document_id(), Some(id.clone()));
+        let loaded = kernel::Document::load(&scene.save()).unwrap();
+        assert_eq!(loaded.document_id(), Some(id.clone()));
+        scene.note_document_event("saved", "Box", None, Some("hew".into()));
+        let got = drained(&mut scene);
+        let frames = &got[&first];
+        assert_eq!(frames[0]["params"]["document_id"], serde_json::Value::Null);
+        assert_eq!(frames[1]["params"]["document_id"], id.as_str());
+        // A library model item made from the document carries no id.
+        let item = scene.extract_document_item(None).unwrap();
+        assert_eq!(kernel::Document::load(&item).unwrap().document_id(), None);
+    }
+
+    #[test]
+    fn lifecycle_events_are_offered_once_to_the_host_even_with_no_connection() {
+        // A window nobody is connected to still reports its lifecycle: the
+        // host fans it out to first-party connections bound elsewhere.
+        let mut scene = Scene::new();
+        scene.note_document_event("opened", "Box", Some("/tmp/box.hew".into()), None);
+        scene.note_tool_changed("line");
+        let out: serde_json::Value = serde_json::from_str(&scene.drain_events()).unwrap();
+        let batches = out.as_array().unwrap();
+        assert_eq!(batches.len(), 1, "{out}");
+        assert!(batches[0]["conn"].is_null());
+        let frames = batches[0]["frames"].as_array().unwrap();
+        assert_eq!(frames.len(), 1, "only the lifecycle event: {out}");
+        let frame: serde_json::Value = serde_json::from_str(frames[0].as_str().unwrap()).unwrap();
+        assert_eq!(frame["method"], "hew.event.document_opened");
+        assert_eq!(frame["params"]["path"], "/tmp/box.hew");
+        assert_eq!(frame["params"]["title"], "Box");
+        // Take, not peek.
+        assert_eq!(scene.drain_events(), "[]");
+    }
+
+    #[test]
+    fn drain_filters_by_grant_and_subscription() {
+        let mut scene = Scene::new();
+        let reader = scene
+            .api_plugin_connection_open(
+                r#"{"ceiling":"core","permissions":["model.read"],"plugin":"com.example.r","document":"doc_1"}"#,
+            )
+            .unwrap();
+        let other_doc = scene
+            .api_plugin_connection_open(
+                r#"{"ceiling":"core","permissions":["model.read"],"plugin":"com.example.o","document":"doc_2"}"#,
+            )
+            .unwrap();
+        let first = scene.api_connection_open();
+        subscribed(
+            &mut scene,
+            reader,
+            &["document_changed", "tool_changed", "document_saved"],
+        );
+        subscribed(&mut scene, other_doc, &["document_changed"]);
+        subscribed(&mut scene, first, &["tool_changed", "document_saved"]);
+        drained(&mut scene);
+
+        scene
+            .api_dispatch_reply(first, &draw_rect_frame(1, 0.0))
+            .unwrap();
+        scene.note_tool_changed("line");
+        scene.note_document_event(
+            "saved",
+            "Box",
+            Some("/tmp/box.hew".into()),
+            Some("hew".into()),
+        );
+        let got = drained(&mut scene);
+        let methods = |conn: u32| -> Vec<String> {
+            got.get(&conn)
+                .map(|fs| {
+                    fs.iter()
+                        .map(|f| f["method"].as_str().unwrap().to_string())
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        // model.read: document_changed and document_saved, but tool_changed
+        // needs view (denied at subscribe, never delivered); no path
+        // without documents.save.
+        assert_eq!(
+            methods(reader),
+            vec!["hew.event.document_saved", "hew.event.document_changed"]
+        );
+        let saved = &got[&reader][0]["params"];
+        assert_eq!(saved["format"], "hew");
+        assert!(saved.get("path").is_none(), "{saved}");
+        // Bound to another document: nothing about this one.
+        assert!(methods(other_doc).is_empty());
+        // First party: what it subscribed to, path included; not
+        // document_changed, which it did not ask for.
+        assert_eq!(
+            methods(first),
+            vec!["hew.event.tool_changed", "hew.event.document_saved"]
+        );
+        assert_eq!(got[&first][1]["params"]["path"], "/tmp/box.hew");
+        assert_eq!(
+            got[&first][0]["params"],
+            serde_json::json!({ "tool": "line" })
+        );
+    }
+
+    /// A plugin command's children are not history until its compound ends:
+    /// a drain while it is open sends nothing for them, the end sends its one
+    /// entry, and an abort sends one `abort` and nothing of what it undid.
+    #[test]
+    fn drain_holds_a_compounds_children_until_it_ends() {
+        let mut scene = Scene::new();
+        let conn = scene.api_connection_open();
+        subscribed(&mut scene, conn, &["document_changed"]);
+        drained(&mut scene);
+        let meta = || kernel::CompoundMeta {
+            label: "Cut list".into(),
+            origin: kernel::HistoryOrigin::Connection("plugin:com.example.p".into()),
+            coalesce: None,
+        };
+        let guide = |scene: &mut Scene| {
+            let txn = scene.doc.begin_transaction();
+            scene
+                .doc
+                .add_guide_line(Point3::ORIGIN, Vec3::new(1.0, 0.0, 0.0))
+                .unwrap();
+            scene.doc.commit_transaction(txn, meta()).unwrap();
+        };
+        // Before the compound: goes out.
+        guide(&mut scene);
+        let token = scene.doc.begin_compound(meta());
+        guide(&mut scene);
+        guide(&mut scene);
+        let got = drained(&mut scene);
+        assert_eq!(got[&conn].len(), 1, "only what came before the compound");
+        assert!(drained(&mut scene).is_empty(), "children held");
+        scene.doc.end_compound(token).unwrap();
+        let got = drained(&mut scene);
+        assert_eq!(got[&conn].len(), 1);
+        assert_eq!(got[&conn][0]["params"]["label"], "Cut list");
+        assert_eq!(
+            got[&conn][0]["params"]["changes"]["added"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+
+        let token = scene.doc.begin_compound(meta());
+        guide(&mut scene);
+        assert!(drained(&mut scene).is_empty());
+        scene.doc.abort_compound(token).unwrap();
+        let got = drained(&mut scene);
+        let kinds: Vec<&str> = got[&conn]
+            .iter()
+            .map(|f| f["params"]["kind"].as_str().unwrap())
+            .collect();
+        assert_eq!(kinds, vec!["abort"]);
+    }
+
+    #[test]
+    fn drain_collapses_past_64() {
+        let mut scene = Scene::new();
+        let conn = scene.api_connection_open();
+        subscribed(&mut scene, conn, &["document_changed"]);
+        drained(&mut scene);
+        for i in 0..65 {
+            scene
+                .doc
+                .attr_set(
+                    kernel::AttrTarget::Document,
+                    "com.example.t",
+                    "k",
+                    kernel::AttrValue::Int(i),
+                )
+                .unwrap();
+        }
+        let got = drained(&mut scene);
+        assert_eq!(got[&conn].len(), 1);
+        let params = &got[&conn][0]["params"];
+        assert_eq!(params["kind"], "commit");
+        assert_eq!(params["changes"]["full"], true);
+        assert_eq!(params["generation"], scene.doc.history_generation());
+        assert_eq!(params["epoch"], scene.doc.document_epoch());
+        // 64 go one by one.
+        for i in 0..64 {
+            scene
+                .doc
+                .attr_set(
+                    kernel::AttrTarget::Document,
+                    "com.example.t",
+                    "k",
+                    kernel::AttrValue::Int(i),
+                )
+                .unwrap();
+        }
+        assert_eq!(drained(&mut scene)[&conn].len(), 64);
+        // A reload is one reset.
+        let bytes = scene.doc.save();
+        scene.load_core(&bytes).unwrap();
+        let got = drained(&mut scene);
+        assert_eq!(got[&conn].len(), 1);
+        assert_eq!(got[&conn][0]["params"]["kind"], "reset");
+        assert_eq!(got[&conn][0]["params"]["changes"]["full"], true);
+    }
+
+    #[test]
+    fn context_and_units_and_scenes_change_once_each() {
+        let mut scene = Scene::new();
+        let conn = scene.api_connection_open();
+        subscribed(
+            &mut scene,
+            conn,
+            &["context_changed", "units_changed", "scenes_changed"],
+        );
+        drained(&mut scene);
+
+        scene.set_display_units("mm");
+        let got = drained(&mut scene);
+        assert_eq!(got[&conn].len(), 1);
+        assert_eq!(
+            got[&conn][0]["params"],
+            serde_json::json!({ "document": "doc_1", "units": "mm" })
+        );
+        scene.set_display_units("mm");
+        assert!(drained(&mut scene).is_empty(), "same units, no event");
+
+        let reply = scene
+            .api_dispatch_reply(
+                conn,
+                r#"{"jsonrpc":"2.0","id":5,"method":"hew.scenes.add","params":{"name":"Front"}}"#,
+            )
+            .unwrap();
+        assert!(reply.contains("\"result\""), "{reply}");
+        let got = drained(&mut scene);
+        assert_eq!(got[&conn].len(), 1);
+        assert_eq!(got[&conn][0]["method"], "hew.event.scenes_changed");
+        assert_eq!(got[&conn][0]["params"]["scenes"][0]["name"], "Front");
+        assert_eq!(got[&conn][0]["params"]["active"], serde_json::Value::Null);
+        assert!(drained(&mut scene).is_empty());
+        let sid = scene.doc.scenes()[0].sid;
+        scene.note_scene_activated(sid);
+        let got = drained(&mut scene);
+        assert_eq!(got[&conn][0]["params"]["active"], api::ids::scene_id(sid));
+        assert!(drained(&mut scene).is_empty());
+
+        // Enter a group: the stack changed once.
+        let r = scene
+            .api_dispatch_reply(conn, &draw_rect_frame(6, 0.0))
+            .unwrap();
+        assert!(r.contains("\"result\""), "{r}");
+        let sketch = scene.doc.visible_sketch_ids()[0];
+        let region = scene.doc.extrudable_regions(sketch).unwrap()[0];
+        scene.doc.extrude_region(sketch, region, 0.5).unwrap();
+        let objects = scene.doc.top_level_nodes();
+        let (g, _) = scene.doc.group_nodes(&objects).unwrap();
+        drained(&mut scene);
+        scene.doc.open_group_session(g).unwrap();
+        let got = drained(&mut scene);
+        assert_eq!(got[&conn].len(), 1);
+        assert_eq!(got[&conn][0]["method"], "hew.event.context_changed");
+        assert_eq!(got[&conn][0]["params"]["stack"][0]["kind"], "group");
+        assert!(drained(&mut scene).is_empty());
+    }
+
+    #[test]
+    fn plugin_connections_carry_their_grant_and_identity() {
+        let mut scene = Scene::new();
+        assert!(scene.api_plugin_connection_open("not json").is_err());
+        assert!(
+            scene
+                .api_plugin_connection_open(r#"{"ceiling":"app","permissions":["all"]}"#)
+                .is_err(),
+            "a first-party grant is not a plugin connection"
+        );
+        assert!(
+            scene
+                .api_plugin_connection_open(
+                    r#"{"ceiling":"app","permissions":["all"],"plugin":"com.example.p"}"#
+                )
+                .is_err(),
+            "a plugin grant may not hold all"
+        );
+        let conn = scene
+            .api_plugin_connection_open(
+                r#"{"ceiling":"core","permissions":["model.read"],"plugin":"com.example.p","document":"doc_1"}"#,
+            )
+            .expect("a plugin grant opens");
+        let reply = scene
+            .api_dispatch_reply(
+                conn,
+                r#"{"jsonrpc":"2.0","id":0,"method":"hew.meta.hello","params":{"protocol":1}}"#,
+            )
+            .unwrap();
+        assert!(reply.contains("\"profile\":\"plugin\""), "{reply}");
+        assert_eq!(
+            scene.api_connections[&conn].identity(),
+            "plugin:com.example.p"
+        );
+        let reply = scene
+            .api_dispatch_reply(
+                conn,
+                r#"{"jsonrpc":"2.0","id":1,"method":"hew.sketch.draw_rect",
+                    "params":{"plane":{"ground":true},"corner_a":[0.0,0.0,0.0],"corner_b":[1.0,1.0,0.0]}}"#,
+            )
+            .unwrap();
+        assert!(reply.contains("-32001"), "model.write not held: {reply}");
+        assert!(scene.sketch_ids().is_empty());
     }
 
     #[test]
@@ -18179,7 +29335,7 @@ mod tests {
             "params": { "path": "cube_open.stl", "units": "mm", "bytes_base64": api::commands::doc::encode_base64(stl) },
         })
         .to_string();
-        let reply = scene.api_dispatch(conn, &frame).unwrap();
+        let reply = scene.api_dispatch_reply(conn, &frame).unwrap();
         assert!(reply.contains("\"result\""), "import succeeds: {reply}");
         let ids = scene.last_import_object_ids();
         assert_eq!(ids.len(), 1);
@@ -18206,7 +29362,7 @@ mod tests {
             },
         })
         .to_string();
-        let reply = scene.api_dispatch(conn, &frame).unwrap();
+        let reply = scene.api_dispatch_reply(conn, &frame).unwrap();
         assert!(reply.contains("\"picture\""), "import succeeds: {reply}");
         let [inst] = scene.doc.instance_ids()[..] else {
             panic!("one picture placed");
@@ -18242,7 +29398,7 @@ mod tests {
             },
         })
         .to_string();
-        let reply = scene.api_dispatch(conn, &frame).unwrap();
+        let reply = scene.api_dispatch_reply(conn, &frame).unwrap();
         let v: serde_json::Value = serde_json::from_str(&reply).unwrap();
         assert!(v.get("error").is_some(), "refused: {reply}");
         assert!(reply.contains("at least"), "names the minimum: {reply}");
@@ -18257,7 +29413,7 @@ mod tests {
     fn api_dispatch_malformed_json_answers_a_parse_error_with_null_id() {
         let mut scene = Scene::new();
         let conn = scene.api_connection_open();
-        let reply = scene.api_dispatch(conn, "not json").unwrap();
+        let reply = scene.api_dispatch_reply(conn, "not json").unwrap();
         assert!(reply.contains("\"id\":null"), "got {reply}");
         assert!(reply.contains("-32700"), "PARSE_ERROR code: {reply}");
     }
@@ -18266,7 +29422,7 @@ mod tests {
     fn api_dispatch_unknown_connection_answers_typed_instead_of_panicking() {
         let mut scene = Scene::new();
         let reply = scene
-            .api_dispatch(
+            .api_dispatch_reply(
                 999,
                 r#"{"jsonrpc":"2.0","id":0,"method":"hew.meta.hello","params":{"protocol":1}}"#,
             )
@@ -18279,7 +29435,7 @@ mod tests {
         let mut scene = Scene::new();
         let conn = scene.api_connection_open();
         hello_and_attach(&mut scene, conn);
-        let reply = scene.api_dispatch(
+        let reply = scene.api_dispatch_reply(
             conn,
             r#"{"jsonrpc":"2.0","method":"hew.sketch.draw_rect",
                 "params":{"plane":{"ground":true},"corner_a":[0.0,0.0,0.0],"corner_b":[1.0,1.0,0.0]}}"#,
@@ -18298,7 +29454,7 @@ mod tests {
         hello_and_attach(&mut scene, conn);
         scene.api_connection_close(conn);
         let reply = scene
-            .api_dispatch(
+            .api_dispatch_reply(
                 conn,
                 r#"{"jsonrpc":"2.0","id":5,"method":"hew.query.scene","params":{}}"#,
             )
@@ -18317,10 +29473,10 @@ mod tests {
         let mut scene = Scene::new();
         let conn = scene.api_connection_open();
         hello_and_attach(&mut scene, conn);
-        scene.begin_ground_sketch();
+        scene.begin_ground_sketch().unwrap();
 
         let reply = scene
-            .api_dispatch(
+            .api_dispatch_reply(
                 conn,
                 r#"{"jsonrpc":"2.0","id":2,"method":"hew.doc.new","params":{}}"#,
             )
@@ -18357,6 +29513,7 @@ mod tests {
             section: None,
             view_style: None,
             extra: Default::default(),
+            geo: None,
         };
         doc.ingest(scene, Vec::new()).unwrap();
         let mut scene = Scene::new();
@@ -18364,7 +29521,7 @@ mod tests {
         let ids = scene.guide_ids();
         assert_eq!(ids.len(), 1);
         assert_eq!(scene.guide_tags(ids[0]), vec!["Rig/Cameras".to_string()]);
-        scene.set_tag_hidden("Rig".to_string(), true);
+        scene.set_tag_hidden("Rig".to_string(), true).unwrap();
         assert!(
             scene.guide_ids().is_empty(),
             "hidden through a tag above its own"
@@ -18373,8 +29530,51 @@ mod tests {
             scene.doc.guide(guide_id(ids[0])).is_some(),
             "the document keeps it"
         );
-        scene.set_tag_hidden("Rig".to_string(), false);
+        scene.set_tag_hidden("Rig".to_string(), false).unwrap();
         assert_eq!(scene.guide_ids(), ids);
+    }
+
+    /// A line guide's dash reaches the viewport as its stipple mask: the
+    /// imported mask for a line, the default for one Hew draws, none for a
+    /// point.
+    #[test]
+    fn a_guide_lines_dash_is_listed_as_its_stipple_mask() {
+        use kernel::{GuideDash, GuideSpan, ImportGuide, ImportScene, Point3, Vec3};
+        let mut doc = kernel::Document::new();
+        let scene = ImportScene {
+            materials: Vec::new(),
+            defs: Vec::new(),
+            roots: Vec::new(),
+            guides: vec![
+                ImportGuide::Line {
+                    dash: GuideDash(0x1C47),
+                    origin: Point3::ORIGIN,
+                    direction: Vec3::new(1.0, 0.0, 0.0),
+                    span: GuideSpan::INFINITE,
+                    tags: Vec::new(),
+                },
+                ImportGuide::Point {
+                    position: Point3::new(1.0, 2.0, 0.0),
+                    tags: Vec::new(),
+                },
+            ],
+            tags: Vec::new(),
+            camera: None,
+            scenes: Vec::new(),
+            section: None,
+            view_style: None,
+            extra: Default::default(),
+            geo: None,
+        };
+        doc.ingest(scene, Vec::new()).unwrap();
+        let mut scene = Scene::new();
+        scene.load(&doc.save()).unwrap();
+        let drawn = scene.add_guide_line(0.0, 1.0, 0.0, 1.0, 0.0, 0.0).unwrap();
+        let ids = scene.guide_ids();
+        assert_eq!(ids.len(), 3);
+        assert_eq!(scene.guide_dash(ids[0]), Some(0x1C47));
+        assert_eq!(scene.guide_dash(ids[1]), None, "a point has no dash");
+        assert_eq!(scene.guide_dash(drawn), Some(0x3333));
     }
 
     /// One placed picture's shape, in world space, for comparing a placed
@@ -18660,20 +29860,26 @@ mod tests {
         let (undo, redo) = (scene.doc.undo_depth(), scene.doc.redo_depth());
         let materials = scene.doc.material_ids().len();
 
-        let mut out = image_import::import(
-            &png_stub(300, 100),
-            None,
-            "speck",
-            &image_import::Placement::ground(1.0),
-        )
-        .unwrap();
-        // Shrink the face past what the kernel can find a plane for.
-        let kernel::ImportNode::Mesh(mesh) = &mut out.scene.defs[0].children[0] else {
-            panic!("the definition holds the picture's mesh");
+        // Shrink the face past what the kernel can find a plane for: a
+        // 10 × 3.3 nm picture, twice its area under 1e-12 m² and narrower
+        // than `kernel::tol::MIN_FACE_WIDTH`.
+        let shrunk = |k: f64| {
+            let mut out = image_import::import(
+                &png_stub(300, 100),
+                None,
+                "speck",
+                &image_import::Placement::ground(1.0),
+            )
+            .unwrap();
+            let kernel::ImportNode::Mesh(mesh) = &mut out.scene.defs[0].children[0] else {
+                panic!("the definition holds the picture's mesh");
+            };
+            for p in &mut mesh.positions {
+                *p = Point3::new(p.x * k, p.y * k, 0.0);
+            }
+            out
         };
-        for p in &mut mesh.positions {
-            *p = Point3::new(p.x * 1e-7, p.y * 1e-7, 0.0);
-        }
+        let out = shrunk(1e-8);
         let err = scene.ingest_picture(out.scene).unwrap_err();
         assert!(err.0.starts_with("ImageTooSmall: "), "{}", err.0);
         assert!(err.0.contains("can't be built"), "{}", err.0);
@@ -18691,6 +29897,11 @@ mod tests {
         // The earlier undone placement is still the one redo brings back.
         scene.scene_redo().unwrap();
         assert_eq!(scene.doc.instance_ids().len(), 2);
+        // The 0.1 × 0.033 µm picture the area floor alone used to refuse is
+        // 50 nm wide: it is kept now, and the document reopens.
+        scene.ingest_picture(shrunk(1e-7).scene).unwrap();
+        assert_eq!(scene.doc.instance_ids().len(), 3);
+        kernel::Document::load(&scene.save()).expect("reopens");
     }
 
     /// `RecordedCall::PlaceImage` replays: the bytes, name, frame and width
@@ -18720,6 +29931,707 @@ mod tests {
         assert_eq!(replayed.replay(&json).unwrap(), golden);
         assert_eq!(replayed.save(), scene.save(), "byte-identical document");
     }
+
+    // -----------------------------------------------------------------
+    // Editing scope: wherever faces are targets (Shaded and X-ray), the
+    // picks pass over geometry outside the open edit and land on the
+    // nearest candidate inside it (docs/design/xray-edit-scope-pick.md):
+    // the editing view draws what is outside the scope translucent, so
+    // what is inside it can be seen. Wireframe ignores the scope; with
+    // nothing in scope under the ray, every pick answers exactly as it
+    // does without one.
+    // -----------------------------------------------------------------
+
+    /// A ray from x = 10 straight down -x, at height `y`, `z`.
+    const RAY_X0: f64 = 10.0;
+
+    fn pick_face_x(scene: &Scene, y: f64, z: f64) -> Option<FacePickJs> {
+        scene.pick_face(RAY_X0, y, z, -1.0, 0.0, 0.0)
+    }
+
+    fn pick_region_x(scene: &Scene, y: f64, z: f64) -> Option<SketchRegionPickJs> {
+        scene.pick_sketch_region(RAY_X0, y, z, -1.0, 0.0, 0.0)
+    }
+
+    /// Draws a square `[y0,y1]×[z0,z1]` on `obj`'s +x face (at `x`) through
+    /// the draft family the app's draw tools use. A closed loop inside a
+    /// face imprints: it becomes a sub-face of `obj`, not a sketch.
+    fn square_on_x_face(scene: &mut Scene, obj: u64, x: f64, y0: f64, y1: f64, z0: f64, z1: f64) {
+        let face = wasm_face_matching(scene, obj, kernel::Vec3::new(1.0, 0.0, 0.0));
+        let pts = [x, y0, z0, x, y1, z0, x, y1, z1, x, y0, z1];
+        draft_loop(scene, None, obj, face, &pts, None).expect("draws on the face");
+    }
+
+    /// A free square `[y0,y1]×[z0,z1]` on the plane x = `x`, drawn the way
+    /// the app draws on an empty plane.
+    fn free_square_at_x(scene: &mut Scene, x: f64, y0: f64, y1: f64, z0: f64, z1: f64) {
+        let d = scene
+            .draft_begin_plane(x, 0.0, 0.0, 1.0, 0.0, 0.0, "Rectangle")
+            .unwrap();
+        let pts = [(y0, z0), (y1, z0), (y1, z1), (y0, z1)];
+        for i in 0..4 {
+            let (a, b) = (pts[i], pts[(i + 1) % 4]);
+            scene
+                .draft_add_segment(d, x, a.0, a.1, x, b.0, b.1)
+                .unwrap();
+        }
+        scene.draft_end(d).unwrap();
+    }
+
+    /// The object that owns a region pick's sketch, if any.
+    fn region_owner(scene: &Scene, pick: &SketchRegionPickJs) -> Option<u64> {
+        scene
+            .doc
+            .sketch_owner_object(sketch_id(pick.sketch()))
+            .map(|o| o.data().as_ffi())
+    }
+
+    /// Pushes the scope exactly as the app's `refreshSessionScope` does:
+    /// the innermost frame's direct members, groups flattened to their leaf
+    /// objects and instances (`flattenSessionScope`), with the frame's own
+    /// drawing in scope.
+    fn push_session_scope_as_the_app(scene: &mut Scene) {
+        let mut objects = Vec::new();
+        let mut instances = Vec::new();
+        let mut stack = scene.doc.session_direct_members().unwrap_or_default();
+        while let Some(node) = stack.pop() {
+            match node {
+                NodeId::Object(o) => objects.push(o.data().as_ffi()),
+                NodeId::Instance(i) => instances.push(i.data().as_ffi()),
+                NodeId::Group(g) => stack.extend(scene.doc.group_members(g).unwrap_or_default()),
+            }
+        }
+        scene.set_pick_scope(objects, instances, true);
+    }
+
+    /// Every pick the scope touches, as comparable values.
+    #[derive(Debug, PartialEq)]
+    struct Picks {
+        face: Option<(u64, u64, Option<u64>, u64)>,
+        region: Option<(u64, u64, u64)>,
+        sketch: Option<u64>,
+        edge: Option<(u64, u64)>,
+        vertex: Option<(u64, u64)>,
+    }
+
+    fn picks_x(scene: &Scene, y: f64, z: f64) -> Picks {
+        let (o, d) = ([RAY_X0, y, z], [-1.0, 0.0, 0.0]);
+        Picks {
+            face: scene
+                .pick_face(o[0], o[1], o[2], d[0], d[1], d[2])
+                .map(|p| (p.object(), p.face(), p.instance(), p.depth().to_bits())),
+            region: scene
+                .pick_sketch_region(o[0], o[1], o[2], d[0], d[1], d[2])
+                .map(|p| (p.sketch(), p.region(), p.depth().to_bits())),
+            sketch: scene.pick_sketch(o[0], o[1], o[2], d[0], d[1], d[2]),
+            edge: scene
+                .pick_sketch_edge(o[0], o[1], o[2], d[0], d[1], d[2])
+                .map(|p| (p.sketch(), p.edge())),
+            vertex: scene
+                .pick_sketch_vertex(o[0], o[1], o[2], d[0], d[1], d[2])
+                .map(|p| (p.sketch(), p.vertex())),
+        }
+    }
+
+    /// The scope API: empty lists are a scope (not a clear),
+    /// `clear_pick_scope` clears it and the frame flag, a load clears both,
+    /// and a live-API resync keeps both.
+    #[test]
+    fn the_pick_scope_sets_clears_and_drops_on_load() {
+        let mut scene = Scene::new();
+        let a = scene_box(&mut scene, 0.0, 0.0, 1.0, 1.0, 1.0);
+        assert_eq!(scene.inference.pick_scope(), None);
+        assert!(!scene.pick_scope_frame_sketches);
+        scene.set_pick_scope(vec![a], vec![], false);
+        assert!(scene.inference.pick_scope().is_some());
+        assert!(!scene.pick_scope_frame_sketches);
+        scene.set_pick_scope(vec![], vec![], true);
+        assert_eq!(
+            scene.inference.pick_scope(),
+            Some(&PickScope::default()),
+            "empty lists are a scope, not a clear"
+        );
+        assert!(scene.pick_scope_frame_sketches);
+        scene.clear_pick_scope();
+        assert_eq!(scene.inference.pick_scope(), None);
+        assert!(!scene.pick_scope_frame_sketches, "a clear drops the flag");
+
+        scene.set_pick_scope(vec![a], vec![], true);
+        scene.full_resync();
+        assert_eq!(
+            scene.inference.pick_scope().map(|s| s.objects.len()),
+            Some(1),
+            "a resync keeps the window's scope"
+        );
+        assert!(scene.pick_scope_frame_sketches, "and its frame flag");
+        let bytes = scene.save();
+        scene.load(&bytes).unwrap();
+        assert_eq!(scene.inference.pick_scope(), None, "a load drops it");
+        assert!(!scene.pick_scope_frame_sketches, "and its frame flag");
+    }
+
+    /// An open line drawn on `obj`'s +x face (at `x`) from `(y0, z)` to
+    /// `(y1, z)`: it splits nothing, so the draft keeps it as a sketch the
+    /// object owns.
+    fn owned_line_on_x_face(scene: &mut Scene, obj: u64, x: f64, y0: f64, y1: f64, z: f64) -> u64 {
+        let face = wasm_face_matching(scene, obj, kernel::Vec3::new(1.0, 0.0, 0.0));
+        let d = scene.draft_begin_face(obj, face, "Line").unwrap();
+        scene.draft_add_segment(d, x, y0, z, x, y1, z).unwrap();
+        let report: serde_json::Value = serde_json::from_str(&scene.draft_end(d).unwrap()).unwrap();
+        let sketch = report["sketches"][0].as_u64().expect("kept as a sketch");
+        assert_eq!(
+            scene.doc.sketch_owner_object(sketch_id(sketch)),
+            Some(object_id(obj)),
+            "an owned sketch"
+        );
+        sketch
+    }
+
+    /// A closed square on the plane x = `x` made a sketch owned by `obj`
+    /// (one of whose faces lies on that plane) through the kernel's owner
+    /// call: drawing on a face imprints a closed loop into the face, so an
+    /// owned sketch REGION is reached only this way (or by a load).
+    fn owned_square_at_x(scene: &mut Scene, obj: u64, x: f64, y0: f64, y1: f64, z0: f64, z1: f64) {
+        let plane =
+            Plane::from_point_normal(Point3::new(x, 0.0, 0.0), Vec3::new(1.0, 0.0, 0.0)).unwrap();
+        let s = scene.doc.add_sketch(plane);
+        let sk = scene.doc.sketch_mut(s).unwrap();
+        let pts = [(y0, z0), (y1, z0), (y1, z1), (y0, z1)];
+        for i in 0..4 {
+            let (a, b) = (pts[i], pts[(i + 1) % 4]);
+            sk.add_segment(Point3::new(x, a.0, a.1), Point3::new(x, b.0, b.1))
+                .unwrap();
+        }
+        scene
+            .doc
+            .set_sketch_object_owner(s, Some(object_id(obj)))
+            .unwrap();
+    }
+
+    /// A region drawn on the FRONT box's face (it imprints: a sub-face of
+    /// the front box) with a free drawing in front of it, the REAR box in
+    /// scope, under each policy. In Shaded and X-ray alike the face pick
+    /// reaches the rear box; the region pick has nothing in scope under
+    /// the ray and answers as without a scope, until the rear box owns a
+    /// region there. Wireframe ignores the scope. Owned lines on both
+    /// faces drive the edge, vertex and whole-sketch picks.
+    #[test]
+    fn a_region_on_the_front_box_with_the_rear_box_in_scope_under_each_policy() {
+        let mut scene = Scene::new();
+        let rear = scene_box(&mut scene, 0.0, 0.0, 2.0, 2.0, 2.0);
+        let front = scene_box(&mut scene, 4.0, 0.0, 6.0, 2.0, 2.0);
+        square_on_x_face(&mut scene, front, 6.0, 0.5, 1.5, 0.5, 1.5);
+        free_square_at_x(&mut scene, 7.0, 0.25, 1.75, 0.25, 1.75);
+        let front_line = owned_line_on_x_face(&mut scene, front, 6.0, 0.6, 1.4, 0.4);
+        let rear_line = owned_line_on_x_face(&mut scene, rear, 2.0, 0.6, 1.4, 0.4);
+        let (y, z) = (1.0, 1.0);
+        let modes = ["shaded", "xray", "wireframe"];
+
+        let mut unscoped = Vec::new();
+        for mode in modes {
+            scene.set_render_mode(mode).unwrap();
+            unscoped.push(picks_x(&scene, y, z));
+        }
+        scene.set_pick_scope(vec![rear], vec![], false);
+        for (k, mode) in modes.into_iter().enumerate() {
+            scene.set_render_mode(mode).unwrap();
+            let face = pick_face_x(&scene, y, z);
+            let region = pick_region_x(&scene, y, z);
+            match mode {
+                "wireframe" => {
+                    assert!(face.is_none() && region.is_none(), "{mode}");
+                    assert_eq!(picks_x(&scene, y, z), unscoped[k], "{mode}: scope ignored");
+                }
+                _ => {
+                    let face = face.expect("the rear box's face");
+                    assert_eq!(face.object(), rear, "{mode}: through the front box");
+                    assert!((face.depth() - 8.0).abs() < 1e-9);
+                    let unscoped_face = unscoped[k].face.expect("front");
+                    assert_eq!(unscoped_face.0, front, "unscoped: the imprinted face");
+                    // Nothing in scope among the regions: as without one.
+                    let region = region.expect("the free drawing, as before");
+                    assert_eq!(region_owner(&scene, &region), None);
+                    assert!((region.depth() - 3.0).abs() < 1e-9);
+                    assert_eq!(picks_x(&scene, y, z).region, unscoped[k].region);
+                }
+            }
+        }
+
+        // Edge, vertex and whole-sketch picks: the owned lines sit on one
+        // axis-parallel ray, the front one nearer.
+        let (ey, ez) = (1.0, 0.4);
+        let edge_sketch = |scene: &Scene| {
+            scene
+                .pick_sketch_edge(RAY_X0, ey, ez, -1.0, 0.0, 0.0)
+                .map(|p| p.sketch())
+        };
+        let whole = |scene: &Scene| scene.pick_sketch(RAY_X0, ey, ez, -1.0, 0.0, 0.0);
+        let vertex_sketch = |scene: &Scene| {
+            scene
+                .pick_sketch_vertex(RAY_X0, 0.6, 0.4, -1.0, 0.0, 0.0)
+                .map(|p| p.sketch())
+        };
+        for mode in modes {
+            scene.set_render_mode(mode).unwrap();
+            let want = if mode == "wireframe" {
+                front_line
+            } else {
+                rear_line
+            };
+            assert_eq!(edge_sketch(&scene), Some(want), "{mode} edge");
+            assert_eq!(whole(&scene), Some(want), "{mode} sketch");
+            assert_eq!(vertex_sketch(&scene), Some(want), "{mode} vertex");
+        }
+        scene.clear_pick_scope();
+        for mode in ["shaded", "xray"] {
+            scene.set_render_mode(mode).unwrap();
+            assert_eq!(edge_sketch(&scene), Some(front_line), "unscoped {mode}");
+        }
+        scene.set_render_mode("xray").unwrap();
+
+        // The rear box owns a region under the same ray: Shaded and X-ray
+        // land on it.
+        owned_square_at_x(&mut scene, rear, 2.0, 0.5, 1.5, 0.5, 1.5);
+        scene.set_pick_scope(vec![rear], vec![], false);
+        for mode in modes {
+            scene.set_render_mode(mode).unwrap();
+            let region = pick_region_x(&scene, y, z);
+            match mode {
+                "wireframe" => assert!(region.is_none()),
+                _ => {
+                    let region = region.expect("the rear box's region");
+                    assert_eq!(region_owner(&scene, &region), Some(rear), "{mode}");
+                    assert!((region.depth() - 8.0).abs() < 1e-9);
+                }
+            }
+        }
+        // The front box in scope: it owns no region, so the free drawing;
+        // a scope of stale ids: the unscoped picks, bit for bit.
+        scene.set_render_mode("xray").unwrap();
+        scene.set_pick_scope(vec![front], vec![], false);
+        assert_eq!(
+            region_owner(&scene, &pick_region_x(&scene, y, z).unwrap()),
+            None
+        );
+        assert_eq!(pick_face_x(&scene, y, z).unwrap().object(), front);
+        for mode in ["shaded", "xray"] {
+            scene.set_render_mode(mode).unwrap();
+            scene.clear_pick_scope();
+            let bare = picks_x(&scene, y, z);
+            scene.set_pick_scope(vec![999_999], vec![888_888], true);
+            assert_eq!(
+                picks_x(&scene, y, z),
+                bare,
+                "{mode}: stale ids are harmless"
+            );
+            scene.set_pick_scope(vec![], vec![], true);
+            assert_eq!(picks_x(&scene, y, z), bare, "{mode}: an empty scope too");
+        }
+        scene.set_render_mode("xray").unwrap();
+        // The camera's geometry picks never consult the scope.
+        scene.set_pick_scope(vec![rear], vec![], false);
+        let geom = scene
+            .pick_face_geometry(RAY_X0, y, z, -1.0, 0.0, 0.0)
+            .unwrap();
+        assert_eq!(geom.object(), front);
+        let geom_region = scene
+            .pick_sketch_region_geometry(RAY_X0, y, z, -1.0, 0.0, 0.0)
+            .unwrap();
+        assert_eq!(region_owner(&scene, &geom_region), None);
+        assert!((geom_region.depth() - 3.0).abs() < 1e-9);
+    }
+
+    /// The reporter's scene: a component buried half inside an enclosing
+    /// box, a sibling copy in front of the box, a free drawing in front of
+    /// that. With an explode session open on the buried copy and the scope
+    /// pushed as the app pushes it, X-ray picks pass over the sibling and
+    /// the box to the session's own face, and the frame's own drawing (a
+    /// sketch drawn mid-session, owned by no object) beats the drawing in
+    /// front of it. Shaded picks the same way; Wireframe as before.
+    #[test]
+    fn an_explode_session_frame_picks_its_own_geometry_through_the_context() {
+        let mut scene = Scene::new();
+        let enclosing = scene_box(&mut scene, 0.0, 0.0, 4.0, 2.0, 2.0);
+        free_square_at_x(&mut scene, 4.5, 0.25, 1.75, 0.25, 1.75);
+        let member = scene_box(&mut scene, 1.0, 0.5, 2.0, 1.5, 1.0);
+        let entered = scene.make_component(&[0], &[member]).unwrap();
+        let component = scene.instance_def(entered).unwrap();
+        let sibling = scene
+            .place_instance(
+                component,
+                &[1.0, 0.0, 0.0, 5.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0],
+            )
+            .unwrap();
+        let (y, z) = (1.0, 0.5);
+
+        scene.set_render_mode("xray").unwrap();
+        let top_level = picks_x(&scene, y, z);
+        assert_eq!(top_level.face.map(|f| f.2), Some(Some(sibling)));
+
+        scene.open_explode_session(entered).unwrap();
+        push_session_scope_as_the_app(&mut scene);
+        let scope = scene.inference.pick_scope().cloned().expect("a scope");
+        assert!(scope.objects.contains(&object_id(member)));
+        let face = pick_face_x(&scene, y, z).expect("the session's face");
+        assert_eq!((face.object(), face.instance()), (member, None));
+        assert!((face.depth() - 8.0).abs() < 1e-9);
+        // Nothing drawn in the frame yet: the region pick is unscoped.
+        let region = pick_region_x(&scene, y, z).expect("the free drawing");
+        assert!((region.depth() - 5.5).abs() < 1e-9);
+
+        // Nothing of the frame under the ray: the enclosing box, as today.
+        let off = pick_face_x(&scene, 1.75, 1.5).expect("the enclosing box");
+        assert_eq!(off.object(), enclosing);
+
+        // Drawing mid-session, on the plane x = 3 inside the box: the
+        // frame's own sketch. X-ray takes it over the drawing in front.
+        free_square_at_x(&mut scene, 3.0, 0.5, 1.5, 0.25, 1.25);
+        push_session_scope_as_the_app(&mut scene);
+        let region = pick_region_x(&scene, y, z).expect("the session's drawing");
+        assert_eq!(region_owner(&scene, &region), None, "a free sketch");
+        assert!((region.depth() - 7.0).abs() < 1e-9);
+        assert!(
+            scene
+                .doc
+                .session_frame_sketches()
+                .contains(&sketch_id(region.sketch()))
+        );
+
+        // Shaded: the editing view draws the context translucent, so the
+        // scope applies just as in X-ray.
+        let xray = picks_x(&scene, y, z);
+        scene.set_render_mode("shaded").unwrap();
+        let shaded = picks_x(&scene, y, z);
+        assert_eq!(shaded, xray, "Shaded picks the frame's own geometry too");
+        assert_eq!(shaded.face.map(|f| (f.0, f.2)), Some((member, None)));
+        // Wireframe: the scope is ignored, exactly the unscoped answers.
+        scene.set_render_mode("wireframe").unwrap();
+        let wire = picks_x(&scene, y, z);
+        scene.clear_pick_scope();
+        assert_eq!(picks_x(&scene, y, z), wire, "Wireframe ignores the scope");
+        // And unscoped Shaded is the sibling's face and the drawing in
+        // front, as at the top level.
+        scene.set_render_mode("shaded").unwrap();
+        assert_eq!(
+            pick_face_x(&scene, y, z).and_then(|f| f.instance()),
+            Some(sibling)
+        );
+        assert!((pick_region_x(&scene, y, z).unwrap().depth() - 5.5).abs() < 1e-9);
+
+        // Closed, with the scope cleared as the app clears it: top level.
+        scene.close_innermost_session().unwrap();
+        scene.clear_pick_scope();
+        scene.set_render_mode("xray").unwrap();
+        assert_eq!(
+            pick_face_x(&scene, y, z).and_then(|f| f.instance()),
+            Some(sibling)
+        );
+    }
+
+    /// A group session: the group's members are the scope, flattened to
+    /// leaf objects as the app pushes them. Shaded and X-ray reach a
+    /// member's face, a nested member's face, and a member's owned line
+    /// through the box in front; Wireframe does not scope the line.
+    #[test]
+    fn a_group_session_frame_picks_its_members_through_the_context() {
+        let mut scene = Scene::new();
+        let enclosing = scene_box(&mut scene, 0.0, 0.0, 4.0, 2.0, 2.0);
+        let box_line = owned_line_on_x_face(&mut scene, enclosing, 4.0, 0.6, 1.4, 0.4);
+        let a = scene_box(&mut scene, 1.0, 0.5, 2.0, 1.5, 1.0);
+        let b = scene_box(&mut scene, 1.0, 1.6, 2.0, 1.9, 1.0);
+        let a_line = owned_line_on_x_face(&mut scene, a, 2.0, 0.6, 1.4, 0.4);
+        let inner = scene.group_nodes(&[0], &[b]).unwrap();
+        let group = scene.group_nodes(&[0, 1], &[a, inner]).unwrap();
+        let (y, z) = (1.0, 0.5);
+        let edge_sketch = |scene: &Scene| {
+            scene
+                .pick_sketch_edge(RAY_X0, 1.0, 0.4, -1.0, 0.0, 0.0)
+                .map(|p| p.sketch())
+        };
+
+        scene.set_render_mode("xray").unwrap();
+        assert_eq!(pick_face_x(&scene, y, z).unwrap().object(), enclosing);
+        assert_eq!(edge_sketch(&scene), Some(box_line));
+        scene.open_group_session(group).unwrap();
+        push_session_scope_as_the_app(&mut scene);
+        let scope = scene.inference.pick_scope().cloned().unwrap();
+        assert!(
+            scope.objects.contains(&object_id(a)) && scope.objects.contains(&object_id(b)),
+            "the nested group's leaf is in scope too: {scope:?}"
+        );
+        for mode in ["xray", "shaded"] {
+            scene.set_render_mode(mode).unwrap();
+            assert_eq!(pick_face_x(&scene, y, z).unwrap().object(), a, "{mode}");
+            assert_eq!(
+                pick_face_x(&scene, 1.75, 0.5).unwrap().object(),
+                b,
+                "{mode}"
+            );
+            assert_eq!(edge_sketch(&scene), Some(a_line), "{mode}");
+        }
+        scene.set_render_mode("wireframe").unwrap();
+        assert_eq!(edge_sketch(&scene), Some(box_line), "Wireframe: unscoped");
+        scene.close_innermost_session().unwrap();
+        scene.clear_pick_scope();
+        scene.set_render_mode("shaded").unwrap();
+        assert_eq!(pick_face_x(&scene, y, z).unwrap().object(), enclosing);
+        assert_eq!(edge_sketch(&scene), Some(box_line), "top level");
+    }
+
+    /// The legacy in-context edit of a non-uniformly scaled placement (no
+    /// explode session for that pose): the scope is that one instance. Shaded
+    /// and X-ray reach its face through the box in front and pass over a
+    /// sibling copy; the member's object id alone names no placement.
+    #[test]
+    fn a_legacy_context_on_a_squashed_placement_picks_that_instance_only() {
+        let mut scene = Scene::new();
+        let member = scene_box(&mut scene, 0.0, 0.0, 1.0, 1.0, 1.0);
+        let first = scene.make_component(&[0], &[member]).unwrap();
+        let component = scene.instance_def(first).unwrap();
+        scene.delete_node(2, first).unwrap();
+        // Squashed in z (non-uniform), inside the enclosing box (x 1..2,
+        // y -1.5..-0.5).
+        let squashed = scene
+            .place_instance(
+                component,
+                &[1.0, 0.0, 0.0, 1.0, 0.0, 1.0, 0.0, -1.5, 0.0, 0.0, 0.5, 0.0],
+            )
+            .unwrap();
+        assert!(scene.open_explode_session(squashed).is_err(), "pose gate");
+        let enclosing = scene_box(&mut scene, 0.0, -2.0, 4.0, 0.0, 2.0);
+        let sibling = scene
+            .place_instance(
+                component,
+                &[1.0, 0.0, 0.0, 6.0, 0.0, 1.0, 0.0, -1.5, 0.0, 0.0, 1.0, 0.0],
+            )
+            .unwrap();
+        let (y, z) = (-1.0, 0.5);
+
+        scene.set_render_mode("xray").unwrap();
+        assert_eq!(pick_face_x(&scene, y, z).unwrap().instance(), Some(sibling));
+        scene.set_pick_scope(vec![member], vec![], false);
+        assert_eq!(
+            pick_face_x(&scene, y, z).unwrap().instance(),
+            Some(sibling),
+            "the member's object id names no placement"
+        );
+        scene.set_pick_scope(vec![], vec![squashed], false);
+        for mode in ["xray", "shaded"] {
+            scene.set_render_mode(mode).unwrap();
+            let face = pick_face_x(&scene, y, z).expect("the squashed copy");
+            assert_eq!(
+                (face.object(), face.instance()),
+                (member, Some(squashed)),
+                "{mode}"
+            );
+            assert!((face.depth() - 8.0).abs() < 1e-9);
+        }
+        scene.clear_pick_scope();
+        assert_eq!(pick_face_x(&scene, y, z).unwrap().instance(), Some(sibling));
+        let _ = enclosing;
+    }
+
+    /// The scope calls record and replay, so a replayed session re-asks a
+    /// scoped pick with the scope it was asked under.
+    #[test]
+    fn the_pick_scope_records_and_replays() {
+        let mut scene = Scene::new();
+        scene.start_recording();
+        let rear = scene_box(&mut scene, 0.0, 0.0, 2.0, 2.0, 2.0);
+        let _front = scene_box(&mut scene, 4.0, 0.0, 6.0, 2.0, 2.0);
+        scene.set_pick_scope(vec![rear], vec![], true);
+        scene.stop_recording();
+        let json = scene.take_recording();
+        assert!(json.contains("\"method\":\"set_pick_scope\""), "{json}");
+        assert!(json.contains("\"frame_sketches\":true"), "{json}");
+        let golden = scene.state_hash();
+        let mut replayed = Scene::new();
+        assert_eq!(replayed.replay(&json).unwrap(), golden);
+        assert!(replayed.pick_scope_frame_sketches);
+        replayed.set_render_mode("xray").unwrap();
+        scene.set_render_mode("xray").unwrap();
+        assert_eq!(picks_x(&replayed, 1.0, 1.0), picks_x(&scene, 1.0, 1.0));
+        assert_eq!(pick_face_x(&replayed, 1.0, 1.0).unwrap().object(), rear);
+
+        scene.start_recording();
+        scene.clear_pick_scope();
+        scene.stop_recording();
+        let json = scene.take_recording();
+        assert!(json.contains("\"method\":\"clear_pick_scope\""), "{json}");
+        replayed.replay(&json).unwrap();
+        assert_eq!(replayed.inference.pick_scope(), None);
+    }
+
+    /// A recording made before `frame_sketches` existed replays with its
+    /// original meaning: both lists empty cleared the scope, and otherwise
+    /// the frame's drawing was in scope.
+    #[test]
+    fn a_pick_scope_recorded_without_the_frame_flag_replays_as_it_meant() {
+        let mut scene = Scene::new();
+        scene.start_recording();
+        let rear = scene_box(&mut scene, 0.0, 0.0, 2.0, 2.0, 2.0);
+        scene.set_pick_scope(vec![rear], vec![], false);
+        scene.stop_recording();
+        let json = scene.take_recording();
+        let golden = scene.state_hash();
+        let flagged = "\"frame_sketches\":false";
+        assert!(json.contains(flagged), "{json}");
+
+        let legacy = json.replace(&format!(",{flagged}"), "");
+        assert!(!legacy.contains("frame_sketches"), "{legacy}");
+        let mut replayed = Scene::new();
+        assert_eq!(replayed.replay(&legacy).unwrap(), golden);
+        assert_eq!(
+            replayed.inference.pick_scope().map(|s| s.objects.len()),
+            Some(1)
+        );
+        assert!(
+            replayed.pick_scope_frame_sketches,
+            "legacy: frame drawing in"
+        );
+
+        let rear_list = format!("\"objects\":[{rear}]");
+        assert!(legacy.contains(&rear_list), "{legacy}");
+        let legacy_empty = legacy.replace(&rear_list, "\"objects\":[]");
+        let mut replayed = Scene::new();
+        replayed.replay(&legacy_empty).unwrap();
+        assert_eq!(
+            replayed.inference.pick_scope(),
+            None,
+            "legacy: empty cleared"
+        );
+        assert!(!replayed.pick_scope_frame_sketches);
+    }
+
+    /// The reporter's component, entered, with drawing of its own: a free
+    /// square drawn mid-session inside the enclosing box (plane x = 3),
+    /// and a region the member owns on its +x face (x = 2) behind it.
+    /// Returns (scene, member, entered instance).
+    fn entered_component_with_drawing() -> (Scene, u64, u64) {
+        let mut scene = Scene::new();
+        let _enclosing = scene_box(&mut scene, 0.0, 0.0, 4.0, 2.0, 2.0);
+        free_square_at_x(&mut scene, 4.5, 0.25, 1.75, 0.25, 1.75);
+        let member = scene_box(&mut scene, 1.0, 0.5, 2.0, 1.5, 1.0);
+        let entered = scene.make_component(&[0], &[member]).unwrap();
+        scene.open_explode_session(entered).unwrap();
+        free_square_at_x(&mut scene, 3.0, 0.5, 1.5, 0.25, 1.25);
+        owned_square_at_x(&mut scene, member, 2.0, 0.6, 1.4, 0.25, 0.75);
+        (scene, member, entered)
+    }
+
+    /// (a) An object context pushed on top of a component session scopes
+    /// to that object and its own drawing: the session frame's free
+    /// drawing is context there (`frame_sketches` false), so the region
+    /// pick passes over it to the object's own region. The session's own
+    /// scope keeps the frame's drawing in.
+    #[test]
+    fn an_object_context_on_a_component_session_leaves_the_frames_drawing_out() {
+        let (mut scene, member, _) = entered_component_with_drawing();
+        let (y, z) = (1.0, 0.5);
+        for mode in ["shaded", "xray"] {
+            scene.set_render_mode(mode).unwrap();
+            push_session_scope_as_the_app(&mut scene);
+            let region = pick_region_x(&scene, y, z).expect("the frame's drawing");
+            assert_eq!(region_owner(&scene, &region), None, "{mode}: free");
+            assert!((region.depth() - 7.0).abs() < 1e-9, "{mode}");
+
+            // Double-click the member: an object context on the session.
+            scene.set_pick_scope(vec![member], vec![], false);
+            let region = pick_region_x(&scene, y, z).expect("the member's region");
+            assert_eq!(region_owner(&scene, &region), Some(member), "{mode}");
+            assert!((region.depth() - 8.0).abs() < 1e-9, "{mode}");
+            let face = pick_face_x(&scene, y, z).expect("the member's face");
+            assert_eq!(face.object(), member, "{mode}");
+
+            // The flag alone is what leaves the frame's drawing out.
+            scene.set_pick_scope(vec![member], vec![], true);
+            let region = pick_region_x(&scene, y, z).unwrap();
+            assert!((region.depth() - 7.0).abs() < 1e-9, "{mode}");
+        }
+    }
+
+    /// (b) An open component with no solid left, only drawing: the scope
+    /// is empty of objects and instances but still a scope, so its
+    /// drawing beats the context drawn in front of it (before, empty lists
+    /// cleared the scope and left the drawing unscoped).
+    #[test]
+    fn an_open_component_with_only_drawing_is_scoped_to_its_drawing() {
+        let (mut scene, member, _) = entered_component_with_drawing();
+        let (y, z) = (1.0, 0.5);
+        scene.delete_node(0, member).unwrap();
+        push_session_scope_as_the_app(&mut scene);
+        let scope = scene.inference.pick_scope().cloned().expect("a scope");
+        assert!(scope.objects.is_empty() && scope.instances.is_empty());
+        for mode in ["shaded", "xray"] {
+            scene.set_render_mode(mode).unwrap();
+            let region = pick_region_x(&scene, y, z).expect("the frame's drawing");
+            assert!((region.depth() - 7.0).abs() < 1e-9, "{mode}");
+            assert!(
+                scene
+                    .doc
+                    .session_frame_sketches()
+                    .contains(&sketch_id(region.sketch()))
+            );
+            // No solid in scope: the face pick is the unscoped one.
+            let scoped_face = pick_face_x(&scene, y, z).map(|f| f.object());
+            scene.clear_pick_scope();
+            assert_eq!(pick_face_x(&scene, y, z).map(|f| f.object()), scoped_face);
+            let unscoped = pick_region_x(&scene, y, z).unwrap();
+            assert!((unscoped.depth() - 5.5).abs() < 1e-9, "{mode}: in front");
+            push_session_scope_as_the_app(&mut scene);
+        }
+        scene.set_render_mode("wireframe").unwrap();
+        assert!(pick_region_x(&scene, y, z).is_none(), "Wireframe: no fills");
+    }
+
+    /// (c) A group session: the drawing the group holds and a line drawn
+    /// while it is open are the frame's own drawing, in scope through
+    /// `frame_sketches` — they pass over the context drawn in front. An
+    /// object context on top (`frame_sketches` false) leaves them out.
+    #[test]
+    fn a_group_sessions_own_drawing_is_in_scope() {
+        let mut scene = Scene::new();
+        let _enclosing = scene_box(&mut scene, 0.0, 0.0, 4.0, 2.0, 2.0);
+        let a = scene_box(&mut scene, 1.0, 0.5, 2.0, 1.5, 1.0);
+        let (y, z) = (1.0, 0.5);
+        free_square_at_x(&mut scene, 3.0, 0.5, 1.5, 0.25, 1.25);
+        let held = pick_region_x(&scene, y, z).expect("the square").sketch();
+        free_square_at_x(&mut scene, 4.5, 0.25, 1.75, 0.25, 1.75);
+        let g = scene.group_nodes(&[0], &[a]).unwrap();
+        scene
+            .doc
+            .set_sketch_group(sketch_id(held), Some(group_id(g)))
+            .unwrap();
+
+        scene.open_group_session(g).unwrap();
+        push_session_scope_as_the_app(&mut scene);
+        for mode in ["shaded", "xray"] {
+            scene.set_render_mode(mode).unwrap();
+            let region = pick_region_x(&scene, y, z).expect("the group's drawing");
+            assert_eq!(region.sketch(), held, "{mode}");
+            assert!((region.depth() - 7.0).abs() < 1e-9, "{mode}");
+        }
+
+        // A square drawn while the group is open, nearer than the held one.
+        free_square_at_x(&mut scene, 3.5, 0.5, 1.5, 0.25, 1.25);
+        push_session_scope_as_the_app(&mut scene);
+        for mode in ["shaded", "xray"] {
+            scene.set_render_mode(mode).unwrap();
+            let region = pick_region_x(&scene, y, z).expect("the new drawing");
+            assert_ne!(region.sketch(), held);
+            assert!((region.depth() - 6.5).abs() < 1e-9, "{mode}");
+            // An object context on top: only that object's drawing.
+            scene.set_pick_scope(vec![a], vec![], false);
+            let region = pick_region_x(&scene, y, z).unwrap();
+            assert!((region.depth() - 5.5).abs() < 1e-9, "{mode}: context");
+            push_session_scope_as_the_app(&mut scene);
+        }
+
+        scene.close_innermost_session().unwrap();
+        scene.clear_pick_scope();
+        let region = pick_region_x(&scene, y, z).unwrap();
+        assert!((region.depth() - 5.5).abs() < 1e-9, "top level");
+    }
 }
 
 #[cfg(test)]
@@ -18734,5 +30646,362 @@ mod records_itself_tests {
         let mixed = r#"{"jsonrpc":"2.0","id":1,"method":"hew.doc.transact","params":{"commands":[{"method":"hew.doc.import"},{"method":"hew.sketch.draw_rect"}]}}"#;
         assert!(!records_itself("hew.doc.transact", mixed));
         assert!(!records_itself("hew.sketch.draw_rect", "{}"));
+    }
+}
+
+/// The Preview wall on the app's live API (docs/dev/DEVELOPMENT.md
+/// "Preview features"): the socket bus a `hew-cli --live` or MCP client
+/// reaches, a plugin realm's connection, and the frames a plugin sends while
+/// serving a forward all dispatch through [`Scene::api_dispatch_outcome`],
+/// so a production build refuses every preview command there `preview_only`
+/// and a preview build runs it. Walks `preview-features.json`; names no
+/// feature. (`cfg(hew_preview)` is `crates/api`'s; this module asks it.)
+#[cfg(test)]
+mod preview_wall_tests {
+    use super::*;
+
+    fn reply(answer: Option<String>) -> serde_json::Value {
+        let tagged: serde_json::Value =
+            serde_json::from_str(&answer.expect("an answer")).expect("tagged JSON");
+        let frame = tagged["reply"]
+            .as_str()
+            .or_else(|| tagged["dry_run"].as_str())
+            .unwrap_or_else(|| panic!("a reply, got {tagged}"));
+        serde_json::from_str(frame).expect("a JSON-RPC frame")
+    }
+
+    fn frame(id: u32, method: &str, params: serde_json::Value) -> String {
+        serde_json::json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params })
+            .to_string()
+    }
+
+    fn open(scene: &mut Scene, conn: u32) {
+        for (id, method, params) in [
+            (0, "hew.meta.hello", serde_json::json!({ "protocol": 1 })),
+            (1, "hew.doc.attach", serde_json::json!({})),
+        ] {
+            let r = reply(scene.api_dispatch(conn, &frame(id, method, params)));
+            assert!(r.get("error").is_none(), "{method}: {r}");
+        }
+    }
+
+    #[test]
+    fn the_module_reports_the_build_it_is() {
+        assert_eq!(preview_build(), api::preview::PREVIEW_BUILD);
+    }
+
+    #[test]
+    fn the_live_api_answers_the_wall_on_every_connection_kind() {
+        let preview = api::preview::PREVIEW_BUILD;
+        let mut scene = Scene::new();
+        let app = scene.api_connection_open();
+        open(&mut scene, app);
+        let plugin = scene
+            .api_plugin_connection_open(
+                &serde_json::json!({
+                    "ceiling": "app",
+                    "permissions": ["model.read", "model.write", "view"],
+                    "plugin": "com.example.wall",
+                    "app": null,
+                    "document": null
+                })
+                .to_string(),
+            )
+            .expect("a plugin connection");
+        open(&mut scene, plugin);
+
+        let caps = reply(scene.api_dispatch(
+            app,
+            &frame(2, "hew.meta.capabilities", serde_json::json!({})),
+        ));
+        let listed: Vec<String> = caps["result"]["commands"]
+            .as_array()
+            .expect("a command list")
+            .iter()
+            .filter_map(|c| c["name"].as_str().map(str::to_string))
+            .collect();
+
+        for feature in api::preview::features() {
+            for command in &feature.api_commands {
+                assert_eq!(listed.contains(command), preview, "{command} listed");
+                let answers = [
+                    ("app", reply(scene.api_dispatch(app, &frame(3, command, serde_json::json!({}))))),
+                    (
+                        "plugin",
+                        reply(scene.api_dispatch(plugin, &frame(4, command, serde_json::json!({})))),
+                    ),
+                    (
+                        "in forward",
+                        reply(scene.api_dispatch_in_forward(
+                            plugin,
+                            11,
+                            &frame(5, command, serde_json::json!({})),
+                        )),
+                    ),
+                    (
+                        "transaction",
+                        reply(scene.api_dispatch(
+                            app,
+                            &frame(
+                                6,
+                                "hew.doc.transact",
+                                serde_json::json!({ "commands": [{ "method": command, "params": {} }] }),
+                            ),
+                        )),
+                    ),
+                ];
+                for (path, r) in answers {
+                    let refusal = r.pointer("/error/data/refusal");
+                    if preview {
+                        assert_ne!(
+                            refusal,
+                            Some(&serde_json::json!("preview_only")),
+                            "{command} {path}: {r}"
+                        );
+                    } else {
+                        assert_eq!(
+                            refusal,
+                            Some(&serde_json::json!("preview_only")),
+                            "{command} {path}: {r}"
+                        );
+                        assert_eq!(r["error"]["data"]["detail"]["feature"], feature.id.as_str());
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod imported_mark_tests {
+    use super::Scene;
+    use kernel::{
+        Document, ImportNode, ImportScene, ImportSceneExtra, ImportSketch, MeshRecipe, Plane,
+        Point3, Vec3,
+    };
+    use slotmap::Key as _;
+
+    /// A foreign import's solid and loose drawing answer imported through
+    /// the scene; drawing made in Hew and a stale handle answer not.
+    #[test]
+    fn imported_solids_and_sketches_say_so() {
+        let ground = Plane::from_point_normal(Point3::ORIGIN, Vec3::new(0.0, 0.0, 1.0)).unwrap();
+        let quad = MeshRecipe {
+            name: "Panel".to_string(),
+            positions: vec![
+                Point3::new(0.0, 0.0, 1.0),
+                Point3::new(1.0, 0.0, 1.0),
+                Point3::new(1.0, 1.0, 1.0),
+                Point3::new(0.0, 1.0, 1.0),
+            ],
+            faces: vec![vec![0, 1, 2, 3]],
+            face_materials: vec![kernel::NO_MATERIAL],
+            face_uv_frames: vec![None],
+            face_holes: vec![Vec::new()],
+            base_material: kernel::NO_MATERIAL,
+            tags: Vec::new(),
+            extra: Default::default(),
+        };
+        let mut doc = Document::new();
+        doc.ingest(
+            ImportScene {
+                materials: Vec::new(),
+                defs: Vec::new(),
+                roots: vec![ImportNode::Mesh(quad)],
+                guides: Vec::new(),
+                tags: Vec::new(),
+                camera: None,
+                scenes: Vec::new(),
+                section: None,
+                view_style: None,
+                extra: ImportSceneExtra {
+                    sketches: vec![ImportSketch {
+                        plane: ground,
+                        def: None,
+                        group: None,
+                        segments: vec![[Point3::new(3.0, 0.0, 0.0), Point3::new(4.0, 0.0, 0.0)]],
+                        curves: Vec::new(),
+                        filled: Vec::new(),
+                        tags: Vec::new(),
+                        imported: false,
+                    }],
+                    ..Default::default()
+                },
+                geo: None,
+            },
+            Vec::new(),
+        )
+        .unwrap();
+        let mut scene = Scene::new();
+        scene.load(&doc.save()).unwrap();
+        let object = scene.doc.visible_object_ids()[0].data().as_ffi();
+        let sketch = scene.doc.sketch_ids()[0].data().as_ffi();
+        assert!(scene.object_is_imported(object));
+        assert!(scene.sketch_is_imported(sketch));
+        assert!(!scene.object_is_imported(u64::MAX), "a stale object");
+        assert!(!scene.sketch_is_imported(u64::MAX), "a stale sketch");
+
+        let mut doc = Document::new();
+        let s = doc.add_sketch(ground);
+        doc.begin_sketch_gesture(s).unwrap();
+        doc.sketch_mut(s)
+            .unwrap()
+            .add_segment(Point3::ORIGIN, Point3::new(1.0, 0.0, 0.0))
+            .unwrap();
+        doc.end_sketch_gesture(s).unwrap();
+        let mut scene = Scene::new();
+        scene.load(&doc.save()).unwrap();
+        let sketch = scene.doc.sketch_ids()[0].data().as_ffi();
+        assert!(!scene.sketch_is_imported(sketch), "drawing made in Hew");
+    }
+
+    /// Removing a line from an imported sketch through the eraser's
+    /// gesture path (`sketch_begin_gesture` / `sketch_remove_edge` /
+    /// `sketch_end_gesture`) draws nothing, so the sketch stays marked;
+    /// adding one through the same path clears it.
+    #[test]
+    fn the_gesture_path_clears_the_mark_only_when_it_draws() {
+        let ground = Plane::from_point_normal(Point3::ORIGIN, Vec3::new(0.0, 0.0, 1.0)).unwrap();
+        let mut doc = Document::new();
+        doc.ingest(
+            ImportScene {
+                materials: Vec::new(),
+                defs: Vec::new(),
+                roots: Vec::new(),
+                guides: Vec::new(),
+                tags: Vec::new(),
+                camera: None,
+                scenes: Vec::new(),
+                section: None,
+                view_style: None,
+                extra: ImportSceneExtra {
+                    sketches: vec![ImportSketch {
+                        plane: ground,
+                        def: None,
+                        group: None,
+                        segments: vec![
+                            [Point3::new(0.0, 0.0, 0.0), Point3::new(1.0, 0.0, 0.0)],
+                            [Point3::new(1.0, 0.0, 0.0), Point3::new(1.0, 1.0, 0.0)],
+                        ],
+                        curves: Vec::new(),
+                        filled: Vec::new(),
+                        tags: Vec::new(),
+                        imported: false,
+                    }],
+                    ..Default::default()
+                },
+                geo: None,
+            },
+            Vec::new(),
+        )
+        .unwrap();
+        let mut scene = Scene::new();
+        scene.load(&doc.save()).unwrap();
+        let sid = scene.doc.sketch_ids()[0];
+        let sketch = sid.data().as_ffi();
+        let edge = scene
+            .doc
+            .sketch(sid)
+            .unwrap()
+            .edges()
+            .keys()
+            .next()
+            .unwrap();
+        scene.sketch_begin_gesture(sketch).unwrap();
+        scene
+            .sketch_remove_edge(sketch, edge.data().as_ffi())
+            .unwrap();
+        scene.sketch_end_gesture(sketch).unwrap();
+        assert_eq!(scene.doc.sketch(sid).unwrap().edges().len(), 1);
+        assert!(scene.sketch_is_imported(sketch), "erasing drew nothing");
+
+        scene.sketch_begin_gesture(sketch).unwrap();
+        scene
+            .sketch_add_segment(sketch, 1.0, 1.0, 0.0, 0.0, 1.0, 0.0)
+            .unwrap();
+        scene.sketch_end_gesture(sketch).unwrap();
+        assert!(
+            !scene.sketch_is_imported(sketch),
+            "drawing made it the user's"
+        );
+    }
+
+    // ---- The remote note (docs/design/shared-library-sources.md 7.2, B3)
+
+    fn remote_note_json(edited: bool) -> serde_json::Value {
+        serde_json::json!({
+            "source": "github:hew3d/example",
+            "name": "Example",
+            "path": "Components/chair.hew",
+            "sha256": "ab".repeat(32),
+            "commit": "c0ffee",
+            "license": "CC0-1.0",
+            "fetchedAt": "2026-11-01T00:00:00.000Z",
+            "edited": edited,
+        })
+    }
+
+    fn set_note(doc: &mut kernel::Document, note: &serde_json::Value) {
+        doc.attr_set(
+            kernel::AttrTarget::Document,
+            "hew.library",
+            "remote",
+            kernel::AttrValue::from_json(note).unwrap(),
+        )
+        .unwrap();
+    }
+
+    fn note_in(doc: &kernel::Document) -> Option<serde_json::Value> {
+        let dict = doc.attr_get(&kernel::AttrTarget::Document).unwrap()?;
+        dict.get("hew.library")?.get("remote").map(|v| v.to_json())
+    }
+
+    /// `apply_library_meta` removes a `remote` the item document already
+    /// carries (a document opened from a noted item) unless the caller's
+    /// metadata passes one. Covers `extract_item`, `extract_document_item`
+    /// and the profile/chain saves, which all go through it.
+    #[test]
+    fn apply_library_meta_drops_a_carried_note_unless_the_caller_passes_one() {
+        let mut item = kernel::Document::new();
+        set_note(&mut item, &remote_note_json(true));
+        super::apply_library_meta(&mut item, Some(r#"{"id":"x","name":"Copy"}"#)).unwrap();
+        assert_eq!(note_in(&item), None, "no note was passed, so none is kept");
+
+        let mut item = kernel::Document::new();
+        set_note(&mut item, &remote_note_json(true));
+        let meta = serde_json::json!({ "id": "x", "remote": remote_note_json(false) });
+        super::apply_library_meta(&mut item, Some(&meta.to_string())).unwrap();
+        assert_eq!(
+            note_in(&item),
+            Some(remote_note_json(false)),
+            "the caller's note wins"
+        );
+    }
+
+    /// With no metadata at all (`None`) a carried note must not survive
+    /// either: the item is a new one.
+    #[test]
+    fn apply_library_meta_with_no_metadata_still_drops_a_carried_note() {
+        let mut item = kernel::Document::new();
+        set_note(&mut item, &remote_note_json(false));
+        super::apply_library_meta(&mut item, None).unwrap();
+        assert_eq!(note_in(&item), None);
+    }
+
+    /// `update_item_meta` (rename, keywords, collection) keeps the note and
+    /// leaves `edited` as it was.
+    #[test]
+    fn update_item_meta_keeps_the_note_and_leaves_edited_alone() {
+        for edited in [false, true] {
+            let mut item = kernel::Document::new();
+            set_note(&mut item, &remote_note_json(edited));
+            let out = super::update_item_meta(
+                &item.save(),
+                r#"{"name":"Dining Chair","collection":"Furniture"}"#,
+            )
+            .unwrap_or_else(|_| panic!("update_item_meta succeeds"));
+            let reloaded = kernel::Document::load(&out).unwrap();
+            assert_eq!(note_in(&reloaded), Some(remote_note_json(edited)));
+        }
     }
 }

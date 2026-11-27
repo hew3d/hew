@@ -44,3 +44,55 @@ new_key_type! {
     /// (ARCHITECTURE.md).
     pub struct AnnotationId;
 }
+
+/// Serde for a list of slotmap keys as decimal strings of their FFI value
+/// (`KeyData::as_ffi`): strings, not numbers, because JSON numbers lose
+/// precision above 2^53 in JavaScript. The test harness and the wasm
+/// boundary pass handles as decimal strings the same way.
+pub mod serde_ffi_vec {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use slotmap::{Key, KeyData};
+
+    /// Writes each key as its decimal FFI string.
+    pub fn serialize<K: Key, S: Serializer>(keys: &[K], s: S) -> Result<S::Ok, S::Error> {
+        keys.iter()
+            .map(|k| k.data().as_ffi().to_string())
+            .collect::<Vec<String>>()
+            .serialize(s)
+    }
+
+    /// Reads decimal FFI strings back into keys.
+    pub fn deserialize<'de, K: Key, D: Deserializer<'de>>(d: D) -> Result<Vec<K>, D::Error> {
+        let raw: Vec<String> = Vec::deserialize(d)?;
+        raw.iter()
+            .map(|s| {
+                s.parse::<u64>()
+                    .map(|v| K::from(KeyData::from_ffi(v)))
+                    .map_err(serde::de::Error::custom)
+            })
+            .collect()
+    }
+}
+
+/// Serde for an optional slotmap key as a decimal FFI string (see
+/// [`serde_ffi_vec`]).
+pub mod serde_ffi_opt {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use slotmap::{Key, KeyData};
+
+    /// Writes the key as its decimal FFI string, or `null`.
+    pub fn serialize<K: Key, S: Serializer>(key: &Option<K>, s: S) -> Result<S::Ok, S::Error> {
+        key.map(|k| k.data().as_ffi().to_string()).serialize(s)
+    }
+
+    /// Reads an optional decimal FFI string back into a key.
+    pub fn deserialize<'de, K: Key, D: Deserializer<'de>>(d: D) -> Result<Option<K>, D::Error> {
+        let raw: Option<String> = Option::deserialize(d)?;
+        raw.map(|s| {
+            s.parse::<u64>()
+                .map(|v| K::from(KeyData::from_ffi(v)))
+                .map_err(serde::de::Error::custom)
+        })
+        .transpose()
+    }
+}

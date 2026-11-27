@@ -23,9 +23,11 @@ import {
  * "is the rest of the model actually dimmed" has something to dim):
  *
  *   1. Double-click instance A open — sibling instance B (same definition)
- *      and the unrelated box both prove out: B is hidden kernel-side
- *      (`instances_of` excludes it), the unrelated box is merely dimmed
- *      (still a live, visible, un-hidden world object — just faded).
+ *      and the unrelated box both prove out: only A hides kernel-side
+ *      (`instances_of` keeps B — a LIVE sibling placement that renders the
+ *      session's world geometry, ARCHITECTURE.md 2.11; live-siblings.spec.ts
+ *      drives that rendering), the unrelated box is merely dimmed (still a
+ *      live, visible, un-hidden world object — just faded).
  *   2. Push/Pull a member face outward (a REAL drag — a plain world-object
  *      push, the same mechanics tools.spec.ts's own Push/Pull drags use).
  *   3. Draw a rectangle on another member face and Push/Pull the new
@@ -177,9 +179,14 @@ test('explode session: open, edit two member faces, close folds both instances, 
   await dblClickWorld(page, ctx, 1, 0.5, 1)
   await page.waitForTimeout(200)
 
-  // Sibling instance B is hidden kernel-side: `instances_of` (which the
-  // harness's getInstancesOf wraps) filters hidden instances out entirely.
-  expect(await page.evaluate((c) => window.__hew_test!.getInstancesOf(c), component)).toEqual([])
+  // Only the ENTERED instance A hides kernel-side: `instances_of` (which the
+  // harness's getInstancesOf wraps) filters hidden instances out, and the
+  // sibling B stays live — a live sibling placement drawing the session's
+  // world member (ARCHITECTURE.md 2.11).
+  expect(await page.evaluate((c) => window.__hew_test!.getInstancesOf(c), component)).toEqual([setup.instanceB])
+  expect(await page.evaluate(() => window.__hew_test!.getExplodeSessionInstance())).toBe(setup.instance)
+  expect(await page.evaluate(() => window.__hew_test!.getSessionPlacements())).toEqual([setup.instanceB])
+  expect(await page.evaluate((i) => window.__hew_test!.getInstanceExpandedMembers(i), setup.instanceB)).toEqual([memberId])
   // The member is now a WORLD-owned object (baked, same id) — object_ids()
   // (`getObjectCount`) counts only world-tree objects, so it now includes
   // both the unrelated box AND the newly-baked member.
@@ -193,7 +200,7 @@ test('explode session: open, edit two member faces, close folds both instances, 
   // changed" proof component-edit.spec.ts's circle-imprint check uses.
   const afterOpenShot = await page.locator('canvas').first().screenshot()
   expect(afterOpenShot.equals(beforeShot)).toBe(false)
-  const hashAfterOpen = await page.evaluate(() => window.__hew_test!.getStateHash())
+  const hashAfterOpen = await page.evaluate(() => window.__hew_test!.getModelStateHash())
 
   // ---- 2. Push/Pull a member face outward — a REAL drag, reliable here
   // (unlike component-edit.spec.ts's K1/K2 case) because the member is a
@@ -203,7 +210,7 @@ test('explode session: open, edit two member faces, close folds both instances, 
   await dragWorld(page, ctx, [1, 0.5, 1], [1, 0.5, 2])
   const boundsAfterPush = await page.evaluate((id) => window.__hew_test!.getObjectBounds(id), memberId)
   expect(boundsAfterPush[5]).toBeGreaterThan(1.1) // maxZ grew past the original 1
-  const hashAfterTopPush = await page.evaluate(() => window.__hew_test!.getStateHash())
+  const hashAfterTopPush = await page.evaluate(() => window.__hew_test!.getModelStateHash())
   expect(hashAfterTopPush).not.toBe(hashAfterOpen)
 
   // ---- 3. Draw a rectangle on the FRONT member face and Push/Pull the new
@@ -214,7 +221,7 @@ test('explode session: open, edit two member faces, close folds both instances, 
   await clickWorld(page, ctx, 1.1, 0, 0.6)
   // Fail fast, with a clear signal, if the rectangle imprint didn't commit —
   // rather than a confusing mismatch several steps later at the undo walk.
-  const hashAfterRectangle = await page.evaluate(() => window.__hew_test!.getStateHash())
+  const hashAfterRectangle = await page.evaluate(() => window.__hew_test!.getModelStateHash())
   expect(hashAfterRectangle).not.toBe(hashAfterTopPush)
   await page.keyboard.press('p')
   await dragWorld(page, ctx, [1.0, 0, 0.5], [1.0, -2, 0.5])
@@ -264,7 +271,7 @@ test('explode session: open, edit two member faces, close folds both instances, 
   const memberBounds = () =>
     page.evaluate((id) => window.__hew_test!.getObjectBounds(id), memberId)
   const sessionOpen = async () =>
-    (await page.evaluate((c) => window.__hew_test!.getInstancesOf(c), component)).length === 0
+    (await page.evaluate(() => window.__hew_test!.getExplodeSessionInstance())) !== null
 
   // ---- 5. Undo the granular walk in reverse: close -> extrude -> push/pull
   // -> open. Undoing past the close visually RE-ENTERS the session — the
@@ -277,7 +284,7 @@ test('explode session: open, edit two member faces, close folds both instances, 
     return b[1] < -0.1 && b[5] > 1.1
   }, 'session reopened with both edits')
   await page.waitForTimeout(150)
-  expect(await page.evaluate((c) => window.__hew_test!.getInstancesOf(c), component)).toEqual([])
+  expect(await page.evaluate((c) => window.__hew_test!.getInstancesOf(c), component)).toEqual([setup.instanceB])
   const afterUndoCloseShot = await page.locator('canvas').first().screenshot()
   // Re-entering the session re-dims the unrelated box again — visually
   // distinct from the (undimmed) post-close render just captured.
@@ -346,7 +353,7 @@ test('explode session: deleting every member closes and deletes the component; u
     return h.makeComponent([box])
   })
   const { component } = setup
-  const hashBefore = await page.evaluate(() => window.__hew_test!.getStateHash())
+  const hashBefore = await page.evaluate(() => window.__hew_test!.getModelStateHash())
 
   await dblClickWorld(page, ctx, 1, 0.5, 1)
   await page.waitForTimeout(200)
@@ -387,7 +394,7 @@ test('explode session: deleting every member closes and deletes the component; u
   await page.waitForTimeout(150)
   await page.evaluate(() => window.__hew_test!.undo()) // undoes the open
   await page.waitForTimeout(150)
-  const hashAfter = await page.evaluate(() => window.__hew_test!.getStateHash())
+  const hashAfter = await page.evaluate(() => window.__hew_test!.getModelStateHash())
   expect(hashAfter).toBe(hashBefore)
   const membersRestored = await page.evaluate((c) => window.__hew_test!.getComponentMemberObjects(c), component)
   expect(membersRestored).toHaveLength(1)
@@ -479,4 +486,444 @@ test('explode session: a solid created mid-session is immediately click-selectab
   )).toEqual(['object'])
 
   await page.keyboard.press('Escape')
+})
+
+test('explode session: a line folded into a component stays drawn when the component is opened or exploded', async ({
+  page,
+}) => {
+  // A loose line drawn on the ground inside a session, outside the part,
+  // folds into the definition at close: it renders through the instance
+  // from then on. Opening the session again and exploding the instance each
+  // move that drawing back to a world sketch while the instance hides, and
+  // the viewport must redraw the world sketches at that moment: they used
+  // to be redrawn only on the next drawing change, so in a freshly opened
+  // file the line vanished from view while it was still in the document.
+  let ctx = await ready(page).then(() => aim(page, CAMERA))
+  const { component } = await page.evaluate(() => {
+    const h = window.__hew_test!
+    const box = h.drawBox([0, 0, 0], [1, 1, 0], 1)
+    return h.makeComponent([box])
+  })
+  await dblClickWorld(page, ctx, 0.5, 0.5, 1)
+  await expect.poll(async () => page.evaluate(() => window.__hew_test!.getExplodeSessionInstance())).not.toBeNull()
+  await page.keyboard.press('l')
+  await clickWorld(page, ctx, 2, 0.1, 0)
+  await clickWorld(page, ctx, 2, 0.9, 0)
+  await page.keyboard.press('Escape') // end the line chain
+  await page.keyboard.press('Space')
+  await page.keyboard.press('Escape') // close the session
+  await expect.poll(async () => page.evaluate(() => window.__hew_test!.getExplodeSessionInstance())).toBeNull()
+  // The line folded in: a definition sketch, no world sketch.
+  expect(await page.evaluate((c) => window.__hew_test!.getComponentMemberSketches(c), component)).toHaveLength(1)
+  expect(await page.evaluate(() => window.__hew_test!.getSketchIds())).toHaveLength(0)
+  // Where the line landed (the clicks snap); the instance's pose is the
+  // identity, so its definition coordinates are world coordinates.
+  const [sketch] = await page.evaluate((c) => window.__hew_test!.getComponentMemberSketches(c), component)
+  const seg = await page.evaluate((s) => window.__hew_test!.getSketchLines(s), sketch)
+  const mid: [number, number, number] = [(seg[0] + seg[3]) / 2, (seg[1] + seg[4]) / 2, (seg[2] + seg[5]) / 2]
+  const ground: [number, number, number] = [mid[0] + 0.3, mid[1], mid[2]]
+  // The line is drawn when the pixel on it differs clearly from the bare
+  // ground beside it.
+  const lineDrawn = async (): Promise<boolean> =>
+    page.evaluate(
+      ([on, off]) => {
+        const t = window.__hew_test!
+        const a = t.pixelColorAt(on)
+        const b = t.pixelColorAt(off)
+        if (a === null || b === null) return false
+        return Math.abs(a.r - b.r) + Math.abs(a.g - b.g) + Math.abs(a.b - b.b) > 60
+      },
+      [mid, ground] as const,
+    )
+  expect(await lineDrawn()).toBe(true)
+
+  // Save and reopen, so nothing drawn during the session lingers on screen.
+  const bytes = await page.evaluate(() => window.__hew_test!.save())
+  await page.evaluate((b) => window.__hew_test!.load(b), bytes)
+  ctx = await aim(page, CAMERA)
+  await expect.poll(lineDrawn).toBe(true)
+
+  // Opening the session bakes it to a world sketch: still drawn.
+  await dblClickWorld(page, ctx, 0.5, 0.5, 1)
+  await expect.poll(async () => page.evaluate(() => window.__hew_test!.getExplodeSessionInstance())).not.toBeNull()
+  expect(await page.evaluate(() => window.__hew_test!.getSketchIds())).toHaveLength(1)
+  await expect.poll(lineDrawn).toBe(true)
+
+  await page.keyboard.press('Escape')
+  await expect.poll(async () => page.evaluate(() => window.__hew_test!.getExplodeSessionInstance())).toBeNull()
+  await expect.poll(lineDrawn).toBe(true)
+
+  // Exploding copies it out as a world sketch: still drawn.
+  await clickWorld(page, ctx, 0.5, 0.5, 1)
+  await expect.poll(async () => page.evaluate(() => window.__hew_test!.getSelection().map((n) => n.kind))).toEqual(['instance'])
+  await page.getByTestId('menu-bar').getByRole('button', { name: 'Object', exact: true }).click()
+  await page.getByTestId('menu-bar').getByText('Explode', { exact: true }).click()
+  await expect.poll(async () => page.evaluate(() => window.__hew_test!.getSketchIds())).toHaveLength(1)
+  await expect.poll(lineDrawn).toBe(true)
+})
+
+test('a line folded into a component selects the component: hover names it, a click selects it, a crossing sweep takes it', async ({
+  page,
+}) => {
+  // A line drawn inside a component renders through the instance, but no
+  // snap names it (the inference index leaves definition drawing out), so
+  // hovering it read as bare ground and clicking it selected nothing. As in
+  // SketchUp, a click on any entity of a closed component selects the
+  // component, and the component's box takes the line in.
+  const ctx = await ready(page).then(() => aim(page, CAMERA))
+  const { component } = await page.evaluate(() => {
+    const h = window.__hew_test!
+    const box = h.drawBox([0, 0, 0], [1, 1, 0], 1)
+    return h.makeComponent([box])
+  })
+  await dblClickWorld(page, ctx, 0.5, 0.5, 1)
+  await expect.poll(async () => page.evaluate(() => window.__hew_test!.getExplodeSessionInstance())).not.toBeNull()
+  await page.keyboard.press('l')
+  await clickWorld(page, ctx, 2, 0.1, 0)
+  await clickWorld(page, ctx, 2, 0.9, 0)
+  await page.keyboard.press('Escape') // end the line chain
+  await page.keyboard.press('Space')
+  await page.keyboard.press('Escape') // close the session
+  await expect.poll(async () => page.evaluate(() => window.__hew_test!.getExplodeSessionInstance())).toBeNull()
+  const [sketch] = await page.evaluate((c) => window.__hew_test!.getComponentMemberSketches(c), component)
+  const seg = await page.evaluate((s) => window.__hew_test!.getSketchLines(s), sketch)
+  const mid: [number, number, number] = [(seg[0] + seg[3]) / 2, (seg[1] + seg[4]) / 2, (seg[2] + seg[5]) / 2]
+  await page.evaluate(() => window.__hew_test!.selectNodes([]))
+
+  // Hover: the tip's second line names the component, not just the ground.
+  const at = px(ctx, mid[0], mid[1], mid[2])
+  await page.mouse.move(at.x - 4, at.y - 4)
+  await page.mouse.move(at.x, at.y)
+  await expect(page.getByTestId('inference-tip-detail')).toContainText(/Component/, { timeout: 3000 })
+
+  // Click: the instance is selected.
+  await clickWorld(page, ctx, mid[0], mid[1], mid[2])
+  await expect.poll(async () => page.evaluate(() => window.__hew_test!.getSelection().map((n) => n.kind))).toEqual(['instance'])
+
+  // Its box encloses the line, which lies outside the cube.
+  const b = await page.evaluate(() => window.__hew_test!.getSelectionBounds())
+  expect(b).not.toBeNull()
+  for (const k of [0, 1, 2]) {
+    expect(b![k]).toBeLessThanOrEqual(Math.min(seg[k], seg[k + 3]) + 1e-6)
+    expect(b![k + 3]).toBeGreaterThanOrEqual(Math.max(seg[k], seg[k + 3]) - 1e-6)
+  }
+
+  // A right-to-left crossing sweep over the line alone takes the instance.
+  await page.evaluate(() => window.__hew_test!.selectNodes([]))
+  const right = px(ctx, mid[0] + 0.15, mid[1] + 0.05, mid[2])
+  const left = px(ctx, mid[0] - 0.15, mid[1] - 0.05, mid[2])
+  const sweep = {
+    minX: Math.min(left.x, right.x) - 20, maxX: Math.max(left.x, right.x) + 20,
+    minY: Math.min(left.y, right.y) - 20, maxY: Math.max(left.y, right.y) + 20,
+  }
+  // The sweep stays clear of the cube, so only the line can take it in.
+  for (const c of [[0, 0, 0], [1, 0, 0], [0, 1, 0], [1, 1, 0], [0, 0, 1], [1, 0, 1], [0, 1, 1], [1, 1, 1]]) {
+    const q = px(ctx, c[0], c[1], c[2])
+    expect(q.x < sweep.minX || q.x > sweep.maxX || q.y < sweep.minY || q.y > sweep.maxY).toBe(true)
+  }
+  await page.mouse.move(right.x + 20, right.y - 20)
+  await page.mouse.down()
+  await page.mouse.move(left.x - 20, left.y + 20, { steps: 12 })
+  await page.mouse.up()
+  await expect.poll(async () => page.evaluate(() => window.__hew_test!.getSelection().map((n) => n.kind))).toEqual(['instance'])
+})
+
+/** Folds a line into a fresh component of one unit box at (x0, 0): opens its
+ *  session by a real double-click, draws a line along x = x0 + 2 (outside the
+ *  cube), and closes. Returns the instance, definition and the line's
+ *  endpoints in world space (the instance sits at the identity pose). */
+async function componentWithLine(
+  page: Page,
+  ctx: Ctx,
+  x0: number,
+): Promise<{ instance: string; component: string; mid: [number, number, number] }> {
+  const { instance, component } = await page.evaluate((x) => {
+    const h = window.__hew_test!
+    const box = h.drawBox([x, 0, 0], [x + 1, 1, 0], 1)
+    return h.makeComponent([box])
+  }, x0)
+  await dblClickWorld(page, ctx, x0 + 0.5, 0.5, 1)
+  await expect.poll(async () => page.evaluate(() => window.__hew_test!.getExplodeSessionInstance())).toBe(instance)
+  await page.keyboard.press('l')
+  await clickWorld(page, ctx, x0 + 2, 0.1, 0)
+  await clickWorld(page, ctx, x0 + 2, 0.9, 0)
+  await page.keyboard.press('Escape') // end the line chain
+  await page.keyboard.press('Space')
+  await page.keyboard.press('Escape') // close the session
+  await expect.poll(async () => page.evaluate(() => window.__hew_test!.getExplodeSessionInstance())).toBeNull()
+  const [sketch] = await page.evaluate((c) => window.__hew_test!.getComponentMemberSketches(c), component)
+  const seg = await page.evaluate((s) => window.__hew_test!.getSketchLines(s), sketch)
+  const mid: [number, number, number] = [(seg[0] + seg[3]) / 2, (seg[1] + seg[4]) / 2, (seg[2] + seg[5]) / 2]
+  await page.evaluate(() => window.__hew_test!.selectNodes([]))
+  return { instance, component, mid }
+}
+
+const selectionKinds = async (page: Page): Promise<string[]> =>
+  page.evaluate(() => window.__hew_test!.getSelection().map((n) => n.kind))
+
+test('double-clicking a component\'s line opens the component, even over a solid face the line lies on', async ({ page }) => {
+  const ctx = await ready(page).then(() => aim(page, CAMERA))
+  const { instance, mid } = await componentWithLine(page, ctx, 0)
+  // A solid whose top face lies in the line's own plane, under the line: the
+  // face is under the cursor too, and must not take the double-click.
+  await page.evaluate(() => {
+    const h = window.__hew_test!
+    h.drawBox([1.5, -0.5, 0], [2.5, 1.5, 0], -1)
+  })
+  await page.evaluate(() => window.__hew_test!.selectNodes([]))
+  const at = px(ctx, mid[0], mid[1], mid[2])
+  await page.mouse.move(at.x - 4, at.y - 4)
+  await page.mouse.move(at.x, at.y)
+  await page.waitForTimeout(150)
+  await page.mouse.click(at.x, at.y, { clickCount: 2 })
+  await expect.poll(async () => page.evaluate(() => window.__hew_test!.getExplodeSessionInstance())).toBe(instance)
+})
+
+test('a component\'s line under the cursor beats a guide lying along it', async ({ page }) => {
+  const ctx = await ready(page).then(() => aim(page, CAMERA))
+  const { mid } = await componentWithLine(page, ctx, 0)
+  // A guide along the line, as guides are often placed on edges.
+  await page.evaluate((m) => window.__hew_test!.addGuideLine(m[0], 0, m[2], 0, 1, 0), mid)
+  await clickWorld(page, ctx, mid[0], mid[1], mid[2])
+  await expect.poll(() => selectionKinds(page)).toEqual(['instance'])
+  expect(await page.evaluate(() => window.__hew_test!.getSelectedGuide())).toBeNull()
+  // Off the line the guide is still selectable.
+  await clickWorld(page, ctx, mid[0], 3, mid[2])
+  await expect.poll(async () => page.evaluate(() => window.__hew_test!.getSelectedGuide())).not.toBeNull()
+})
+
+test('a window marquee counts a component\'s outlying line in its extent', async ({ page }) => {
+  const ctx = await ready(page).then(() => aim(page, CAMERA))
+  await componentWithLine(page, ctx, 0)
+  const drag = async (from: { x: number; y: number }, to: { x: number; y: number }): Promise<void> => {
+    await page.mouse.move(from.x, from.y)
+    await page.mouse.down()
+    await page.mouse.move(to.x, to.y, { steps: 12 })
+    await page.mouse.up()
+    await page.waitForTimeout(150)
+  }
+  const corners = (pts: [number, number, number][], pad: number) => {
+    const ps = pts.map((p) => px(ctx, p[0], p[1], p[2]))
+    return {
+      min: { x: Math.min(...ps.map((p) => p.x)) - pad, y: Math.min(...ps.map((p) => p.y)) - pad },
+      max: { x: Math.max(...ps.map((p) => p.x)) + pad, y: Math.max(...ps.map((p) => p.y)) + pad },
+    }
+  }
+  const cube: [number, number, number][] = [[0, 0, 0], [1, 0, 0], [0, 1, 0], [1, 1, 0], [0, 0, 1], [1, 0, 1], [0, 1, 1], [1, 1, 1]]
+  // Left to right around the cube alone: the line two metres out is a drawn
+  // part of the component, so the window neither encloses nor covers it.
+  const tight = corners(cube, 12)
+  await drag(tight.min, tight.max)
+  expect(await selectionKinds(page)).toEqual([])
+  // Around the cube and the line: enclosed.
+  const all = corners([...cube, [2, 0.1, 0], [2, 0.9, 0]], 14)
+  await drag(all.min, all.max)
+  await expect.poll(() => selectionKinds(page)).toEqual(['instance'])
+})
+
+test('in a group, a line inside a component outside the group is out of scope and masks nothing', async ({ page }) => {
+  const ctx = await ready(page).then(() => aim(page, CAMERA))
+  const a = await componentWithLine(page, ctx, 0)
+  const b = await componentWithLine(page, ctx, 3)
+  // A holds a group with another box; B stays at the top level.
+  const filler = await page.evaluate(() => window.__hew_test!.drawBox([0, 3, 0], [1, 4, 0], 1))
+  const group = await page.evaluate(
+    ([inst, obj]) => window.__hew_test!.groupNodes([{ kind: 'instance', id: inst }, { kind: 'object', id: obj }]),
+    [a.instance, filler] as const,
+  )
+  await dblClickWorld(page, ctx, 0.5, 3.5, 1) // enter the group
+  await page.waitForTimeout(250)
+  await page.evaluate(() => window.__hew_test!.selectNodes([]))
+  // B's line (outside the group): nothing.
+  await clickWorld(page, ctx, b.mid[0], b.mid[1], b.mid[2])
+  expect(await selectionKinds(page)).toEqual([])
+  // A's line (inside it): the component.
+  await clickWorld(page, ctx, a.mid[0], a.mid[1], a.mid[2])
+  await expect.poll(() => selectionKinds(page)).toEqual(['instance'])
+  expect(group).toBeTruthy()
+})
+
+test('a line drawn in a nested component draws, and picks, through the outer component', async ({ page }) => {
+  const camera: CameraParams = {
+    position: { x: 8, y: -8, z: 8 }, target: { x: 2.5, y: 1.5, z: 0 }, up: { x: 0, y: 0, z: 1 }, fovDeg: 50, near: 0.1, far: 1000,
+  }
+  const ctx = await ready(page).then(() => aim(page, camera))
+  const part = await componentWithLine(page, ctx, 0)
+  const { assembly, assemblyInstance } = await page.evaluate(() => {
+    const h = window.__hew_test!
+    const box = h.drawBox([3, 0, 0], [4, 1, 0], 1)
+    const r = h.makeComponent([box])
+    return { assembly: r.component, assemblyInstance: r.instance }
+  })
+  // Fold a placed part (with its line) into the assembly as a nested member.
+  await dblClickWorld(page, ctx, 3.5, 0.5, 1)
+  await expect.poll(async () => page.evaluate(() => window.__hew_test!.getExplodeSessionInstance())).toBe(assemblyInstance)
+  await page.evaluate(([c]) => window.__hew_test!.placeInstance(c, 3, 3, 0), [part.component] as const)
+  await page.keyboard.press('Escape')
+  await expect.poll(async () => page.evaluate(() => window.__hew_test!.getExplodeSessionInstance())).toBeNull()
+  expect(assembly).toBeTruthy()
+  await page.evaluate(() => window.__hew_test!.selectNodes([]))
+  // The nested part's line sits at world (5, 3.5) through the assembly's
+  // nested placement (+3, +3): clicking there selects the assembly.
+  const lineMid: [number, number, number] = [part.mid[0] + 3, part.mid[1] + 3, part.mid[2]]
+  const lineDrawn = async (): Promise<boolean> =>
+    page.evaluate(
+      ([on, off]) => {
+        const t = window.__hew_test!
+        const a = t.pixelColorAt(on)
+        const b = t.pixelColorAt(off)
+        if (a === null || b === null) return false
+        return Math.abs(a.r - b.r) + Math.abs(a.g - b.g) + Math.abs(a.b - b.b) > 60
+      },
+      [lineMid, [lineMid[0] + 0.3, lineMid[1], lineMid[2]]] as const,
+    )
+  await expect.poll(lineDrawn).toBe(true)
+  await clickWorld(page, ctx, lineMid[0], lineMid[1], lineMid[2])
+  await expect.poll(async () => page.evaluate(() => window.__hew_test!.getSelection().map((n) => n.id))).toEqual([assemblyInstance])
+})
+
+test('ungrouping a hidden group, and undoing it, keeps the lines inside its components in step with the component', async ({ page }) => {
+  const ctx = await ready(page).then(() => aim(page, CAMERA))
+  const { instance, mid } = await componentWithLine(page, ctx, 0)
+  const differs = (a: [number, number, number], b: [number, number, number]) =>
+    page.evaluate(
+      ([on, off]) => {
+        const t = window.__hew_test!
+        const p = t.pixelColorAt(on)
+        const q = t.pixelColorAt(off)
+        if (p === null || q === null) return false
+        return Math.abs(p.r - q.r) + Math.abs(p.g - q.g) + Math.abs(p.b - q.b) > 60
+      },
+      [a, b] as const,
+    )
+  const lineDrawn = (): Promise<boolean> => differs(mid, [mid[0] + 0.3, mid[1], mid[2]])
+  const cubeDrawn = (): Promise<boolean> => differs([0.5, 0.5, 1], [0.5, 0.5, 1.6])
+  // The line is drawn exactly when its component is.
+  const inStep = async (): Promise<boolean> => (await lineDrawn()) === (await cubeDrawn())
+  const group = await page.evaluate((i) => window.__hew_test!.groupNodes([{ kind: 'instance', id: i }]), instance)
+  await expect.poll(lineDrawn).toBe(true)
+  await expect.poll(cubeDrawn).toBe(true)
+  await page.evaluate((g) => window.__hew_test!.toggleNodeHidden({ kind: 'group', id: g }), group)
+  await expect.poll(lineDrawn).toBe(false)
+  await expect.poll(cubeDrawn).toBe(false)
+  await page.evaluate((g) => window.__hew_test!.selectNodes([{ kind: 'group', id: g }]), group)
+  await expect.poll(() => selectionKinds(page)).toEqual(['group'])
+  await page.getByTestId('menu-bar').getByRole('button', { name: 'Object', exact: true }).click()
+  await page.getByTestId('menu-bar').getByText('Ungroup', { exact: true }).click()
+  await expect.poll(() => selectionKinds(page)).toEqual([])
+  await expect.poll(inStep).toBe(true)
+  // Undo brings the group back; the line follows the component again.
+  await page.keyboard.press('ControlOrMeta+z')
+  await expect.poll(inStep).toBe(true)
+  await page.keyboard.press('ControlOrMeta+Shift+Z')
+  await expect.poll(inStep).toBe(true)
+})
+
+/** A component whose only drawing is one diagonal line from (x0+2, 0.1) to
+ *  (x0+3, 0.9): its box is deleted inside the session, so the placement
+ *  holds lines and no solid. Returns the instance and the line's endpoints. */
+async function lineOnlyComponent(
+  page: Page,
+  ctx: Ctx,
+  x0: number,
+): Promise<{ instance: string; component: string; a: [number, number, number]; b: [number, number, number] }> {
+  const made = await page.evaluate((x) => {
+    const h = window.__hew_test!
+    const box = h.drawBox([x, 0, 0], [x + 1, 1, 0], 1)
+    return { ...h.makeComponent([box]), box }
+  }, x0)
+  await dblClickWorld(page, ctx, x0 + 0.5, 0.5, 1)
+  await expect.poll(async () => page.evaluate(() => window.__hew_test!.getExplodeSessionInstance())).toBe(made.instance)
+  await page.keyboard.press('l')
+  await clickWorld(page, ctx, x0 + 2, -1.5, 0)
+  await clickWorld(page, ctx, x0 + 3.5, 2.5, 0)
+  await page.keyboard.press('Escape')
+  await page.keyboard.press('Space')
+  await page.evaluate((id) => window.__hew_test!.deleteObject(id), made.box)
+  await page.keyboard.press('Escape')
+  await expect.poll(async () => page.evaluate(() => window.__hew_test!.getExplodeSessionInstance())).toBeNull()
+  const [sketch] = await page.evaluate((c) => window.__hew_test!.getComponentMemberSketches(c), made.component)
+  const seg = await page.evaluate((s) => window.__hew_test!.getSketchLines(s), sketch)
+  await page.evaluate(() => window.__hew_test!.selectNodes([]))
+  return {
+    instance: made.instance,
+    component: made.component,
+    a: [seg[0], seg[1], seg[2]],
+    b: [seg[3], seg[4], seg[5]],
+  }
+}
+
+/** A real left-to-right (window) or right-to-left (crossing) drag between two
+ *  screen points. */
+async function marquee(page: Page, from: { x: number; y: number }, to: { x: number; y: number }): Promise<void> {
+  await page.mouse.move(from.x, from.y)
+  await page.mouse.down()
+  await page.mouse.move(to.x, to.y, { steps: 12 })
+  await page.mouse.up()
+  await page.waitForTimeout(150)
+}
+
+test('a lone diagonal line: a window must enclose all of it, a crossing needs only a touch', async ({ page }) => {
+  const ctx = await ready(page).then(() => aim(page, CAMERA))
+  const { instance, component, a, b } = await lineOnlyComponent(page, ctx, 0)
+  expect(instance).toBeTruthy()
+  // Lines and no solid: the placement is a lines-only instance.
+  expect(await page.evaluate((c) => window.__hew_test!.getComponentMemberObjects(c), component)).toEqual([])
+  expect(await page.evaluate((c) => window.__hew_test!.getComponentMemberSketches(c).length, component)).toBe(1)
+  const pa = px(ctx, a[0], a[1], a[2])
+  const pb = px(ctx, b[0], b[1], b[2])
+  const lo = { x: Math.min(pa.x, pb.x), y: Math.min(pa.y, pb.y) }
+  const hi = { x: Math.max(pa.x, pb.x), y: Math.max(pa.y, pb.y) }
+  // A window around the whole bounding rect but one corner: it swallows 94%
+  // of the line's rect yet leaves one endpoint outside, and a line has no
+  // screen area to "cover": not selected.
+  const w = hi.x - lo.x
+  const h = hi.y - lo.y
+  // The line must read as a true diagonal on screen for this to mean anything.
+  expect(Math.min(w, h)).toBeGreaterThan(60)
+  await marquee(page, { x: lo.x - 20, y: lo.y - 20 }, { x: lo.x + w * 0.97, y: lo.y + h * 0.97 })
+  expect(await selectionKinds(page)).toEqual([])
+  // Enclosing both endpoints: selected.
+  await marquee(page, { x: lo.x - 20, y: lo.y - 20 }, { x: hi.x + 20, y: hi.y + 20 })
+  await expect.poll(() => selectionKinds(page)).toEqual(['instance'])
+  await page.evaluate(() => window.__hew_test!.selectNodes([]))
+  // Crossing whose far corner just passes the line's midpoint: selected.
+  const mid = { x: (pa.x + pb.x) / 2, y: (pa.y + pb.y) / 2 }
+  const len = Math.hypot(pb.x - pa.x, pb.y - pa.y)
+  // 40 px off the line, on the side that makes the drag run right to left.
+  const k = pb.y > pa.y ? -1 : 1
+  const side = { x: (k * -(pb.y - pa.y) / len) * 40, y: (k * (pb.x - pa.x) / len) * 40 }
+  await marquee(page, { x: mid.x + side.x, y: mid.y + side.y }, { x: mid.x - side.x * 0.2, y: mid.y - side.y * 0.2 })
+  await expect.poll(() => selectionKinds(page)).toEqual(['instance'])
+  await page.evaluate(() => window.__hew_test!.selectNodes([]))
+  // Crossing that stays clear of the line (beside its far end): nothing.
+  await marquee(page, { x: hi.x + 60, y: lo.y - 20 }, { x: hi.x + 30, y: lo.y + 10 })
+  expect(await selectionKinds(page)).toEqual([])
+})
+
+test('a component with lines: crossing takes it by a touch on the line alone, and a window covering most of its extent takes it', async ({ page }) => {
+  const ctx = await ready(page).then(() => aim(page, CAMERA))
+  await componentWithLine(page, ctx, 0)
+  const cube: [number, number, number][] = [[0, 0, 0], [1, 0, 0], [0, 1, 0], [1, 1, 0], [0, 0, 1], [1, 0, 1], [0, 1, 1], [1, 1, 1]]
+  const all = [...cube, [2, 0.1, 0], [2, 0.9, 0]] as [number, number, number][]
+  const ps = all.map((p) => px(ctx, p[0], p[1], p[2]))
+  const minX = Math.min(...ps.map((p) => p.x))
+  const maxX = Math.max(...ps.map((p) => p.x))
+  const minY = Math.min(...ps.map((p) => p.y))
+  const maxY = Math.max(...ps.map((p) => p.y))
+  // Crossing across the outlying line only (clear of the cube): selected.
+  const l = px(ctx, 2, 0.5, 0)
+  await marquee(page, { x: l.x + 15, y: l.y + 15 }, { x: l.x - 3, y: l.y - 3 })
+  await expect.poll(() => selectionKinds(page)).toEqual(['instance'])
+  await page.evaluate(() => window.__hew_test!.selectNodes([]))
+  // A window over ~90% of the extent (cube plus line) leaves the line's far
+  // end out yet covers most of it: taken by coverage.
+  const w = maxX - minX
+  const h = maxY - minY
+  await marquee(page, { x: minX - 20, y: minY - 20 }, { x: minX + w * 0.97, y: minY + h * 0.97 })
+  await expect.poll(() => selectionKinds(page)).toEqual(['instance'])
+  await page.evaluate(() => window.__hew_test!.selectNodes([]))
+  // A window over only half: not enough.
+  await marquee(page, { x: minX - 20, y: minY - 20 }, { x: minX + w * 0.5, y: minY + h * 0.5 })
+  expect(await selectionKinds(page)).toEqual([])
 })

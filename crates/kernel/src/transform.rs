@@ -11,6 +11,7 @@
 
 use crate::math::{Plane, Point3, Vec3};
 use crate::tol;
+use crate::trig;
 
 /// Error from constructing or inverting a transform.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -21,17 +22,21 @@ pub enum TransformError {
     /// A rotation axis too short to define a direction
     /// (below [`tol::NORMALIZE_MIN_LENGTH`]).
     DegenerateAxis,
-    /// The linear part flips orientation (determinant < 0, e.g. a negative
-    /// scale). Baking it into a solid would invert every face's winding /
-    /// outward normal, so it is refused rather than silently producing an
-    /// inside-out object.
-    Reflection,
     /// The map would leave some face's texture frame (its
     /// [`crate::material::UvFrame`]) degenerate: an extreme stretch or
     /// squash that shrinks a gradient past what the frame can hold, or
     /// turns its two axes (near-)parallel. Refused rather than storing a
     /// frame that would smear the face's picture to a line.
     DegenerateTextureFrame,
+    /// The map would leave some face's points off the face's mapped plane
+    /// beyond the planarity tolerance: the rounding of coordinates far from
+    /// the origin, where a face that is flat before the map cannot stay
+    /// flat after it. Refused rather than committing a face that is not
+    /// flat to the plane it carries. Also the answer when no such plane
+    /// keeps a curved face's analytic surface (a cylinder's axis, say)
+    /// consistent with it, which the validator and a file's reader would
+    /// reject.
+    FaceNotFlat,
 }
 
 impl std::fmt::Display for TransformError {
@@ -41,11 +46,11 @@ impl std::fmt::Display for TransformError {
             TransformError::DegenerateAxis => {
                 write!(f, "rotation axis too short to define a direction")
             }
-            TransformError::Reflection => {
-                write!(f, "transform flips orientation (negative determinant)")
-            }
             TransformError::DegenerateTextureFrame => {
                 write!(f, "transform would squash a face's texture frame")
+            }
+            TransformError::FaceNotFlat => {
+                write!(f, "transform would leave a face off its plane")
             }
         }
     }
@@ -83,8 +88,9 @@ impl Transform {
     }
 
     /// Uniform scale about the origin. A `factor` of 0 constructs fine but is
-    /// singular: [`Transform::inverse`] and [`Transform::apply_plane`] will
-    /// fail on it.
+    /// singular: [`Transform::inverse`] and both plane maps
+    /// ([`Transform::apply_plane_keeping_side`] and its winding-following
+    /// twin) fail on it.
     pub fn uniform_scale(factor: f64) -> Transform {
         Transform::scale(Vec3::new(factor, factor, factor))
     }
@@ -107,7 +113,7 @@ impl Transform {
         let k = axis
             .normalized()
             .map_err(|_| TransformError::DegenerateAxis)?;
-        let (sin, cos) = angle.sin_cos();
+        let (sin, cos) = trig::sin_cos(angle);
         let one_c = 1.0 - cos;
         Ok(Transform {
             linear: [
@@ -128,6 +134,45 @@ impl Transform {
                 ],
             ],
             translation: Vec3::ZERO,
+        })
+    }
+
+    /// Reflection across the plane through `point` with normal `normal`:
+    /// `p ↦ p − 2((p − point)·n)n` with `n` the unit normal. Every point of
+    /// the plane stays put, the normal reverses, and the determinant is −1.
+    /// `normal` need not be unit length, and any nonzero finite normal
+    /// works however large or small: it is divided by its largest component
+    /// before it is normalized. A zero normal is
+    /// [`TransformError::Singular`] (the mirror has no plane), as is a
+    /// non-finite input.
+    pub fn reflection(point: Point3, normal: Vec3) -> Result<Transform, TransformError> {
+        if ![point.x, point.y, point.z, normal.x, normal.y, normal.z]
+            .iter()
+            .all(|v| v.is_finite())
+        {
+            return Err(TransformError::Singular);
+        }
+        // Divide by the largest component first, so a normal whose squared
+        // length would overflow (or underflow) still names its direction.
+        let big = normal.x.abs().max(normal.y.abs()).max(normal.z.abs());
+        if big == 0.0 {
+            return Err(TransformError::Singular);
+        }
+        let n = Vec3::new(normal.x / big, normal.y / big, normal.z / big)
+            .normalized()
+            .map_err(|_| TransformError::Singular)?;
+        let k = [n.x, n.y, n.z];
+        let mut linear = [[0.0; 3]; 3];
+        for (i, row) in linear.iter_mut().enumerate() {
+            for (j, cell) in row.iter_mut().enumerate() {
+                let id = if i == j { 1.0 } else { 0.0 };
+                *cell = id - 2.0 * k[i] * k[j];
+            }
+        }
+        let d = 2.0 * point.to_vec().dot(n);
+        Ok(Transform {
+            linear,
+            translation: Vec3::new(d * n.x, d * n.y, d * n.z),
         })
     }
 
@@ -185,7 +230,8 @@ impl Transform {
     /// Maps a displacement/direction: `L·v` (no translation).
     ///
     /// NOT for surface normals — normals must go through
-    /// [`Transform::apply_plane`] (inverse-transpose).
+    /// [`Transform::apply_normal`] or
+    /// [`Transform::apply_plane_keeping_side`] (inverse-transpose).
     pub fn apply_vector(&self, v: Vec3) -> Vec3 {
         let l = &self.linear;
         Vec3::new(
@@ -231,27 +277,95 @@ impl Transform {
         )
     }
 
-    /// Maps a plane so that transformed points stay on the transformed plane.
+    /// Maps a plane so that transformed points stay on the transformed
+    /// plane, with the normal following the mapped WINDING.
     ///
-    /// Internally maps three points spanning the plane and refits, which is
-    /// equivalent to the inverse-transpose normal rule and also keeps the
-    /// orientation convention (winding) consistent under reflections.
-    pub fn apply_plane(&self, plane: &Plane) -> Result<Plane, TransformError> {
-        if self.determinant().abs() < tol::NORMALIZE_MIN_LENGTH {
+    /// The normal is the inverse-transpose map of the old one
+    /// ([`Transform::apply_normal`], the cofactor of the linear part),
+    /// normalized and turned over when the determinant is negative: under a
+    /// reflection a mapped loop whose vertex order was kept winds the other
+    /// way, so this normal points to the OPPOSITE side of the surface from
+    /// [`Transform::apply_normal`]'s. The offset is taken through the
+    /// mapped foot of the perpendicular from the origin; see
+    /// [`Transform::apply_plane_following_winding_near`] for a plane whose
+    /// points of interest are far from that foot.
+    ///
+    /// Right only where that is what the caller wants: a face plane stored
+    /// next to its mapped loop that the caller then reverses (as
+    /// [`crate::topo::Object::apply_transform`] does, turning plane and
+    /// loop over together), or a use where the sign cancels (an unsigned
+    /// distance, a projection onto the plane). A plane mapped for its
+    /// normal — a sketch's up, a face's outward side, a split's positive
+    /// half-space, a hit normal — must use
+    /// [`Transform::apply_plane_keeping_side`] instead. The two agree when
+    /// the determinant is positive.
+    pub fn apply_plane_following_winding(&self, plane: &Plane) -> Result<Plane, TransformError> {
+        self.apply_plane_following_winding_near(plane, plane.point())
+    }
+
+    /// [`Transform::apply_plane_following_winding`] with the offset taken
+    /// through `near` projected onto the plane, mapped. The normal is the
+    /// same; only the point the offset is measured through moves. Rounding
+    /// in the mapped normal tilts the plane about that point, so the error
+    /// it leaves at a point of the face grows with the distance between
+    /// the two: a face's own vertex as `near` keeps every point of a face
+    /// far from the origin on the mapped plane to the last few ulps, where
+    /// the foot of the perpendicular (kilometers away for such a face)
+    /// would not.
+    pub(crate) fn apply_plane_following_winding_near(
+        &self,
+        plane: &Plane,
+        near: Point3,
+    ) -> Result<Plane, TransformError> {
+        let det = self.determinant();
+        if det.abs() < tol::NORMALIZE_MIN_LENGTH {
             return Err(TransformError::Singular);
         }
         let n = plane.normal();
-        // Offset of the plane recovered through public API: n·p = offset, so
-        // signed_distance(origin) = -offset.
-        let offset = -plane.signed_distance(Point3::ORIGIN);
-        let anchor = Point3::ORIGIN + n * offset;
-        let (u, v) = orthonormal_basis(n);
-        let triangle = [
-            self.apply_point(anchor),
-            self.apply_point(anchor + u),
-            self.apply_point(anchor + v),
-        ];
-        Plane::from_polygon(&triangle).map_err(|_| TransformError::Singular)
+        let anchor = near - n * plane.signed_distance(near);
+        // `apply_normal` keeps the side; the winding turns over with a
+        // reflection.
+        let mapped = self.apply_normal(n);
+        let mapped = if det < 0.0 { -mapped } else { mapped };
+        // `mapped` is the Newell vector of a unit right triangle on the
+        // plane, mapped (`L·u × L·v`), and has a direction by the face
+        // rule ([`Plane::from_polygon`]): at least
+        // [`tol::NORMALIZE_MIN_LENGTH`] long, or at least
+        // [`tol::MIN_FACE_WIDTH`] times that triangle's half perimeter.
+        let len = mapped.length();
+        let has_direction = len >= tol::NORMALIZE_MIN_LENGTH
+            || (len > 0.0 && {
+                let (u, v) = orthonormal_basis(n);
+                let (lu, lv) = (self.apply_vector(u), self.apply_vector(v));
+                let half = (lu.length() + lv.length() + (lv - lu).length()) / 2.0;
+                len >= tol::MIN_FACE_WIDTH * half
+            });
+        if !(has_direction && len.is_finite()) {
+            return Err(TransformError::Singular);
+        }
+        let unit = mapped / len;
+        Plane::from_unit_normal_offset(unit, unit.dot(self.apply_point(anchor).to_vec()))
+            .map_err(|_| TransformError::Singular)
+    }
+
+    /// Maps a plane so that transformed points stay on the transformed
+    /// plane, with the normal on the SAME side of the surface it was on
+    /// before the map: its direction is [`Transform::apply_normal`]'s.
+    ///
+    /// This is the map for a plane carried for its normal: a sketch's up
+    /// (the side it extrudes toward), a face's outward side, the positive
+    /// half-space of a split, a hit normal handed to a caller. Under a
+    /// reflection [`Transform::apply_plane_following_winding`] follows the
+    /// reversed winding, so it is turned over here; the two are equal when the
+    /// determinant is positive. A loop drawn on the returned plane must be
+    /// reversed to stay counter-clockwise about its normal.
+    pub fn apply_plane_keeping_side(&self, plane: &Plane) -> Result<Plane, TransformError> {
+        let mapped = self.apply_plane_following_winding(plane)?;
+        Ok(if self.determinant() < 0.0 {
+            mapped.flipped()
+        } else {
+            mapped
+        })
     }
 
     /// The uniform scale factor of this map when its linear part is a
@@ -444,7 +558,7 @@ mod tests {
         let plane = Plane::from_polygon(&polygon).unwrap();
         let t = Transform::scale(Vec3::new(1.0, 2.0, 4.0))
             .then(&Transform::translation(Vec3::new(0.5, 0.0, -3.0)));
-        let mapped = t.apply_plane(&plane).unwrap();
+        let mapped = t.apply_plane_following_winding(&plane).unwrap();
         for p in polygon {
             let d = mapped.signed_distance(t.apply_point(p));
             assert!(d.abs() < TEST_EPS, "point left its plane by {d}");
@@ -453,6 +567,48 @@ mod tests {
         let above = Point3::new(1.0, 1.0, 1.0);
         assert!(plane.signed_distance(above) > 0.0);
         assert!(mapped.signed_distance(t.apply_point(above)) > 0.0);
+    }
+
+    /// A plane mapped through a point of its face keeps that face's mapped
+    /// points on it to rounding at the face's own scale, however far the
+    /// face is from the origin: a centimeter square 10 km out, on a tilted
+    /// plane, turned about its corner and moved, stays within 1e-10 m (the
+    /// error the foot-of-perpendicular anchor leaves grows with the square
+    /// of the distance).
+    #[test]
+    fn a_plane_mapped_near_its_face_keeps_the_face_on_it_far_out() {
+        let n = Vec3::new(0.3, -0.7, 0.4).normalized().unwrap();
+        let u = n.cross(Vec3::new(0.0, 0.0, 1.0)).normalized().unwrap();
+        let v = n.cross(u);
+        let corner = Point3::new(10_000.25, 3_500.5, 12.75);
+        let square = [
+            corner,
+            corner + u * 0.01,
+            corner + u * 0.01 + v * 0.01,
+            corner + v * 0.01,
+        ];
+        let plane = Plane::from_polygon(&square).unwrap();
+        let turn = Transform::translation(Point3::ORIGIN - corner)
+            .then(&Transform::rotation(Vec3::new(0.2, 0.9, -0.4), 2.9).unwrap())
+            .then(&Transform::translation(corner - Point3::ORIGIN))
+            .then(&Transform::translation(Vec3::new(-3_100.0, 4_250.5, 900.0)));
+        let mapped = turn
+            .apply_plane_following_winding_near(&plane, square[0])
+            .unwrap();
+        for p in square {
+            let d = mapped.signed_distance(turn.apply_point(p));
+            assert!(d.abs() < 1e-10, "a point left its plane by {d}");
+        }
+        // The normal is the foot-anchored map's, and a reflection turns it
+        // with the winding.
+        let foot = turn.apply_plane_following_winding(&plane).unwrap();
+        assert_eq!(foot.normal(), mapped.normal());
+        let mirror = Transform::scale(Vec3::new(-1.0, 1.0, 1.0));
+        let flipped = mirror
+            .apply_plane_following_winding_near(&plane, square[0])
+            .unwrap();
+        let side = mirror.apply_plane_keeping_side(&plane).unwrap();
+        assert!(flipped.normal().dot(side.normal()) < 0.0);
     }
 
     #[test]
@@ -465,7 +621,7 @@ mod tests {
         .unwrap();
         let squash = Transform::scale(Vec3::new(1.0, 1.0, 0.0));
         assert_eq!(
-            squash.apply_plane(&plane).unwrap_err(),
+            squash.apply_plane_keeping_side(&plane).unwrap_err(),
             TransformError::Singular
         );
     }

@@ -14,7 +14,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 /// This namespace's slice of the handler table.
-pub fn handler(name: &str) -> Option<Handler> {
+pub(crate) fn handler(name: &str) -> Option<Handler> {
     match name {
         "hew.view.line_drawing" => Some(line_drawing),
         "hew.print.pdf" => Some(print_pdf),
@@ -45,6 +45,10 @@ struct RawLineDrawingParams {
     scale: Option<f64>,
     #[serde(default)]
     path: Option<String>,
+    #[serde(default)]
+    selection: Option<Vec<Value>>,
+    #[serde(default)]
+    scope: Option<String>,
 }
 
 fn line_drawing(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
@@ -54,6 +58,12 @@ fn line_drawing(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
             "scene is mutually exclusive with camera and view".to_string(),
         ));
     }
+    if raw.selection.is_some() && raw.scene.is_some() {
+        return Err(CmdError::Params(
+            "selection is mutually exclusive with scene".to_string(),
+        ));
+    }
+    super::doc::validate_selection(&raw.selection)?;
     let (camera, view) = parse_camera_or_view(raw.camera, raw.view)?;
     let scene = raw
         .scene
@@ -80,6 +90,17 @@ fn line_drawing(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
             "path applies to format \"svg\" only".to_string(),
         ));
     }
+    let scope = crate::scope::Scope::from_name(raw.scope.as_deref())?;
+    if raw.scope.is_some() && raw.selection.is_none() {
+        return Err(CmdError::Params("scope applies to a selection".to_string()));
+    }
+    let selection = raw
+        .selection
+        .as_deref()
+        .map(|list| crate::locate::resolve_render_roots(ctx, list))
+        .transpose()?
+        .map(|roots| super::doc::scoped_selection(ctx, roots, scope))
+        .transpose()?;
     let p = LineDrawingParams {
         camera,
         view,
@@ -89,6 +110,7 @@ fn line_drawing(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
         format,
         scale,
         path: raw.path,
+        selection,
     };
     let result = ctx
         .host

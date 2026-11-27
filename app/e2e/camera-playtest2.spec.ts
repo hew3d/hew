@@ -552,7 +552,7 @@ test.describe('Field of View has no standalone entry (camera-playtest2.md §2)',
     await expect(page.getByText('Zoom Window')).not.toBeVisible()
 
     const isMac = await page.evaluate(() => navigator.platform.toLowerCase().includes('mac'))
-    await page.keyboard.press(isMac ? 'Meta+k' : 'Control+k')
+    await page.keyboard.press(isMac ? 'Meta+/' : 'Control+k')
     // Wait for the palette itself (not a fixed timeout) — its search input
     // grabs focus via requestAnimationFrame once mounted (CommandPalette.tsx).
     const search = page.getByRole('textbox', { name: 'Search' })

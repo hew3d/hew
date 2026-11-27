@@ -95,7 +95,7 @@ function primaryLanguage(tag: string): string {
  *   resolves as 'system' so a stale persisted choice never leaves a user in
  *   a bracketed, padded UI.
  * - An explicit but unshipped locale (a catalog that exists on disk but is
- *   not complete, or one removed in an update) resolves as 'system'.
+ *   not offered yet, or one removed in an update) resolves as 'system'.
  * - 'system' walks the preferred-language list in order and returns the
  *   first shipped locale that matches exactly or by primary language
  *   ("ja-JP" matches "ja"), then falls back to the source locale.

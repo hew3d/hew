@@ -14,7 +14,7 @@
 import type { V3 } from '../viewport/geoHelpers'
 import {
   pickPlaneUnit,
-  planeOfCtx,
+  planeOfCtxIn,
   readPlaneUnits,
   regionRingEdges,
   type PlaneRegion,
@@ -33,8 +33,8 @@ export interface PickedRegion {
   normal: V3
 }
 
-function describe(ctx: string, pu: PlaneUnits, region: PlaneRegion): PickedRegion | null {
-  const pl = planeOfCtx(ctx)
+function describe(scene: PlaneUnitsScene, ctx: string, pu: PlaneUnits, region: PlaneRegion): PickedRegion | null {
+  const pl = planeOfCtxIn(scene, ctx)
   if (pl === null || region.outer.length < 3) return null
   return { ctx, pu, region, point: region.outer[0], normal: pl.normal }
 }
@@ -71,12 +71,17 @@ export function regionUnderRay(
     Math.max(0, edgeTolerance),
   )
   if (pick === null) return null
+  // A detached shape's pick names its own sketch context (as `refOfPick`
+  // resolves it); the key lives in THAT listing, not the request's.
+  const pickCtx = pick.ctx ?? ctx
+  const pickPu = pickCtx === ctx ? pu : readPlaneUnits(scene, pickCtx)
+  if (pickPu === null) return null
   if ('region' in pick) {
-    const region = pu.regionByKey.get(pick.region)
-    return region === undefined ? null : describe(ctx, pu, region)
+    const region = pickPu.regionByKey.get(pick.region)
+    return region === undefined ? null : describe(scene, pickCtx, pickPu, region)
   }
-  const region = regionOfEdge(pu, pick.edge)
-  return region === null ? null : describe(ctx, pu, region)
+  const region = regionOfEdge(pickPu, pick.edge)
+  return region === null ? null : describe(scene, pickCtx, pickPu, region)
 }
 
 /** The listing entry of a free profile named by its `(sketch, region)`
@@ -90,7 +95,7 @@ export function regionOfFreeProfile(
   const pu = readPlaneUnits(scene, ctx)
   if (pu === null) return null
   const region = pu.regions.find((r) => r.extrude !== null && r.extrude.sketch === sketch && r.extrude.region === regionHandle)
-  return region === undefined ? null : describe(ctx, pu, region)
+  return region === undefined ? null : describe(scene, ctx, pu, region)
 }
 
 /** The region of `ctx` whose rings carry the segment `a`–`b` (a picked
@@ -116,7 +121,7 @@ export function regionOfSegment(
       for (const ring of rings) {
         for (let i = 0; i < ring.length; i++) {
           const p = ring[i], q = ring[(i + 1) % ring.length]
-          if (onSeg(a, p, q) && onSeg(b, p, q)) return describe(ctx, pu, r)
+          if (onSeg(a, p, q) && onSeg(b, p, q)) return describe(scene, ctx, pu, r)
         }
       }
     }

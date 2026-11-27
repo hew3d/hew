@@ -20,9 +20,11 @@
  * against the in-memory Storage polyfill provided by src/test/setup.ts.
  */
 
+import { resetHealthReportCache } from './health/healthReport'
 import { BANNED_RE, readableText } from './health/bannedWords'
 import { render, screen, fireEvent, waitFor, within, act } from '@testing-library/react'
-import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
+import { describe, expect, it, vi, beforeAll, afterAll, beforeEach, afterEach } from 'vitest'
+import { requiresPreview } from './test/requiresPreview'
 
 /**
  * Scope a query to the top menu bar. Tool/panel names (e.g. "Select",
@@ -40,6 +42,20 @@ const menubar = () => within(screen.getByTestId('menu-bar'))
 // A minimal mock Scene sufficient for App to start and render its full UI.
 // Shared across all tests in this file; vi.clearAllMocks() resets call counts.
 const mockScene = {
+  // Events (docs/agents/HEW_API.md §4.5): the units mirror and the
+  // document lifecycle notes.
+  set_display_units: vi.fn(),
+  // Selection and view state (docs/agents/HEW_API.md §7): the mirrors the
+  // bus reads.
+  set_ui_selection: vi.fn(),
+  set_ui_isolation: vi.fn(),
+  set_ui_context: vi.fn(),
+  set_ui_gesture_armed: vi.fn(),
+  note_tool_changed: vi.fn(),
+  note_document_event: vi.fn(),
+  document_id: vi.fn(() => undefined),
+  ensure_document_id: vi.fn(() => '00000000-0000-4000-8000-000000000000'),
+  busy: () => false,
   object_ids: () => new BigUint64Array(),
   group_ids: () => new BigUint64Array(),
   instance_ids: () => new BigUint64Array(),
@@ -57,6 +73,8 @@ const mockScene = {
   node_user_hidden: () => false,
   set_node_user_hidden: vi.fn(),
   object_solid: () => true,
+  has_smoothed_objects: () => false,
+  smoothed_object_ids: () => new BigUint64Array(0),
   // Model Health (status badge / Outliner icons): an all-solid, empty summary.
   // (The full health_report_json is the panel's, read only while its window is open.)
   health_summary_json: () =>
@@ -80,6 +98,7 @@ const mockScene = {
   undo_depth: () => 0,
   redo_depth: () => 0,
   history_entries_json: () => JSON.stringify({ undo: [], redo: [], savedDepth: null }),
+  geo_reference_json: () => 'null',
   // save() is called once to snapshot the blank scene for "New" resets.
   save: () => new Uint8Array(),
   load: vi.fn(),
@@ -89,7 +108,8 @@ const mockScene = {
   set_camera_state: vi.fn(),
   view_style_json: () => undefined,
   set_view_style_axes: vi.fn(),
-  node_parent: () => undefined as bigint | undefined,
+  node_parent: (_kind: number, _id: bigint) => undefined as bigint | undefined,
+  is_linked: (_id: bigint) => false,
   material_ids: () => new BigUint64Array(),
   material_info: () => undefined,
   material_texture_bytes: () => undefined,
@@ -114,6 +134,7 @@ const mockScene = {
   // Object Info's Materials row: nothing painted by default.
   object_materials: () => new BigUint64Array(),
   instance_expanded_members: () => new BigUint64Array(),
+  instance_expanded_inherited: () => new BigUint64Array(),
   set_hidden: vi.fn(),
   group_members: () => [] as { kind: string; id: bigint }[],
   component_name: () => undefined as string | undefined,
@@ -183,8 +204,9 @@ vi.mock('./io/fileHost', async (importOriginal) => {
   return {
     ...actual,
     makeFileHost: vi.fn(actual.makeFileHost),
+    // The native-menu sync block below also flips the desktop flags on for one test.
     get isTauri() {
-      return tauriMode.on || actual.isTauri
+      return tauriMode.on || nativeMenu.on || actual.isTauri
     },
   }
 })
@@ -193,12 +215,12 @@ vi.mock('./io/fileHost', async (importOriginal) => {
 const tauriCore = vi.hoisted(() => ({
   invoke: vi.fn(async (_cmd: string, _args?: unknown): Promise<unknown> => undefined),
 }))
-vi.mock('@tauri-apps/api/core', () => ({ invoke: tauriCore.invoke }))
 
 // The live bridge is a no-op outside Tauri; the spy keeps the operation
 // runner App hands it, so a test can drive a live `revert` the way the shell does.
 const liveBridge = vi.hoisted(() => ({
   runOp: null as null | ((op: string, args: Record<string, unknown>) => Promise<{ ok: boolean; refusal?: string; message?: string }>),
+  deps: null as unknown,
 }))
 vi.mock('./api/liveBridge', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./api/liveBridge')>()
@@ -206,10 +228,46 @@ vi.mock('./api/liveBridge', async (importOriginal) => {
     ...actual,
     installLiveBridge: vi.fn((deps: { runOp?: typeof liveBridge.runOp }) => {
       liveBridge.runOp = deps.runOp ?? null
+      liveBridge.deps = deps
       return () => {}
     }),
   }
 })
+
+// platform + the Tauri bridge — only the native-menu sync test turns these on
+// (the effect that pushes check marks to the macOS menu bar needs isTauri &&
+// isMac and an `invoke` to observe).
+const nativeMenu = vi.hoisted(() => ({
+  on: false,
+  invoke: vi.fn(async (..._args: unknown[]) => undefined),
+  menuAction: null as ((event: { payload: string }) => void) | null,
+}))
+vi.mock('./platform', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./platform')>()
+  return { ...actual, get isMac() { return nativeMenu.on || actual.isMac } }
+})
+vi.mock('@tauri-apps/api/core', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@tauri-apps/api/core')>()
+  // One mock for both blocks: the native-menu block observes `invoke` while it
+  // is on; everywhere else the Revert block's spy answers.
+  return {
+    ...actual,
+    invoke: (cmd: string, args?: unknown) =>
+      nativeMenu.on ? nativeMenu.invoke(cmd, args) : tauriCore.invoke(cmd, args),
+  }
+})
+vi.mock('@tauri-apps/api/event', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@tauri-apps/api/event')>()
+  return { ...actual, listen: async () => () => {} }
+})
+vi.mock('@tauri-apps/api/webviewWindow', () => ({
+  getCurrentWebviewWindow: () => ({
+    listen: async (event: string, cb: (e: { payload: string }) => void) => {
+      if (event === 'menu-action') nativeMenu.menuAction = cb
+      return () => {}
+    },
+  }),
+}))
 
 // io/savePanel — the desktop's native save panel. Off by default (every
 // other test here runs the browser path); the native-panel block below
@@ -236,6 +294,7 @@ const recoveryState = vi.hoisted(() => ({
   write: vi.fn(async (_bytes: Uint8Array, _meta: unknown) => {}),
   clear: vi.fn(async () => {}),
   writeSource: vi.fn(async (_source: Uint8Array | null) => {}),
+  claim: vi.fn(async (_slot: string): Promise<unknown> => null),
 }))
 vi.mock('./io/recoveryStore', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./io/recoveryStore')>()
@@ -244,7 +303,7 @@ vi.mock('./io/recoveryStore', async (importOriginal) => {
     makeRecoveryStore: () => ({
       write: recoveryState.write,
       list: async () => recoveryState.listings,
-      claim: async () => null,
+      claim: recoveryState.claim,
       clear: recoveryState.clear,
       discardAll: async () => {},
       writeSource: recoveryState.writeSource,
@@ -267,6 +326,7 @@ import Viewport from './viewport/Viewport'
 import { recordRecent } from './io/recents'
 import { getTrayLayout, setTrayLayout, DEFAULT_TRAY_LAYOUT } from './settings/trayLayout'
 import { setShowWelcome } from './settings/welcomeScreen'
+import * as LogStore from './log/LogStore'
 import { resetStlImportUnitForTest } from './settings/stlImportUnit'
 import { makeFileHost, type DocFormat, type FileHost, type FileRef } from './io/fileHost'
 import * as savePanel from './io/savePanel'
@@ -277,6 +337,7 @@ import { MATERIAL_SENTINEL } from './tools/PaintTool'
 import { clearOpenAttempt, getFailedOpen } from './log/failedOpen'
 import { clearKernelStop, getKernelStop, getPanicCapture, KERNEL_PANIC_EVENT } from './log/panicCapture'
 import { kernelMemoryBytes } from './wasm/kernelMemory'
+import { resetAllChords, setChords } from './keymap/keymap'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -300,6 +361,7 @@ beforeEach(() => {
   // an unrelated later test).
   recoveryState.write.mockReset().mockResolvedValue(undefined)
   recoveryState.clear.mockReset().mockResolvedValue(undefined)
+  recoveryState.claim.mockReset().mockResolvedValue(null)
 })
 
 /**
@@ -315,6 +377,115 @@ async function renderAndLoad() {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+describe('App — the bus view mirrors', () => {
+  it('selection effect mirrors into the scene', async () => {
+    vi.clearAllMocks()
+    await renderAndLoad()
+    // Mount mirrors the empty selection and the active tool. The mirror
+    // effects run after the rail first paints, so wait for them.
+    await waitFor(() => {
+      expect(mockScene.set_ui_selection).toHaveBeenLastCalledWith('[]')
+      expect(mockScene.note_tool_changed).toHaveBeenLastCalledWith('Select')
+    })
+    const props = (): {
+      onSelectMany: (nodes: { kind: string; id: bigint }[], mode: string) => void
+    } => {
+      const calls = vi.mocked(Viewport).mock.calls
+      return calls[calls.length - 1][0] as never
+    }
+    act(() => {
+      props().onSelectMany(
+        [
+          { kind: 'object', id: 4n },
+          { kind: 'instance', id: 9007199254740993n },
+        ],
+        'replace',
+      )
+    })
+    await waitFor(() =>
+      expect(mockScene.set_ui_selection).toHaveBeenLastCalledWith(
+        '[{"kind":"object","id":"4"},{"kind":"instance","id":"9007199254740993"}]',
+      ),
+    )
+    // Clearing the selection mirrors an empty one.
+    act(() => {
+      props().onSelectMany([], 'replace')
+    })
+    await waitFor(() => expect(mockScene.set_ui_selection).toHaveBeenLastCalledWith('[]'))
+  })
+})
+
+describe('App — the page going away', () => {
+  const pagehide = (persisted: boolean): void => {
+    const e = new Event('pagehide') as Event & { persisted: boolean }
+    Object.defineProperty(e, 'persisted', { value: persisted })
+    window.dispatchEvent(e)
+  }
+  const closes = (): number =>
+    vi.mocked(mockScene.note_document_event).mock.calls.filter(([kind]) => kind === 'closed').length
+
+  it('closes the document on pagehide only when the page is not kept for the back/forward cache', async () => {
+    await renderAndLoad()
+    vi.mocked(mockScene.note_document_event).mockClear()
+    pagehide(true)
+    expect(closes()).toBe(0)
+    pagehide(false)
+    expect(closes()).toBe(1)
+  })
+})
+
+describe('App — a bus hide re-reads the hidden state', () => {
+  afterEach(() => {
+    vi.mocked(Viewport).mockImplementation((() => null) as never)
+    mockScene.user_hidden_kinds = () => new Uint8Array()
+    mockScene.user_hidden_ids = () => new BigUint64Array()
+  })
+
+  it('hidden_changed with something already hidden pushes the fresh set, not the last render\'s', async () => {
+    vi.clearAllMocks()
+    // A viewport that remembers what it was told to hide.
+    let hidden: { objects: bigint[]; instances: bigint[] } = { objects: [], instances: [] }
+    const setHidden = vi.fn((objects: bigint[], instances: bigint[]) => {
+      hidden = { objects: [...objects], instances: [...instances] }
+    })
+    const api: Record<string, unknown> = {
+      setHidden,
+      getHiddenIds: () => hidden,
+      getEffectiveHiddenIds: () => hidden,
+    }
+    const proxy = new Proxy(api, {
+      get: (t, k) => {
+        if (typeof k === 'string' && !(k in t)) t[k] = vi.fn()
+        return t[k as string]
+      },
+    })
+    vi.mocked(Viewport).mockImplementation(((props: { apiRef?: { current: unknown } }) => {
+      if (props.apiRef !== undefined) props.apiRef.current = proxy
+      return null
+    }) as never)
+    await renderAndLoad()
+    const { applyPendingViewDirectives, directiveTargets } = await import('./api/liveBridge')
+    const deps = liveBridge.deps as Parameters<typeof directiveTargets>[0]
+    const busHide = (ids: bigint[]) => {
+      mockScene.user_hidden_kinds = () => new Uint8Array(ids.length)
+      mockScene.user_hidden_ids = () => BigUint64Array.from(ids)
+      // The bridge's `hidden_changed` arm: re-seed, then reconcile, in one tick.
+      act(() => {
+        applyPendingViewDirectives('[{"kind":"hidden_changed"}]', directiveTargets(deps))
+      })
+    }
+    // obj 1 is hidden already (say through the Outliner), then a bus hide
+    // adds obj 2: both stay hidden.
+    busHide([1n])
+    expect(hidden.objects).toEqual([1n])
+    busHide([1n, 2n])
+    expect([...hidden.objects].sort()).toEqual([1n, 2n])
+    // A bus show of obj 1: only obj 2 stays hidden.
+    busHide([2n])
+    expect(hidden.objects).toEqual([2n])
+  })
+})
 
 describe('App — loading state', () => {
   it('shows "Loading kernel…" before the kernel resolves', () => {
@@ -457,6 +628,119 @@ describe('App — Make Solid entry points', () => {
     fireEvent.click(badge)
     expect(await screen.findByRole('dialog', { name: 'Model Health' })).toBeInTheDocument()
     expect(screen.queryByRole('dialog', { name: 'Make Solid' })).not.toBeInTheDocument()
+  })
+
+  it('Mend shows the busy card and lets it paint before the kernel call starts', async () => {
+    report.mockImplementation(() =>
+      JSON.stringify({
+        rows: [{ ...OPEN_ROW, verdict: { kind: 'non_manifold' }, branching_vertices: 2 }],
+        families: [],
+        counts: { objects: 4, solids: 3, flat_sheets: 0, bent_sheets: 0, cappable: 0, holes: 0, mixed: 0, non_manifold: 1 },
+      }),
+    )
+    m.mend_census_json = () =>
+      JSON.stringify({ weld: 0.000002, weld_vertices: 12, folds: 0, branching_vertices: 2, islands: 1, filled_rims: 0 })
+    resetHealthReportCache()
+    let cardWhenKernelRan: boolean | null = null
+    m.api_connection_open = vi.fn(() => {
+      // runBatch's first call: the card must already be on screen.
+      cardWhenKernelRan = document.body.textContent?.includes('Mending…') ?? false
+      throw new Error('stop here')
+    })
+    try {
+      await renderAndLoad()
+      const badge = await waitFor(() => {
+        const el = document.querySelector('[data-health-badge="open"]')
+        if (el === null) throw new Error('no badge yet')
+        return el as HTMLElement
+      })
+      fireEvent.click(badge)
+      await screen.findByRole('dialog', { name: 'Model Health' })
+      fireEvent.click(document.querySelector('[data-health-row="4"]') as HTMLElement)
+      fireEvent.click(await screen.findByRole('button', { name: 'Mend' }))
+      // Card is up, kernel not yet touched.
+      expect(screen.getByText('Mending…')).toBeTruthy()
+      expect(m.api_connection_open).not.toHaveBeenCalled()
+      await waitFor(() => expect(m.api_connection_open).toHaveBeenCalledTimes(1))
+      expect(cardWhenKernelRan).toBe(true)
+      await waitFor(() => expect(screen.queryByText('Mending…')).toBeNull())
+    } finally {
+      delete m.mend_census_json
+      delete m.api_connection_open
+      resetHealthReportCache()
+    }
+  })
+
+  it('Mend drops a key pressed during the work even though it is delivered after, and keeps keys pressed later', async () => {
+    report.mockImplementation(() =>
+      JSON.stringify({
+        rows: [{ ...OPEN_ROW, verdict: { kind: 'non_manifold' }, branching_vertices: 2 }],
+        families: [],
+        counts: { objects: 4, solids: 3, flat_sheets: 0, bent_sheets: 0, cappable: 0, holes: 0, mixed: 0, non_manifold: 1 },
+      }),
+    )
+    m.mend_census_json = () =>
+      JSON.stringify({ weld: 0.000002, weld_vertices: 12, folds: 0, branching_vertices: 2, islands: 1, filled_rims: 0 })
+    resetHealthReportCache()
+    let pressedDuringWork = 0
+    m.api_connection_open = vi.fn(() => {
+      // A key the user pressed while the main thread was frozen: its
+      // stamp precedes the end of the work.
+      pressedDuringWork = performance.now()
+      throw new Error('stop here')
+    })
+    const undos: number[] = []
+    const onKey = (ev: KeyboardEvent) => {
+      if (ev.key === 'z' && ev.ctrlKey) undos.push(ev.timeStamp)
+    }
+    const keyAt = (timeStamp: number) => {
+      const ev = new KeyboardEvent('keydown', { key: 'z', ctrlKey: true, bubbles: true, cancelable: true })
+      Object.defineProperty(ev, 'timeStamp', { value: timeStamp })
+      document.body.dispatchEvent(ev)
+    }
+    window.addEventListener('keydown', onKey)
+    // Hold the swallower's 100 ms removal so a slow machine can't run it
+    // between the work ending and this test's dispatches.
+    const held: Array<() => void> = []
+    const realSetTimeout = window.setTimeout.bind(window)
+    const timerSpy = vi.spyOn(window, 'setTimeout').mockImplementation(((fn: () => void, ms?: number, ...rest: unknown[]) => {
+      if (ms === 100 && String(fn).includes('removeEventListener')) {
+        held.push(fn)
+        return 0
+      }
+      return realSetTimeout(fn, ms, ...rest)
+    }) as typeof window.setTimeout)
+    try {
+      await renderAndLoad()
+      const badge = await waitFor(() => {
+        const el = document.querySelector('[data-health-badge="open"]')
+        if (el === null) throw new Error('no badge yet')
+        return el as HTMLElement
+      })
+      fireEvent.click(badge)
+      await screen.findByRole('dialog', { name: 'Model Health' })
+      fireEvent.click(document.querySelector('[data-health-row="4"]') as HTMLElement)
+      fireEvent.click(await screen.findByRole('button', { name: 'Mend' }))
+      await waitFor(() => expect(m.api_connection_open).toHaveBeenCalledTimes(1))
+      await waitFor(() => expect(screen.queryByText('Mending…')).toBeNull())
+      // The queued key arrives after the work finished: still swallowed.
+      keyAt(pressedDuringWork)
+      expect(undos).toEqual([])
+      // A key pressed after the work ended goes through.
+      keyAt(performance.now() + 1)
+      expect(undos).toHaveLength(1)
+      // Once the window closes, even a stale stamp gets through.
+      expect(held).toHaveLength(1)
+      held[0]()
+      keyAt(pressedDuringWork)
+      expect(undos).toHaveLength(2)
+    } finally {
+      timerSpy.mockRestore()
+      window.removeEventListener('keydown', onKey)
+      delete m.mend_census_json
+      delete m.api_connection_open
+      resetHealthReportCache()
+    }
   })
 
   it('the badge with every object solid is plain and neutral, not a button', async () => {
@@ -644,7 +928,9 @@ describe('App — Make Solid entry points', () => {
       fireEvent.click(within(warning).getByRole('button', { name: 'Make Solid…' }))
       expect(await screen.findByRole('dialog', { name: 'Make Solid' })).toBeInTheDocument()
       expect(screen.queryByRole('dialog', { name: /export stl warning/i })).not.toBeInTheDocument()
-      expect(screen.getByRole('heading', { name: 'Make the selection solid' })).toBeInTheDocument()
+      // KB-6: the objects were never selected, so the window must not say so.
+      expect(screen.getByRole('heading', { name: 'Make these objects solid' })).toBeInTheDocument()
+      expect(screen.queryByText(/you selected/)).not.toBeInTheDocument()
       expect(report).toHaveBeenLastCalledWith(BigUint64Array.from([4n, 5n]))
     } finally {
       mockScene.object_ids = defaults.ids
@@ -862,6 +1148,28 @@ describe('App — keyboard shortcuts', () => {
     fireEvent.click(screen.getByRole('button', { name: /^draw$/i }))
     const arcItem = menubar().getByText('Arc').closest('div')
     expect(arcItem?.textContent).toContain('✓')
+  })
+
+  it('a key bound in Settings ▸ Controls runs its command and shows in the menus', async () => {
+    try {
+      await renderAndLoad()
+      act(() => {
+        setChords('tool-dimension', ['D'])
+        setChords('tool-rectangle', [])
+      })
+      fireEvent.keyDown(document, { key: 'd', code: 'KeyD' })
+      fireEvent.click(screen.getByRole('button', { name: /^tools$/i }))
+      const dimension = menubar().getByText('Dimension').closest('div')
+      expect(dimension?.textContent).toContain('✓')
+      expect(dimension?.textContent).toContain('D')
+      fireEvent.keyDown(document, { key: 'Escape' })
+      // Rectangle's R was removed: the key now does nothing.
+      fireEvent.keyDown(document, { key: 'r', code: 'KeyR' })
+      fireEvent.click(screen.getByRole('button', { name: /^draw$/i }))
+      expect(menubar().getByText('Rectangle').closest('div')?.textContent).not.toContain('✓')
+    } finally {
+      resetAllChords()
+    }
   })
 
   it('clicking Draw > Arc activates the Arc tool', async () => {
@@ -1202,6 +1510,7 @@ describe('App — hidden-by-default tag registry', () => {
     mockScene.tag_meta_hidden = defaultTagMetaHidden
     mockScene.node_tags = defaultNodeTags
     mockScene.object_ids = defaultObjectIds
+    for (const k of ['guide_ids', 'guide_kind', 'guide_tags']) delete (mockScene as Record<string, unknown>)[k]
   })
 
   it('seeds hiddenTagPaths from the registry on File ▸ New and pushes the hide to the kernel', async () => {
@@ -1245,6 +1554,33 @@ describe('App — hidden-by-default tag registry', () => {
     // Toggling again shows it — set_tag_hidden persists the flip back to false.
     fireEvent.click(screen.getByTitle('Show tagged objects'))
     expect(mockScene.set_tag_hidden).toHaveBeenCalledWith('Walls', false)
+  })
+
+  it('hiding a tag drops a selected guide on it from the selection', async () => {
+    mockScene.object_ids = () => new BigUint64Array([1n])
+    mockScene.node_tags = () => ['Walls']
+    const mock = mockScene as Record<string, unknown>
+    mock.guide_ids = () => new BigUint64Array([7n])
+    mock.guide_kind = () => 'point'
+    mock.guide_tags = () => []
+
+    await renderAndLoad()
+    const latest = () => {
+      const calls = vi.mocked(Viewport).mock.calls
+      return calls[calls.length - 1][0] as unknown as {
+        onSelectGuide: (id: bigint | null) => void
+        selectedGuides: bigint[]
+      }
+    }
+    act(() => latest().onSelectGuide(7n))
+    expect(Array.from(latest().selectedGuides)).toEqual([7n])
+
+    // What hiding the tag does in the kernel: the guide is no longer listed
+    // among the shown guides.
+    mock.guide_ids = () => new BigUint64Array()
+    fireEvent.click(screen.getByRole('button', { name: /^tags$/i }))
+    fireEvent.click(screen.getByTitle('Hide tagged objects'))
+    expect(Array.from(latest().selectedGuides)).toEqual([])
   })
 })
 
@@ -1480,6 +1816,23 @@ describe('App — import overlay lifecycle', () => {
     await waitFor(() => expect(screen.queryByRole('status')).not.toBeInTheDocument())
     expect(screen.getByText(/Import failed: corrupt chunk/)).toBeInTheDocument()
   })
+
+  it('keeps the import error on screen until it is clicked away', async () => {
+    mockScene.import_skp = vi.fn(() => {
+      throw new Error('malformed sections')
+    })
+
+    await renderAndLoad()
+    triggerImport()
+    await screen.findByText(/Import failed: malformed sections/)
+    // Well past the ordinary 4 s toast lifetime, it is still there.
+    await new Promise((r) => setTimeout(r, 4600))
+    const toast = screen.getByText(/Import failed: malformed sections/).closest('[data-testid="toast"]') as HTMLElement
+    expect(toast).not.toBeNull()
+    expect(within(toast).getByText(/click to dismiss/i)).toBeInTheDocument()
+    fireEvent.click(toast)
+    expect(screen.queryByText(/Import failed: malformed sections/)).not.toBeInTheDocument()
+  }, 15000)
 
   it('latches the kernel-panic banner when the import traps the wasm kernel', async () => {
     // A wasm trap mid-import (an out-of-memory abort on a model too big for
@@ -2220,6 +2573,23 @@ describe('App — unified Open dialog', () => {
         expect(screen.queryByRole('dialog', { name: 'Open report' })).not.toBeInTheDocument()
       })
 
+      it('announces the opened .skp once, with its name and path, not the blank placeholder', async () => {
+        vi.mocked(fakeFileHost.openAny).mockResolvedValueOnce({
+          kind: 'skp',
+          name: 'house.skp',
+          bytes: new Uint8Array([8, 8]),
+          handle: '/tmp/house.skp',
+        })
+        await renderAndLoad()
+        vi.mocked(mockScene.note_document_event).mockClear()
+        triggerOpen()
+        await screen.findByRole('dialog', { name: 'Open report' })
+        const opened = vi
+          .mocked(mockScene.note_document_event)
+          .mock.calls.filter(([kind]) => kind === 'opened')
+        expect(opened).toEqual([['opened', 'house.skp', '/tmp/house.skp', undefined]])
+      })
+
       it('refuses with a toast while another .skp open is still stepping', async () => {
         vi.mocked(fakeFileHost.openAny).mockResolvedValueOnce({
           kind: 'skp',
@@ -2455,6 +2825,14 @@ describe('App — unified Open dialog', () => {
           expect(tauriCore.invoke).toHaveBeenCalledWith('push_recent', { path: '/tmp/my-house.hew' }),
         )
         expect(recoveryState.clear).toHaveBeenCalled()
+        // The replacement is announced with the file's path, like the
+        // `document_closed` before it.
+        expect(mockScene.note_document_event).toHaveBeenCalledWith(
+          'opened',
+          'my-house.hew',
+          '/tmp/my-house.hew',
+          undefined,
+        )
       })
     })
 
@@ -2546,11 +2924,117 @@ describe('App — toast severity', () => {
     expect(bubble.style.background).toBe('var(--status-leaky-bg)')
   })
 
+  it('keeps the raw code out of the toast and in the diagnostic log (KB-20)', async () => {
+    await renderAndLoad()
+    act(() => latestOnToast()("This object isn't solid.", 'ObjectNotSolid'))
+    expect(screen.getByText(/This object isn't solid\./)).toBeInTheDocument()
+    expect(screen.queryByText(/ObjectNotSolid/)).not.toBeInTheDocument()
+    // The code travels with the report: the log tail the Report Bug dialog sends.
+    expect(LogStore.getEntries().some((e) => e.message === "[ObjectNotSolid] This object isn't solid.")).toBe(true)
+  })
+
   it('renders warning-level refusals as neutral bubbles', async () => {
     await renderAndLoad()
     act(() => latestOnToast()('nothing to undo', 'NothingToUndo'))
     const bubble = screen.getByText(/nothing to undo/).closest('div')!
     expect(bubble.style.background).toBe('var(--surface-overlay)')
+  })
+
+  it('shows plain words only: the machine code never appears in the bubble', async () => {
+    await renderAndLoad()
+    act(() => latestOnToast()('nothing to undo', 'NothingToUndo'))
+    const bubble = screen.getByText(/nothing to undo/).closest('div')!
+    expect(bubble.textContent).not.toContain('NothingToUndo')
+    expect(bubble.textContent).not.toContain('[')
+  })
+})
+
+describe('App — the lock toast', () => {
+  function latestOnToast(): (message: string, code?: string) => void {
+    const calls = vi.mocked(Viewport).mock.calls
+    const props = calls[calls.length - 1][0] as { onToast: (m: string, c?: string) => void }
+    return props.onToast
+  }
+  const lockToasts = () => screen.queryAllByTestId('toast').filter((el) => el.hasAttribute('data-lock-toast'))
+
+  it('never stacks: a second refusal replaces the first', async () => {
+    await renderAndLoad()
+    act(() => latestOnToast()('Locked', 'LockedNode'))
+    act(() => latestOnToast()('Both copies are locked', 'LockedNode'))
+    act(() => latestOnToast()('Both copies are locked', 'LockedNode'))
+    expect(lockToasts()).toHaveLength(1)
+    expect(lockToasts()[0].textContent).toContain('Both copies are locked')
+  })
+
+  it('has a close button that dismisses it', async () => {
+    await renderAndLoad()
+    act(() => latestOnToast()('Locked', 'LockedNode'))
+    fireEvent.click(within(lockToasts()[0]).getByRole('button', { name: 'Close' }))
+    expect(lockToasts()).toHaveLength(0)
+  })
+
+  it('goes away on a press anywhere outside it, without swallowing the press, but not on a press inside', async () => {
+    await renderAndLoad()
+    act(() => latestOnToast()('Locked', 'LockedNode'))
+    fireEvent.pointerDown(lockToasts()[0])
+    expect(lockToasts()).toHaveLength(1)
+    let reached = false
+    const probe = document.createElement('div')
+    probe.addEventListener('pointerdown', () => { reached = true })
+    document.body.appendChild(probe)
+    fireEvent.pointerDown(probe)
+    probe.remove()
+    expect(reached).toBe(true)
+    expect(lockToasts()).toHaveLength(0)
+  })
+
+  it('goes away on Escape, which still reaches everything else', async () => {
+    await renderAndLoad()
+    act(() => latestOnToast()('Locked', 'LockedNode'))
+    const e = new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })
+    act(() => { window.dispatchEvent(e) })
+    expect(lockToasts()).toHaveLength(0)
+    expect(e.defaultPrevented).toBe(false)
+  })
+
+  it('leaves other toasts alone, and an identical ordinary toast does not stack', async () => {
+    await renderAndLoad()
+    act(() => latestOnToast()('nothing to undo', 'NothingToUndo'))
+    act(() => latestOnToast()('nothing to undo', 'NothingToUndo'))
+    act(() => latestOnToast()('Locked', 'LockedNode'))
+    fireEvent.pointerDown(document.body)
+    expect(screen.getAllByText('nothing to undo')).toHaveLength(1)
+    expect(lockToasts()).toHaveLength(0)
+  })
+})
+
+describe('App — Smooth surface that can no longer be drawn', () => {
+  it('toasts once per object after a commit that touched it, and stays quiet for untouched ones', async () => {
+    const m = mockScene as unknown as Record<string, unknown>
+    const prior = { smooth_level: m.smooth_level, smooth_surface_available: m.smooth_surface_available, object_name: m.object_name }
+    m.smooth_level = vi.fn((id: bigint) => (id === 5n ? 2 : 0))
+    m.smooth_surface_available = vi.fn(() => false)
+    m.object_name = vi.fn(() => 'Vase')
+    try {
+      await renderAndLoad()
+      const calls = vi.mocked(Viewport).mock.calls
+      const sceneChange = () =>
+        (calls[calls.length - 1][0] as { onSceneChange: (w: Map<bigint, boolean>, t?: readonly bigint[]) => void }).onSceneChange
+      act(() => sceneChange()(new Map(), [5n]))
+      const copy = 'Smooth 2 on Vase is off for now: the shape grew too dense for it. Lower the level or simplify the shape.'
+      expect(screen.getAllByText(copy)).toHaveLength(1)
+      act(() => sceneChange()(new Map(), [5n]))
+      expect(screen.getAllByText(copy)).toHaveLength(1)
+      // A commit that touched nothing smoothed adds nothing.
+      act(() => sceneChange()(new Map(), [6n]))
+      expect(screen.getAllByText(copy)).toHaveLength(1)
+      // A full refresh (no touched hint) reads nothing per object.
+      const levelCalls = vi.mocked(m.smooth_level as (id: bigint) => number).mock.calls.length
+      act(() => sceneChange()(new Map()))
+      expect(vi.mocked(m.smooth_level as (id: bigint) => number).mock.calls.length).toBe(levelCalls)
+    } finally {
+      Object.assign(m, prior)
+    }
   })
 })
 
@@ -2582,7 +3066,7 @@ describe('App — boolean auto-explode failure surfacing (finding 2)', () => {
       // committed real mutations, but the retried boolean still failed.
       const calls = vi.mocked(Viewport).mock.calls
       const { apiRef } = calls[calls.length - 1][0] as unknown as {
-        apiRef?: { current: { runBoolean: (op: number, a: unknown, b: unknown) => unknown } | null }
+        apiRef?: { current: { runBoolean: (op: number, nodes: unknown[]) => unknown } | null }
       }
       act(() => {
         if (apiRef !== undefined) apiRef.current = { runBoolean: vi.fn(() => 'mutated-failed') }
@@ -2591,7 +3075,7 @@ describe('App — boolean auto-explode failure surfacing (finding 2)', () => {
       const callsBeforeClick = canUndoMock.mock.calls.length
 
       fireEvent.click(screen.getByRole('button', { name: /^object$/i }))
-      fireEvent.mouseDown(screen.getByText('Union'))
+      fireEvent.mouseDown(menubar().getByText('Union'))
 
       // A re-render happened — `setDocRev` fired, exactly as the success
       // path already did, instead of the failure silently doing nothing.
@@ -2599,6 +3083,65 @@ describe('App — boolean auto-explode failure surfacing (finding 2)', () => {
     } finally {
       mockScene.object_ids = priorObjectIds
       mockScene.can_scene_undo = priorCanUndo
+    }
+  })
+
+  it('passes every selected operand, in selection order, to runBoolean (three objects open the gate)', async () => {
+    const priorObjectIds = mockScene.object_ids
+    mockScene.object_ids = vi.fn(() => BigUint64Array.from([1n, 2n, 3n]))
+    try {
+      await renderAndLoad()
+      act(() => window.__hew_test!.selectObjects(['3', '1', '2']))
+      const calls = vi.mocked(Viewport).mock.calls
+      const { apiRef } = calls[calls.length - 1][0] as unknown as {
+        apiRef?: { current: Record<string, unknown> | null }
+      }
+      const runBoolean = vi.fn(() => null)
+      act(() => {
+        if (apiRef !== undefined) apiRef.current = { runBoolean, operandTriangles: vi.fn(() => 0) }
+      })
+      fireEvent.click(screen.getByRole('button', { name: /^object$/i }))
+      fireEvent.mouseDown(menubar().getByText('Subtract'))
+      expect(runBoolean).toHaveBeenCalledTimes(1)
+      expect(runBoolean).toHaveBeenCalledWith(1, [
+        { kind: 'object', id: 3n },
+        { kind: 'object', id: 1n },
+        { kind: 'object', id: 2n },
+      ])
+    } finally {
+      mockScene.object_ids = priorObjectIds
+    }
+  })
+
+  it('runs a boolean on large operands behind the busy card, painted before the work starts', async () => {
+    const priorObjectIds = mockScene.object_ids
+    mockScene.object_ids = vi.fn(() => BigUint64Array.from([1n, 2n]))
+    try {
+      await renderAndLoad()
+      act(() => window.__hew_test!.selectObjects(['1', '2']))
+      const calls = vi.mocked(Viewport).mock.calls
+      const { apiRef } = calls[calls.length - 1][0] as unknown as {
+        apiRef?: { current: Record<string, unknown> | null }
+      }
+      const runBoolean = vi.fn(() => null)
+      act(() => {
+        if (apiRef !== undefined) apiRef.current = { runBoolean, operandTriangles: vi.fn(() => 480_000) }
+      })
+      fireEvent.click(screen.getByRole('button', { name: /^object$/i }))
+      fireEvent.mouseDown(menubar().getByText('Union'))
+      // The card is up and the boolean has not run yet.
+      expect(screen.getByText('Combining…')).toBeTruthy()
+      expect(screen.getByText('This can take a while on a large object.')).toBeTruthy()
+      expect(runBoolean).not.toHaveBeenCalled()
+      // A second Union while the card paints is ignored.
+      fireEvent.click(screen.getByRole('button', { name: /^object$/i }))
+      fireEvent.mouseDown(menubar().getByText('Union'))
+      await waitFor(() => expect(runBoolean).toHaveBeenCalledTimes(1))
+      await new Promise((r) => setTimeout(r, 100))
+      expect(runBoolean).toHaveBeenCalledTimes(1)
+      await waitFor(() => expect(screen.queryByText('Combining…')).toBeNull())
+    } finally {
+      mockScene.object_ids = priorObjectIds
     }
   })
 })
@@ -2749,7 +3292,7 @@ describe('App — enterNode entry convergence (adversarial-review finding 1)', (
     await renderAndLoad()
     const { apiRef, onSessionChange } = latestViewportProps()
     const runCloseInnermostSession = vi.fn(() => true)
-    const runOpenGroupSession = vi.fn(() => true)
+    const runOpenGroupSession = vi.fn(() => ({ ok: true }))
     const runOpenExplodeSessionOrFallback = vi.fn()
     act(() => {
       if (apiRef !== undefined) {
@@ -2789,7 +3332,7 @@ describe('App — enterNode entry convergence (adversarial-review finding 1)', (
     await renderAndLoad()
     const { apiRef, onSessionChange } = latestViewportProps()
     const runCloseInnermostSession = vi.fn(() => true)
-    const runOpenGroupSession = vi.fn(() => true)
+    const runOpenGroupSession = vi.fn(() => ({ ok: true }))
     const runOpenExplodeSessionOrFallback = vi.fn()
     act(() => {
       if (apiRef !== undefined) {
@@ -2834,7 +3377,7 @@ describe('App — enterNode entry convergence (adversarial-review finding 1)', (
       await renderAndLoad()
       const { apiRef, onSessionChange } = latestViewportProps()
       const runCloseInnermostSession = vi.fn(() => true)
-      const runOpenGroupSession = vi.fn(() => true)
+      const runOpenGroupSession = vi.fn(() => ({ ok: true }))
       act(() => {
         if (apiRef !== undefined) {
           apiRef.current = {
@@ -2874,7 +3417,7 @@ describe('App — enterNode entry convergence (adversarial-review finding 1)', (
           sessionMembers: () => [{ kind: 'object', id: 1n }],
           hasArmedGesture: () => true,
           runCloseInnermostSession,
-          runOpenGroupSession: vi.fn(() => true),
+          runOpenGroupSession: vi.fn(() => ({ ok: true })),
           runOpenExplodeSessionOrFallback: vi.fn(),
         }
       }
@@ -3074,7 +3617,7 @@ describe('App — handleSessionChange selection ordering (adversarial-review fin
             // trailing `setSelectedIds([target])`.
             runOpenGroupSession: (id: bigint) => {
               latestViewportProps().onSessionChange?.([{ node: { kind: 'group', id }, label: 'Group 1' }])
-              return true
+              return { ok: true }
             },
             runOpenExplodeSessionOrFallback: vi.fn(),
           }
@@ -3119,7 +3662,7 @@ describe('App — armed-gesture guard on breadcrumb close paths (adversarial-rev
           sessionMembers: () => null,
           hasArmedGesture: () => armed,
           runCloseInnermostSession,
-          runOpenGroupSession: vi.fn(() => true),
+          runOpenGroupSession: vi.fn(() => ({ ok: true })),
           runOpenExplodeSessionOrFallback: vi.fn(),
         }
       }
@@ -3151,7 +3694,7 @@ describe('App — armed-gesture guard on breadcrumb close paths (adversarial-rev
           sessionMembers: () => null,
           hasArmedGesture: () => armed,
           runCloseInnermostSession,
-          runOpenGroupSession: vi.fn(() => true),
+          runOpenGroupSession: vi.fn(() => ({ ok: true })),
           runOpenExplodeSessionOrFallback: vi.fn(),
         }
       }
@@ -3306,6 +3849,54 @@ describe('App — welcome screen', () => {
     expect(screen.queryByRole('dialog', { name: /welcome to hew/i })).not.toBeInTheDocument()
   })
 
+  it.each([
+    [true, 1],
+    [false, 0],
+  ])('says why Save will ask for a location (path withheld: %s)', async (pathWithheld, notes) => {
+    const meta = { version: 1 as const, savedAt: Date.now(), name: 'Crashed Doc', path: null }
+    recoveryState.listings = [{ slot: 'web', meta }]
+    recoveryState.claim.mockResolvedValue({
+      bytes: new Uint8Array([1]),
+      meta: { ...meta, format: 'hew' },
+      source: null,
+      pathWithheld,
+    })
+    await renderAndLoad()
+    const dialog = await screen.findByRole('dialog', { name: /recover unsaved document/i })
+    await act(async () => {
+      fireEvent.click(within(dialog).getByRole('button', { name: /^recover/i }))
+    })
+    await waitFor(() => expect(recoveryState.claim).toHaveBeenCalled())
+    await waitFor(() => expect(document.title).toContain('Crashed Doc'))
+    expect(screen.queryAllByText(/can’t save over the original file/)).toHaveLength(notes)
+  })
+
+  it('opens after the recovery prompt is discarded (KB-39: declining is a fresh launch)', async () => {
+    setShowWelcome(true)
+    recoveryState.listings = [
+      { slot: 'web', meta: { version: 1, savedAt: Date.now(), name: 'Crashed Doc', path: null } },
+    ]
+    await renderAndLoad()
+    await screen.findByRole('dialog', { name: /recover unsaved document/i })
+    fireEvent.click(screen.getByRole('button', { name: /^discard$/i }))
+    await screen.findByRole('dialog', { name: /welcome to hew/i })
+  })
+
+  it('opens after the recovery prompt is dismissed with Escape (KB-39)', async () => {
+    setShowWelcome(true)
+    recoveryState.listings = [
+      { slot: 'web', meta: { version: 1, savedAt: Date.now(), name: 'Crashed Doc', path: null } },
+    ]
+    await renderAndLoad()
+    await screen.findByRole('dialog', { name: /recover unsaved document/i })
+    // The dialog's Escape listener is attached in a passive effect, which can
+    // flush after the DOM node is already findable. Drain pending effects so
+    // the key press cannot land in that gap.
+    await act(async () => {})
+    fireEvent.keyDown(document, { key: 'Escape' })
+    await screen.findByRole('dialog', { name: /welcome to hew/i })
+  })
+
   it('swallows app shortcuts while open — no tool switch, no palette stacked underneath', async () => {
     setShowWelcome(true)
     await renderAndLoad()
@@ -3325,6 +3916,66 @@ describe('App — welcome screen', () => {
     fireEvent.click(screen.getByRole('button', { name: /^draw$/i }))
     const rectangleItem = menubar().getByText('Rectangle').closest('div')
     expect(rectangleItem?.textContent).not.toContain('✓')
+  })
+
+  it('Select All does nothing while open (the native key equivalent runs before the page)', async () => {
+    setShowWelcome(true)
+    await renderAndLoad()
+    await screen.findByRole('dialog', { name: /welcome to hew/i })
+    const selectAll = vi.fn()
+    const calls = vi.mocked(Viewport).mock.calls
+    const { apiRef } = calls[calls.length - 1][0] as { apiRef?: { current: { selectAll: () => void } | null } }
+    act(() => {
+      if (apiRef !== undefined) apiRef.current = { selectAll }
+    })
+    fireEvent.click(menubar().getByRole('button', { name: /^edit$/i }))
+    fireEvent.mouseDown(menubar().getByText('Select All'))
+    expect(selectAll).not.toHaveBeenCalled()
+
+    // Once the welcome screen is gone the same command selects.
+    fireEvent.click(screen.getByRole('button', { name: /start modeling/i }))
+    fireEvent.click(menubar().getByRole('button', { name: /^edit$/i }))
+    fireEvent.mouseDown(menubar().getByText('Select All'))
+    expect(selectAll).toHaveBeenCalledOnce()
+  })
+})
+
+describe('App — web settings modal', () => {
+  it('is a labelled modal dialog, so the keymap\'s open-dialog guard covers it', async () => {
+    await renderAndLoad()
+    fireEvent.keyDown(document, { key: ',', code: 'Comma', ctrlKey: true })
+    const dialog = await screen.findByRole('dialog', { name: 'Settings' })
+    expect(dialog).toHaveAttribute('aria-modal', 'true')
+    // A bare key (Space = Select tool) stays out of the commands behind it:
+    // the dispatcher would have claimed (preventDefault-ed) it otherwise.
+    const notClaimed = fireEvent.keyDown(within(dialog).getByRole('tab', { name: 'Controls' }), { key: ' ', code: 'Space' })
+    expect(notClaimed).toBe(true)
+  })
+})
+
+describe('App — web settings modal Escape (KB-16)', () => {
+  it('closes with Escape', async () => {
+    await renderAndLoad()
+    fireEvent.keyDown(document, { key: ',', code: 'Comma', ctrlKey: true })
+    await screen.findByRole('dialog', { name: 'Settings' })
+    fireEvent.keyDown(document.body, { key: 'Escape' })
+    expect(screen.queryByRole('dialog', { name: 'Settings' })).not.toBeInTheDocument()
+  })
+})
+
+describe('App — web settings modal Escape with an open child (KB-16)', () => {
+  it('leaves Settings open while a child popup is open, then closes it', async () => {
+    await renderAndLoad()
+    fireEvent.keyDown(document, { key: ',', code: 'Comma', ctrlKey: true })
+    await screen.findByRole('dialog', { name: 'Settings' })
+    const child = document.createElement('div')
+    child.setAttribute('role', 'menu')
+    document.body.appendChild(child)
+    fireEvent.keyDown(child, { key: 'Escape' })
+    expect(screen.getByRole('dialog', { name: 'Settings' })).toBeInTheDocument()
+    child.remove()
+    fireEvent.keyDown(document.body, { key: 'Escape' })
+    expect(screen.queryByRole('dialog', { name: 'Settings' })).not.toBeInTheDocument()
   })
 })
 
@@ -3601,6 +4252,42 @@ describe('App — Lane C: dirty is derived from the kernel saved mark', () => {
     act(() => harness.addNodeTag('object', '1', ['tag']))
 
     expect(document.title.startsWith('•')).toBe(false)
+  })
+})
+
+describe('App — Lock and Unlock dirty the document', () => {
+  // A lock is a real, undoable kernel change that draws nothing new, so no
+  // viewport refresh reports it: the App has to mark the document itself.
+  const m = mockScene as Record<string, unknown>
+  const KEYS = ['object_ids', 'group_ids', 'instance_ids', 'node_locked', 'set_nodes_locked']
+  let prior: [string, unknown][] = []
+
+  beforeEach(() => {
+    prior = KEYS.map((k) => [k, m[k]])
+    m.object_ids = () => new BigUint64Array([1n])
+    m.group_ids = () => new BigUint64Array()
+    m.instance_ids = () => new BigUint64Array()
+    m.node_locked = () => true
+    m.set_nodes_locked = vi.fn()
+  })
+
+  afterEach(() => {
+    for (const [k, v] of prior) {
+      if (v === undefined) delete m[k]
+      else m[k] = v
+    }
+  })
+
+  it('Edit ▸ Unlock ▸ All marks the document unsaved', async () => {
+    await renderAndLoad()
+    expect(document.title.startsWith('•')).toBe(false)
+
+    fireEvent.click(screen.getByRole('button', { name: /^edit$/i }))
+    fireEvent.mouseEnter(menubar().getByText('Unlock'))
+    fireEvent.mouseDown(menubar().getByText('All'))
+
+    expect(m.set_nodes_locked).toHaveBeenCalledOnce()
+    expect(document.title.startsWith('•')).toBe(true)
   })
 })
 
@@ -3916,7 +4603,7 @@ describe('App — v1.1 assets lane: viewport resync + current-material reset aft
   })
 
   it('deleting an unused material calls refreshScene and, if it was the current material, resets currentMaterialId to the sentinel', async () => {
-    const redInfo = { name: () => 'Red', r: () => 220, g: () => 30, b: () => 30, a: () => 255, has_texture: () => false }
+    const redInfo = { name: () => 'Red', r: () => 220, g: () => 30, b: () => 30, a: () => 255, has_texture: () => false, has_pbr: () => false, metallic: () => 0, roughness: () => 1 }
     stub('material_ids', () => BigUint64Array.from([7n]))
     stub('material_info', ((id: bigint) => (id === 7n ? redInfo : undefined)) as typeof mockScene.material_info)
     stub('material_usage', (() => 0) as typeof mockScene.material_usage)
@@ -3967,7 +4654,7 @@ describe('App — v1.1 assets lane: viewport resync + current-material reset aft
   })
 
   it('Purge Unused calls refreshScene and clears currentMaterialId when the current material was purged', async () => {
-    const staleInfo = { name: () => 'Stray', r: () => 5, g: () => 5, b: () => 5, a: () => 255, has_texture: () => false }
+    const staleInfo = { name: () => 'Stray', r: () => 5, g: () => 5, b: () => 5, a: () => 255, has_texture: () => false, has_pbr: () => false, metallic: () => 0, roughness: () => 1 }
     let purged = false
     stub('material_ids', () => (purged ? new BigUint64Array() : BigUint64Array.from([11n])))
     stub('material_info', ((id: bigint) => (id === 11n && !purged ? staleInfo : undefined)) as typeof mockScene.material_info)
@@ -4044,14 +4731,16 @@ describe('App — the native save panel chooses the format', () => {
   }
 
   it('Save As writes the format picked in the panel to the path it picked', async () => {
-    vi.mocked(savePanel.pickSaveTarget).mockResolvedValue({ path: '/tmp/m.skp', format: 'skp2017', options: {} })
+    vi.mocked(savePanel.pickSaveTarget).mockResolvedValue({ path: '/tmp/m.skp', format: 'skp-older', options: { release: 'skp2017' } })
     await renderAndLoad()
     fileMenu('Save As…')
 
     await waitFor(() => expect(fakeFileHost.writeTo).toHaveBeenCalledOnce())
-    expect(savePanel.pickSaveTarget).toHaveBeenCalledWith('Save As', expect.any(String), savePanel.SAVE_PANEL_FORMATS, 'hew')
-    expect((mockScene as Record<string, unknown>).save_skp).toHaveBeenCalledWith('skp2017', expect.any(String))
+    expect(savePanel.pickSaveTarget).toHaveBeenCalledWith('Save As', expect.any(String), savePanel.savePanelFormats('hew', false), 'hew')
+    expect((mockScene as Record<string, unknown>).save_skp).toHaveBeenCalledWith('skp2017', expect.any(String), undefined, false)
     expect(fakeFileHost.writeTo).toHaveBeenCalledWith('/tmp/m.skp', written, 'skp2017')
+    // A save mints the document's persistent id before writing.
+    expect(mockScene.ensure_document_id).toHaveBeenCalled()
     // No in-app format step, no second picker.
     expect(screen.queryByRole('dialog', { name: /^save as$/i })).not.toBeInTheDocument()
     expect(fakeFileHost.saveAs).not.toHaveBeenCalled()
@@ -4165,18 +4854,36 @@ describe('App — the native save panel chooses the format', () => {
   })
 
   it('Export writes the format picked in the panel to the path it picked', async () => {
-    vi.mocked(savePanel.pickSaveTarget).mockResolvedValue({ path: '/tmp/e.skp', format: 'skp2017', options: {} })
+    vi.mocked(savePanel.pickSaveTarget).mockResolvedValue({ path: '/tmp/e.skp', format: 'skp-older', options: { release: 'skp2017' } })
     await renderAndLoad()
     fileMenu('Export…')
 
     await waitFor(() => expect(fakeFileHost.writeTo).toHaveBeenCalledOnce())
     const [title, , formats, initial] = vi.mocked(savePanel.pickSaveTarget).mock.calls[0]
     expect([title, initial]).toEqual(['Export', 'glb'])
-    expect(formats.map((f) => f.id)).toEqual(savePanel.EXPORT_FORMATS.map((f) => f.format))
-    expect((mockScene as Record<string, unknown>).export_skp).toHaveBeenCalledWith('skp2017', expect.any(String))
+    expect(formats.map((f) => f.id)).toEqual(['glb', 'stl', '3mf', 'usdz', 'svg', 'skp', 'skp-older'])
+    expect((mockScene as Record<string, unknown>).export_skp).toHaveBeenCalledWith('skp2017', expect.any(String), false)
     expect(fakeFileHost.writeTo).toHaveBeenCalledWith('/tmp/e.skp', written)
     expect(screen.queryByRole('dialog', { name: /^export$/i })).not.toBeInTheDocument()
     expect(fakeFileHost.exportBinary).not.toHaveBeenCalled()
+  })
+
+  it('Save As passes the compat box of the 2021-and-later container to the writer', async () => {
+    vi.mocked(savePanel.pickSaveTarget).mockResolvedValue({ path: '/tmp/m.skp', format: 'skp2026', options: { compat: true } })
+    await renderAndLoad()
+    fileMenu('Save As…')
+
+    await waitFor(() => expect(fakeFileHost.writeTo).toHaveBeenCalledOnce())
+    expect((mockScene as Record<string, unknown>).save_skp).toHaveBeenCalledWith('skp2026', expect.any(String), undefined, true)
+  })
+
+  it('Export passes the compat box only for the 2021-and-later container', async () => {
+    vi.mocked(savePanel.pickSaveTarget).mockResolvedValue({ path: '/tmp/e.skp', format: 'skp', options: { compat: true } })
+    await renderAndLoad()
+    fileMenu('Export…')
+
+    await waitFor(() => expect(fakeFileHost.writeTo).toHaveBeenCalledOnce())
+    expect((mockScene as Record<string, unknown>).export_skp).toHaveBeenCalledWith('skp2026', expect.any(String), true)
   })
 
   it('a panel that could not be shown says so rather than passing for a cancel', async () => {
@@ -4188,6 +4895,39 @@ describe('App — the native save panel chooses the format', () => {
     expect(await screen.findByText(/Export failed: .*main thread/)).toBeInTheDocument()
     expect(fakeFileHost.writeTo).not.toHaveBeenCalled()
   })
+
+  it('Export to a stream release lists what the older format left out', async () => {
+    vi.mocked(savePanel.pickSaveTarget).mockResolvedValue({ path: '/tmp/e.skp', format: 'skp-older', options: { release: 'skp2018' } })
+    ;(mockScene as Record<string, unknown>).export_skp = vi.fn(() => ({
+      bytes: written,
+      simplified: [],
+      writer_notes: ['a text is anchored to an entity the file does not hold and is left out'],
+    }))
+    await renderAndLoad()
+    fileMenu('Export…')
+
+    const notice = await screen.findByTestId('skp-loss-notice')
+    expect(notice).toHaveTextContent('left out')
+    expect(notice).toHaveTextContent('a text is anchored to an entity')
+    expect((mockScene as Record<string, unknown>).export_skp).toHaveBeenCalledWith('skp2018', expect.any(String), false)
+  })
+
+  it.each(['skp8', 'skp3', 'skp2013'] as const)(
+    'Export to release %s passes the release through as its own target',
+    async (format) => {
+      vi.mocked(savePanel.pickSaveTarget).mockResolvedValue({ path: '/tmp/e.skp', format: 'skp-older', options: { release: format } })
+      ;(mockScene as Record<string, unknown>).export_skp = vi.fn(() => ({
+        bytes: written,
+        simplified: [],
+        writer_notes: [],
+      }))
+      await renderAndLoad()
+      fileMenu('Export…')
+      await waitFor(() =>
+        expect((mockScene as Record<string, unknown>).export_skp).toHaveBeenCalledWith(format, expect.any(String), false),
+      )
+    },
+  )
 
   it('a canceled panel writes nothing', async () => {
     vi.mocked(savePanel.pickSaveTarget).mockResolvedValue(null)
@@ -4231,7 +4971,7 @@ describe('App — revealInTray (Object Info tag chips and Materials row)', () =>
     mockScene.material_ids = () => new BigUint64Array([10n])
     mockScene.material_info = ((id: bigint) =>
       id === 10n
-        ? { name: () => 'Oak', r: () => 200, g: () => 150, b: () => 100, a: () => 255, has_texture: () => false, world_w: () => 1, world_h: () => 1 }
+        ? { name: () => 'Oak', r: () => 200, g: () => 150, b: () => 100, a: () => 255, has_texture: () => false, has_pbr: () => false, metallic: () => 0, roughness: () => 1, world_w: () => 1, world_h: () => 1 }
         : undefined) as unknown as typeof mockScene.material_info
     mockScene.object_materials = () => new BigUint64Array([10n])
   })
@@ -4276,5 +5016,457 @@ describe('App — revealInTray (Object Info tag chips and Materials row)', () =>
     // Selecting here does not switch tools the way picking in the palette does.
     expect(screen.getByTitle('Rectangle (R)')).toBeInTheDocument()
     expect(vi.mocked(Viewport).mock.calls.at(-1)?.[0]).toMatchObject({ activeTool: 'Select' })
+  })
+})
+
+describe('App — native Smooth check marks after a refused level', () => {
+  // The effects under test load `invoke` with a dynamic import. Under load,
+  // vitest intermittently hands those imports the REAL @tauri-apps/api/core
+  // module instead of the mocked one (the mock factory above is async), and
+  // the real invoke goes to `window.__TAURI_INTERNALS__.invoke`. Providing
+  // that bridge as well routes either module to the same recorder, so no
+  // sync is lost whichever one a given import resolves to.
+  beforeAll(() => {
+    ;(window as unknown as Record<string, unknown>).__TAURI_INTERNALS__ = {
+      invoke: (cmd: string, args?: unknown) => nativeMenu.invoke(cmd, args),
+    }
+  })
+  afterAll(() => {
+    delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__
+  })
+
+  // Each menu push loads `invoke` with its own dynamic import, and under
+  // Vitest imports in flight together can resolve out of order: a push made
+  // at mount could land after the one for a later selection and read as the
+  // latest state. The tests let the imports in flight finish before they make
+  // the next push.
+  const pushesLanded = () => act(async () => { await vi.dynamicImportSettled() })
+
+  afterEach(() => {
+    nativeMenu.on = false
+    nativeMenu.menuAction = null
+    nativeMenu.invoke.mockClear()
+  })
+
+  it('re-pushes the menu state with the previous level checked when Smooth is refused', async (ctx) => {
+    requiresPreview(ctx, 'smooth')
+    const m = mockScene as unknown as Record<string, unknown>
+    const prior = { object_ids: m.object_ids, smooth_level: m.smooth_level, set_smooth_level: m.set_smooth_level }
+    m.object_ids = vi.fn(() => BigUint64Array.from([1n]))
+    m.smooth_level = vi.fn(() => 1)
+    m.set_smooth_level = vi.fn(() => { throw new Error('AmountOutOfRange: cage too dense') })
+    nativeMenu.on = true
+    try {
+      await renderAndLoad()
+      await pushesLanded()
+      act(() => window.__hew_test!.selectObjects(['1']))
+      const syncs = () => nativeMenu.invoke.mock.calls.filter((c) => c[0] === 'sync_menu_state')
+      // The selection's own push must be in before the count is taken: it
+      // already carries the old level, so counted later it would pass for the
+      // push that follows the refusal.
+      await waitFor(() => {
+        const push = syncs()[syncs().length - 1]?.[1] as { enabled: Record<string, boolean> } | undefined
+        expect(push?.enabled['object-smooth-2']).toBe(true)
+      }, { timeout: 15_000 })
+      await pushesLanded()
+      const before = syncs().length
+
+      // The native item arrives as a menu-action event, after muda has
+      // already toggled the clicked check mark.
+      await waitFor(() => expect(nativeMenu.menuAction).not.toBeNull(), { timeout: 15_000 })
+      act(() => nativeMenu.menuAction!({ payload: 'smooth-3' }))
+
+      await waitFor(() => expect(syncs().length).toBeGreaterThan(before), { timeout: 15_000 })
+      const last = syncs()[syncs().length - 1][1] as { checked: Record<string, boolean> }
+      expect(last.checked['object-smooth-1']).toBe(true)
+      expect(last.checked['object-smooth-3']).toBe(false)
+    } finally {
+      Object.assign(m, prior)
+    }
+    // A full render plus three round trips through the native menu: under
+    // a loaded machine the default 5 s is not enough.
+  }, 20_000)
+
+  it('enables Soften Edges… only for a directly selected solid, while Smooth stays open for any object', async () => {
+    const m = mockScene as unknown as Record<string, unknown>
+    const prior = { object_ids: m.object_ids, smooth_level: m.smooth_level, object_solid: m.object_solid, health_report_json: m.health_report_json }
+    m.object_ids = vi.fn(() => BigUint64Array.from([1n]))
+    m.smooth_level = vi.fn(() => 0)
+    // Object Info's Geometry row reads the health report for a non-solid object.
+    m.health_report_json = () => '{"rows":[],"families":[],"counts":{}}'
+    nativeMenu.on = true
+    try {
+      for (const solid of [true, false]) {
+        m.object_solid = vi.fn(() => solid)
+        nativeMenu.invoke.mockClear()
+        const { unmount } = render(<App />)
+        await waitFor(() => screen.getByTitle('Rectangle (R)'), { timeout: 2000 })
+        await pushesLanded()
+        act(() => window.__hew_test!.selectObjects(['1']))
+        await waitFor(() => {
+          const calls = nativeMenu.invoke.mock.calls.filter((c) => c[0] === 'sync_menu_state')
+          const last = calls[calls.length - 1]?.[1] as { enabled: Record<string, boolean> } | undefined
+          expect(last?.enabled['object-smooth-2']).toBe(true)
+          expect(last?.enabled['object-soften-edges']).toBe(solid)
+        }, { timeout: 15_000 })
+        unmount()
+      }
+    } finally {
+      Object.assign(m, prior)
+    }
+    // Two full renders in a loop: the default 5 s test timeout and the
+    // 1 s waitFor are too tight on a loaded machine.
+  }, 20_000)
+})
+
+describe('App — the bus enters and leaves the user context (hew.view.enter / exit / exit_all)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    Element.prototype.scrollIntoView = vi.fn()
+  })
+
+  function latestViewportProps(): {
+    onSessionChange?: (frames: { node: { kind: string; id: bigint }; label: string }[]) => void
+    onEnterContext?: (node: { kind: string; id: bigint }) => void
+    apiRef?: { current: Record<string, unknown> | null }
+  } {
+    const calls = vi.mocked(Viewport).mock.calls
+    return calls[calls.length - 1][0] as never
+  }
+
+  /** Applies directives the way the live bridge does after a dispatch. */
+  async function applyDirectives(json: string): Promise<void> {
+    const { applyPendingViewDirectives, directiveTargets } = await import('./api/liveBridge')
+    const deps = liveBridge.deps as Parameters<typeof directiveTargets>[0]
+    act(() => {
+      applyPendingViewDirectives(json, directiveTargets(deps))
+    })
+  }
+
+  /** Applies several directive batches back to back in ONE act(), so no
+   *  render runs between them: the bridge does not flush React between two
+   *  websocket frames either. */
+  async function applyDirectivesUnflushed(jsons: string[]): Promise<void> {
+    const { applyPendingViewDirectives, directiveTargets } = await import('./api/liveBridge')
+    const deps = liveBridge.deps as Parameters<typeof directiveTargets>[0]
+    act(() => {
+      for (const json of jsons) applyPendingViewDirectives(json, directiveTargets(deps))
+    })
+  }
+
+  /** A viewport API whose sessions are real enough to follow: `open` and
+   *  `close` keep a stack the way the kernel's would and report it through
+   *  `onSessionChange`, as the real Viewport does. */
+  function sessionViewport(opts: { armed?: boolean; refuseInstances?: boolean; refuseGroups?: boolean; history?: { depth: number } } = {}) {
+    let armed = opts.armed === true
+    let stack: { kind: string; id: bigint }[] = []
+    const report = () => {
+      latestViewportProps().onSessionChange?.(
+        stack.map((node) => ({ node, label: `${node.kind} ${node.id}` })),
+      )
+    }
+    const runOpenGroupSession = vi.fn((id: bigint) => {
+      // The kernel declines the group (a toast in the real window).
+      if (opts.refuseGroups === true) return { refused: { name: 'enter_refused', detail: { code: 'ExplodeSessionOpen' } } }
+      stack = [...stack, { kind: 'group', id }]
+      // Opening a session is a history step.
+      if (opts.history !== undefined) opts.history.depth++
+      report()
+      return { ok: true }
+    })
+    const runCloseInnermostSession = vi.fn(() => {
+      stack = stack.slice(0, -1)
+      report()
+      return true
+    })
+    // An instance a session cannot take (unevenly scaled, or placed in a
+    // group elsewhere): the fallback pushes it as an in-context entry through
+    // the viewport's own callback.
+    const runOpenExplodeSessionOrFallback = vi.fn((_id: bigint, frame: { kind: string; id: bigint }) => {
+      // A nested definition on an instance no session can take: the window
+      // toasts and enters nothing.
+      if (opts.refuseInstances === true) return { refused: { name: 'nested_component_in_context' } }
+      latestViewportProps().onEnterContext?.(frame)
+      return { ok: true }
+    })
+    // The app's own Undo: takes back the last step, which closes the session.
+    const runUndo = vi.fn(() => {
+      if (opts.history !== undefined) opts.history.depth--
+      stack = stack.slice(0, -1)
+      report()
+    })
+    const api = {
+      runUndo,
+      sessionStack: () => [...stack],
+      sessionMembers: () => null,
+      hasArmedGesture: () => armed,
+      runOpenGroupSession,
+      runCloseInnermostSession,
+      runOpenExplodeSessionOrFallback,
+    }
+    act(() => {
+      const ref = latestViewportProps().apiRef
+      if (ref !== undefined) ref.current = api
+    })
+    return {
+      runUndo,
+      runOpenGroupSession,
+      runCloseInnermostSession,
+      runOpenExplodeSessionOrFallback,
+      setArmed: (next: boolean) => {
+        armed = next
+      },
+    }
+  }
+
+  /** Group 50 holds the mirrored instance 60. */
+  async function withNestedInstance(run: () => Promise<void>): Promise<void> {
+    const prior = mockScene.node_parent
+    mockScene.node_parent = vi.fn((kind: number, id: bigint) =>
+      kind === 2 && id === 60n ? 50n : undefined,
+    )
+    try {
+      await run()
+    } finally {
+      mockScene.node_parent = prior
+    }
+  }
+
+  const enterMirrored = '[{"kind":"enter_context","path":[],"leaf":{"kind":"instance","id":"60"}}]'
+
+  it('enter_context for a mirrored instance inside a group opens the group, then the instance with itself as the fallback, and selects it', async () => {
+    await withNestedInstance(async () => {
+      await renderAndLoad()
+      const { runOpenGroupSession, runOpenExplodeSessionOrFallback } = sessionViewport()
+      await applyDirectives(enterMirrored)
+      expect(runOpenGroupSession).toHaveBeenCalledWith(50n)
+      expect(runOpenExplodeSessionOrFallback).toHaveBeenCalledWith(60n, { kind: 'instance', id: 60n })
+      expect(runOpenGroupSession.mock.invocationCallOrder[0]).toBeLessThan(
+        runOpenExplodeSessionOrFallback.mock.invocationCallOrder[0],
+      )
+      expect(window.__hew_test!.getSelection()).toEqual([{ kind: 'instance', id: '60' }])
+      // The Scene hears the fallback entry in the same call stack.
+      expect(mockScene.set_ui_context).toHaveBeenLastCalledWith('[{"kind":"instance","id":"60"}]')
+    })
+  })
+
+  it('an entry the window declines part way is refused, and the group it opened closes again', async () => {
+    await withNestedInstance(async () => {
+      await renderAndLoad()
+      const { runOpenGroupSession, runCloseInnermostSession } = sessionViewport({ refuseInstances: true })
+      const { applyPendingViewDirectives, directiveTargets } = await import('./api/liveBridge')
+      const deps = liveBridge.deps as Parameters<typeof directiveTargets>[0]
+      let refused: unknown
+      act(() => {
+        refused = applyPendingViewDirectives(enterMirrored, directiveTargets(deps))
+      })
+      expect(runOpenGroupSession).toHaveBeenCalledWith(50n)
+      expect(refused).toEqual({ name: 'nested_component_in_context' })
+      // Back where it began: the group the walk opened is closed, nothing is
+      // selected, and the Scene hears no in-context entry.
+      expect(runCloseInnermostSession).toHaveBeenCalledTimes(1)
+      expect(window.__hew_test!.getSelection()).toEqual([])
+      expect(mockScene.set_ui_context).toHaveBeenLastCalledWith('[]')
+    })
+  })
+
+  it('a refused entry takes its steps back with Undo, not with a closing step of its own', async () => {
+    await withNestedInstance(async () => {
+      await renderAndLoad()
+      const history = { depth: 5 }
+      const priorDepth = mockScene.undo_depth
+      const priorCan = mockScene.can_scene_undo
+      mockScene.undo_depth = () => history.depth
+      mockScene.can_scene_undo = () => history.depth > 0
+      try {
+        const { runUndo, runCloseInnermostSession } = sessionViewport({ refuseInstances: true, history })
+        const { applyPendingViewDirectives, directiveTargets } = await import('./api/liveBridge')
+        const deps = liveBridge.deps as Parameters<typeof directiveTargets>[0]
+        act(() => {
+          applyPendingViewDirectives(enterMirrored, directiveTargets(deps))
+        })
+        // One step taken (the group's open), one Undo to take it back: the
+        // history is the depth it was, and nothing was closed on top of it.
+        expect(runUndo).toHaveBeenCalledTimes(1)
+        expect(runCloseInnermostSession).not.toHaveBeenCalled()
+        expect(history.depth).toBe(5)
+        expect(window.__hew_test!.getSelection()).toEqual([])
+      } finally {
+        mockScene.undo_depth = priorDepth
+        mockScene.can_scene_undo = priorCan
+      }
+    })
+  })
+
+  it("the Outliner's entry still walks on past a frame the window declines, as it always did", async () => {
+    await withNestedInstance(async () => {
+      await renderAndLoad()
+      const { runOpenGroupSession, runOpenExplodeSessionOrFallback } = sessionViewport({ refuseGroups: true })
+      const deps = liveBridge.deps as { enterNode: (n: { kind: 'instance'; id: bigint }) => unknown }
+      let outcome: unknown
+      act(() => {
+        outcome = deps.enterNode({ kind: 'instance', id: 60n })
+      })
+      // The group was declined, and the instance step, the fallback entry and
+      // the selection still happened: nothing was undone for a person.
+      expect(runOpenGroupSession).toHaveBeenCalledWith(50n)
+      expect(runOpenExplodeSessionOrFallback).toHaveBeenCalledWith(60n, { kind: 'instance', id: 60n })
+      expect(window.__hew_test!.getSelection()).toEqual([{ kind: 'instance', id: '60' }])
+      expect(mockScene.set_ui_context).toHaveBeenLastCalledWith('[{"kind":"instance","id":"60"}]')
+      // What the bus is told is the first refusal.
+      expect(outcome).toEqual({ refused: { name: 'enter_refused', detail: { code: 'ExplodeSessionOpen' } } })
+    })
+  })
+
+  it('exit_context with one fallback entry pops it and closes no session', async () => {
+    await withNestedInstance(async () => {
+      await renderAndLoad()
+      const { runCloseInnermostSession } = sessionViewport()
+      await applyDirectives(enterMirrored)
+      runCloseInnermostSession.mockClear()
+      await applyDirectives('[{"kind":"exit_context"}]')
+      expect(runCloseInnermostSession).not.toHaveBeenCalled()
+      expect(mockScene.set_ui_context).toHaveBeenLastCalledWith('[]')
+      // The next exit steps out of the group.
+      await applyDirectives('[{"kind":"exit_context"}]')
+      expect(runCloseInnermostSession).toHaveBeenCalledTimes(1)
+    })
+  })
+
+  it('exit_context with one session and no fallback closes the innermost session', async () => {
+    await renderAndLoad()
+    const { runCloseInnermostSession } = sessionViewport()
+    act(() => {
+      latestViewportProps().onSessionChange?.([{ node: { kind: 'group', id: 50n }, label: 'Group 50' }])
+    })
+    await applyDirectives('[{"kind":"exit_context"}]')
+    expect(runCloseInnermostSession).toHaveBeenCalledTimes(1)
+  })
+
+  it('exit_context at the top level does nothing', async () => {
+    await renderAndLoad()
+    const { runCloseInnermostSession } = sessionViewport()
+    await applyDirectives('[{"kind":"exit_context"}]')
+    expect(runCloseInnermostSession).not.toHaveBeenCalled()
+  })
+
+  it('exit_all_contexts closes every session and clears the fallback', async () => {
+    await withNestedInstance(async () => {
+      await renderAndLoad()
+      const { runCloseInnermostSession } = sessionViewport()
+      await applyDirectives(enterMirrored)
+      await applyDirectives('[{"kind":"exit_all_contexts"}]')
+      expect(runCloseInnermostSession).toHaveBeenCalledTimes(1)
+      expect(mockScene.set_ui_context).toHaveBeenLastCalledWith('[]')
+    })
+  })
+
+  it('exit_all_contexts closes a group and a component session, innermost first', async () => {
+    const prior = mockScene.node_parent
+    // Instance 61 sits in group 50 too, but is not mirrored here: the
+    // viewport opens a session for it (stubbed as a second open frame).
+    mockScene.node_parent = vi.fn((kind: number, id: bigint) =>
+      kind === 1 && id === 51n ? 50n : undefined,
+    )
+    try {
+      await renderAndLoad()
+      const { runOpenGroupSession, runCloseInnermostSession } = sessionViewport()
+      await applyDirectives('[{"kind":"enter_context","path":[],"leaf":{"kind":"group","id":"51"}}]')
+      expect(runOpenGroupSession.mock.calls).toEqual([[50n], [51n]])
+      await applyDirectives('[{"kind":"exit_all_contexts"}]')
+      expect(runCloseInnermostSession).toHaveBeenCalledTimes(2)
+    } finally {
+      mockScene.node_parent = prior
+    }
+  })
+
+  it('an exit_all right behind an enter, before any render, still closes the session', async () => {
+    await withNestedInstance(async () => {
+      await renderAndLoad()
+      const { runCloseInnermostSession } = sessionViewport()
+      await applyDirectivesUnflushed([enterMirrored, '[{"kind":"exit_all_contexts"}]'])
+      expect(runCloseInnermostSession).toHaveBeenCalledTimes(1)
+      expect(mockScene.set_ui_context).toHaveBeenLastCalledWith('[]')
+    })
+  })
+
+  it('an exit_context right behind an enter, before any render, pops the fallback entry first and then the session', async () => {
+    await withNestedInstance(async () => {
+      await renderAndLoad()
+      const { runCloseInnermostSession } = sessionViewport()
+      await applyDirectivesUnflushed([
+        enterMirrored,
+        '[{"kind":"exit_context"}]',
+        '[{"kind":"exit_context"}]',
+      ])
+      expect(runCloseInnermostSession).toHaveBeenCalledTimes(1)
+    })
+  })
+
+  it('an armed gesture leaves the viewport untouched (the Outliner\'s own guard)', async () => {
+    await withNestedInstance(async () => {
+      await renderAndLoad()
+      const { runOpenGroupSession, runOpenExplodeSessionOrFallback, runCloseInnermostSession } = sessionViewport({
+        armed: true,
+      })
+      await applyDirectives(enterMirrored)
+      await applyDirectives('[{"kind":"exit_all_contexts"}]')
+      expect(runOpenGroupSession).not.toHaveBeenCalled()
+      expect(runOpenExplodeSessionOrFallback).not.toHaveBeenCalled()
+      expect(runCloseInnermostSession).not.toHaveBeenCalled()
+    })
+  })
+
+  it('an armed gesture refuses exit and exit_all while a session and a fallback entry are open', async () => {
+    await withNestedInstance(async () => {
+      await renderAndLoad()
+      const { runCloseInnermostSession, setArmed } = sessionViewport()
+      await applyDirectives(enterMirrored)
+      setArmed(true)
+      mockScene.set_ui_context.mockClear()
+      await applyDirectives('[{"kind":"exit_context"}]')
+      await applyDirectives('[{"kind":"exit_all_contexts"}]')
+      expect(runCloseInnermostSession).not.toHaveBeenCalled()
+      // The fallback entry is still there.
+      expect(mockScene.set_ui_context).not.toHaveBeenCalledWith('[]')
+      // Once the gesture ends the same call works.
+      setArmed(false)
+      await applyDirectives('[{"kind":"exit_all_contexts"}]')
+      expect(runCloseInnermostSession).toHaveBeenCalledTimes(1)
+    })
+  })
+
+  it('the person\'s own context changes reach the Scene mirror too (undo reconcile, double-click)', async () => {
+    await renderAndLoad()
+    sessionViewport()
+    act(() => {
+      latestViewportProps().onEnterContext?.({ kind: 'instance', id: 60n })
+    })
+    expect(mockScene.set_ui_context).toHaveBeenLastCalledWith('[{"kind":"instance","id":"60"}]')
+    act(() => {
+      ;(latestViewportProps() as { onExitAllContexts?: () => void }).onExitAllContexts?.()
+    })
+    expect(mockScene.set_ui_context).toHaveBeenLastCalledWith('[]')
+  })
+
+  it('a path keeps a fallback instance beneath the leaf', async () => {
+    await renderAndLoad()
+    sessionViewport()
+    await applyDirectives(
+      '[{"kind":"enter_context","path":[{"kind":"instance","id":"7"}],"leaf":{"kind":"object","id":"3"}}]',
+    )
+    expect(mockScene.set_ui_context).toHaveBeenLastCalledWith(
+      '[{"kind":"instance","id":"7"},{"kind":"object","id":"3"}]',
+    )
+  })
+
+  it('a path enters each instance outermost first, then the leaf', async () => {
+    await renderAndLoad()
+    const { runOpenExplodeSessionOrFallback } = sessionViewport()
+    await applyDirectives(
+      '[{"kind":"enter_context","path":[{"kind":"instance","id":"7"}],"leaf":{"kind":"object","id":"3"}}]',
+    )
+    expect(runOpenExplodeSessionOrFallback).toHaveBeenCalledWith(7n, { kind: 'instance', id: 7n })
+    expect(window.__hew_test!.getSelection()).toEqual([{ kind: 'object', id: '3' }])
   })
 })
