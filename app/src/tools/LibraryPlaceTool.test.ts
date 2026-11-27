@@ -27,5 +27,25 @@ describe('parseInsertResult', () => {
     expect(result.rootKinds).toEqual([])
     expect(result.rootIds).toEqual([])
     expect(result.definitionsReused).toBe(0)
+    expect(result.drawn).toEqual([])
+    expect(result.drawingUnchanged).toBe(false)
+  })
+
+  it("parses a paste's drawn sketches (v1.5 decisions D3)", () => {
+    const result = parseInsertResult({
+      rootKinds: [],
+      rootIds: [],
+      drawn: [
+        { plane: [0, 0, 0, 0, 0, 1], detached: null, anchors: [[[0, 0, 0], [1, 0, 0]]] },
+        { plane: [0, 0, 1, 0, 0, 1], detached: '4294967298', anchors: [] },
+        { plane: [0, 0], detached: null, anchors: [] },
+      ],
+      drawingUnchanged: true,
+    })
+    expect(result.drawn).toEqual([
+      { plane: [0, 0, 0, 0, 0, 1], detached: null, anchors: [[[0, 0, 0], [1, 0, 0]]] },
+      { plane: [0, 0, 1, 0, 0, 1], detached: 4294967298n, anchors: [] },
+    ])
+    expect(result.drawingUnchanged).toBe(true)
   })
 })

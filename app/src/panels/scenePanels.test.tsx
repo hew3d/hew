@@ -103,6 +103,7 @@ function makeScene(overrides: Record<string, any> = {}): WasmScene {
     node_tags: (_kind: number, _id: bigint) => [] as string[],
     object_materials: (_id: bigint) => [] as bigint[],
     instance_expanded_members: (_id: bigint) => [] as bigint[],
+    instance_expanded_inherited: (_id: bigint) => [] as bigint[],
     tag_meta_paths: () => [] as string[],
     tag_meta_hidden: () => new Uint8Array(),
     set_tag_hidden: vi.fn(),
@@ -117,6 +118,7 @@ function makeScene(overrides: Record<string, any> = {}): WasmScene {
     add_texture_material: vi.fn(),
     set_object_material: vi.fn(),
     set_material_alpha: vi.fn(),
+    set_material_pbr: vi.fn(),
     // v1.1 assets lane: material/definition rename+delete, purge unused.
     set_material_name: vi.fn(),
     delete_material: vi.fn(),
@@ -131,6 +133,7 @@ function makeScene(overrides: Record<string, any> = {}): WasmScene {
     group_members: (_id: bigint) => [] as { kind: string; id: bigint }[],
     node_parent: (_kind: number, _id: bigint) => undefined as bigint | undefined,
     instance_def: (_id: bigint) => undefined as bigint | undefined,
+    is_linked: () => false,
     component_name: (_id: bigint) => undefined as string | undefined,
     instances_of: (_id: bigint) => new BigUint64Array(),
     set_component_name: vi.fn(),
@@ -353,6 +356,7 @@ describe('ObjectInfoPanel', () => {
           instance_ids: () => new BigUint64Array([4n]),
           instance_name: () => undefined,
           instance_def: () => 9n,
+          is_linked: () => false,
           component_name: () => 'Door',
           node_tags: () => [],
         })}
@@ -374,6 +378,7 @@ describe('ObjectInfoPanel', () => {
           instance_ids: () => new BigUint64Array([4n]),
           instance_name: () => 'Front Door',
           instance_def: () => 9n,
+          is_linked: () => false,
           component_name: () => 'Door',
           instances_of: () => new BigUint64Array([4n]),
           node_tags: () => [],
@@ -397,6 +402,7 @@ describe('ObjectInfoPanel', () => {
       instance_ids: () => new BigUint64Array([4n]),
       instance_name: () => undefined,
       instance_def: () => 9n,
+      is_linked: () => false,
       component_name: () => 'Door',
       instances_of: () => new BigUint64Array([4n]),
       node_tags: () => [],
@@ -428,6 +434,7 @@ describe('ObjectInfoPanel', () => {
           instance_ids: () => new BigUint64Array([4n, 5n, 6n]),
           instance_name: () => undefined,
           instance_def: () => 9n,
+          is_linked: () => false,
           component_name: () => 'Door',
           instances_of: () => new BigUint64Array([4n, 5n, 6n]),
           node_tags: () => [],
@@ -457,6 +464,7 @@ describe('ObjectInfoPanel', () => {
           instance_ids: () => new BigUint64Array([4n]),
           instance_name: () => undefined,
           instance_def: () => 9n,
+          is_linked: () => false,
           component_name: () => 'Door',
           instances_of: () => new BigUint64Array([4n]),
           node_tags: () => [],
@@ -528,6 +536,7 @@ describe('ObjectInfoPanel', () => {
       ],
       instance_name: () => undefined,
       instance_def: (id: bigint) => (id === 4n ? 9n : 10n),
+      is_linked: () => false,
       component_name: () => undefined,
       instances_of: (id: bigint) => new BigUint64Array([id === 9n ? 4n : 5n]),
       node_tags: () => [],
@@ -576,6 +585,7 @@ describe('ObjectInfoPanel', () => {
       ],
       instance_name: () => undefined,
       instance_def: () => 9n,
+      is_linked: () => false,
       component_name: () => undefined,
       instances_of: () => new BigUint64Array([4n, 5n]),
       node_tags: () => [],
@@ -696,7 +706,7 @@ describe('ObjectInfoPanel', () => {
     expect(screen.getByText("Open edges don't lie flat")).toBeInTheDocument()
     fourth.unmount()
     const fifth = renderOpen(healthJson({ kind: 'non_manifold' }, { branching_vertices: 2 }))
-    expect(screen.getByText('Open edges branch')).toBeInTheDocument()
+    expect(screen.getByText('Openings tangled together')).toBeInTheDocument()
     fifth.unmount()
     renderOpen(
       healthJson({ kind: 'holes', planar: 1, warped: 0 }, { rims: [{ role: 'outer', planar: true, closed: true, cappable: false, sheet_edge: true, perimeter: 4, extent: 1, edges: 4 }] }),
@@ -724,6 +734,39 @@ describe('ObjectInfoPanel', () => {
       expect(text).toMatch(/Geometry/)
       unmount()
     }
+  })
+
+  it('points an object Mend can act on at Model Health, and only then', () => {
+    const census = (n: number) =>
+      JSON.stringify({ weld: 0.000002, weld_vertices: n, weld_max_gap: 0, folds: 0, branching_vertices: 0, islands: 1, hole_rims: 0, hole_rims_planar: 0, hole_rims_warped: 0, outer_rims: 0, fill_rims: [], filled_rims: 0, fill_curved: 0, pieces: 0 })
+    const render1 = (n: number | null) =>
+      render(
+        <ObjectInfoPanel
+          scene={makeScene({
+            object_name: () => undefined,
+            node_tags: () => [],
+            object_solid: () => false,
+            health_report_json: () => healthJson({ kind: 'non_manifold' }, { branching_vertices: 2 }),
+            ...(n === null ? {} : { mend_census_json: () => census(n) }),
+          })}
+          docRev={0}
+          selectedIds={[{ kind: 'object', id: 1n }]}
+          onNameChanged={vi.fn()}
+          onGeometryChanged={vi.fn()}
+          onTagsChanged={vi.fn()}
+          onSelectMany={vi.fn()}
+        />,
+      )
+    const first = render1(12)
+    expect(screen.getByText('Openings tangled together')).toBeInTheDocument()
+    expect(screen.getByText('Mend it from Model Health')).toBeInTheDocument()
+    expect(readableText(first.container)).not.toMatch(BANNED_RE)
+    first.unmount()
+    const second = render1(0)
+    expect(screen.queryByText('Mend it from Model Health')).not.toBeInTheDocument()
+    second.unmount()
+    render1(null)
+    expect(screen.queryByText('Mend it from Model Health')).not.toBeInTheDocument()
   })
 
   it('a kept panel reads as kept', () => {
@@ -1591,7 +1634,7 @@ describe('MaterialPalette', () => {
       b: () => 0,
       a: () => 255,
       name: () => 'Red Paint',
-      has_texture: () => false,
+      has_texture: () => false, has_pbr: () => false, metallic: () => 0, roughness: () => 1,
     }
     const scene = makeScene({
       material_ids: () => new BigUint64Array([7n]),
@@ -1608,7 +1651,7 @@ describe('MaterialPalette', () => {
       g: () => 128,
       b: () => 255,
       name: () => 'Sky Blue',
-      has_texture: () => false,
+      has_texture: () => false, has_pbr: () => false, metallic: () => 0, roughness: () => 1,
     }
     const scene = makeScene({
       material_ids: () => new BigUint64Array([3n]),
@@ -1627,9 +1670,9 @@ describe('MaterialPalette', () => {
   })
 
   it('filter narrows the materials list by case-insensitive substring match on name, without hiding the Default row', () => {
-    const infos: Record<string, { r: () => number; g: () => number; b: () => number; a: () => number; name: () => string; has_texture: () => boolean }> = {
-      '1': { r: () => 255, g: () => 0, b: () => 0, a: () => 255, name: () => 'Red Paint', has_texture: () => false },
-      '2': { r: () => 0, g: () => 128, b: () => 255, a: () => 255, name: () => 'Sky Blue', has_texture: () => false },
+    const infos: Record<string, { r: () => number; g: () => number; b: () => number; a: () => number; name: () => string; has_texture: () => boolean; has_pbr: () => boolean; metallic: () => number; roughness: () => number }> = {
+      '1': { r: () => 255, g: () => 0, b: () => 0, a: () => 255, name: () => 'Red Paint', has_texture: () => false, has_pbr: () => false, metallic: () => 0, roughness: () => 1 },
+      '2': { r: () => 0, g: () => 128, b: () => 255, a: () => 255, name: () => 'Sky Blue', has_texture: () => false, has_pbr: () => false, metallic: () => 0, roughness: () => 1 },
     }
     const scene = makeScene({
       material_ids: () => new BigUint64Array([1n, 2n]),
@@ -1647,7 +1690,7 @@ describe('MaterialPalette', () => {
   })
 
   it('lists materials by name, case-insensitive and numeric ("paint 2" before "Paint 10")', () => {
-    const named = (name: string) => ({ r: () => 0, g: () => 0, b: () => 0, a: () => 255, name: () => name, has_texture: () => false })
+    const named = (name: string) => ({ r: () => 0, g: () => 0, b: () => 0, a: () => 255, name: () => name, has_texture: () => false, has_pbr: () => false, metallic: () => 0, roughness: () => 1 })
     const infos: Record<string, ReturnType<typeof named>> = {
       '1': named('Paint 10'), '2': named('zinc'), '3': named('paint 2'), '4': named('Brick'),
     }
@@ -1664,7 +1707,7 @@ describe('MaterialPalette', () => {
   })
 
   it('shows "No materials match" when the filter matches nothing, and the × clears it back to the full list', () => {
-    const mockInfo = { r: () => 255, g: () => 0, b: () => 0, a: () => 255, name: () => 'Red Paint', has_texture: () => false }
+    const mockInfo = { r: () => 255, g: () => 0, b: () => 0, a: () => 255, name: () => 'Red Paint', has_texture: () => false, has_pbr: () => false, metallic: () => 0, roughness: () => 1 }
     const scene = makeScene({
       material_ids: () => new BigUint64Array([1n]),
       material_info: () => mockInfo,
@@ -1680,7 +1723,7 @@ describe('MaterialPalette', () => {
   })
 
   it('filtering out the selected material does not clear the selection — the opacity slider keeps showing its alpha', () => {
-    const mockInfo = { r: () => 255, g: () => 0, b: () => 0, a: () => 128, name: () => 'Glass', has_texture: () => false }
+    const mockInfo = { r: () => 255, g: () => 0, b: () => 0, a: () => 128, name: () => 'Glass', has_texture: () => false, has_pbr: () => false, metallic: () => 0, roughness: () => 1 }
     const scene = makeScene({
       material_ids: () => new BigUint64Array([7n]),
       material_info: () => mockInfo,
@@ -1688,14 +1731,14 @@ describe('MaterialPalette', () => {
     render(<MaterialPalette {...baseProps} scene={scene} currentMaterialId={7n} />)
     fireEvent.change(screen.getByLabelText('Filter materials'), { target: { value: 'zzz' } })
     expect(screen.queryByTitle('Glass')).not.toBeInTheDocument()
-    const slider = screen.getByRole('slider') as HTMLInputElement
+    const slider = screen.getByRole('slider', { name: /opacity/i }) as HTMLInputElement
     expect(slider).not.toBeDisabled()
     expect(slider.value).toBe('128')
   })
 
   it('scrolls the newly-selected swatch into view when currentMaterialId changes — the Alt-eyedropper\'s sample→select loop on a long list', () => {
     const mockInfoFor = (name: string) => ({
-      r: () => 0, g: () => 0, b: () => 0, a: () => 255, name: () => name, has_texture: () => false,
+      r: () => 0, g: () => 0, b: () => 0, a: () => 255, name: () => name, has_texture: () => false, has_pbr: () => false, metallic: () => 0, roughness: () => 1,
     })
     const scene = makeScene({
       material_ids: () => new BigUint64Array([1n, 2n, 3n]),
@@ -1712,7 +1755,7 @@ describe('MaterialPalette', () => {
 
   it('an eyedropper sample landing on a filtered-out swatch clears the filter so the swatch is visible and still gets scrolled to', () => {
     const mockInfoFor = (name: string) => ({
-      r: () => 0, g: () => 0, b: () => 0, a: () => 255, name: () => name, has_texture: () => false,
+      r: () => 0, g: () => 0, b: () => 0, a: () => 255, name: () => name, has_texture: () => false, has_pbr: () => false, metallic: () => 0, roughness: () => 1,
     })
     const scene = makeScene({
       material_ids: () => new BigUint64Array([1n, 2n, 3n]),
@@ -1738,7 +1781,7 @@ describe('MaterialPalette', () => {
   it('does not re-trigger the scroll on a re-render where the selection did not actually change', () => {
     const scene = makeScene({
       material_ids: () => new BigUint64Array([1n]),
-      material_info: () => ({ r: () => 0, g: () => 0, b: () => 0, a: () => 255, name: () => 'Mat', has_texture: () => false }),
+      material_info: () => ({ r: () => 0, g: () => 0, b: () => 0, a: () => 255, name: () => 'Mat', has_texture: () => false, has_pbr: () => false, metallic: () => 0, roughness: () => 1 }),
     })
     const { rerender } = render(<MaterialPalette {...baseProps} scene={scene} currentMaterialId={1n} docRev={0} />)
     ;(Element.prototype.scrollIntoView as ReturnType<typeof vi.fn>).mockClear()
@@ -1753,7 +1796,7 @@ describe('MaterialPalette', () => {
   it('a revealNonce bump re-scrolls to an already-current material, and an unchanged nonce does not', () => {
     const scene = makeScene({
       material_ids: () => new BigUint64Array([1n, 2n]),
-      material_info: () => ({ r: () => 0, g: () => 0, b: () => 0, a: () => 255, name: () => 'Mat', has_texture: () => false }),
+      material_info: () => ({ r: () => 0, g: () => 0, b: () => 0, a: () => 255, name: () => 'Mat', has_texture: () => false, has_pbr: () => false, metallic: () => 0, roughness: () => 1 }),
     })
     const { rerender } = render(<MaterialPalette {...baseProps} scene={scene} currentMaterialId={2n} revealNonce={1} />)
     const scroll = Element.prototype.scrollIntoView as ReturnType<typeof vi.fn>
@@ -1768,7 +1811,7 @@ describe('MaterialPalette', () => {
 
   it('opacity slider is disabled when the Default swatch is selected', () => {
     render(<MaterialPalette {...baseProps} scene={makeScene()} />)
-    expect(screen.getByRole('slider')).toBeDisabled()
+    expect(screen.getByRole('slider', { name: /opacity/i })).toBeDisabled()
   })
 
   it('opacity slider reflects the selected material\'s current alpha', () => {
@@ -1778,14 +1821,14 @@ describe('MaterialPalette', () => {
       b: () => 0,
       a: () => 128,
       name: () => 'Glass',
-      has_texture: () => false,
+      has_texture: () => false, has_pbr: () => false, metallic: () => 0, roughness: () => 1,
     }
     const scene = makeScene({
       material_ids: () => new BigUint64Array([7n]),
       material_info: () => mockInfo,
     })
     render(<MaterialPalette {...baseProps} scene={scene} currentMaterialId={7n} />)
-    const slider = screen.getByRole('slider') as HTMLInputElement
+    const slider = screen.getByRole('slider', { name: /opacity/i }) as HTMLInputElement
     expect(slider).not.toBeDisabled()
     expect(slider.value).toBe('128')
   })
@@ -1797,16 +1840,48 @@ describe('MaterialPalette', () => {
       b: () => 0,
       a: () => 255,
       name: () => 'Glass',
-      has_texture: () => false,
+      has_texture: () => false, has_pbr: () => false, metallic: () => 0, roughness: () => 1,
     }
     const scene = makeScene({
       material_ids: () => new BigUint64Array([7n]),
       material_info: () => mockInfo,
     })
     render(<MaterialPalette {...baseProps} scene={scene} currentMaterialId={7n} />)
-    fireEvent.change(screen.getByRole('slider'), { target: { value: '64' } })
+    fireEvent.change(screen.getByRole('slider', { name: /opacity/i }), { target: { value: '64' } })
     expect(screen.getByText('25%')).toBeInTheDocument()
     expect((scene as any).set_material_alpha).not.toHaveBeenCalled()
+  })
+
+  it('releasing the metallic or roughness slider commits both factors once through set_material_pbr', () => {
+    const mockInfo = {
+      r: () => 200,
+      g: () => 180,
+      b: () => 60,
+      a: () => 255,
+      name: () => 'Brass',
+      has_texture: () => false, has_pbr: () => true, metallic: () => 0.8, roughness: () => 0.4,
+    }
+    const scene = makeScene({
+      material_ids: () => new BigUint64Array([7n]),
+      material_info: () => mockInfo,
+    })
+    const onAlphaCommitted = vi.fn()
+    render(<MaterialPalette {...baseProps} scene={scene} currentMaterialId={7n} onAlphaCommitted={onAlphaCommitted} />)
+    const metallic = screen.getByRole('slider', { name: /metallic/i }) as HTMLInputElement
+    const roughness = screen.getByRole('slider', { name: /roughness/i }) as HTMLInputElement
+    expect([metallic.value, roughness.value]).toEqual(['80', '40'])
+    fireEvent.change(roughness, { target: { value: '10' } })
+    expect((scene as any).set_material_pbr).not.toHaveBeenCalled()
+    fireEvent.blur(roughness)
+    expect((scene as any).set_material_pbr).toHaveBeenCalledTimes(1)
+    expect((scene as any).set_material_pbr).toHaveBeenCalledWith(7n, 0.8, 0.1)
+    expect(onAlphaCommitted).toHaveBeenCalledTimes(1)
+  })
+
+  it('the metallic and roughness sliders are disabled with no material selected', () => {
+    render(<MaterialPalette {...baseProps} scene={makeScene()} />)
+    expect(screen.getByRole('slider', { name: /metallic/i })).toBeDisabled()
+    expect(screen.getByRole('slider', { name: /roughness/i })).toBeDisabled()
   })
 
   it('releasing the opacity slider commits set_material_alpha and onAlphaCommitted once, and does not double-fire onDocumentChanged', () => {
@@ -1816,7 +1891,7 @@ describe('MaterialPalette', () => {
       b: () => 0,
       a: () => 255,
       name: () => 'Glass',
-      has_texture: () => false,
+      has_texture: () => false, has_pbr: () => false, metallic: () => 0, roughness: () => 1,
     }
     const scene = makeScene({
       material_ids: () => new BigUint64Array([7n]),
@@ -1833,7 +1908,7 @@ describe('MaterialPalette', () => {
         onAlphaCommitted={onAlphaCommitted}
       />,
     )
-    const slider = screen.getByRole('slider')
+    const slider = screen.getByRole('slider', { name: /opacity/i })
     fireEvent.change(slider, { target: { value: '64' } })
     fireEvent.blur(slider)
     expect((scene as any).set_material_alpha).toHaveBeenCalledTimes(1)
@@ -1855,7 +1930,7 @@ describe('MaterialPalette', () => {
       b: () => 0,
       a: () => 254,
       name: () => 'Glass',
-      has_texture: () => false,
+      has_texture: () => false, has_pbr: () => false, metallic: () => 0.5, roughness: () => 0.5,
     }
     const scene = makeScene({
       material_ids: () => new BigUint64Array([7n]),
@@ -1874,7 +1949,7 @@ describe('MaterialPalette', () => {
       b: () => 0,
       a: () => 255,
       name: () => 'Glass',
-      has_texture: () => false,
+      has_texture: () => false, has_pbr: () => false, metallic: () => 0, roughness: () => 1,
     }
     const scene = makeScene({
       material_ids: () => new BigUint64Array([7n]),
@@ -1883,7 +1958,7 @@ describe('MaterialPalette', () => {
     const { unmount } = render(
       <MaterialPalette {...baseProps} scene={scene} currentMaterialId={7n} />,
     )
-    fireEvent.change(screen.getByRole('slider'), { target: { value: '64' } })
+    fireEvent.change(screen.getByRole('slider', { name: /opacity/i }), { target: { value: '64' } })
     expect((scene as any).set_material_alpha).not.toHaveBeenCalled()
     unmount()
     expect((scene as any).set_material_alpha).toHaveBeenCalledWith(7n, 64)
@@ -1901,7 +1976,7 @@ describe('MaterialPalette', () => {
   })
 
   it('clicking the × to clear the filter returns focus to the filter input, not <body>', () => {
-    const mockInfo = { r: () => 255, g: () => 0, b: () => 0, a: () => 255, name: () => 'Red Paint', has_texture: () => false }
+    const mockInfo = { r: () => 255, g: () => 0, b: () => 0, a: () => 255, name: () => 'Red Paint', has_texture: () => false, has_pbr: () => false, metallic: () => 0, roughness: () => 1 }
     const scene = makeScene({
       material_ids: () => new BigUint64Array([1n]),
       material_info: () => mockInfo,
@@ -2156,6 +2231,7 @@ describe('DocumentTree', () => {
       },
       instance_name: () => undefined,
       instance_def: () => 9n,
+      is_linked: () => false,
       component_name: () => 'Door',
     })
     render(
@@ -2288,7 +2364,7 @@ describe('DocumentTree', () => {
     const row = screen.getByText('Sketch 1').closest('div')
     // The primary-selection tint is applied via inline style — assert it isn't
     // the default transparent background a non-selected row would get.
-    expect(row).toHaveStyle({ background: 'var(--accent-tint-18)' })
+    expect((row as HTMLElement).style.background).toBe('var(--accent-tint-18)')
   })
 
   it('renders distinct type icons: solid object, leaky object, group, instance', () => {
@@ -3191,5 +3267,90 @@ describe('TagsPanel', () => {
     // The flash clearing keeps the selection.
     rerender(<TagsPanel {...baseTagProps} scene={scene} revealTag={null} />)
     expect(activeOf('Roof')).toBe('true')
+  })
+})
+
+describe('ObjectInfoPanel — linked copies', () => {
+  const linkedScene = (overrides: Record<string, unknown> = {}) =>
+    makeScene({
+      instance_ids: () => new BigUint64Array([4n, 5n, 6n]),
+      instance_name: () => undefined,
+      instance_def: () => 9n,
+      is_linked: () => true,
+      component_name: () => 'Leg',
+      instances_of: () => new BigUint64Array([4n, 5n, 6n]),
+      component_member_objects: () => new BigUint64Array([30n]),
+      owner_definition: () => undefined,
+      node_tags: () => [],
+      ...overrides,
+    })
+  const panel = (scene: WasmScene, extra: Record<string, unknown> = {}) => (
+    <ObjectInfoPanel
+      scene={scene}
+      docRev={0}
+      selectedIds={[{ kind: 'instance', id: 4n }]}
+      onNameChanged={vi.fn()}
+      onGeometryChanged={vi.fn()}
+      onTagsChanged={vi.fn()}
+      onSelectMany={vi.fn()}
+      {...extra}
+    />
+  )
+
+  it('a_linked_placement_reads_as_an_object_with_a_count_and_no_unlink_or_make_component', () => {
+    render(panel(linkedScene()))
+    // The type is what a plain Object shows, with "(3 linked)" beside it.
+    expect(screen.getByText('Object')).toBeInTheDocument()
+    expect(screen.getByTestId('object-info-linked-count').textContent).toBe('(3 linked)')
+    expect(screen.queryByRole('button', { name: 'Unlink' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Make component' })).toBeNull()
+    expect(screen.queryByTestId('object-info-copies')).toBeNull()
+    expect(screen.queryByText(/linked copy/i)).toBeNull()
+    expect(screen.queryByText(/instance/i)).toBeNull()
+    expect(screen.queryByText(/definition/i)).toBeNull()
+  })
+
+  it('one_name_field_names_this_copy_and_shows_the_shared_name_when_empty', () => {
+    const scene = linkedScene({ instance_name: () => 'Front left' })
+    render(panel(scene))
+    expect(screen.queryByLabelText('Name (all copies)')).toBeNull()
+    const mine = screen.getByDisplayValue('Front left') as HTMLInputElement
+    expect(mine.placeholder).toBe('Leg')
+    fireEvent.change(mine, { target: { value: 'Front right' } })
+    fireEvent.blur(mine)
+    expect((scene as unknown as { set_node_name: ReturnType<typeof vi.fn> }).set_node_name).toHaveBeenCalledWith(2, 4n, 'Front right')
+  })
+
+  it('an_unnamed_linked_object_shows_the_plain_object_label_as_its_name', () => {
+    const bare = linkedScene({ component_name: () => undefined, object_name: () => undefined, top_level_nodes: () => [{ kind: 'instance', id: 4n }] })
+    render(panel(bare))
+    expect((screen.getByPlaceholderText('Object 1') as HTMLInputElement).value).toBe('')
+  })
+
+  it('the_count_selects_every_placement', () => {
+    const onSelectMany = vi.fn()
+    render(panel(linkedScene(), { onSelectMany }))
+    fireEvent.click(screen.getByTestId('object-info-linked-count'))
+    expect(onSelectMany).toHaveBeenCalledWith([
+      { kind: 'instance', id: 4n },
+      { kind: 'instance', id: 5n },
+      { kind: 'instance', id: 6n },
+    ])
+  })
+
+  it('a set of one shows no count and no linked wording', () => {
+    render(panel(linkedScene({ instances_of: () => new BigUint64Array([4n]) })))
+    expect(screen.queryByTestId('object-info-linked-count')).toBeNull()
+    expect(screen.queryByText(/linked/i)).toBeNull()
+    expect(screen.getByText('Object')).toBeInTheDocument()
+  })
+
+  it('an_ordinary_component_keeps_definition_name_and_instance_count', () => {
+    render(panel(linkedScene({ is_linked: () => false, component_name: () => 'Door' })))
+    expect(screen.getByLabelText('Definition Name')).toBeInTheDocument()
+    expect(screen.getByLabelText('Instance Name')).toBeInTheDocument()
+    expect(screen.getByText('(3 instances)')).toBeInTheDocument()
+    expect(screen.queryByTestId('object-info-copies')).toBeNull()
+    expect(screen.getByText('Component')).toBeInTheDocument()
   })
 })

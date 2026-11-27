@@ -79,8 +79,14 @@ export class ErrorBoundary extends Component<Props, State> {
     window.addEventListener(KERNEL_PANIC_EVENT, this.handleKernelPanic)
   }
 
+  /** The pending reset of the "copied" mark, cleared on unmount so it
+   *  never fires on a boundary that is gone. */
+  private copiedTimer: number | null = null
+
   componentWillUnmount() {
     window.removeEventListener(KERNEL_PANIC_EVENT, this.handleKernelPanic)
+    if (this.copiedTimer !== null) window.clearTimeout(this.copiedTimer)
+    this.copiedTimer = null
   }
 
   componentDidCatch(error: Error, info: ErrorInfo) {
@@ -151,7 +157,11 @@ export class ErrorBoundary extends Component<Props, State> {
     if (error === null) return
     void navigator.clipboard?.writeText(formatCrashReport(error, componentStack, recentErrors))
     this.setState({ copied: true })
-    window.setTimeout(() => this.setState({ copied: false }), 1200)
+    if (this.copiedTimer !== null) window.clearTimeout(this.copiedTimer)
+    this.copiedTimer = window.setTimeout(() => {
+      this.copiedTimer = null
+      this.setState({ copied: false })
+    }, 1200)
   }
 
   /** Builds the `ReportBugDialog` crash-mode input: the in-memory panic

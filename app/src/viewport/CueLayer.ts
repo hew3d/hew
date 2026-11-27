@@ -6,16 +6,22 @@
  *       endpoint   → green   #00cc44
  *       midpoint   → cyan    #00cccc
  *       on-edge    → red     #cc2200
+ *       on-intersection-line → orange-red #e05a00 (the line where two
+ *                    objects' faces meet — a virtual edge, no stored geometry)
  *       on-face    → blue    #0055cc
  *       on-guide   → purple  #9933cc  (construction guide)
  *       on-axis    → axis color (X=red, Y=green, Z=blue; unknown=magenta)
- *       from-point → axis color, same as on-axis (LineTool's from-point
- *                    closing inference — a tool-local kind, never emitted
- *                    by SnapService itself)
+ *       from-point → axis color, same as on-axis (the draw tools'
+ *                    reference-line inference, referenceLines.ts — a
+ *                    tool-local kind, never emitted by SnapService itself)
  *       ground     → gray    #888888  (fallback — no kernel snap)
  *       plane      → gray    #888888  (constraint-plane fallback, same role)
  *       other      → white   #ffffff
  *   - Dashed guide line through the snap point along direction() when present.
+ *   - The virtual edge itself, drawn solid between its two ends, when the
+ *     snap lies on the line where two objects' faces meet (`meetingLine`):
+ *     nothing in the model draws that line, so the cue is the only thing
+ *     that shows what the cursor is sliding along.
  *
  * The group is added to the scene once; call update() on every pointer move
  * to rebuild its children; call updateMarkerScale(camera) every render frame
@@ -24,7 +30,8 @@
 
 import * as THREE from 'three'
 import type { Snap } from '../tools/types'
-import { axisColorsForTheme } from './axisColors'
+import { axisColorForDirection, axisColorsForTheme } from './axisColors'
+import { WORLD_DRAWING_AXES, type DrawingAxes } from '../tools/drawingAxes'
 import { getResolvedTheme } from '../settings/theme'
 
 const SNAP_COLORS: Record<string, number> = {
@@ -35,11 +42,21 @@ const SNAP_COLORS: Record<string, number> = {
   midpoint: 0x00cccc,
   intersection: 0xffaa00,
   'on-edge': 0xcc2200,
+  'on-intersection-line': 0xe05a00,
   'on-face': 0x0055cc,
   'on-guide': 0x9933cc,
   ground: 0x888888,
   plane: 0x888888,
 }
+
+/** Neutral color of a reference line that runs along no drawing axis. */
+const NEUTRAL_LINE_COLOR = 0x888888
+
+/** Screen size (px) of the dot at a reference line's foot. */
+const FOOT_DOT_PX = 7
+
+/** |cos| above which a reference line counts as running along a drawing axis. */
+const AXIS_LINE_TOL_DOT = Math.cos((1 * Math.PI) / 180)
 
 /** Half-length of the dashed guide line (meters) */
 const GUIDE_HALF_LENGTH = 5
@@ -117,9 +134,39 @@ function buildTieLine(from: THREE.Vector3, to: THREE.Vector3, color: number): TH
   return ls
 }
 
+/** The dot marking a reference line's foot on the drawing plane. */
+function buildFootDot(at: THREE.Vector3, color: number): THREE.Points {
+  const geo = new THREE.BufferGeometry()
+  geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array([at.x, at.y, at.z]), 3))
+  const mat = new THREE.PointsMaterial({ color, size: FOOT_DOT_PX, sizeAttenuation: false, depthTest: false, transparent: true, opacity: 0.9 })
+  const pts = new THREE.Points(geo, mat)
+  pts.renderOrder = 999
+  return pts
+}
+
 /** Nominal dash length of the projection tie (metres, before the 4..40 dash
  *  clamp) — short enough to read as dotted at drawing scale. */
 const TIE_DASH_LENGTH_M = 0.02
+
+/** Below this length (metres) a meeting line has nothing to draw: the
+ *  kernel's own point-merge distance, the shortest stretch it offers. */
+const MEETING_LINE_MIN_LENGTH_M = 1e-9
+
+/** The virtual edge where two objects' faces meet, drawn solid between its
+ *  two ends in the snap's own color. Nothing in the model draws this line
+ *  — objects never merge, so it is no stored edge — and without it the
+ *  cursor would appear to slide along nothing. Drawn over geometry like
+ *  the tie, a little fainter than a real edge's highlight. `null` for a
+ *  degenerate line, which draws nothing. */
+function buildMeetingLine(a: THREE.Vector3, b: THREE.Vector3, color: number): THREE.LineSegments | null {
+  if (a.distanceTo(b) < MEETING_LINE_MIN_LENGTH_M) return null
+  const geo = new THREE.BufferGeometry()
+  geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array([a.x, a.y, a.z, b.x, b.y, b.z]), 3))
+  const mat = new THREE.LineBasicMaterial({ color, depthTest: false, transparent: true, opacity: 0.85 })
+  const ls = new THREE.LineSegments(geo, mat)
+  ls.renderOrder = 998
+  return ls
+}
 
 export class CueLayer {
   readonly group: THREE.Group
@@ -144,10 +191,10 @@ export class CueLayer {
    * point but not the line (Tape Measure under `readOnly`) get exactly
    * that by passing `true` here while leaving the snap itself unmodified.
    */
-  update(snap: Snap | null, suppressAxisLine = false): void {
+  update(snap: Snap | null, suppressAxisLine = false, frame: DrawingAxes = WORLD_DRAWING_AXES): void {
     // Dispose old geometry
     this.group.traverse((child) => {
-      if (child instanceof THREE.LineSegments) {
+      if (child instanceof THREE.LineSegments || child instanceof THREE.Points) {
         child.geometry.dispose()
         if (child.material instanceof THREE.Material) {
           child.material.dispose()
@@ -179,8 +226,33 @@ export class CueLayer {
     // against any geometry, unlike the thin 1px three.js cross this used to
     // draw. CueLayer keeps only the in-scene dashed GUIDE line (which the DOM
     // layer can't do — it needs depth + world extent along the axis/edge).
-    if (snap.direction !== undefined && !(suppressAxisLine && snap.kind === 'on-axis')) {
+    if (snap.from !== undefined) {
+      // A reference line (referenceLines.ts): dashed from its foot on the
+      // drawing plane to the snap point — in the axis color when it runs along
+      // a drawing axis, neutral otherwise — with a dot at the foot and, when
+      // the reference point is off the plane, a thin tie up to it. A crossing
+      // draws its second line the same way.
+      const colors = axisColorsForTheme(getResolvedTheme())
+      const lineColor = (dir: [number, number, number] | undefined): number => {
+        const match = dir === undefined ? null : axisColorForDirection(dir, AXIS_LINE_TOL_DOT, colors, frame)
+        return match === null ? NEUTRAL_LINE_COLOR : match.color
+      }
+      const addLine = (from: [number, number, number], source: [number, number, number] | undefined, dir: [number, number, number] | undefined): void => {
+        const foot = new THREE.Vector3(...from)
+        const c = lineColor(dir)
+        this.group.add(buildTieLine(foot, pos, c))
+        this.group.add(buildFootDot(foot, c))
+        if (source !== undefined) this.group.add(buildTieLine(new THREE.Vector3(...source), foot, NEUTRAL_LINE_COLOR))
+      }
+      addLine(snap.from, snap.fromSource, snap.direction)
+      if (snap.fromAlso !== undefined) addLine(snap.fromAlso.from, snap.fromAlso.fromSource, snap.fromAlso.direction)
+    } else if (snap.direction !== undefined && !(suppressAxisLine && snap.kind === 'on-axis')) {
       this.group.add(buildGuideLine(pos, snap.direction, color))
+    }
+    // A plain projected snap (a named point dropped onto the drawing plane):
+    // the thin tie from where the point is to where the drawing lands.
+    if (snap.from === undefined && snap.fromSource !== undefined) {
+      this.group.add(buildTieLine(new THREE.Vector3(...snap.fromSource), pos, snapColor(snap.kind)))
     }
     // A locked snap projected from a real point: tie the two together in
     // the snap's own kind colour (the axis colour above belongs to the
@@ -188,6 +260,15 @@ export class CueLayer {
     if (snap.projectedFrom !== undefined) {
       const from = new THREE.Vector3(...snap.projectedFrom)
       this.group.add(buildTieLine(from, pos, snapColor(snap.kind)))
+    }
+    // The line where two objects' faces meet: show the whole stretch the
+    // cursor is on, in the kind's color (orange-red for the line, cyan for
+    // its midpoint) — a real edge is already drawn by the model, this one
+    // is not.
+    if (snap.meetingLine !== undefined) {
+      const [a, b] = snap.meetingLine
+      const line = buildMeetingLine(new THREE.Vector3(...a), new THREE.Vector3(...b), snapColor(snap.kind))
+      if (line !== null) this.group.add(line)
     }
   }
 

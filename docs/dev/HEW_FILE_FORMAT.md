@@ -6,7 +6,7 @@ enough detail for an independent implementation to produce byte-compatible
 output and correctly interpret every field, with no access to Hew's source.
 
 Two independent format numbers appear in every file: **manifest format
-version `20`**, and **geometry buffer format version `8`**. Both are covered
+version `33`**, and **geometry buffer format version `11`**. Both are covered
 below, including exactly which fields exist at each version and how a
 reader must treat versions it does not recognize.
 
@@ -59,10 +59,12 @@ ascending dense-id order (the array index equals the entry's own `id` field).
 
 ```jsonc
 {
-  "format_version": 22,
-  "geometry_version": 8,
+  "format_version": 33,
+  "geometry_version": 11,
   "app": "hew",
   "app_version": "1.2.1",
+  "document_id": "3f2c9107-5ed4-40a8-806b-1ec297405d83", // v29+, optional;
+                                    // omitted = the document has no id yet
 
   "materials": [
     { "id": 0, "sid": 0, "name": "Red", "color": [220, 50, 40, 255],
@@ -70,6 +72,9 @@ ascending dense-id order (the array index equals the entry's own `id` field).
         "asset": "textures/tex_0.png",
         "format": "png",            // "png" | "jpg"
         "world_size": [1.0, 1.0]    // meters per image tile [width, height], both > 0
+      },
+      "pbr": {                      // v26+; omitted for a plain material (§4.5)
+        "metallic": 0.9, "roughness": 0.25, "normal_scale": 1.0, "occlusion_strength": 1.0
       } }
   ],
   "objects": [
@@ -78,24 +83,35 @@ ascending dense-id order (the array index equals the entry's own `id` field).
       "tags": [["Architecture", "Walls"], ["Level", "L1"]],
       "attrs": {                     // v14+; omitted entirely when empty
         "com.example.shelving": { "part_no": "SHLF-204", "load_kg": 35.5 }
-      } }
+      },
+      "blends": [ { "id": 1, "seq": 0, "spec": { /* ... */ },
+                    "trimmed": [ /* ... */ ], "marks": [ /* ... */ ] } ],
+                                     // v31+; what each fillet on the object
+                                     // replaced (§4.3); omitted when none
+      "imported": true,              // v32+, optional; omitted = not imported (§4.3)
+      "locked": true }               // v33+, optional; omitted = not locked (§4.3)
   ],
   "groups": [
     { "id": 0, "sid": 4, "members": [ {"kind":"object","id":0}, {"kind":"group","id":1} ],
       "name": "MyGroup",
-      "tags": [["Architecture"]] }
+      "tags": [["Architecture"]],
+      "locked": true }   // v33+, optional; omitted = not locked (§4.4)
   ],
   "components": [
     { "id": 0, "sid": 5, "name": "MyComponent",
       "members": [ {"kind":"object","id":2}, {"kind":"object","id":3},
-                   {"kind":"instance","id":1} ] }  // NodeRefs at v15+; bare
-                                                   // object ids at v14-
+                   {"kind":"instance","id":1} ],  // NodeRefs at v15+; bare
+                                                  // object ids at v14-
+      "locked": true }   // v33+, optional; omitted = not locked. Every
+                         // instance of it is locked (§4.4)
   ],
   "instances": [
     { "id": 0, "sid": 6, "def": 0,
       "pose": [1,0,0,0, 0,1,0,0, 0,0,1,0],
       "name": "Chair_1",
-      "tags": [["Furniture"]] }
+      "tags": [["Furniture"]],
+      "material": 0 }  // v27+, optional; dense `materials[]` id. Omitted =
+                       // the placement has no material of its own
   ],
   "sketches": [
     { "id": 0, "sid": 7,
@@ -114,6 +130,15 @@ ascending dense-id order (the array index equals the entry's own `id` field).
       "owner_group": 0, // v19+, optional; dense `groups[]` id. Omitted =
                        // in no group (the only possibility before v19)
       "tags": [["Site"]] // v20+, optional; omitted = untagged
+    },
+    { "id": 1, "sid": 12,
+      "plane": [0.0, 0.0, 1.0, 0.0],
+      "vertices": [ {"id":0, "p":[5.0, 0.0, 0.0]} ],
+      "edges":    [ {"id":0, "from":0, "to":1} ],
+      "regions":  [ {"id":0, "outer":[0,1,2], "holes":[]} ],
+      "detached": true, // v23+, optional; omitted = the sketch joins its
+                       // plane's arrangement. Never with "owner_object"
+      "imported": true // v32+, optional; omitted = drawing made in Hew (§4.6)
     }
   ],
   "guides": [
@@ -121,6 +146,8 @@ ascending dense-id order (the array index equals the entry's own `id` field).
       "tags": [["Rig"]] }, // v21+, optional; omitted = untagged
     { "id": 2, "sid": 10, "kind": "line", "p": [0.0, 1.0, 0.0], "dir": [0.0, 0.0, 1.0],
       "from": 0.0, "to": 0.0127 }, // v22+, optional; omitted = runs on forever
+    { "id": 3, "sid": 11, "kind": "line", "p": [0.0, 2.0, 0.0], "dir": [1.0, 0.0, 0.0],
+      "dash": 7239 }, // v24+, optional; omitted = 0x3333 (short dashes)
     { "id": 1, "sid": 9, "kind": "point", "p": [2.0, 3.0, 0.0] }
   ],
   "annotations": [
@@ -150,6 +177,9 @@ ascending dense-id order (the array index equals the entry's own `id` field).
   },
   "axes": { "origin": [1.0, 2.0, 0.0],           // v13+; omitted entirely at world identity
             "x": [0.0, 1.0, 0.0], "y": [-1.0, 0.0, 0.0] },
+  "geo": { "name": "NAD83 / Oregon North", "easting": 2500000.5, "northing": 250000.25,
+           "height": 12.75, "x_axis": [0.0, 1.0], "scale": 0.9999,
+           "map_unit": "foot", "map_unit_metres": 0.3048 }, // v25+; omitted when the model has no place on a map (§4.16)
   "section_plane": {                 // v16+; omitted entirely when no plane is placed
     "origin": [0.0, 0.3, 0.0],
     "normal": [0.0, 1.0, 0.0],       // unit; points at the side the cut REMOVES
@@ -172,15 +202,33 @@ ascending dense-id order (the array index equals the entry's own `id` field).
 
 ### Field reference
 
-- **`format_version`** (`u32`, required) — manifest schema version. Current: `22`.
+- **`format_version`** (`u32`, required) — manifest schema version. Current: `33`.
 - **`geometry_version`** (`u32`, required) — geometry buffer layout version
-  used by every entry under `geometry/` in this file. Current: `8`.
+  used by every entry under `geometry/` in this file. Current: `11`.
   Redundant with the per-buffer version in each buffer's own header (),
   but lets a reader reject a whole file up front without opening buffers.
 - **`app`**, **`app_version`** (`string`, required) — free-form writer
   identification, no semantic meaning. A reader MUST NOT branch on these.
   Hew writes the release that saved the file (e.g. `"1.2.1"`). Releases up
   to and including 1.2.0 wrote `"0.1.0"` whatever their own version.
+- **`document_id`** (`string`, v29+, optional) — a UUID that identifies the
+  document across saves, so data kept outside the file (a plugin's
+  per-document storage, provenance) can key on it. Format: exactly 36
+  characters, lowercase hexadecimal in the hyphenated `8-4-4-4-12` form
+  (`3f2c9107-5ed4-40a8-806b-1ec297405d83`); Hew mints a version 4 UUID
+  (RFC 9562), but a reader checks only the textual form. Any other value,
+  including uppercase hex, braces, or `null`, is a fatal, typed error. Absent means
+  the document has no id yet: every pre-v29 file, and any document never
+  saved by a v29 writer. A writer mints the id once, from real randomness,
+  the first time it saves the document as `.hew` (a `.skp` save mints it
+  too, on the document in memory, though a SketchUp file has no slot for
+  it), and never changes it after: a save, a Save As to a new name, and a
+  plain file copy all keep it, so two copies of one file carry the same
+  id. A Hew Library item made from a whole document leaves it out: the
+  item is a separate document, and one opened from it gets its own id on
+  its first save. It is file identity, not document content: it is not
+  undoable, and it does not take part in the state digest replay
+  fixtures pin.
 - **`materials`** — the material palette ().
 - **`objects`** — every live Object, both world-tree and component-definition
   members ().
@@ -213,11 +261,66 @@ ascending dense-id order (the array index equals the entry's own `id` field).
   fatal, typed error, as is a value nested more than 64 levels deep
   (lists and objects count one level each). Omitted entirely when empty, so an attribute-free
   document is byte-identical to one written before the field existed. The
-  kernel stores and round-trips dictionaries verbatim and interprets one
-  first-party key only: `hew.health` → `surface: true` on an object (a
+  kernel stores and round-trips dictionaries verbatim and interprets two
+  first-party keys only. `hew.health` → `surface: true` on an object (a
   definition member included) marks it as a surface someone accepted
   (Model Health); it is an ordinary attribute in the file, and any other
-  value means "not marked".
+  value means "not marked". `hew.smooth` → `level` on an object is its
+  Smooth level: an integer 1 to 3 makes the object's stored faces the cage
+  of a subdivision surface of that many steps, drawn and exported as the
+  smoothed mesh; absent, or any other value, means Off. The attribute is
+  the whole of the feature in the file: the cage is the object's ordinary
+  geometry, and the per-edge crease flag that keeps an edge sharp under
+  Smooth is in the geometry buffer (§3).
+
+  Hew reserves the attribute `hew` / `linked` (a boolean) on a component
+  definition to mark a linked set: a definition created by copying an
+  Object or a Group. It changes no record field. A reader that does not
+  know the key shows an ordinary component. A definition without the key
+  is a named component.
+
+  Hew also writes the first-party namespace `hew.library` (docs/agents/HEW_API.md
+  §8.1). Like every attribute it changes no record field and needs no
+  manifest version; a reader that does not know a key keeps it verbatim.
+  On a Library item file's document dictionary it holds the item's
+  metadata (`id`, `name`, `category`, `keywords`, `collection`,
+  `savedAt`, `sourceDoc`) and, written by every save to the Library since
+  1.5, `prints`: an object mapping each component definition's `sid` in
+  the item file (a decimal string) to that definition's **content print**.
+  An item added from a Library source also holds `remote`, the note of
+  where it came from: an object with `source` (the canonical source
+  reference), `name` (the source's name), `path` (the item's path in the
+  source's index), `sha256` (the hash of the file as the source published
+  it, 64 lowercase hex digits), `commit` (git sources, when the read
+  resolved one), `license`, `fetchedAt` (an ISO 8601 time) and `edited`
+  (a boolean: the item's contents were saved over since it was taken).
+  A reader treats a `remote` without string `source` and `sha256` as
+  absent. HEW_API.md §8.1 has which saves keep the note and which drop
+  it.
+  On a component definition placed from (or saved to) the Library it holds
+  the link: `source_id` (the item's `id`), `content_hash` (a fingerprint
+  of the item file's bytes, still written so older readers keep working,
+  compared by nothing), `def_sid` (the definition's `sid` in the item
+  file) and, since 1.5, `print`: the definition's content print when it
+  was last in step with the item (its base). A save of several parts
+  links each definition to its own definition in the item. Placed root
+  nodes carry `source_id` and `content_hash` only.
+
+  A content print is the text `p1:` followed by 64 lowercase hex digits,
+  the SHA-256 of a canonical byte stream of what the definition holds: each
+  live member in order (an Object by its faces as loops of vertices rounded
+  to 1 µm, surface claims, blend tags with what each blend's record asks
+  for and the paint of the faces it consumed, creased and soft edges,
+  circle and polygon claims and Smooth level; a group by its members; a
+  placement by
+  its pose, its own paint and the print of the definition it places), each
+  face's paint by value (color, texture image and tile size, physically
+  based properties, never the palette slot or the material's name), and
+  the definition's own sketches by their edges. Names, tags, attributes,
+  ids, hidden flags and where the definition is placed are left out.
+  Prints under another prefix than `p1` do not compare. Files without
+  these keys are read as before: a link without `print` has no base, and
+  an item without `prints` has its prints computed from the file.
 - **`camera`** (v13+, optional) — the camera's working view at last save.
 - **`view_style`** (v19+, optional) — how the document asks to be shown:
   its backdrop and axes (§4.15). Absent → Hew's own look.
@@ -230,6 +333,8 @@ ascending dense-id order (the array index equals the entry's own `id` field).
   manifest is byte-identical to what it would write with no axes concept at
   all. A reader MUST reject rather than repair a present-but-non-orthonormal
   frame (rule 4: no silent geometry repair).
+- **`geo`** (optional object, v25+) — the document's coordinate reference
+  system (§4.16). Omitted when the model has none.
 
 ### `NodeRef`
 
@@ -297,6 +402,37 @@ of the manifest:
 | `sketches[].regions[].faceless` | 21 | `false` (every closed loop has a face, the only possibility before v21) |
 | `guides[].tags` | 21 | empty list (the guide carries no tag) |
 | `guides[].from`, `guides[].to` | 22 | absent: the line runs on forever both ways, the only possibility before v22 |
+| `sketches[].detached` | 23 | `false` (every sketch joins its plane's arrangement, the only possibility before v23) |
+| `camera.image_width`, `camera.aspect_ratio` (top-level and in `scenes[].camera`) | 24 | absent: unset, the only possibility before v24 |
+| `view_style.section_cut_color`, `section_cut_width`, `section_fill`, `section_fill_color`, `active_section_color`, `guides_color`, `guides_hidden` (top-level and in `scenes[].view_style`) | 24 | absent: unset, Hew's own look |
+| `guides[].dash` | 24 | `0x3333` (short dashes, how every guide was drawn before v24) |
+| `geo` (top-level object) | 25 | absent: the model has no geo-reference, the only possibility before v25 |
+| `materials[].pbr` | 26 | absent: a plain material (no metal, fully rough, no maps), the only possibility before v26 |
+| `instances[].material` | 27 | absent: the placement has no material of its own, the only possibility before v27 |
+| `document_id` (top-level string) | 29 | absent: the document has no id yet; the next save mints one |
+| `sketches[].curves[].kind = "smooth"` (an entry with no `center` and no `radius`) | 30 | no chain is marked smooth; a chain without a `curves[]` entry is identity-only |
+| `objects[].blends` | 31 | empty list: every blend on the object restores by derivation from its tagged faces (§4.3), as every blend did before v31 |
+| `objects[].imported`, `sketches[].imported` | 32 | `false`: nothing is marked imported. An older file is never marked retroactively on load |
+| `objects[].locked`, `groups[].locked`, `components[].locked` | 33 | `false`: nothing is locked |
+
+Manifest v28 adds no manifest field: it marks geometry buffer v9 (face
+and edge attribute dictionaries, §3), so a v28 manifest names
+`geometry_version` 9.
+
+Manifest v30 also marks geometry buffer v10 (sphere, torus and cone
+surface claims, crease flags and blend tags, §3), so a v30 or v31 manifest
+names `geometry_version` 10. A manifest at v27 to v29 never carries a
+smooth chain entry or blend records, and its geometry buffers are at most
+v9, whatever a reader of a newer version expects.
+
+Manifest v32 also marks geometry buffer v11 (each face's plane stored,
+§3), introduced with it: a v32 or v33 manifest names `geometry_version`
+11. Manifest v33 adds the `locked` flags and changes no geometry.
+
+`document_id` (v29) is version-gated the usual single direction: a file
+declaring a version older than 29 that carries it is malformed for its own
+declared version and MUST be rejected. At v29+ it is optional, but a
+present one must have the exact textual form the field reference gives.
 
 Four fields land in the same v13 bump (four efforts in flight at once) and
 are version-gated the same way the retired fields below are (just in the
@@ -324,6 +460,9 @@ with any subset of them, or none, is perfectly ordinary.
   same reason: a file declaring a version older than 13 that still carries
   `annotations` is malformed for its own declared version and MUST be
   rejected rather than silently loaded.
+- `objects[].blends` (v31) likewise: a file declaring a version older than
+  31 that carries one is malformed for its own declared version and MUST be
+  rejected.
 - **`sid` (v14) is gated in both directions.** A file declaring a version
   older than 14 that carries any `sid` field is malformed for its own
   declared version and MUST be rejected (no pre-v14 writer ever emitted
@@ -389,12 +528,12 @@ All multi-byte integers and all floats are **little-endian**. Material ids
 inside a buffer are the same dense ids used by `manifest.json`'s `materials`
 array — one shared id space, not a buffer-local one.
 
-### 3.1 Layout (current version, `8`)
+### 3.1 Layout (current version, `11`)
 
 ```
 offset  type                field
 0       u8[4]               magic = "HEWG" (0x48 0x45 0x57 0x47)
-4       u32                 version (currently 8)
+4       u32                 version (currently 11)
 8       u8                  watertight: 0 = Open (leaky), 1 = Watertight
 9       u32                 base_material id (0xFFFFFFFF = none)
 13      u8                  imported flag: 0 = strict native tolerance, 1 = imported tolerance
@@ -406,15 +545,22 @@ offset  type                field
         u8                  uv_frame flag: 0 = no UV frame, 1 = UV frame follows
         f64[8]              uv_frame, present only when the flag above is 1:
                              s.x s.y s.z  t.x t.y t.z  u0 v0
-        u8                  surface flag: 0 = plain planar face, 1 = cylinder reference follows
-        f64[7]              surface, present only when the flag above is 1:
-                             axis_point.x .y .z  axis.x .y .z  radius
+        u8                  surface kind: 0 = plain planar face, 1 = cylinder, 2 = sphere (v10),
+                             3 = torus (v10), 4 = cone (v10); the class's payload follows
+        f64[n]              surface payload, by kind (absent for 0):
+                             1 cylinder, n = 7: axis_point.x .y .z  axis.x .y .z  radius
+                             2 sphere,   n = 4: center.x .y .z  radius
+                             3 torus,    n = 8: center.x .y .z  axis.x .y .z  major_radius  minor_radius
+                             4 cone,     n = 7: apex.x .y .z  axis.x .y .z  half_angle (radians)
         u32                 outer_count (K)
         u32[K]              outer-loop vertex indices (0-based into the vertex table, in loop order)
         u32                 hole_count (H)
         --- repeated H times: ---
         u32                 hole_vertex_count (J)
         u32[J]              hole-loop vertex indices
+        u8                  plane flag (v11): 0 = the plane is the one the reader refits from the outer loop (§3.3), 1 = the plane follows
+        f64[4]              plane, present only when the flag above is 1:
+                             normal.x .y .z  offset   (unit normal; points p on the face have normal·p = offset)
         u8                  soft_edges flag (v6): 0 = no edge of this face is soft, 1 = per-edge flags follow
         --- present only when the soft_edges flag is 1: ---
         --- one entry per outer edge (K entries), then per hole edge (J per hole, in hole order): ---
@@ -433,7 +579,81 @@ offset  type                field
                              circumcircle center.x .y .z  radius
         u8                  back paint flag (v8): 0 = the back shows what the front shows, 1 = a back material id follows
         u32                 back material id, present only when the flag above is 1
+        u8                  face_attrs flag (v9): 0 = no dictionary, 1 = a dictionary follows
+        u32                 byte length (L), present only when the flag above is 1
+        u8[L]               the face's attribute dictionary as UTF-8 JSON, present only when the flag above is 1
+        u8                  edge_attrs flag (v9): 0 = no edge of this face carries a dictionary, 1 = per-edge entries follow
+        --- present only when the edge_attrs flag is 1: ---
+        --- one entry per outer edge (K entries), then per hole edge (J per hole, in hole order): ---
+        u8                  edge dictionary flag: 0 = none, 1 = a dictionary follows
+        u32                 byte length (L), present only when the flag above is 1
+        u8[L]               the edge's attribute dictionary as UTF-8 JSON, present only when the flag above is 1
+        u8                  creases flag (v10): 0 = no edge of this face is creased, 1 = per-edge flags follow
+        --- present only when the creases flag is 1: ---
+        --- one entry per outer edge (K entries), then per hole edge (J per hole, in hole order): ---
+        u8                  crease flag: 0 = not creased, 1 = creased (kept sharp under Smooth)
+        u8                  blend flag (v10): 0 = the face belongs to no blend, 1 = a blend tag follows
+        u32                 blend id, present only when the flag above is 1
+        u8                  blend kind: 0 = fillet, 1 = chamfer, 2 = profile
+        u8                  blend role: 0 = strip, 1 = corner, 2 = run-out
 ```
+
+A face or edge **attribute dictionary** (v9) is the same shape as the
+manifest's `attrs` (§2 field reference): a JSON object of namespace →
+key → value, compact, with object keys in ascending byte order (a
+conforming writer emits it with no whitespace, which makes equal
+dictionaries byte-equal). It is client data the kernel stores and never
+interprets (docs/agents/HEW_API.md §8). An entry is written only when the
+element carries a non-empty dictionary; an empty one is the 0 flag. Like
+the other per-edge blocks, an edge's dictionary is written by every face
+the edge bounds, at the entry for that edge, and the two entries of a
+shared edge must be identical: both absent, or equal dictionaries. A plain
+solid grows by the two flag bytes per face.
+
+
+A **crease** (v10) is the user's mark that an edge stays sharp under Smooth.
+It is only ever on an interior edge and never on a soft edge (the validator
+rejects either). Both faces of a shared edge store its flag, and the two
+MUST agree; unlike soft, a disagreement is corruption, not OR'd.
+
+A **blend tag** (v10) groups the faces of one fillet, chamfer or profile on
+one object: every face with the same id belongs to the same blend, and the
+role says which part of it the face is (a strip along an edge, a corner
+where blends meet, the run-out fan of a stopped blend). The tag stores no
+size and no original edge: what the blend replaced is the manifest's
+`objects[].blends[]` record for the id (v31+, §4.3), and a tag with no
+record re-derives it from the geometry. Either way the edit is verified, so
+a tag on geometry that has since been cut through refuses edits instead of
+editing wrongly. A reader that ignores it loses only the grouping, never
+shape. A face carrying neither a crease nor a tag grows by two zero bytes
+over v9.
+
+A face's **plane** (v11) is the oriented plane the face lies on. Flag `0`
+means the face's plane is the reader's refit from its outer loop (§3.3,
+"Face plane recomputation"); flag `1` means the plane is the unit normal
+and offset that follow. Either way a reader gives the face exactly that
+plane, so a face reopens on the plane the writer had for it.
+
+When a writer omits a plane is writer policy, not part of the format. Hew
+writes flag `0` when the refit equals the face's plane bit for bit, and
+flag `1` otherwise. Hew never stores a plane a reader would refuse: for a
+face whose points stray from its plane beyond the tolerance, or whose
+plane fails §3.3's stored-plane checks, it writes flag `0` and logs how
+many faces it wrote so, and the reader refits that face as a v10 reader
+would. Only an invalid object carries such a face: Hew's validator
+rejects a face off its plane, and a face whose plane fails the
+stored-plane checks against its own outer loop's refit, so no operation
+commits one. Hew gives a face it fits
+from its own outer loop (a drawn or extruded face, an imported polygon)
+the refit as its plane whenever every point fits it, and a move, turn or
+scale keeps that, so such faces cost the one flag byte. A face cut by a
+boolean keeps the plane of the face it was cut from, which its loop
+refits only to within rounding, and then the plane is stored. Likewise,
+when writing buffer version 11 and later, Hew never writes an analytic-surface claim the reader's validator would
+reject on the plane the face reopens on (an invalid state, such as a
+curved face turned far from the origin): it writes surface kind `0` for
+that face, counted in the same log, and the face reopens as a plain
+planar facet rather than leaving the file unreadable.
 
 A face's back paint (v8) is the material on its back side: a `.skp` face
 can be painted on each side. Renderers draw it where the back can be seen
@@ -477,15 +697,27 @@ order over the raw f64 bit patterns (IEEE 754 `totalOrder`; Rust
 - faces are sorted by their rotated outer-ring position sequence, then hole
   count, then hole sequences, then material id, then UV frame (frameless
   faces first; frames compared elementwise `s.x s.y s.z t.x t.y t.z u0 v0`
-  under the same f64 total order), then the per-face analytic surface (v4;
-  surface-less faces first, then by `axis_point.x y z axis.x y z radius`
-  under the f64 total order), then the per-edge circle claims (v5; the outer
-  loop's claim sequence in canonical vertex order, then each hole's, each
-  compared by length then entry — claim-less before claim-bearing, then by
-  `center.x y z radius`), then the per-edge polygon claims (v7; compared
-  the same way). Coincident faces on disjoint shells can tie on
+  under the same f64 total order), then the back material id (v8), then the
+  per-face analytic surface (v4; surface-less faces first, then by the kind
+  byte, then the kind's payload f64s in wire order under the f64 total
+  order), then the per-edge circle claims of the outer loop (v5; the
+  claim sequence in canonical vertex order, compared by length then entry —
+  claim-less before claim-bearing, then by `center.x y z radius`), then the
+  outer loop's soft flags (v6) and then each hole's, then each hole's circle
+  claims, then the per-edge polygon claims (v7; outer, then holes, compared
+  like circle claims), then the face's attribute dictionary (v9; absent
+  before present, present compared as its emitted JSON bytes,
+  lexicographically), then the per-edge dictionaries (the outer loop's
+  entry sequence, then each hole's, absent before present, present by
+  bytes), then the crease flags (v10; outer, then holes), then the blend
+  tag (v10; untagged first, then by id, kind, role), then the stored plane
+  (v11; omitted before stored, stored compared elementwise
+  `normal.x y z offset` under the f64 total order). Each version's keys
+  come after the older ones, so a buffer without the newer payloads sorts
+  exactly as it did. Coincident faces on disjoint shells can tie on
   geometry alone, so every emitted payload — ring, holes, material, UV
-  frame, surface, and edge-curve claims — participates in the key;
+  frame, surface, edge claims, dictionaries, creases, blend tags and
+  plane — participates in the key;
 - vertices are numbered by first appearance while walking the faces in that
   order (each face's outer loop, then its holes); a vertex several loops
   share (a touching hole) takes the number of its first appearance and is
@@ -506,16 +738,34 @@ are scalar offsets. A face with no `uv_frame` instead uses its material's
 paths, selected by this flag.
 
 `surface` (v4+), when present, is the face's **analytic surface
-reference**: the face is a planar chord facet of the infinite right
-circular cylinder through `axis_point` along unit `axis` with the given
-`radius` — durable metadata over the faceted geometry (the extruded side
-walls of arc/circle profiles carry it), never a replacement for the
-polygonal face itself. The face's plane is parallel to `axis`, at most
-`radius` from it, and every face vertex lies within `radius` of the axis
-line; angular/axial extent is derived from the vertices, never stored. A
-reader that ignores the field loses only analytic metadata (exact
-center/axis/radius for snapping, smooth shading, re-export), never shape
-or watertightness.
+reference**: the face is a planar chord facet of an analytic surface —
+durable metadata over the faceted geometry, never a replacement for the
+polygonal face itself. Angular and axial extent are derived from the
+vertices, never stored. A reader that ignores the field loses only analytic
+metadata (exact centers, axes and radii for snapping, smooth shading,
+re-export), never shape or watertightness. Each class names the weak
+conditions every chord facet of it satisfies, which the validator enforces
+(tolerances are the object's planarity tolerance, `PLANE_DIST` or
+`IMPORT_PLANE_DIST`):
+
+- **cylinder** (kind 1, v4+): the infinite right circular cylinder through
+  `axis_point` along unit `axis` with the given `radius` (the extruded side
+  walls of arc and circle profiles carry it). The face's plane is parallel
+  to `axis` and at most `radius` from it, and every vertex lies within
+  `radius` of the axis line.
+- **sphere** (kind 2, v10+): the sphere about `center` with `radius`. The
+  plane lies within `radius` of the center and every vertex within `radius`
+  of it.
+- **torus** (kind 3, v10+): the surface swept by a circle of `minor_radius`
+  whose center travels the circle of `major_radius` about unit `axis`
+  through `center` (both radii strictly positive; a zero-major torus is
+  written as a sphere). Every vertex lies within `minor_radius + σ(ρ)` of the
+  center circle, where `ρ` is the vertex's distance from the axis and
+  `σ(ρ) = ρ·(sec(π/24) − 1)` allows for a chord across the ring.
+- **cone** (kind 4, v10+): one nappe of the right circular cone with `apex`,
+  unit `axis` pointing into the nappe, and `half_angle` in `(0, π/2)`. The
+  plane passes through the apex, and every vertex has axial coordinate
+  `t ≥ 0` and lies within `t·tan(half_angle)` of the axis.
 
 The per-face **edge-curve claims** (v5+) are the solid-edge mirror of the
 sketch-edge curve chains: an edge marked with a circle is a chord facet of
@@ -546,6 +796,23 @@ present at every version:
 | per-face `soft_edges` flag + payload | 6 | flag byte and payload are not present at all — the `edge_curves` flag (v5) follows the last hole loop directly | no edge is soft |
 | per-face `edge_polygons` flag + payload | 7 | flag byte and payload are not present at all — the next face's material id (or the buffer's end) follows the `edge_curves` block directly | no edge is a polygon's side |
 | per-face back paint flag + id | 8 | flag byte and id are not present at all — the next face's material id (or the buffer's end) follows the `edge_polygons` block directly | no face has a painted back |
+| per-face `face_attrs` and `edge_attrs` blocks | 9 | neither flag byte nor any payload is present — the next face's material id (or the buffer's end) follows the back paint block directly | no face or edge carries a dictionary |
+| per-face surface kinds 2–4 (sphere, torus, cone) | 10 | a kind byte other than 0 or 1 is malformed | only cylinder claims |
+| per-face creases flag + payload and blend flag + tag | 10 | neither flag byte nor any payload is present — the next face's material id (or the buffer's end) follows the `edge_attrs` block directly | no edge is creased, no face belongs to a blend |
+| per-face plane flag + payload | 11 | flag byte and payload are not present at all — the `soft_edges` flag (v6) follows the last hole loop directly | the plane refit from the outer loop, with the fallbacks of §3.3 |
+
+Buffer version 9 also widens which faces a reader accepts, with no layout
+change: §3.3's face plane rule keeps a loop under the 1e-12 m² area floor
+when it is at least 1e-8 m wide. The reader applies the one rule to every
+buffer version; a buffer of version 8 or older written by Hew cannot
+contain such a face, so the wider rule changes nothing for it. Pre-release
+readers of version 9 that predate the rule reject such a face as corrupt.
+
+A reader of version 11 also opens more buffers of version 10 and older: a
+face whose points stray from the refit plane gets the first of §3.3's
+fallback planes that holds them all, where earlier readers rejected it as
+not flat. Every face an earlier reader accepted keeps the plane it gave
+it, since the refit comes first.
 
 All gates shift subsequent byte offsets, so a reader must branch on the
 buffer's own `version` at each gated point rather than assume fixed offsets
@@ -571,25 +838,83 @@ contents do not describe valid geometry.
   must be fallible and report allocation failure as a typed decode error.
   These checks do not change the encoding or its version.
 - **Structural corruption** — an out-of-range vertex index, a loop under 3
-  vertices (`outer_count`/`hole_vertex_count < 3`), a `watertight`/
-  `uv_frame`/`imported`/`surface`/`edge_curves` byte outside its 0-1 range,
-  a `surface` payload whose `axis` is not unit length or whose `radius` is
-  not finite and strictly positive, or an edge-curve payload whose `radius`
-  is not finite and strictly positive — is a fatal error reported with the
-  byte offset and what was wrong. Never a panic, never best-effort
+  vertices (`outer_count`/`hole_vertex_count < 3`), any flag byte outside
+  its 0-1 range (`watertight`, `imported`, `uv_frame`, `soft_edges` and each
+  soft flag, `edge_curves` and each edge-curve flag, `edge_polygons` and each
+  polygon flag, back paint, `creases` and each crease flag, blend, `plane`),
+  a surface kind outside 0-1 below v10 or outside 0-4 from v10, a surface
+  payload whose axis is not unit length (within 1e-9) or whose radius is not
+  finite and strictly positive (cylinder and sphere radius; both torus
+  radii), a cone half-angle outside `(0, π/2)`, a blend kind or role outside
+  0-2, an edge-curve or polygon payload whose `radius` is not finite and
+  strictly positive, two faces of a shared edge that store different circle
+  or polygon claims or different crease flags — is a fatal error reported
+  with the byte offset and what was wrong. Never a panic, never best-effort
   recovery. (After rebuild, the validator additionally rejects an edge-curve
   claim whose endpoints are not within tolerance of `radius` from `center`,
-  exactly as it rejects a lying `surface`.)
-- **Face plane recomputation.** Planes are *not* stored; a reader must
-  recompute each face's best-fit plane from its outer-loop vertices (Newell's
-  method over the loop in the order the writer emits it, rotated to its
-  canonical start) and reject a loop that doesn't span a plane — a Newell
-  vector (twice the enclosed area) shorter than 1e-12 m² — or whose vertices
-  stray from it beyond tolerance (gated by `imported`). The kernel's
-  validator holds every live face to the same predicate, so no operation
-  commits a face, however small, that a saved file could not reopen. This is safe because a baked object's transform is always
-  orientation-preserving (), so the recomputed plane's normal always
-  matches how the geometry was authored.
+  a lying `surface` by the per-class conditions above, a crease on a
+  boundary edge, and an edge both soft and creased.)
+- **Attribute dictionaries (v9).** A `face_attrs`, `edge_attrs`, or
+  per-edge dictionary flag outside 0-1, a length running past the end of
+  the buffer (truncation), or a present dictionary that is not valid
+  UTF-8 JSON of the `attrs` shape is a fatal error. The shape is held as
+  strictly as a live write: a JSON object of at least one namespace; every
+  namespace a non-empty string holding at least one key; every key a
+  non-empty string; every value representable (finite numbers, integers
+  within `i64`, nesting at most 64 levels, the manifest's `attrs` rules).
+- **Shared-edge agreement (v9).** The two faces of a shared edge must
+  write the same dictionary entry for it (both absent, or equal
+  dictionaries). A disagreement is a tampered or corrupt file, rejected
+  as such, never resolved by which face was read last.
+- **Face plane recomputation.** For every face a reader refits a plane
+  from its outer-loop vertices: Newell's method over the loop in the order
+  the writer emits it, rotated to its canonical start, the normal being the
+  Newell vector divided by its length. It rejects a loop that doesn't span
+  a plane: a Newell vector `n` (twice the enclosed area) shorter than
+  1e-12 m² **and** shorter than 1e-8 m times half the loop's perimeter
+  (the loop is under 10 nm wide), unless the object is `imported` and
+  every edge of the loop is at least 1e-8 m long and `n`, accumulated about
+  the loop's first vertex, is at least 1e-6 times the perimeter squared (a
+  small loop of a scan that is no sliver; normalized after scaling by its
+  largest component, and taken as the refit). Which plane the face then
+  gets depends on the buffer version:
+  - **v11 and later.** With plane flag `0` the face's plane is the refit.
+    With flag `1` it is the stored plane, taken as written (never
+    renormalized), and the reader rejects as corrupt a stored plane whose
+    normal or offset is not finite, whose normal's length is more than
+    1e-9 from 1, or whose normal points away from the refit's (a
+    non-positive dot product: the plane faces against the loop's winding;
+    checked when the refit is finite, which a loop too large for its
+    Newell sum to be represented is not).
+  - **v10 and earlier.** Planes were not stored, so the face's plane is the
+    refit, unless one of its boundary points (outer loop or hole) is
+    farther from it than the planarity tolerance (gated by `imported`).
+    Then the reader tries, in this order, the least-squares plane through
+    the outer loop (heights along the refit normal fitted as a linear
+    function of the two in-plane coordinates, about the loop's vertex
+    centroid) and the plane through the loop's vertex triple of largest
+    area (the first in loop order on a tie, tried only for a loop of at
+    most 64 vertices: the search is cubic in the loop's length, and a file
+    of many long loops that all miss the refit would otherwise take hours
+    to open), each oriented with the refit's normal. The first
+    that holds every boundary point within the tolerance is the face's
+    plane; no point moves, since the file never said which plane the face
+    had. When none fits, the face fails the planarity check below as not
+    flat.
+
+  Every boundary point must then lie within the planarity tolerance of
+  the face's plane (the validator's check). The kernel's validator holds
+  every live face to the same predicates (the loop spans a plane, every
+  point lies within tolerance of the plane the face carries, and that
+  plane passes the v11 stored-plane checks above against the loop's
+  refit), and the
+  writer stores that plane, so no operation commits a face, however small,
+  that a saved file could not reopen on the very plane it was checked
+  against. This is safe because a
+  baked reflection reverses every face's loops (the transform turns every
+  face over once it has mapped the vertices, so the loops wind
+  counter-clockwise from the outward normal again), so the refit's normal
+  always matches how the geometry was authored.
 - **Watertightness cross-check.** The stored `watertight` byte must equal
   what the reader's own topology reconstruction computes — a mismatch is a
   fatal error (cheap tamper detection), never silently corrected.
@@ -665,6 +990,99 @@ zip path), an optional `base_material` (used by any face whose own per-face
 material is absent — an object-level default paint, not an override), an
 optional `name`, and optional `tags` ().
 
+An object's faces and edges may each carry an attribute dictionary
+(geometry buffer v9, §3.1), stored with the geometry rather than in the
+manifest because faces and edges have no stable id there.
+`imported` (v32+, `bool`, optional, omitted when `false`) marks an object
+built from a **foreign file's mesh** (a `.skp` Hew did not write, an
+`.stl`, `.obj`, `.dae`, glTF and the like) that the user has not drawn on
+since. It is provenance, not geometry: the edges that split such an
+object's faces are the source file's own, and a viewer draws them as
+ordinary edges rather than as shapes drawn in Hew. The first drawing made
+on the object clears it (erasing or moving nothing new does not); copies,
+slices, push-through pieces and boolean results of an imported object
+carry it. A reader MUST reject a file declaring `format_version < 32`
+whose `objects[]` sets `imported` (reject-not-repair), and MUST NOT mark
+anything imported when loading an older file.
+
+`locked` (v33+, `bool`, optional, omitted when `false`) marks an object
+the user **locked**: nothing about it may change until it is unlocked,
+whether its geometry, its place, its paint, its name, its tags or its
+attributes. Hiding and showing it, selecting it, measuring it and
+snapping to it are not changes. A copy made of a locked object as a
+separate object is not locked. A reader MUST reject a file declaring
+`format_version < 33` whose `objects[]`, `groups[]` or `components[]`
+sets `locked` (reject-not-repair), and loads an older file with nothing
+locked.
+
+**`blends`** (v31+, optional, omitted when empty) holds, for every fillet,
+chamfer or profile blend whose faces carry a blend tag in the object's
+geometry buffer (§3.1), what that blend replaced, ascending `id`:
+
+```jsonc
+{ "id": 1,                 // the blend id the faces carry
+  "seq": 0,                // the order the object's blends were made in
+  "spec": {                // the blend as it was asked for
+    "edges": [ [[0,0,1],[1,0,1]] ],     // each picked edge's two ends
+    "profile": { "kind": "round", "radius": 0.1, "segments": 6 },
+                                        // as hew.solid.fillet spells it:
+                                        // round | chamfer | cove | bullnose | custom
+    "primary": { "normal": [0,0,1], "offset": 1.0 },    // asymmetric chamfer only
+    "corners": "default",               // default | mitered | flat
+    "stops": { "start": 0.0, "end": 0.2 },              // stopped blends only
+    "handles": [ { "at": 0.3, "radius": 0.03 } ] },     // variable radius only
+  "trimmed": [             // each loop of a face the blend trimmed
+    { "after":  [[0,0.1,1], [1,0.1,1], [1,1,1], [0,1,1]],  // the ring it left
+      "before": [[0,0,1],   [1,0,1],   [1,1,1], [0,1,1]] } ], // the ring it replaced
+  "consumed": [            // faces the blend replaced whole (consumed, or cut
+                           // into `pieces`), with their attributes
+    { "outer": [[/*...*/]], "holes": [], "material": 0, "back_material": 0,
+      "uv_frame": { "s": [1,0,0], "t": [0,1,0], "u0": 0, "v0": 0 },
+      "surface": { "kind": "cylinder", "axis_point": [0,0,0], "axis": [0,0,1], "radius": 0.5 },
+      "blend": { "id": 2, "kind": "fillet", "role": "strip" },
+      "attrs": { "com.example": { "part": "A-1" } } } ],
+  "pieces": [              // untagged faces the blend left that go away
+                           // whole, each as its rings, outer loop first
+    [ [[0.1,0,0.2], [0.12,0,0.2], [0.12,0.01,0.25]] ] ],
+  "marks": [               // the marks of every edge the blend removed
+    { "a": [0,0,1], "b": [1,0,1], "soft": false, "crease": true,
+      "curve": { "center": [0,0,1], "radius": 0.5 }, "polygon": null } ] }
+```
+
+Lengths are meters and points `[x, y, z]` in the object's own frame, like
+its geometry buffer; a transform baked into the buffer is baked into the
+record too. Removing or resizing the blend removes its tagged faces and
+the faces it trimmed, splices each `before` ring into the face whose loop
+still holds the `after` ring's changed stretches (so an edit elsewhere on
+that face since, a pocket say, survives), removes every face whose rings
+are exactly one entry of `pieces` (matched cyclically, winding kept, holes
+in any order, within 1e-9), adds the `consumed` faces back, and gives the
+edges it makes their `marks`. A face a blend trimmed into exactly one
+piece with as many loops is written as `trimmed` loops; any other face it
+replaced is written whole in `consumed`, its pieces in `pieces` (a swept
+blend cuts each facet it rolls across into pieces). `pieces` is
+optional and absent means empty: a record written without it names no
+piece. A piece that is
+no longer exactly a face of the object makes the record not fit, as a ring
+that no longer fits does. A record that does not fit is not applied: the
+edit falls back to deriving the sharp geometry
+from the faces around the blend and verifying it, and refuses when that
+fails too. A later blend that trimmed this one is taken off
+ahead of it by its own record and put back afterwards, `seq` deciding the
+order. A `surface` entry follows the per-class rules of §3.1 and is
+checked the same way; `material` and `back_material` are dense palette
+ids like `base_material`; `attrs` (optional, absent = none) is the face's
+attribute dictionary in the shape of `objects[].attrs`, given back to the
+face when the record puts it back, and a present one MUST hold at least
+one key; every number MUST be finite, every ring MUST
+have three points or more, every `pieces` entry MUST have one ring or
+more, `spec.edges` MUST be non-empty, sizes MUST be
+positive, facet counts MUST be 2 to 96 (`arc_segments` 1 to 96), `seq`
+MUST be at most 2^30, a `primary` normal MUST be unit length (within
+1e-9), and `kind`/`role` MUST be among the names above — a reader rejects
+anything else with a typed error (reject-not-repair). A record for an id
+no face carries is dropped on save, and one in a file is dropped on load.
+
 An object needs no stored relationship to the sketch it was extruded from:
 extrusion deletes the profile's scaffolding from the sketch (the outline
 became the solid's base face), and re-extruding occupied ground is simply
@@ -678,17 +1096,21 @@ member of exactly one component definition (`components[].members`), or
 reachable from the world tree (directly in `roots`, or nested inside a
 `groups[].members` chain) — never both at once.
 
-Object transforms baked into a buffer's vertex positions are always
-orientation-preserving (determinant positive — reflections are never baked
-into geometry). A mirrored placement exists only as a component **instance**
-pose, never as baked-in geometry — this is what lets the geometry decoder
-recompute face-plane orientation from winding alone ().
+A transform baked into a buffer's vertex positions may be a reflection
+(determinant negative). A baked reflection reverses every face's loops, so
+the loops still wind counter-clockwise seen from the outward normal —
+this is what lets the geometry decoder recompute face-plane orientation
+from winding alone (). A mirrored placement may also exist as a component
+**instance** pose.
 
 ### 4.4 Groups, components, instances
 
 - **Groups** (`groups[]`) are a plain, ordered membership list of
   `NodeRef`s — objects or other groups, nesting unrestricted — plus an
   optional name and tags. A group has no geometry or transform of its own.
+  A group may be `locked` (v33+, optional, omitted when `false`): it and
+  everything inside it, at any depth, stays as it is until the group is
+  unlocked.
 - **Component definitions** (`components[]`) are an ordered list of member
   `NodeRef`s (v15+; pre-v15 files carry bare object dense ids, the only
   member kind that existed), plus an optional name. Members may be
@@ -697,7 +1119,16 @@ recompute face-plane orientation from winding alone ().
   reader rejects a file whose definitions reach themselves, nest beyond
   64 levels, or whose expansion exceeds 1,000,000 leaf placements (per
   definition, and summed over the world instances) — all with typed
-  malformed-manifest errors. The width bound exists because a DAG
+  malformed-manifest errors. A definition may be `locked` (v33+,
+  optional, omitted when `false`): a lock belongs to the shape, not to
+  one copy of it, so **every instance of a locked definition is locked**,
+  and its contents are frozen wherever it is placed. An instance has no
+  `locked` field of its own; a reader MUST NOT look for one. A lock on a
+  root member of a linked set (an object or group listed directly in the
+  `members` of a definition whose attributes carry `hew` / `linked` =
+  `true`) is the set's lock: a reader moves it onto the definition (the
+  definition becomes `locked`, the member does not), and a writer never
+  writes one there. The width bound exists because a DAG
   multiplies: twenty levels of two instances each is a million
   placements. Writers cannot produce such a file through the ops (the
   same bound refuses growth at every op), so the reader bound only ever
@@ -729,13 +1160,27 @@ recompute face-plane orientation from winding alone ().
   `[m00,m01,m02,tx, m10,m11,m12,ty, m20,m21,m22,tz]`, read as `world_point =
   linear * local_point + translation` (`linear` the 3×3 block, `translation`
   the vector `(tx,ty,tz)`). Unlike baked object geometry, a pose **may** be
-  reflective or non-uniformly scaled, since poses are never baked into the
-  definition's geometry. Each instance carries its own optional name
+  non-uniformly scaled, and may be reflective without turning any face
+  over, since poses are not baked into the definition's geometry. Each instance carries its own optional name
   (falling back to the definition's name if absent) and optional tags.
+
+  An instance may carry its own `material` (v27+, optional): a dense
+  `materials[]` id that MUST name an entry of this file (an out-of-range
+  id is a fatal, typed error). Definition-owned instances carry one too.
+  It colors only what nobody painted. A face of a definition member
+  resolves its material in this order: the face's own `material`; else
+  its object's base material; else, walking the instances that place the
+  member from the innermost outward, the first one that has a
+  `material`; else the renderer's default. A painted face or a painted
+  object base therefore keeps its color in every placement, and a nested
+  instance's material wins over its outer instance's. A file declaring
+  `format_version < 27` that carries an instance `material` is malformed
+  for its declared version and MUST be rejected, never honored.
 
 ### 4.5 Materials and textures
 
-Each `materials[]` entry has an id, an informational `name`, and a `color`
+Materials are referenced by faces (front and back), object bases, and
+instances (§4.4). Each `materials[]` entry has an id, an informational `name`, and a `color`
 (`[r, g, b, a]`, each `0-255`). A material may optionally carry a `texture`:
 `asset` (the zip path of the verbatim image bytes), `format` (`"png"` or
 `"jpg"`, matching the asset's actual encoding), and `world_size` (`[width,
@@ -744,6 +1189,19 @@ height]` meters per image tile). A textured face with no per-face
 that does carry a `uv_frame` ignores `world_size` and uses the frame's
 affine mapping instead. A material with no `texture` renders as a flat
 `color` fill.
+
+A material may also carry `pbr` (v26+, optional, omitted when plain): its
+physically based surface. `metallic` and `roughness` (f32, 0 to 1) and
+`occlusion_strength` (f32, 0 to 1) and `normal_scale` (f32, 0 and up) are
+required inside it; `metallic_map`, `roughness_map`, `normal_map` and
+`occlusion_map` are each optional `{ "asset", "format" }` objects naming a
+zip path (`textures/pbr_<material id>_<slot>.png`) of verbatim image bytes
+and their codec (`"png"` or `"jpg"`). A map uses the same planar projection
+and tile size as the material's base `texture`. The plain surface is
+`metallic` 0, `roughness` 1, both strengths 1 and no maps; a writer MUST
+omit `pbr` for it. A reader MUST reject, never repair, a value outside the
+ranges above, an unknown codec, a key not listed here, and a manifest
+declaring `format_version < 26` that carries `pbr` at all.
 
 A material the user deletes from the palette is tombstoned in-session
 (its id stays valid for undo) but never written out: `save()` simply
@@ -792,7 +1250,7 @@ vertex id `0` is unrelated to sketch B's, or to any object/material id `0`).
   one of its edges gives it its face, and a region a drawing step brings
   about has one. A manifest declaring `format_version < 21` that sets
   `faceless` MUST be rejected.
-- `curves[]` (v10+, optional) — `{id, center, radius, kind?}`: the
+- `curves[]` (v10+, optional) — `{id, center, radius, kind?}` (or `{id, kind: "smooth"}`, v30+): the
   **analytic definition** of one curve chain — the exact circle, in the
   sketch plane, that the chain's edges relate to. `id` is the same dense
   per-sketch curve id `edges[].curve` references. Sparse: a chain with no
@@ -829,6 +1287,19 @@ vertex id `0` is unrelated to sketch B's, or to any object/material id `0`).
   handed a v12 file loses the distinction (it reads a polygon as a circle),
   which is why the manifest version moves.
 
+  - `"smooth"` (v30+) — an entry with **no** `center` and **no** `radius`:
+    the chain was drawn as a circle or arc and lost its circle to a
+    non-uniform scale (an ellipse is no circle), but its facet seams are
+    still seams of one smooth curve. Extruding or sweeping it marks those
+    seams soft, so the stretched curve keeps shading smooth. No analytic
+    point (center, quadrant, tangent) is derived from it. A regular
+    polygon's chain is never marked smooth (its sides stay hard), and
+    neither is a chain drawn without a circle in the first place.
+
+  A reader MUST reject a `"smooth"` entry in a manifest declaring
+  `format_version < 30`, a `"smooth"` entry that carries a `center` or a
+  `radius`, and any other entry that lacks either.
+
 - `owner` (v13+, optional) — the dense `components[]` id of the component
   definition whose shared geometry this sketch belongs to, in DEFINITION-
   LOCAL coordinates (its `plane` is expressed in that definition's own
@@ -855,6 +1326,26 @@ vertex id `0` is unrelated to sketch B's, or to any object/material id `0`).
   pre-v17 writer could not have produced it). A sketch whose owner object
   is not saved (deleted, or consumed by a boolean) is not saved either; a
   writer never emits an `owner_object` that names an unsaved object.
+- `detached` (v23+, optional, omitted when false) — the sketch is a
+  **detached shape**: drawing that takes part in no plane arrangement.
+  Drawing made later on the same plane does not split or merge with it,
+  moving it onto other drawing or onto a solid's face does not join it,
+  and extruding one of its regions always makes a new Object. It is a
+  free sketch in every other respect (`owner`, `owner_group`, `tags`
+  apply as usual). A detached sketch is never object-owned: a reader
+  MUST reject `detached` together with `owner_object` as a malformed
+  manifest, and MUST reject a manifest declaring `format_version < 23`
+  that sets `detached` (reject-not-repair: a pre-v23 writer could not
+  have produced it).
+- `imported` (v32+, optional, omitted when false) — the sketch is a
+  **foreign file's drawing** (a `.skp`'s loose edges, from a file Hew did
+  not write) that the user has not drawn in since: a viewer draws its
+  lines as the source's ordinary edges, not as drawing made in Hew. The
+  first drawing that adds to or reshapes the sketch clears it (erasing
+  from it does not); moving, copying, tagging and grouping it keep it. A
+  reader MUST reject a manifest declaring `format_version < 32` that sets
+  `imported`, and MUST NOT mark anything imported when loading an older
+  file.
 
 - `owner_group` (v19+, optional) — the dense `groups[]` id of the group the
   sketch is drawn in: a `.skp` group of edges, or lines drawn while
@@ -907,6 +1398,17 @@ is drawn and snapped to. A guide Hew draws is a whole line and writes
 neither. A manifest declaring `format_version < 22` that carries either
 on a guide, a `"point"` that carries either, a non-number, or `to` not
 past `from` by more than the merge tolerance, MUST be rejected.
+
+`dash` (v24+, optional, `"line"` only) is how the line is drawn: a 16-bit
+on/off mask (`0..=65535`), least-significant bit first, one bit per fixed
+length along the line, so `0xFFFF` (65535) is solid, `0x3333` (13107)
+short dashes, `0x8888` (34952) dotted, `0xF0F0` (61680) long dashes and
+`0x1C47` (7239) dash, dot, dash. Any mask is valid and round-trips. It is
+omitted at the default `0x3333`, which is also what a guide Hew draws and
+what a pre-v24 file's guides have. A `.skp` guide opens with its stipple
+and a save back writes the guide's dash (a fresh write likewise). A
+manifest declaring `format_version < 24` that carries `dash`, or a
+`"point"` that carries it, MUST be rejected.
 
 ### 4.8 Annotations
 
@@ -1047,7 +1549,9 @@ in world space.
   "parallel_height": 5.96,       // v19+: what the view spans at target, meters
   "eye": [4.0, -6.0, 3.0],
   "target": [0.0, 0.0, 0.0],
-  "up": [0.0, 0.0, 1.0]
+  "up": [0.0, 0.0, 1.0],
+  "image_width": 25.4,           // v24+, optional: Match Photo image width, meters
+  "aspect_ratio": 1.5            // v24+, optional: the held width-to-height ratio
 }
 ```
 
@@ -1068,6 +1572,17 @@ in world space.
   `2 · |eye − target| · tan(fov_deg / 2)`, which is how such a file was
   shown; a value that is not finite and positive, or one present in a
   manifest declaring `format_version < 19`, is a fatal, typed error.
+- **`image_width`**, **`aspect_ratio`** (v24+, optional, omitted when
+  unset) — a `.skp` camera set to an image (Match Photo) holds the width
+  the view spans in meters and the width-to-height ratio the view is held
+  to. They are carried and saved, never read by navigation. A `.skp` opens
+  with them (a file's zero is unset), and a save back or fresh write
+  writes them, zero for unset. Setting the camera to a view that looks the
+  way the held one does keeps them; setting it to a view that moved
+  replaces them with unset (a save back then also writes the file
+  camera's two-point perspective and 2D zoom and pan only while the view
+  is the file's own). Each is finite and positive; one in a manifest
+  declaring `format_version < 24` is malformed and MUST be rejected.
 - **`eye`**, **`target`**, **`up`** — world-space xyz triples: the camera
   position, the point it looks toward, and its up direction. A non-finite
   coordinate (in `fov_deg` or any of the three triples) is a fatal, typed
@@ -1177,6 +1692,9 @@ entirely when empty. Each entry:
     (backdrop and axes) opens here, and a Scene captured in Hew takes the
     document's own `view_style` when it has one. Absent when the Scene
     captures no look (a document shown Hew's way).
+  - `transition_s`, `delay_s` — the Scene's own transition time and delay
+    in seconds (finite, not negative), absent when the document's own
+    applies. Optional on any manifest version; not captured view state.
 
 **References.** Every `sid` in `hidden_nodes` / `hidden_tags` MUST name a
 live entity of the file (an object, group, or instance for the former; a
@@ -1214,9 +1732,28 @@ grid, the axes) — the only state every pre-v19 file is in.
   "background": [255, 255, 255],   // sRGB, behind everything
   "sky": [189, 209, 208],          // optional: the sky's color above the horizon; absent = no sky
   "ground": [210, 208, 185],       // optional: the ground plane's color; absent = no ground
-  "axes": false                    // whether the model axes are shown
+  "axes": false,                   // whether the model axes are shown
+  "section_cut_color": [0, 0, 0],  // v24+, optional: the cut outline's color
+  "section_cut_width": 3,          // v24+, optional: its width in pixels
+  "section_fill": false,           // v24+, optional: whether a cut face is filled
+  "section_fill_color": [0, 0, 0], // v24+, optional: the fill's color
+  "active_section_color": [255, 135, 0], // v24+, optional: the cutting plane's color
+  "guides_color": [0, 0, 0],       // v24+, optional: the guides' color
+  "guides_hidden": false           // v24+, optional: the style hides guides
 }
 ```
+
+The section and guide settings (v24+, each optional and omitted when
+unset) come from a `.skp` style and are written back to one, colors
+keeping the file's alpha. The viewport draws the cut outline in
+`section_cut_color` at `section_cut_width`; the rest are carried without
+being drawn (the fill, the cutting plane's color and the guides' color
+and visibility have no Hew rendering yet). Settings with no Hew
+counterpart at all (a style's hidden geometry and hidden objects, the
+section display bits, a section plane's name and symbol) are not in the
+manifest: a save back leaves them as the file has them. A manifest
+declaring `format_version < 24` that carries any of these keys MUST be
+rejected.
 
 With `sky` absent the background shows above the horizon; with `ground`
 absent no ground plane is drawn (Hew's grid lines, a drawing aid the
@@ -1228,6 +1765,52 @@ outside the document's undo/redo history, persisted with the document
 and applied on load. A file declaring `format_version < 19` that carries
 a `view_style` key is malformed for its own declared version and MUST be
 rejected (reject-not-repair, as every version-gated field).
+
+### 4.16 Geo-reference
+
+`geo` (manifest v25+, optional) is the coordinate reference system the
+model is placed in: where the model origin sits on a map. It is data a
+document carries (a `.skp` keeps it through a save back); it moves no
+geometry and nothing reads it as a transform.
+
+```jsonc
+"geo": {
+  "name": "NAD83 / Oregon North",       // optional text, omitted when empty
+  "description": "survey grid",         // optional text
+  "easting": 2500000.5,                 // f64, model origin, in the system's own map unit
+  "northing": 250000.25,                // f64
+  "height": 12.75,                      // f64
+  "x_axis": [0.0, 1.0],                 // [f64;2], the model x axis in the map plane (a vector, not an angle)
+  "scale": 0.9999,                      // f64, map scale factor
+  "geodetic_datum": "NAD83",            // optional text, kept as the file names it
+  "vertical_datum": "NAVD88",
+  "map_projection": "Lambert Conformal Conic",
+  "map_zone": "3601",
+  "map_unit": "foot",                   // the unit's name as the file holds it (METRE, foot, US survey foot)
+  "map_unit_metres": 0.3048,            // optional f64 > 0, meters per map unit when recorded
+  "tgl_id": "EPSG:2913",                // optional text
+  "calibration_file_name": "site.cal"   // optional text
+}
+```
+
+`easting`, `northing`, `x_axis` and `scale` are required; every text key and
+`map_unit_metres` is omitted when empty or unrecorded. Names are not
+interpreted: Hew keeps the datum, projection, zone and unit as the file
+spells them and keeps no registry of them. The angle of `x_axis` from map
+east is `atan2(x_axis[1], x_axis[0])`, undefined for a zero vector (no
+orientation recorded). A reader MUST reject, never repair, a record with a
+non-finite number, a `map_unit_metres` that is not greater than zero, or a
+key not listed here, and a manifest declaring `format_version < 25` that
+carries `geo` at all.
+
+**Undoable.** Setting or clearing the record is one undo step, restoring
+the recorded previous record verbatim; setting the record the document
+already holds records nothing. A `.skp` opened into an empty document
+brings its record in without history (as it does the camera and the view
+style); an import into a document that has work keeps the document's own.
+A `.skp` save writes the record in the 2026 container, keeping the file's
+own trailing records Hew does not read; the releases 3 to 2020 stream
+containers have no such record and omit it.
 
 ## 5. Versioning policy
 

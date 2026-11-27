@@ -9,6 +9,7 @@ import {
   arcPolyline,
   arcPolylineOnPlane,
   arcSegmentCount,
+  arcSegments,
   chordSagitta,
   type Vec2,
   type Vec3,
@@ -244,5 +245,53 @@ describe('arcPolylineOnPlane', () => {
   it('returns null on degenerate input', () => {
     expect(arcPolylineOnPlane([0, 0, 0], [2, 0, 0], 0, [1, 0, 0], [0, 1, 0])).toBeNull()
     expect(arcPolylineOnPlane([0, 0, 0], [0, 0, 0], 0.5, [1, 0, 0], [0, 1, 0])).toBeNull()
+  })
+})
+
+describe('segmentsPerTurn / arcSegmentCount parity with the Rust port', () => {
+  // crates/api/src/geom.rs `draw_segments_per_turn` / `arc_segments` assert
+  // this same table, so the two copies of the drawing rule cannot drift.
+  it('agrees on the parity radii', () => {
+    const table: Array<[number, number]> = [
+      [1e-4, 24],
+      [1e-3, 24],
+      [5e-3, 24],
+      [0.01, 24],
+      [0.05, 24],
+      [0.1, 32],
+      [0.3, 56],
+      [1, 96],
+      [3, 96],
+      [10, 96],
+      [100, 96],
+      [0, 24],
+    ]
+    for (const [r, n] of table) expect(segmentsPerTurn(r)).toBe(n)
+  })
+  it('agrees on arc facet counts', () => {
+    const table: Array<[number, number, number]> = [
+      [0.01, Math.PI / 2, 6],
+      [0.1, Math.PI / 2, 8],
+      [1, Math.PI, 48],
+      [0.003, 0.1, 2],
+      [3, 2 * Math.PI, 96],
+    ]
+    for (const [r, phi, n] of table) expect(arcSegmentCount(phi, r)).toBe(n)
+  })
+})
+
+describe('arcSegments (Fillet default facets)', () => {
+  it('matches the kernel API table', () => {
+    // The same cases as `arc_segments_matches_the_drawing_tools` in
+    // crates/api/src/geom.rs.
+    for (const [r, phi, n] of [
+      [0.01, Math.PI / 2, 6],
+      [0.1, Math.PI / 2, 8],
+      [1.0, Math.PI, 48],
+      [0.003, 0.1, 2],
+      [3.0, 2 * Math.PI, 96],
+    ] as const) {
+      expect(arcSegments(r, phi), `radius ${r}, sweep ${phi}`).toBe(n)
+    }
   })
 })

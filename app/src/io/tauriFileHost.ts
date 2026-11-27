@@ -17,8 +17,9 @@
 
 import { t } from '@lingui/core/macro'
 import type { DocFormat, ExportFileType, FileHost, FileRef, ImageEntry, ImportPick, OpenPick } from './fileHost'
-import { FileReadError } from './fileHost'
+import { FileReadError, UnsupportedFileError } from './fileHost'
 import { extensionFor, formatDescription, nameForFormat } from './docFormat'
+import { collapseDoubledExtension } from './savePanel'
 
 /**
  * Write `bytes` to `path` via the raw-IPC-body `write_file_bytes` command
@@ -38,22 +39,6 @@ import { extensionFor, formatDescription, nameForFormat } from './docFormat'
 async function writeFileBytes(path: string, bytes: Uint8Array): Promise<void> {
   const { invoke } = await import('@tauri-apps/api/core')
   await invoke('write_file_bytes', bytes as never, { headers: { path: encodeURIComponent(path) } })
-}
-
-/**
- * Write a document's bytes to `path`. `.hew` keeps the original
- * `write_file` JSON-array route; a SketchUp file goes through the raw-body
- * route, because a real model is tens to hundreds of megabytes and the JSON
- * route costs about four bytes of IPC per file byte.
- */
-async function writeDocument(path: string, bytes: Uint8Array, format: DocFormat): Promise<void> {
-  if (format === 'hew') {
-    const { invoke } = await import('@tauri-apps/api/core')
-    // write_file expects Vec<u8>; pass Array.from so Tauri IPC sees a JSON array.
-    await invoke('write_file', { path, contents: Array.from(bytes) })
-    return
-  }
-  await writeFileBytes(path, bytes)
 }
 
 /** Extract the basename from a path that may use / or \ separators. */
@@ -110,6 +95,10 @@ export async function resolveImportPickFromPath(filePath: string, fileBytes: Uin
   if (/\.stl$/i.test(filePath)) {
     return { kind: 'stl', name: basename(filePath), bytes: fileBytes, path: filePath }
   }
+
+  // Only a `.dae` is COLLADA. Anything else is refused before the sibling
+  // scan, so no importer ever sees a file it cannot parse.
+  if (!/\.dae$/i.test(filePath)) throw new UnsupportedFileError(basename(filePath))
 
   // Scan the sibling directory (and a <stem>_textures / textures subfolder
   // if present) for PNG/JPEG images.  Best-effort — failures are silently
@@ -178,7 +167,6 @@ export class TauriFileHost implements FileHost {
     const path = await invoke<string | null>('pick_open_path', {
       filters: [{ name: t`Hew model`, extensions: ['hew'] }],
       write: true,
-      approveDir: false,
     })
     if (path === null) return null
 
@@ -199,26 +187,26 @@ export class TauriFileHost implements FileHost {
       return this.saveAs(bytes, 'Untitled.hew')
     }
     const path = ref.handle as string
-    await writeDocument(path, bytes, ref.format)
+    await writeFileBytes(path, bytes)
     return ref
   }
 
   async saveAs(bytes: Uint8Array, suggestedName: string, format: DocFormat = 'hew'): Promise<FileRef | null> {
     const { invoke } = await import('@tauri-apps/api/core')
-    const path = await invoke<string | null>('pick_save_path', {
+    const picked = await invoke<string | null>('pick_save_path', {
       defaultName: nameForFormat(suggestedName, format),
       filters: [{ name: formatDescription(format), extensions: [extensionFor(format).slice(1)] }],
     })
-    if (path === null) return null
+    if (picked === null) return null
+    const path = collapseDoubledExtension(picked, extensionFor(format).slice(1))
 
-    await writeDocument(path, bytes, format)
+    await writeFileBytes(path, bytes)
 
     return { name: basename(path), format, handle: path }
   }
 
   async writeTo(path: string, bytes: Uint8Array, format?: DocFormat): Promise<FileRef> {
-    if (format === undefined) await writeFileBytes(path, bytes)
-    else await writeDocument(path, bytes, format)
+    await writeFileBytes(path, bytes)
     return { name: basename(path), format: format ?? 'hew', handle: path }
   }
 
@@ -229,11 +217,12 @@ export class TauriFileHost implements FileHost {
   ): Promise<string | null> {
     const dotExt = '.' + fileType.ext
     const { invoke } = await import('@tauri-apps/api/core')
-    const path = await invoke<string | null>('pick_save_path', {
+    const picked = await invoke<string | null>('pick_save_path', {
       defaultName: suggestedName.endsWith(dotExt) ? suggestedName : suggestedName + dotExt,
       filters: [{ name: fileType.description, extensions: [fileType.ext] }],
     })
-    if (path === null) return null
+    if (picked === null) return null
+    const path = collapseDoubledExtension(picked, fileType.ext)
 
     await writeFileBytes(path, bytes)
     return path
@@ -244,7 +233,6 @@ export class TauriFileHost implements FileHost {
     const filePath = await invoke<string | null>('pick_open_path', {
       filters: [{ name: 'Pictures (PNG, JPEG)', extensions: ['png', 'jpg', 'jpeg'] }],
       write: false,
-      approveDir: false,
     })
     if (filePath === null) return null
     // A pick whose bytes can't be read is not a cancel: reject with
@@ -261,8 +249,8 @@ export class TauriFileHost implements FileHost {
 
   async openForImport(): Promise<ImportPick | null> {
     const { invoke } = await import('@tauri-apps/api/core')
-    // approveDir: true — the DAE texture scan below reads the picked file's
-    // siblings and textures/-style subfolders; the pick approves that too.
+    // The native picker grants sibling reads only when the picked file is
+    // COLLADA, whose texture scan needs textures/-style subfolders.
     const filePath = await invoke<string | null>('pick_open_path', {
       filters: [
         {
@@ -275,7 +263,6 @@ export class TauriFileHost implements FileHost {
         { name: t`STL model`, extensions: ['stl'] },
       ],
       write: false,
-      approveDir: true,
     })
     if (filePath === null) return null
 
@@ -288,18 +275,8 @@ export class TauriFileHost implements FileHost {
    * Prompt with ONE dialog covering `.hew` plus every import format, and
    * dispatch on the extension the user picked. `write: true` mirrors
    * `open()`'s hew-only pick (a hew pick may be Saved back in place without
-   * a further dialog); `approveDir: true` mirrors `openForImport()`'s pick
-   * (a DAE pick needs its sibling directory approved for the texture scan).
-   * Both are granted regardless of which extension is actually picked, since
-   * the extension isn't known until the dialog resolves and approval is
-   * granted at pick time — `write` is inert for every non-hew kind (nothing
-   * ever calls `write_file` against an import-format path), but `approveDir`
-   * is a real, if bounded, widening: a plain `.hew` pick through THIS dialog
-   * now also gets its containing directory approved for read/list (see
-   * `ApprovedPaths::read_dirs` in shells/tauri/src-tauri/src/main.rs), where
-   * the narrower `.hew`-only `open()` above never did. Flagged for the
-   * maintainer, not fixed here — gating `approveDir` on the resolved path's
-   * own extension would need a Rust-side change to `pick_open_path` itself.
+   * a further dialog). Rust decides additional directory read approval from
+   * the resolved extension: only COLLADA needs sibling texture access.
    */
   async openAny(): Promise<OpenPick | null> {
     const { invoke } = await import('@tauri-apps/api/core')
@@ -316,7 +293,6 @@ export class TauriFileHost implements FileHost {
         { name: t`STL model`, extensions: ['stl'] },
       ],
       write: true,
-      approveDir: true,
     })
     if (filePath === null) return null
 

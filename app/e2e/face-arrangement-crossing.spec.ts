@@ -112,10 +112,10 @@ async function expectPlainRectangle(page: Page, object: string): Promise<void> {
 async function undoRedo(page: Page, object: string, arranged: () => Promise<void>): Promise<void> {
   // One undo entry: Ctrl+Z restores the plain rectangle, redo the arrangement.
   await page.keyboard.press('Escape')
-  await page.keyboard.press('Control+z')
+  await page.keyboard.press('ControlOrMeta+z')
   await page.waitForTimeout(250)
   await expectPlainRectangle(page, object)
-  await page.keyboard.press('Control+Shift+Z')
+  await page.keyboard.press('ControlOrMeta+Shift+Z')
   await page.waitForTimeout(250)
   await arranged()
 }

@@ -76,11 +76,11 @@ Navigation is always available, whatever tool is active. Drag the **middle mouse
 
 No mouse wheel? Press `O`, `H`, or `Z` for Orbit, Pan, and Zoom and drag with the left button.
 
-The **Top / Iso / Front** buttons above the viewport jump to standard views, and **Camera ▸ Zoom Extents** frames everything visible.
+The **view die** in the top-right corner of the viewport jumps to standard views (click a face to look straight at it, or a corner for an isometric-style view), and **Camera ▸ Zoom Extents** frames everything visible.
 
-Try it out! **Orbit** and **Pan** around the model to get a feel for how the camera changes when you move around. To "reset" your view, just click the **Iso** button and it'll reset the camera to a "standard" view. The **Top** and **Front** buttons are similar - they show standardized views of the model that will be extremely handy at certain times.
+Try it out! **Orbit** and **Pan** around the model to get a feel for how the camera changes when you move around. To get back to a known view, click a corner of the die for a three-quarter view of the model. The **Top** and **Front** faces of the die are similar - they show standardized views of the model that will be extremely handy at certain times.
 
-But yeah, just get used to clicking the **Iso** button since that does a camera reset plus "Zoom Extents" in one fell swoop.
+But yeah, when you get lost, **Camera ▸ Standard Views ▸ Iso** does a camera reset plus "Zoom Extents" in one fell swoop.
 
 There's more in [Viewing your model](/learn/viewing/).
 
@@ -101,7 +101,7 @@ Drawing a shape on a solid and then pushing into the solid is a very common way 
 
 So far, all of our work has happened on parts on the "ground". This is the "blue" plane (or *Z-plane*) that crosses the origin. Blue planes can be anywhere up and down the Z-axis, though. There are two other planes - the "red" plane ("X-plane") and "green" plane ("Y-plane"). Likewise, they can move anywhere on the X-axis or Y-axis, resp.
 
-There are several ways to switch to another plane. The two primary ways are to hover over a face that is already on your intended plane and pressing the **Shift** key to lock the cursor into that plane or to use the arrow keys to **lock** onto a particular axis. This is all pretty abstract, so let's make this concrete.
+There are several ways to switch to another plane. The three primary ways are to orbit until the plane you want faces you (a Front or Side standard view does it in one click), so that shapes drawn in empty space land on it; to hover over a face that is already on your intended plane and press the **Shift** key to lock the cursor into that plane; or to use the arrow keys to **lock** onto a particular axis. While a drawing tool is active, the four pips under the view die in the top-right corner show which plane your next click lands on: the filled one. A padlock on a pip means the plane is locked. Clicking the red, green, or blue pip is the mouse version of the `→`, `←`, and `↑` keys. This is all pretty abstract, so let's make this concrete.
 
 Start by creating a hollow box for use as our parts bin. We will try one new tool to help hollow out the rectangle.
 
@@ -123,11 +123,11 @@ It is worth saying that you don't always *have* to use the arrow keys to lock to
 
 Our goal is to make a "cutter" out of a cylinder that we construct to lie *across* the bin. It'll be easier to do this if you **Orbit** the model to show the right face of the bin more clearly. Alternatively, you can choose **Camera ▸ Standard Views ▸ Right**. Play around with this - being able to master the camera is a critical skill working in 3D.
 
-Drawing on the "right" face means locking to the **red / X-plane** (which is perpendicular to the X-axis, because that's how that works).
+A plain click with a draw tool on the right face would split the new circle where it meets the face's edge, because the circle would join the face's drawing. We want the disk to stay whole, so we turn on **Detached** first. Detached mode is how you draw on a face and keep the shape apart from it.
 
-1. Choose the **Circle** (`C`) tool and hover over the bin's right face. Then press the **Right arrow** key. The Status Bar confirms that we're locked to the red plane and there are some visual clues as well.
-2. Click the upper left corner of the right face as the circle center and enter a radius of `2cm`. We now have a disk Sketch on the right face of the bin, rather than on the ground
-3. Choose **Push/Pull** (`P`) to create a cylinder the entire length of the bin (`7cm` or just choose a point on the far edge)
+1. Choose the **Circle** (`C`) tool and hover over the bin's right face. Tap `Ctrl` (`⌘` on a Mac). The cursor gains a small `+`, the hint at the bottom says Detach is on, and the readout gains a "Detached ·" prefix: the next shape stays apart from the face it is drawn on.
+2. Click the upper left corner of the right face as the circle center, type `2cm`, and press `Enter`. The disk is a Sketch in the Outliner, on the face's plane but not part of the face. The face itself is untouched. The disk is blue, the color of drawing that belongs to no solid.
+3. Choose **Push/Pull** (`P`), click the disk, type `-7cm`, and press `Enter`. The minus sign pushes the disk across the bin to its far side. We now have a cylinder along the bin's top edge, sunk into the wall.
 
 ![The bin with a right face disk being extruded into a cylinder](/docs/bin-with-cutter.webp)
 

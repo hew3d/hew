@@ -1,6 +1,7 @@
-import { describe, it, expect, vi } from 'vitest'
+import { describe, it, expect, vi, beforeEach } from 'vitest'
 import * as THREE from 'three'
 import { RotateTool } from './RotateTool'
+import { setCopiesLinked } from '../settings/editing'
 import { DragCommitGate } from '../viewport/dragCommit'
 import { CleanModifierTap } from '../viewport/cleanModifierTap'
 import type { Snap } from './types'
@@ -12,6 +13,8 @@ import { axisColorForDirection, axisColorsForTheme } from '../viewport/axisColor
 import { getResolvedTheme } from '../settings/theme'
 import { worldPerPixelPerspective, worldPerPixelOrtho } from '../viewport/math'
 import type { DrawingAxes } from './drawingAxes'
+import { SiblingPreviewMirror } from '../viewport/siblingPreview'
+import { isSessionGhost } from './transformPreview'
 
 // `isMac` is a load-time constant read from `navigator.platform`, so this
 // whole file mocks `../platform` to `isMac: true` (macOS) rather than
@@ -23,6 +26,11 @@ vi.mock('../platform', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../platform')>()
   return { ...actual, isMac: true, COPY_MODIFIER_KEY: 'Alt', COPY_MODIFIER_LABEL: 'Option' }
 })
+
+// The tool tests below were written when every copy was independent; with
+// "Copies are linked" off the primary copy is that same independent copy.
+// The linked-copy tests turn the preference back on for themselves.
+beforeEach(() => setCopiesLinked(false))
 
 const CTX = ctxGround()
 /** Kernel keys are 16-hex strings. */
@@ -205,7 +213,7 @@ function makeWasmScene(faceNormal?: [number, number, number], frame: number[] = 
     pick_face: vi.fn(() => undefined),
     transform_selection: vi.fn(() => { gen++ }),
     duplicate_selection_array: vi.fn(
-      (_kinds: Uint8Array, ids: BigUint64Array, _affine: Float64Array, count: number) => {
+      (_kinds: Uint8Array, ids: BigUint64Array, _affine: Float64Array, count: number, _linked?: boolean) => {
         const out: { kind: string; id: bigint }[] = []
         for (let k = 0; k < count; k++) {
           for (let i = 0; i < ids.length; i++) {
@@ -214,6 +222,23 @@ function makeWasmScene(faceNormal?: [number, number, number], frame: number[] = 
         }
         gen++
         return out
+      },
+    ),
+    // A linked copy: every loose source is wrapped as its own set, and each
+    // copy is a placement (an instance) of it.
+    duplicate_selection_array_linked: vi.fn(
+      (kinds: Uint8Array, ids: BigUint64Array, _affine: Float64Array, count: number) => {
+        const nodes: { kind: string; id: string }[] = []
+        for (let k = 0; k < count; k++) {
+          for (let i = 0; i < ids.length; i++) nodes.push({ kind: 'instance', id: String(nextObjId++) })
+        }
+        const linked = Array.from(ids).map((id, i) => ({
+          source: { kind: kinds[i] === 1 ? 'group' : kinds[i] === 2 ? 'instance' : 'object', id: String(id) },
+          instance: String(nextObjId++),
+          definition: String(nextObjId++),
+        })).filter((w) => w.source.kind !== 'instance')
+        gen++
+        return JSON.stringify({ nodes, linked })
       },
     ),
     max_array_count: vi.fn(() => 1000),
@@ -236,6 +261,7 @@ function makeWasmScene(faceNormal?: [number, number, number], frame: number[] = 
     sketch_plane: vi.fn((sketch: bigint) =>
       sketch === 3n || sketch === 6n || sketch >= 900n ? new Float64Array([0, 0, 0, 0, 0, 1]) : undefined,
     ),
+    annotation_ids: vi.fn(() => []),
     sketch_island_ids: vi.fn((sketch: bigint) =>
       sketch === 3n ? [40n, 41n] : sketch === 6n ? [45n] : sketch >= 900n ? [77n] : [],
     ),
@@ -285,7 +311,7 @@ function makeWasmScene(faceNormal?: [number, number, number], frame: number[] = 
           }
         }
         gen++
-        return id
+        return JSON.stringify({ objects: [], sketches: [Number(id)], kept_as_sketch: [], faces_closed: [], cells: [] })
       },
     ),
   }
@@ -368,6 +394,26 @@ describe('RotateTool — protractor widget (idle/hover)', () => {
     tool.onPointerMove(makeSnap({ kind: 'face', elementKind: 'face', object: 1n, element: 2n }), rayThrough(0, 0))
     expect(ringColorHex(preview)).toBe(axisColorHex([1, 0, 0]))
     expect(ringColorHex(preview)).not.toBe(axisColorHex([0, 0, 1]))
+  })
+
+  it('a snap on the line where two objects\' faces meet does not adopt the first face\'s axis', () => {
+    // The kernel names the first of the two faces as the line's owner of
+    // record (here a side face, +X); the line is on both and a pick of
+    // neither, so the axis comes from what is under the ray (nothing here
+    // → +Z), as for an edge.
+    const { tool, preview, wasmScene } = makeTool({ faceNormal: [1, 0, 0] })
+    const meetingLine: Snap['meetingLine'] = [
+      [0, -1, 0],
+      [0, 1, 0],
+    ]
+    for (const kind of ['on-intersection-line', 'midpoint']) {
+      tool.onPointerMove(
+        makeSnap({ kind, elementKind: 'meeting-line', object: 1n, element: 2n, meetingLine }),
+        rayThrough(0, 0),
+      )
+      expect(ringColorHex(preview)).toBe(axisColorHex([0, 0, 1]))
+    }
+    expect(wasmScene.face_normal).not.toHaveBeenCalledWith(1n, 2n)
   })
 })
 
@@ -569,6 +615,48 @@ describe('RotateTool — snapConstraint (axis-lock plane)', () => {
     expect(tool.snapConstraint()).toEqual({
       constraintPlane: { point: [0, 0, 0], normal: [0, 0, 1] },
     })
+  })
+})
+
+describe('RotateTool — the center-to-first-point dashed line', () => {
+  /** The dashed line's [start, end] in the preview, or null. */
+  function linkEnds(preview: THREE.Group): number[][] | null {
+    let found: THREE.LineSegments | null = null
+    preview.traverse((o) => {
+      if (o instanceof THREE.LineSegments && o.material instanceof THREE.LineDashedMaterial) found = o
+    })
+    if (found === null) return null
+    const pos = (found as THREE.LineSegments).geometry.getAttribute('position')
+    return [[pos.getX(0), pos.getY(0), pos.getZ(0)], [pos.getX(1), pos.getY(1), pos.getZ(1)]]
+  }
+
+  it('locked, it ends where the click will put the first point: in the rotation plane', () => {
+    const { tool, preview } = makeTool()
+    tool.onPointerMove(makeSnap({ x: 0, y: 0, z: 0 }), rayThrough(0, 0))
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), rayThrough(0, 0)) // pivot at origin
+    tool.onKey(makeKeyEvent('ArrowUp')) // lock Z
+    // A snap off the rotation plane (z = 0.5): the click would project it.
+    tool.onPointerMove(makeSnap({ x: 1, y: 0, z: 0.5, kind: 'endpoint' }), rayThrough(1, 0))
+    const [start, end] = linkEnds(preview)!
+    expect(start).toEqual([0, 0, 0])
+    expect(end[0]).toBeCloseTo(1)
+    expect(end[1]).toBeCloseTo(0)
+    expect(end[2]).toBeCloseTo(0)
+  })
+})
+
+describe('RotateTool — the center-to-first-point line with no snap', () => {
+  it('is hidden while the pointer has no snap, and returns with the next one', () => {
+    const { tool, preview } = makeTool()
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), rayThrough(0, 0)) // center
+    tool.onPointerMove(makeSnap({ x: 2, y: 1, z: 0 }), rayThrough(2, 1))
+    let line: THREE.LineSegments | undefined
+    preview.traverse((o) => { if (o instanceof THREE.LineSegments && o.material instanceof THREE.LineDashedMaterial) line = o })
+    expect(line!.visible).toBe(true)
+    tool.onPointerMove(null, rayThrough(5, 5)) // a ray with no snap (parallel to the plane)
+    expect(line!.visible).toBe(false)
+    tool.onPointerMove(makeSnap({ x: 1, y: 2, z: 0 }), rayThrough(1, 2))
+    expect(line!.visible).toBe(true)
   })
 })
 
@@ -774,17 +862,42 @@ function runNinetyDegreeGesture(tool: RotateTool): void {
 }
 
 describe('RotateTool — durable Alt copy toggle', () => {
-  it('tapping Alt toggles copy mode on and off (not hold-to-copy)', () => {
-    const { tool, onCopyModeChange } = makeTool()
+  it('rotate_copy_cycles_and_passes_the_mode', () => {
+    setCopiesLinked(true)
+    const { tool, wasmScene, onCopyModeChange } = makeTool()
     expect(tool.statusHint()).toContain('center of rotation')
 
     tool.onKey(makeKeyEvent('Alt'))
-    expect(onCopyModeChange).toHaveBeenLastCalledWith(true)
+    expect(onCopyModeChange).toHaveBeenLastCalledWith('primary', true)
     expect(tool.statusHint()).toContain('Copy is on')
 
     tool.onKey(makeKeyEvent('Alt'))
-    expect(onCopyModeChange).toHaveBeenLastCalledWith(false)
-    expect(tool.statusHint()).not.toContain('Copy is on')
+    expect(onCopyModeChange).toHaveBeenLastCalledWith('alternate', false)
+    expect(tool.statusHint()).toContain('Independent copy is on')
+
+    tool.onKey(makeKeyEvent('Alt'))
+    expect(onCopyModeChange).toHaveBeenLastCalledWith('off', false)
+    expect(tool.statusHint()).not.toContain('is on')
+
+    // A linked copy goes through the call that reports its wraps...
+    tool.onKey(makeKeyEvent('Alt'))
+    wasmScene.duplicate_selection_array_linked.mockImplementationOnce(() =>
+      JSON.stringify({ nodes: [{ kind: 'instance', id: '200' }], linked: [] }),
+    )
+    runNinetyDegreeGesture(tool)
+    expect(wasmScene.duplicate_selection_array_linked).toHaveBeenCalledTimes(1)
+    expect(wasmScene.duplicate_selection_array).not.toHaveBeenCalled()
+  })
+
+  it('rotate_alternate_copy_passes_linked_false_with_the_preference_on', () => {
+    setCopiesLinked(true)
+    const { tool, wasmScene } = makeTool()
+    tool.onKey(makeKeyEvent('Alt'))
+    tool.onKey(makeKeyEvent('Alt')) // Independent copy
+    runNinetyDegreeGesture(tool)
+    expect(wasmScene.duplicate_selection_array).toHaveBeenCalledTimes(1)
+    expect(wasmScene.duplicate_selection_array.mock.calls[0][4]).toBe(false)
+    expect(wasmScene.duplicate_selection_array_linked).not.toHaveBeenCalled()
   })
 
   it('ignores Alt autorepeat (a held Alt toggles exactly once)', () => {
@@ -793,7 +906,7 @@ describe('RotateTool — durable Alt copy toggle', () => {
     tool.onKey(makeKeyEvent('Alt', { repeat: true }))
     tool.onKey(makeKeyEvent('Alt', { repeat: true }))
     expect(onCopyModeChange).toHaveBeenCalledTimes(1)
-    expect(onCopyModeChange).toHaveBeenLastCalledWith(true)
+    expect(onCopyModeChange).toHaveBeenLastCalledWith('primary', false)
   })
 
   it('a full gesture commits a COPY (via duplicate_selection_array) while toggled on — Alt long released', () => {
@@ -815,7 +928,8 @@ describe('RotateTool — durable Alt copy toggle', () => {
   it('a full gesture commits a plain ROTATE (transform_selection) after toggling back off', () => {
     const { tool, wasmScene } = makeTool()
     tool.onKey(makeKeyEvent('Alt'))
-    tool.onKey(makeKeyEvent('Alt')) // back off
+    tool.onKey(makeKeyEvent('Alt')) // the other kind of copy
+    tool.onKey(makeKeyEvent('Alt')) // back to plain Rotate
     runNinetyDegreeGesture(tool)
 
     expect(wasmScene.transform_selection).toHaveBeenCalledTimes(1)
@@ -837,10 +951,11 @@ describe('RotateTool — copy modifier is platform-specific (Option on macOS, Ct
   it('toggleCopyMode() flips copy mode directly — the method a Windows/Linux Control clean tap calls', () => {
     const { tool, onCopyModeChange } = makeTool()
     tool.toggleCopyMode()
-    expect(onCopyModeChange).toHaveBeenLastCalledWith(true)
+    expect(onCopyModeChange).toHaveBeenLastCalledWith('primary', false)
     expect(tool.statusHint()).toContain('Copy is on')
     tool.toggleCopyMode()
-    expect(onCopyModeChange).toHaveBeenLastCalledWith(false)
+    tool.toggleCopyMode()
+    expect(onCopyModeChange).toHaveBeenLastCalledWith('off', false)
   })
 
   it('a bare Control keydown does NOT toggle copy mode on macOS — Option owns it here', () => {
@@ -857,7 +972,7 @@ describe('RotateTool — copy modifier is platform-specific (Option on macOS, Ct
     const armed = tap.onKeyUp({ key: 'Control' }, tool)
     expect(armed).not.toBeNull()
     armed!.toggleCopyMode()
-    expect(onCopyModeChange).toHaveBeenLastCalledWith(true)
+    expect(onCopyModeChange).toHaveBeenLastCalledWith('primary', false)
   })
 
   it('a Ctrl+Z chord does NOT toggle copy mode (the clean-tap combo guard)', () => {
@@ -906,7 +1021,7 @@ describe('RotateTool — on Windows/Linux, Alt is NOT the copy modifier (Ctrl is
 
     // The Viewport's Control clean tap calls this directly on this platform.
     tool.toggleCopyMode()
-    expect(onCopyModeChange).toHaveBeenLastCalledWith(true)
+    expect(onCopyModeChange).toHaveBeenLastCalledWith('primary', false)
     expect(tool.statusHint()).toContain('Copy is on')
     expect(tool.statusHint()).toContain('Ctrl')
   })
@@ -1445,8 +1560,8 @@ describe('RotateTool — ×N / /N array copy', () => {
     tool.onPointerMove(makeSnap({ x: 0, y: 0, z: 0 }), rayThrough(0, 0))
     tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), rayThrough(0, 0)) // pivot placed, mid-gesture
 
-    // What App.tsx's onDeleteKey does: skip menuActionRef('edit-delete')
-    // when isCapturingInput(ev.key) is true. It must be true here, or the
+    // What the keymap dispatcher (keymap/dispatch.ts) does: skip Delete's
+    // command when isCapturingInput(ev.key) is true. It must be true here, or the
     // pivoted node gets deleted out from under the live gesture.
     expect(isCapturingInputLike(tool, 'Delete')).toBe(true)
     expect(isCapturingInputLike(tool, 'Backspace')).toBe(true)
@@ -1669,5 +1784,189 @@ describe('RotateTool — click-drag-release gate', () => {
     // The release set the reference: the tool now asks for the angle.
     expect(t.tool.gestureInFlight()).toBe(true)
     expect(t.tool.statusHint()).not.toContain('center of rotation')
+  })
+})
+
+describe('RotateTool — the drag ghost is session geometry, mirrored onto sibling placements', () => {
+  it('the reference click puts a marked ghost in the preview (the protractor disk is not one); the mirror shows it and clears with Esc', () => {
+    const objectsGroup = new THREE.Group()
+    const sub = new THREE.Group()
+    sub.name = 'Object_1'
+    sub.add(new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), new THREE.MeshBasicMaterial()))
+    objectsGroup.add(sub)
+    const preview = new THREE.Group()
+    const wasmScene = makeWasmScene()
+    const tool = new RotateTool(wasmScene as never, preview, objectsGroup, [{ kind: 'object', id: 1n }], vi.fn(), vi.fn(), null, vi.fn(), vi.fn(), vi.fn())
+    const root = new THREE.Group()
+    const mirror = new SiblingPreviewMirror({ source: preview, root, frames: () => [1, 0, 0, 4, 0, 1, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 0, 1, 0, 7, 0, 0, 1, 0] })
+
+    tool.onPointerDown(makeSnap(), rayThrough(0, 0)) // pivot
+    expect(preview.children.filter(isSessionGhost)).toHaveLength(0) // disk only
+    mirror.sync()
+    expect(mirror.mirrorCount).toBe(0)
+    tool.onPointerDown(makeSnap({ x: 1, y: 0, z: 0 }), rayThrough(1, 0)) // reference arm: the ghost appears
+    const ghosts = preview.children.filter(isSessionGhost)
+    expect(ghosts).toHaveLength(1)
+    mirror.sync()
+    expect(mirror.mirrorCount).toBe(2)
+    expect((root.children[0] as THREE.Group).children).toHaveLength(1) // the ghost, not the disk
+
+    tool.onKey(makeKeyEvent('Escape'))
+    mirror.sync()
+    expect(mirror.mirrorCount).toBe(0)
+  })
+})
+
+describe('RotateTool — a click-taken selection lasts only for the gesture (as Move)', () => {
+  const NODE: NodeRef = { kind: 'object', id: 7n }
+
+  function makeAcquiring() {
+    const t = makeTool({ selection: [] })
+    const acquire = vi.fn(() => [NODE])
+    const release = vi.fn()
+    t.tool.setSelectionAcquirer(acquire, release)
+    return { ...t, acquire, release }
+  }
+
+  it('a landed rotation empties the selection again', () => {
+    const t = makeAcquiring()
+    runNinetyDegreeGesture(t.tool)
+    expect(t.wasmScene.transform_selection).toHaveBeenCalledTimes(1)
+    expect(t.release).toHaveBeenCalledTimes(1)
+  })
+
+  it('Esc mid-gesture gives the selection back', () => {
+    const t = makeAcquiring()
+    t.tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), rayThrough(0, 0)) // pivot
+    t.tool.onPointerDown(makeSnap({ x: 1, y: 0, z: 0 }), rayThrough(1, 0)) // reference
+    t.tool.onKey(makeKeyEvent('Escape'))
+    expect(t.release).toHaveBeenCalledTimes(1)
+  })
+
+  it('a refused rotation gives the selection back', () => {
+    const t = makeAcquiring()
+    t.wasmScene.transform_selection.mockImplementationOnce(() => { throw new Error('InvalidTransform: refused') })
+    runNinetyDegreeGesture(t.tool)
+    expect(t.onToast).toHaveBeenCalled()
+    expect(t.release).toHaveBeenCalledTimes(1)
+  })
+
+  it('a refused retype leaves the gesture\'s release to the retype that lands', () => {
+    const t = makeAcquiring()
+    runNinetyDegreeGesture(t.tool)
+    expect(t.release).toHaveBeenCalledTimes(1)
+
+    t.wasmScene.transform_selection.mockImplementationOnce(() => { throw new Error('InvalidTransform: refused') })
+    typeKeys(t.tool, '45')
+    t.tool.onKey(makeKeyEvent('Enter'))
+    expect(t.onToast).toHaveBeenCalled()
+    expect(t.release).toHaveBeenCalledTimes(1)
+
+    typeKeys(t.tool, '30')
+    t.tool.onKey(makeKeyEvent('Enter'))
+    expect(t.wasmScene.transform_selection).toHaveBeenCalledTimes(3)
+    expect(t.release).toHaveBeenCalledTimes(2)
+  })
+
+  it('a copy and its ×N array leave nothing selected — the array still fans from the source', () => {
+    const t = makeAcquiring()
+    t.tool.onKey(makeKeyEvent('Alt'))
+    runNinetyDegreeGesture(t.tool)
+    expect(t.release).toHaveBeenCalledTimes(1)
+    typeKeys(t.tool, '3x')
+    t.tool.onKey(makeKeyEvent('Enter'))
+    const [, ids, , count] = t.wasmScene.duplicate_selection_array.mock.calls.at(-1)!
+    expect(Array.from(ids as BigUint64Array)).toEqual([7n])
+    expect(count).toBe(3)
+    expect(t.release).toHaveBeenCalledTimes(2)
+  })
+
+  it('a selection made beforehand is kept', () => {
+    const t = makeTool()
+    const release = vi.fn()
+    t.tool.setSelectionAcquirer(() => [NODE], release)
+    runNinetyDegreeGesture(t.tool)
+    expect(release).not.toHaveBeenCalled()
+  })
+})
+
+describe('RotateTool — what a click would take (clickAcquire, the hover highlight)', () => {
+  it('idle with nothing selected: a guide first when guides can be taken, else a node', () => {
+    const t = makeTool({ selection: [] })
+    t.tool.setSelectionAcquirer(() => null)
+    expect(t.tool.clickAcquire()).toEqual({ guides: false, nodes: true })
+    t.tool.setGuideHooks(() => null, vi.fn())
+    expect(t.tool.clickAcquire()).toEqual({ guides: true, nodes: true })
+  })
+
+  it('nothing with nodes or a guide selected (the click is the pivot), or mid-gesture', () => {
+    const selected = makeTool()
+    selected.tool.setSelectionAcquirer(() => null)
+    expect(selected.tool.clickAcquire()).toBeNull()
+
+    const guide = makeTool({ selection: [] })
+    guide.tool.setSelectionAcquirer(() => null)
+    guide.tool.setGuideHooks(() => null, vi.fn())
+    guide.tool.setGuideTarget(5n)
+    expect(guide.tool.clickAcquire()).toBeNull()
+
+    const t = makeTool({ selection: [] })
+    t.tool.setSelectionAcquirer(() => [{ kind: 'object', id: 7n }])
+    t.tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), rayThrough(0, 0))
+    expect(t.tool.clickAcquire()).toBeNull()
+  })
+})
+
+describe('RotateTool — dashed line from the center to the first point', () => {
+  function dashedLine(preview: THREE.Object3D): THREE.LineSegments | undefined {
+    let found: THREE.LineSegments | undefined
+    preview.traverse((o) => {
+      if (o instanceof THREE.LineSegments && o.material instanceof THREE.LineDashedMaterial) found = o
+    })
+    return found
+  }
+  const ends = (line: THREE.LineSegments): number[] => {
+    const pos = line.geometry.getAttribute('position')
+    return [pos.getX(0), pos.getY(0), pos.getX(1), pos.getY(1)]
+  }
+
+  it('runs to the cursor while the first point is chosen, then holds at it through the sweep', () => {
+    const { tool, preview } = makeTool()
+    tool.onPointerDown(makeSnap({ x: 0, y: 0, z: 0 }), rayThrough(0, 0)) // center
+    expect(dashedLine(preview)).toBeUndefined()
+
+    tool.onPointerMove(makeSnap({ x: 2, y: 1, z: 0 }), rayThrough(2, 1))
+    expect(ends(dashedLine(preview)!)).toEqual([0, 0, 2, 1])
+
+    tool.onPointerDown(makeSnap({ x: 1, y: 0, z: 0 }), rayThrough(1, 0)) // first point
+    tool.onPointerMove(makeSnap({ x: 0, y: 1, z: 0 }), rayThrough(0, 1)) // sweep
+    expect(ends(dashedLine(preview)!)).toEqual([0, 0, 1, 0])
+
+    tool.onPointerDown(makeSnap({ x: 0, y: 1, z: 0 }), rayThrough(0, 1)) // commit
+    expect(dashedLine(preview)).toBeUndefined()
+  })
+})
+
+// ── Lock (OW-1) ──
+describe('RotateTool — locked items are left behind', () => {
+  it('rotates the rest of a mixed selection and says so once; an all-locked selection never starts', () => {
+    const lock = (s: unknown) => {
+      const x = s as Record<string, unknown>
+      x.node_frozen = vi.fn((kind: number, id: bigint) => (kind === 0 && id === 2n ? { kind: 'object', id } : undefined))
+      x.node_locked = vi.fn((kind: number, id: bigint) => kind === 0 && id === 2n)
+      x.group_members = vi.fn(() => [])
+      x.definition_usage = vi.fn(() => 1)
+    }
+    const mixed = makeTool({ selection: [{ kind: 'object', id: 1n }, { kind: 'object', id: 2n }] })
+    lock(mixed.wasmScene)
+    mixed.tool.onPointerDown(makeSnap(), { origin: [0, 0, 5], direction: [0, 0, -1] })
+    expect(mixed.onToast).toHaveBeenCalledTimes(1)
+    expect(mixed.onToast).toHaveBeenCalledWith('1 locked item was left alone.')
+
+    const all = makeTool({ selection: [{ kind: 'object', id: 2n }] })
+    lock(all.wasmScene)
+    all.tool.onPointerDown(makeSnap(), { origin: [0, 0, 5], direction: [0, 0, -1] })
+    expect(all.onToast).toHaveBeenCalledWith('Locked', 'LockedHint:object:2')
+    expect(all.tool.capturingInput()).toBe(false)
   })
 })

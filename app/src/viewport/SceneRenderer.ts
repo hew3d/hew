@@ -32,15 +32,18 @@ import * as THREE from 'three'
 import { LineSegments2 } from 'three/examples/jsm/lines/LineSegments2.js'
 import { LineMaterial } from 'three/examples/jsm/lines/LineMaterial.js'
 import type { Scene as WasmScene } from '../wasm/loader'
+import type { MaterialJs } from '../wasm/pkg/wasm_api.js'
 import { makeFatSegments, disposeFatSegments } from './fatLine'
 import {
   ctxOfObjectPlane,
   objectDrawingPlanes,
-  parsePlaneUnits,
   ringAllDrawn,
 } from '../tools/planeUnits'
-import { invalidatePlaneUnits } from '../tools/planeUnits'
+import { invalidatePlaneUnits, readPlaneUnits } from '../tools/planeUnits'
+import { readPreviewTint } from '../tools/previewTint'
 import { DEPTH_BIAS } from './depthPolicy'
+import { mapThroughPose, trianglesInVertexRange, triangulatePlanarLoop } from './faceCueGeometry'
+import { drawKindFor, type DrawKind } from './drawKind'
 import type { HealthOverlay } from '../health/healthReport'
 import type { IsolationFade } from './isolation'
 import { srgbColorsToLinear } from './colorSpace'
@@ -51,8 +54,10 @@ import type { SectionPlane } from './sectionManager'
 import { getResolvedTheme } from '../settings/theme'
 import { prefersReducedMotion } from '../platform'
 import { inlineTextQuaternion, TextBillboard } from './TextBillboard'
+import { applyGuideStipple, GUIDE_DEFAULT_STIPPLE } from './guideStipple'
 import { GUIDE_COLOR } from './guideColors'
-import { windowFor, guideReach, guideSpanOf, stretchToUse, type GuideWindow } from './guideWindow'
+import { phongLook } from './pbrLook'
+import { windowFor, guideReach, guideSpanOf, stretchToUse, guideOverlayPositions, GUIDE_POINT_MARKER_HALF_SIZE, type GuideWindow } from './guideWindow'
 
 /** What `updateGuideExtents` needs to know about the live camera. */
 export interface GuideView {
@@ -76,6 +81,7 @@ import {
   pushCenterTick,
   CENTER_TICK_HALF,
 } from './annotationLayout'
+import { applyAffineToPoint } from '../tools/transformMath'
 import { writeFrameUvs, type UvFrameComponents } from '../tools/uvFrameMath'
 import { shownAnnotationIds } from './shownAnnotations'
 
@@ -88,25 +94,56 @@ const EDGE_COLOR = 0x1a1a1a
  *  all but vanishes; a light gray a step below the annotation ink
  *  (`ANNOTATION_COLOR.dark`) reads there and keeps dimensions distinct. */
 export const EDGE_COLOR_SEE_THROUGH_DARK = 0xc4c9d0
+/** Tangent edges (fillet rails) draw the edge color at half strength. */
+const TANGENT_EDGE_OPACITY = 0.5
+/** The cage wire of a Smooth object: a thin light-blue line over the surface. */
+const CAGE_COLOR = 0x4db8ff
+const CAGE_OPACITY = 0.7
 /** Orange highlight for selected object edges (kept for selection; face fill
  *  uses material color). Exported so other tools that want the SAME
  *  selection-highlight semantics (FollowMeTool's picked-path highlight) reuse
  *  this one color rather than drifting a second copy of it. */
 export const EDGE_COLOR_SELECTED = 0xffaa00
-const SKETCH_LINE_COLOR = 0x2266cc
+/** Red for the selected edges of a locked or frozen thing (fallback of the
+ *  `--selection-locked` theme token): SketchUp's cue for a locked entity. */
+export const EDGE_COLOR_SELECTED_LOCKED = 0xe5392e
+/** Edge color of the placement the Paint tool would paint (hover). */
+export const EDGE_COLOR_HOVER = 0xffd08a
+
+/** The draw color language (fallbacks; the live values are the
+ *  `--draw-*` theme tokens, read by `_readDrawColors`): drawing that belongs
+ *  to no solid is blue ("free"), drawing that is part of a solid's face is
+ *  orange ("attached"). */
+const DRAW_FREE_FALLBACK = 0x2266cc
+const DRAW_FREE_FILL_FALLBACK = 0x88aadd
+const DRAW_ATTACHED_FALLBACK = 0xe0761c
+const DRAW_ATTACHED_FILL_FALLBACK = 0xe8a66a
+interface DrawColors {
+  free: number
+  freeFill: number
+  attached: number
+  attachedFill: number
+}
 /** Sketch line width in px (matches the `makeFatSegments` call in `refreshAllSketches`). */
 const SKETCH_LINE_WIDTH_PX = 2.2
+/** Imported (plain) sketch lines draw at the native edge width. */
+const PLAIN_LINE_WIDTH_PX = 1
 /** Section-cut outlines (where the active section passes through a solid):
  * heavy black lines on the plane, as SketchUp draws a cut profile, so a
  * post cut through reads as a square instead of vanishing into the floor
  * it stands on. */
 const SECTION_CUT_COLOR = 0x000000
 const SECTION_CUT_WIDTH_PX = 2.5
+/** The widest cut outline a document style may ask for. */
+const SECTION_CUT_WIDTH_MAX_PX = 12
 /** Selected-sketch highlight width — deliberately bolder than the base
  * sketch-line width above so the orange overlay reads as clearly on top of
  * it rather than disappearing into (or under) it, worst case in light mode. */
 const SKETCH_HIGHLIGHT_WIDTH_PX = 3.8
-const SKETCH_REGION_COLOR = 0x88aadd
+/** Make Solid's loose open-edge overlay: wider and later than the selection
+ *  highlight it sits on (render order 999), so it stays visible. */
+const LOOSE_HEALTH_WIDTH_PX = 7
+const LOOSE_HEALTH_ORDER = 1000
 /** Normal translucency of a sketch region fill. */
 const SKETCH_REGION_OPACITY = 0.4
 /**
@@ -203,12 +240,6 @@ const GUIDE_VIEW_SPAN = 2
  *  render from their own cameras, so a window sized to the live view would
  *  crop them. */
 const GUIDE_PRINT_HALF_LENGTH = 50
-/** Half-length of the selected guide's highlight overlay (meters). It draws
- *  with the depth test off, so unlike the guide itself its length cannot
- *  disturb depth ordering and a long segment reads as infinite. */
-const GUIDE_HIGHLIGHT_HALF_LENGTH = 50
-/** Half-size of a point guide's cross marker (meters). */
-const GUIDE_POINT_MARKER_HALF_SIZE = 0.05
 
 /**
  * One in-flight opacity tween owned by `setHiddenFaded`/`tickFades` (Shop
@@ -394,10 +425,31 @@ export interface RefreshTouched {
 }
 
 /** Disposable group for one object's faces + edges */
+/** What the transform tools' hover highlight covers (`setHoverHighlight`). */
+export interface HoverHighlight {
+  objects: bigint[]
+  instances: bigint[]
+  /** Members of the placement being edited in place, by member object id. */
+  member: { instance: bigint; memberIds: bigint[] } | null
+  sketches: bigint[]
+  /** Pose source for definition-owned sketches (see `setSelectedSketchInstance`). */
+  sketchInstance: bigint | null
+  /** Flat world segment endpoints of drawn shapes. */
+  draftSegments: Float32Array
+  guide: bigint | null
+}
+
 interface ObjectMeshGroup {
   objectId: bigint
   facesMesh: THREE.Mesh
   edgesLines: THREE.LineSegments
+  /** Thin tangent-edge lines (fillet rails); null when the object has none.
+   *  Visible only while View ▸ Tangent Edges is on. */
+  tangentLines: THREE.LineSegments | null
+  /** The cage of a Smooth object, drawn as thin wire while a tool other than
+   *  Select is active (setCageOverlay); null for an object with no Smooth
+   *  level. */
+  cageLines?: THREE.LineSegments | null
   group: THREE.Group
   /** The object's imprint overlay (imprints.ts): translucent fills over
    *  its drawn sub-faces plus fat sketch-blue lines over every drawn loop
@@ -425,6 +477,8 @@ interface InstanceMeshGroup {
   /** Face meshes, one per placement, in the same order as memberIds */
   facesMeshes: THREE.Mesh[]
   edgesLines: THREE.LineSegments[]
+  /** Tangent-edge lines parallel to edgesLines (null where a member has none). */
+  tangentLines: (THREE.LineSegments | null)[]
 }
 
 /**
@@ -441,8 +495,14 @@ interface InstanceMeshGroup {
 interface DefSketchGroup {
   group: THREE.Group
   lines: LineSegments2 | null
-  /** Fill meshes, keyed `${sketchHandle}:${regionHandle}` (region handles
-   *  are per-sketch, so they can collide across sketches). */
+  /** Lines of object-owned (attached, orange) sketches, when any. */
+  linesAttached: LineSegments2 | null
+  /** Lines of imported sketches (plain edge ink), when any. */
+  linesPlain: LineSegments2 | null
+  /** Fill meshes, keyed `${placementIndex}:${sketchHandle}:${regionHandle}`.
+   *  Region handles are per-sketch, and the same nested sketch can be placed
+   *  more than once under one instance (a component holding two instances of
+   *  a drawn component), so the placement index keeps every fill. */
   regionMeshes: Map<string, THREE.Mesh>
 }
 
@@ -464,6 +524,8 @@ interface MemberGeometry {
   /** Which groups draw painted backs (see `_buildMaterialArray`). */
   groupBacks: Uint8Array
   edgePositions: Float32Array
+  /** Tangent joints (fillet rails), drawn only with View ▸ Tangent Edges. */
+  tangentEdgePositions: Float32Array
   /** Whether the member object encloses a volume — drives double-sided
    * rendering for open (non-watertight) shells (see `_bucketTag`). */
   watertight: boolean
@@ -516,6 +578,8 @@ interface MemberBatch {
   side: THREE.Side
   mesh: THREE.InstancedMesh
   edges: THREE.LineSegments
+  /** Tangent-edge soup sharing the pose rows below; null when the member has none. */
+  tangent: THREE.LineSegments | null
   /** Per-instance pose rows for the edge shader, one vec4 per row. */
   edgeRows: [THREE.InstancedBufferAttribute, THREE.InstancedBufferAttribute, THREE.InstancedBufferAttribute]
   /** Slot ownership: slot i belongs to instance `slots[i].instanceId`'s
@@ -563,7 +627,16 @@ interface Placement {
    * hidden placement keeps its batch slot, suppressed like a hidden
    * instance's. Re-read on every `setHidden`. */
   shown: boolean
+  /** The material this placement's member inherits from the placements
+   * above it (kernel `instance_expanded_inherited`; `NO_INHERITED` for
+   * none): faces with neither their own paint nor an Object base show it.
+   * Part of the member's geometry and batch keys, since the tessellator
+   * bakes it into the vertex colors and material groups. */
+  inherited: bigint
 }
+
+/** `u64::MAX`, the kernel's "no inherited material" sentinel. */
+const NO_INHERITED = 0xffff_ffff_ffff_ffffn
 
 /** Renderer-side book-keeping for one placement, batched or materialized. */
 interface InstanceRecord {
@@ -591,6 +664,17 @@ const _slotMatrix = new THREE.Matrix4()
  * `_slotMatrix` so the pull path (record construction) and the write path
  * (slot matrix writes) never alias the same scratch object. */
 const _composeScratch = new THREE.Matrix4()
+
+/** A THREE matrix from a row-major 3×4 affine (12 floats, the kernel's
+ *  `instance_pose` / `component_sketch_frame` layout). */
+function rowMajorToMatrix4(a: ArrayLike<number>): THREE.Matrix4 {
+  return new THREE.Matrix4().set(
+    a[0], a[1], a[2], a[3],
+    a[4], a[5], a[6], a[7],
+    a[8], a[9], a[10], a[11],
+    0, 0, 0, 1,
+  )
+}
 /** Scratch bounds for the live-slots-only batch bounds computation. */
 const _boundsBox = new THREE.Box3()
 const _boundsSphere = new THREE.Sphere()
@@ -678,11 +762,27 @@ export class SceneRenderer {
   readonly instancesGroup: THREE.Group
   /** Parent group for construction guide geometry */
   readonly guidesGroup: THREE.Group
+  /** View ▸ Tangent Edges: whether tangent-edge lines draw. */
+  private tangentEdgesVisible = false
+  /** Whether a Smooth object's cage wire draws (any tool but Select). */
+  private cageOverlayVisible = false
   /** Parent group for dimension/leader-text annotation geometry
    * (docs/design/dimensions-text.md), beside `guidesGroup`. */
   readonly annotationsGroup: THREE.Group
 
   private objectGroups: Map<bigint, ObjectMeshGroup> = new Map()
+  /** Fillet preview masks: for each masked object, the original index
+   *  buffer and material groups to restore, and the face set the current
+   *  filtered buffer was built for (so a pointer move that keeps the same
+   *  faces masked costs nothing). */
+  private faceMasks: Map<
+    bigint,
+    {
+      index: THREE.BufferAttribute
+      groups: { start: number; count: number; materialIndex: number }[]
+      key: string
+    }
+  > = new Map()
   /** MATERIALIZED instances only (selected / isolation-lit / transform-preview
    * placements pulled out of their batch), keyed by instance id. All the
    * per-instance mutation paths (_applyInstanceColors, _setInstanceOpacity,
@@ -691,30 +791,66 @@ export class SceneRenderer {
   private instanceGroups: Map<bigint, InstanceMeshGroup> = new Map()
   /** Every rendered placement, batched or materialized, keyed by instance id. */
   private instanceRecords: Map<bigint, InstanceRecord> = new Map()
-  /** Instanced batches, keyed `${memberId}|${BucketTag}`. Batch geometry and
+  /** Instanced batches, keyed `${memberId}|${BucketTag}|${inherited}`. Batch geometry and
    * materials are owned per batch and disposed on rebuild/removal. */
   private batches: Map<string, MemberBatch> = new Map()
   /** Instances materialized on demand by `getInstanceGroup` (transform
    * preview). Cleared on the next refresh/refreshTouched — the commit that
    * follows a preview — so they restore to their batch. */
   private previewMaterialized: Set<bigint> = new Set()
+  /** The Paint tool's hovered placement (`setHoveredInstance`), or null. */
+  private hoveredInstance: bigint | null = null
   /**
    * Shared typed-array cache for definition member objects.
-   * Keyed by member object id; the raw arrays are shared across every consumer
+   * Keyed by member object id, then by the material the placement passes
+   * down (`Placement.inherited` — the same member drawn under a painted
+   * placement is a different mesh); dropping a member id drops every
+   * inherited variant at once. The raw arrays are shared across every consumer
    * (batches, materialized groups), but each consumer creates its own
    * BufferAttribute wrappers (so that geometry.dispose() on one does not delete
    * GPU buffers shared with another — three.js ties GPU buffer lifetime to the
    * BufferAttribute, not to the underlying TypedArray).
    * Invalidated when a component definition is edited (refreshInstances re-builds it).
    */
-  private memberGeometryCache: Map<bigint, MemberGeometry> = new Map()
+  private memberGeometryCache: Map<bigint, Map<bigint, MemberGeometry>> = new Map()
+  /** Called once when an object cannot be tessellated and is left out. */
+  onUnrenderable: (() => void) | null = null
+  private unrenderableNotified = false
 
   /**
    * THREE.Texture cache, keyed by material id (as string). Built once per id
    * and shared across instances so we never duplicate GPU texture objects.
    */
   private textureCache: Map<string, THREE.Texture> = new Map()
+  /** Free (blue) sketch edges: world sketches, detached shapes, group-held. */
   private sketchLines: LineSegments2 | null = null
+  /** Edges of object-owned sketches (part of a solid's face): orange. */
+  private sketchLinesAttached: LineSegments2 | null = null
+  /** Edges of imported sketches that have not been drawn on since: plain edge ink. */
+  private sketchLinesPlain: LineSegments2 | null = null
+  /** The current draw-color tokens (see `_readDrawColors`). */
+  private drawColors: DrawColors = this._readDrawColors()
+  /** Whether a node is frozen (locked, or inside something locked): its
+   *  selected edges draw in the locked red. Pushed by the Viewport. */
+  private frozenResolver: ((kind: 'object' | 'instance', id: bigint) => boolean) | null = null
+  setFrozenResolver(fn: ((kind: 'object' | 'instance', id: bigint) => boolean) | null): void {
+    this.frozenResolver = fn
+  }
+  /** The selected-edge color of one node: the locked red, or the usual orange. */
+  private _selectedColor(kind: 'object' | 'instance', id: bigint): number {
+    if (this.frozenResolver !== null && this.frozenResolver(kind, id)) {
+      return readPreviewTint('--selection-locked', EDGE_COLOR_SELECTED_LOCKED)
+    }
+    return EDGE_COLOR_SELECTED
+  }
+  /** Re-color the selection after a lock changed (nothing else did). */
+  refreshSelectionColors(): void {
+    for (const id of this.selectedObjectIds) this._applyObjectColors(id, true)
+    for (const id of this.instanceGroups.keys()) {
+      if (id === this.selectedMemberInstance) this._applyInstanceMemberColors(id)
+      else this._applyInstanceColors(id, this.selectedInstanceIds.includes(id))
+    }
+  }
   /** One fill mesh per sketch region, keyed by `${sketchHandle}:${regionHandle}`
    *  (region handles are per-sketch, so they can collide across sketches). */
   private sketchRegionMeshes: Map<string, THREE.Mesh> = new Map()
@@ -726,14 +862,14 @@ export class SceneRenderer {
   private guideLines: THREE.LineSegments | null = null
   /** Per line guide, in `guideLines` segment order: its origin, unit
    *  direction, and the stretch of it currently drawn. */
-  private guideDefs: { o: [number, number, number]; d: [number, number, number]; lo: number; hi: number; win: GuideWindow | null }[] = []
+  private guideDefs: { o: [number, number, number]; d: [number, number, number]; lo: number; hi: number; stipple: number; win: GuideWindow | null }[] = []
   /** Last dash size applied to `guideLines` (screen-constant); -1 = none yet. */
   private lastGuideDashSize = -1
   /** Merged LineSegments for every point guide's cross marker. */
   private guideMarkers: THREE.LineSegments | null = null
-  /** The currently selected guide, drawn as a bright overlay. */
-  private selectedGuideId: bigint | null = null
-  /** Highlight overlay (solid bright line/cross) for `selectedGuideId`. */
+  /** The currently selected guides, drawn as a bright overlay. */
+  private selectedGuideIds: readonly bigint[] = []
+  /** Highlight overlay (solid bright lines/crosses) for `selectedGuideIds`. */
   private guideHighlight: THREE.LineSegments | null = null
 
   /** Batched fat-line geometry for every live, non-detached annotation's
@@ -758,8 +894,8 @@ export class SceneRenderer {
    * carried forward so its edge-on guard (baseline viewed screen-on) can
    * hold the previous decision instead of guessing, avoiding oscillation. */
   private annotationFlipState: Map<bigint, boolean> = new Map()
-  /** The currently selected annotation, drawn as a bright overlay. */
-  private selectedAnnotationId: bigint | null = null
+  /** The currently selected annotations, drawn as a bright overlay. */
+  private selectedAnnotationIds: ReadonlySet<bigint> = new Set()
 
   /** Currently selected sketch ids, drawn as a bright overlay. */
   private selectedSketchIds: bigint[] = []
@@ -788,6 +924,8 @@ export class SceneRenderer {
   private healthRimLines: LineSegments2[] = []
   /** (b) the current finding + Close preview — rebuilt alone on each step / hover. */
   private healthFocusLines: LineSegments2[] = []
+  /** (c) Mend preview dots (points that would merge / split), with (b). */
+  private healthPointClouds: THREE.Points[] = []
   /** Last known watertight state per object */
   private watertightMap: Map<bigint, boolean> = new Map()
   /** Currently selected object ids (ordered; may include non-object entities,
@@ -797,6 +935,13 @@ export class SceneRenderer {
   private selectedInstanceIds: bigint[] = []
   private selectedMemberInstance: bigint | null = null
   private selectedMemberIds: bigint[] = []
+  /** The transform tools' hover highlight (`setHoverHighlight`) and the
+   *  overlay group it draws into; the shared edge material is rebuilt with it.
+   *  The group is readable so `captureFrame` can leave the pre-click
+   *  feedback out, as the print pass does. */
+  private hover: HoverHighlight | null = null
+  readonly hoverGroup: THREE.Group
+  private hoverEdgeMaterial: THREE.LineBasicMaterial | null = null
   /**
    * Active lit set for isolation: null = top level (nothing dimmed);
    * Set<bigint> = the leaf object ids that stay fully lit; all others dim.
@@ -866,6 +1011,9 @@ export class SceneRenderer {
    * work is done once, in `tickFades` — the per-frame hook the render loop
    * already calls before drawing. */
   private sectionCutDirty = false
+  /** The cut outline's color and width (a document style's own, else Hew's). */
+  private sectionCutColor = SECTION_CUT_COLOR
+  private sectionCutWidthPx = SECTION_CUT_WIDTH_PX
 
   constructor(threeScene: THREE.Scene, wasmScene: WasmScene) {
     this.scene = threeScene
@@ -898,6 +1046,10 @@ export class SceneRenderer {
     this.annotationsGroup = new THREE.Group()
     this.annotationsGroup.name = 'Annotations'
     threeScene.add(this.annotationsGroup)
+
+    this.hoverGroup = new THREE.Group()
+    this.hoverGroup.name = 'Hover'
+    threeScene.add(this.hoverGroup)
   }
 
   /** Rebuild all object geometry from the WASM scene. Returns watertight map. */
@@ -1057,6 +1209,16 @@ export class SceneRenderer {
         ![...this.instanceRecords.values()].some((r) => r.memberIds.includes(id)),
     )
     const recheckInstances = new Set<bigint>(touchedInstances)
+    // Live sibling placements (ARCHITECTURE.md 2.11): with a component
+    // session open, every other placement of the on-loan definition draws
+    // the session's world objects through its own pose, so a session commit
+    // that creates or deletes a world object changes those placements'
+    // member lists even though the caller's touched set names only the
+    // object. Re-pull them on every targeted refresh — a handful of
+    // instances, pose + member-id pulls, no geometry; a touched session
+    // object that is already a cached member took the `dirtyMembers` path
+    // above and rebuilds its batches like any definition edit.
+    for (const iid of this.wasmScene.session_placements()) recheckInstances.add(iid)
     if (touchedComponentSet.size > 0 || unresolvedMemberIds.length > 0) {
       for (const [iid, rec] of this.instanceRecords) {
         if (unresolvedMemberIds.length > 0 || touchedComponentSet.has(rec.componentId)) {
@@ -1074,41 +1236,42 @@ export class SceneRenderer {
         this._removeInstance(iid)
         continue
       }
-      // Compare the FULL placement sequence (member id per index, repeats
-      // included), not just the deduplicated member set: a nested
-      // definition can gain/lose a placement of a member it already had
-      // (e.g. an array count edit) with the deduplicated set unchanged —
-      // that still resizes the batch and must take the slow path. Local
-      // pose is deliberately NOT part of this comparison: a nested def edit
-      // that only moves a placement (member set/count unchanged) is exactly
-      // what the fast path below is for, since it always re-composes
-      // `rec.matrix × placement.localMatrix` from the FRESH placement.
-      const samePlacements =
-        next.componentId === prev.componentId &&
-        next.placements.length === prev.placements.length &&
-        next.placements.every((p, i) => p.memberId === prev.placements[i].memberId)
-      if (!samePlacements) {
-        // Batch membership changed (a placement gained/lost/swapped) — the
-        // slow (rebuild) path.
+      // Diff the placements per member by BATCH KEY multiset (member ×
+      // bucket, counts included): a member whose key counts differ gained,
+      // lost, or re-bucketed a placement — its batches resize or move and
+      // take the slow (rebuild) path. Every OTHER member of this instance
+      // keeps its slots and takes the fast in-place write below. Counting
+      // rather than comparing the full sequence matters for live sibling
+      // placements (ARCHITECTURE.md 2.11): a solid created inside a
+      // session adds ONE placement to every sibling, and rebuilding every
+      // member of every sibling for that was a per-commit hitch on a large
+      // component with many copies. Local pose is deliberately NOT part of
+      // the comparison: a nested def edit that only moves a placement is
+      // exactly what the fast path is for, since it re-composes
+      // `rec.matrix × placement.localMatrix` from the FRESH placement. A
+      // bucket flip (reflected/orthogonal, derived from the COMPOSED pose)
+      // shows up as a key count change on both the old and the new key.
+      if (next.componentId !== prev.componentId) {
         for (const m of prev.memberIds) membersToRebuild.add(m)
         for (const m of next.memberIds) membersToRebuild.add(m)
         continue
       }
-      // A pose-only change can still flip an individual PLACEMENT's own
-      // bucket: `reflected`/`orthogonal` are derived from the COMPOSED pose
-      // (outer × local — module doc on `Placement`), so a nested
-      // definition's local pose can independently mirror a member even when
-      // the outer instance pose only translates. Detect any placement whose
-      // bucket tag changed and route just that member through the slow
-      // (rebuild) path below; OTHER placements/members of this same
-      // instance, whose bucket did not change, still take the fast in-place
-      // write below.
-      for (let i = 0; i < next.placements.length; i++) {
-        const nextPlacement = next.placements[i]
-        const prevPlacement = prev.placements[i]
-        const prevKey = this._batchKeyFor(nextPlacement.memberId, prevPlacement)
-        const nextKey = this._batchKeyFor(nextPlacement.memberId, nextPlacement)
-        if (prevKey !== nextKey) membersToRebuild.add(nextPlacement.memberId)
+      const keyCounts = (placements: Placement[]): Map<string, number> => {
+        const counts = new Map<string, number>()
+        for (const p of placements) {
+          const key = this._batchKeyFor(p.memberId, p) ?? `${p.memberId}|?`
+          counts.set(key, (counts.get(key) ?? 0) + 1)
+        }
+        return counts
+      }
+      const prevCounts = keyCounts(prev.placements)
+      const nextCounts = keyCounts(next.placements)
+      const memberOfKey = (key: string): bigint => BigInt(key.slice(0, key.indexOf('|')))
+      for (const [key, n] of prevCounts) {
+        if (nextCounts.get(key) !== n) membersToRebuild.add(memberOfKey(key))
+      }
+      for (const [key, n] of nextCounts) {
+        if (prevCounts.get(key) !== n) membersToRebuild.add(memberOfKey(key))
       }
       // Fast path: write the slot matrix of every placement whose member is
       // NOT being rebuilt this pass. `occurrence` tracks each (member,
@@ -1117,8 +1280,8 @@ export class SceneRenderer {
       // per-instance slot list (built in the same encounter order by
       // `_rebuildMemberBatches`/`_buildBatch`) even when its placements now
       // land in DIFFERENT buckets and so belong to independent slot
-      // sequences (`samePlacements` above guarantees the member SEQUENCE
-      // still matches; it says nothing about each placement's bucket).
+      // sequences (a member not in `membersToRebuild` has exactly the same
+      // key counts as before, so its slot list is still the right length).
       const occurrence = new Map<string, number>()
       for (const placement of next.placements) {
         const m = placement.memberId
@@ -1330,6 +1493,9 @@ export class SceneRenderer {
     const expandedMembers = this.wasmScene.instance_expanded_members(instanceId)
     const expandedLocalPoses = this.wasmScene.instance_expanded_local_poses(instanceId)
     const shown = this._placementsShown(instanceId, expandedMembers.length)
+    // The material each placement inherits (the instance's own, else a
+    // nested placement's on the way in), parallel to the members.
+    const inherited = this.wasmScene.instance_expanded_inherited(instanceId)
     const placements: Placement[] = []
     for (let i = 0; i < expandedMembers.length; i++) {
       const base = i * 12
@@ -1352,6 +1518,7 @@ export class SceneRenderer {
         reflected: this._poseDet(composed) < 0,
         orthogonal: this._poseHasOrthogonalColumns(composed),
         shown: shown[i],
+        inherited: inherited[i] ?? NO_INHERITED,
       })
     }
     const memberIds = [...new Set(placements.map((p) => p.memberId))]
@@ -1366,12 +1533,69 @@ export class SceneRenderer {
     return rec
   }
 
-  /** Fetch (and cache) one member's typed arrays — raw data only, not
-   * BufferAttributes, to avoid GPU buffer aliasing on dispose. */
-  private _getMemberGeometry(memberId: bigint): MemberGeometry {
-    let cached = this.memberGeometryCache.get(memberId)
+  /** Tessellate one object, or null when the kernel refuses (a face imported
+   * from an older file that cannot be drawn, e.g. UnbridgeableHole). The
+   * object is then left out instead of crashing selection/rendering, and
+   * `onUnrenderable` fires once per renderer (not per frame or per object).
+   * Only a typed refusal is swallowed: a wasm trap (`WebAssembly.RuntimeError`)
+   * is a kernel stop, not "part left out", and propagates to the crash
+   * screen (see `log/kernelStopNote`). */
+  private _tryObjectMesh(objectId: bigint): ReturnType<WasmScene['object_mesh']> | null {
+    return this._tryMesh(() => this.wasmScene.object_mesh(objectId))
+  }
+
+  /** `_tryObjectMesh`'s refusal handling around any mesh fetch. */
+  private _tryMesh(
+    fetch: () => ReturnType<WasmScene['object_mesh']>,
+  ): ReturnType<WasmScene['object_mesh']> | null {
+    try {
+      return fetch()
+    } catch (err) {
+      if (err instanceof WebAssembly.RuntimeError) throw err
+      if (!this.unrenderableNotified) {
+        this.unrenderableNotified = true
+        this.onUnrenderable?.()
+      }
+      return null
+    }
+  }
+
+  /** Fetch (and cache) one member's typed arrays as drawn under an
+   * inherited material — raw data only, not BufferAttributes, to avoid GPU
+   * buffer aliasing on dispose. With nothing inherited the member draws
+   * exactly its own object mesh, so that common case keeps `object_mesh`. */
+  private _getMemberGeometry(memberId: bigint, inherited: bigint): MemberGeometry {
+    let variants = this.memberGeometryCache.get(memberId)
+    if (variants === undefined) {
+      variants = new Map()
+      this.memberGeometryCache.set(memberId, variants)
+    }
+    let cached = variants.get(inherited)
     if (cached === undefined) {
-      const mesh = this.wasmScene.object_mesh(memberId)
+      const mesh = this._tryMesh(() =>
+        inherited === NO_INHERITED
+          ? this.wasmScene.object_mesh(memberId)
+          : this.wasmScene.member_mesh(memberId, inherited),
+      )
+      if (mesh === null) {
+        // Cached (not retried per frame) so the member stays drawn as nothing.
+        cached = {
+          positions: new Float32Array(0),
+          normals: new Float32Array(0),
+          indices: new Uint32Array(0),
+          colors: new Float32Array(0),
+          uvs: new Float32Array(0),
+          groupMaterialIds: new BigUint64Array(0),
+          groupStarts: new Uint32Array(0),
+          groupCounts: new Uint32Array(0),
+          groupBacks: new Uint8Array(0),
+          edgePositions: new Float32Array(0),
+          tangentEdgePositions: new Float32Array(0),
+          watertight: true,
+        }
+        variants.set(inherited, cached)
+        return cached
+      }
       try {
         cached = {
           positions: mesh.positions(),
@@ -1387,9 +1611,10 @@ export class SceneRenderer {
           groupCounts: mesh.group_counts(),
           groupBacks: mesh.group_backs(),
           edgePositions: mesh.edge_positions(),
+          tangentEdgePositions: mesh.tangent_edge_positions(),
           watertight: mesh.watertight(),
         }
-        this.memberGeometryCache.set(memberId, cached)
+        variants.set(inherited, cached)
       } finally {
         mesh.free()
       }
@@ -1418,9 +1643,9 @@ export class SceneRenderer {
    * pose — see `Placement`), not of the owning instance as a whole: a
    * repeated member can straddle two different buckets under one instance. */
   private _batchKeyFor(memberId: bigint, placement: Placement): string | undefined {
-    const cached = this.memberGeometryCache.get(memberId)
+    const cached = this.memberGeometryCache.get(memberId)?.get(placement.inherited)
     if (cached === undefined) return undefined
-    return `${memberId}|${this._bucketTag(cached.watertight, placement.reflected, placement.orthogonal, hasBackPaint(cached))}`
+    return `${memberId}|${this._bucketTag(cached.watertight, placement.reflected, placement.orthogonal, hasBackPaint(cached))}|${placement.inherited}`
   }
 
   /** Dispose and rebuild every batch of one definition member from the current
@@ -1441,17 +1666,32 @@ export class SceneRenderer {
     }
     if (entries.length === 0) return
 
-    const cached = this._getMemberGeometry(memberId)
-    const byTag = new Map<BucketTag, { rec: InstanceRecord; placementIndex: number }[]>()
+    // One batch per (bucket, inherited material): placements of the member
+    // under differently painted instances draw different meshes.
+    const byKey = new Map<
+      string,
+      { tag: BucketTag; inherited: bigint; cached: MemberGeometry; es: { rec: InstanceRecord; placementIndex: number }[] }
+    >()
     for (const e of entries) {
       const placement = e.rec.placements[e.placementIndex]
+      const cached = this._getMemberGeometry(memberId, placement.inherited)
       const tag = this._bucketTag(cached.watertight, placement.reflected, placement.orthogonal, hasBackPaint(cached))
-      const list = byTag.get(tag)
-      if (list === undefined) byTag.set(tag, [e])
-      else list.push(e)
+      const key = `${tag}|${placement.inherited}`
+      const group = byKey.get(key)
+      if (group === undefined) byKey.set(key, { tag, inherited: placement.inherited, cached, es: [e] })
+      else group.es.push(e)
     }
-    for (const [tag, es] of byTag) {
-      this._buildBatch(memberId, tag, es, cached)
+    // Drop cached variants no placement draws any more (a placement
+    // repainted away from them).
+    const variants = this.memberGeometryCache.get(memberId)
+    if (variants !== undefined) {
+      const used = new Set([...byKey.values()].map((g) => g.inherited))
+      for (const inh of [...variants.keys()]) {
+        if (!used.has(inh)) variants.delete(inh)
+      }
+    }
+    for (const { tag, inherited, cached, es } of byKey.values()) {
+      this._buildBatch(memberId, tag, inherited, es, cached)
     }
   }
 
@@ -1461,6 +1701,7 @@ export class SceneRenderer {
   private _buildBatch(
     memberId: bigint,
     tag: BucketTag,
+    inherited: bigint,
     entries: { rec: InstanceRecord; placementIndex: number }[],
     cached: MemberGeometry,
   ): void {
@@ -1492,7 +1733,7 @@ export class SceneRenderer {
       tag === 'R' ? THREE.BackSide : undefined,
     )
     const mesh = new THREE.InstancedMesh(faceGeo, materials, entries.length)
-    mesh.name = `InstanceBatch_${memberId}_${tag}`
+    mesh.name = `InstanceBatch_${memberId}_${tag}_${inherited}`
     mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage)
 
     const edgeGeo = new THREE.InstancedBufferGeometry()
@@ -1508,7 +1749,7 @@ export class SceneRenderer {
     edgeGeo.setAttribute('imRow1', edgeRows[1])
     edgeGeo.setAttribute('imRow2', edgeRows[2])
     const edges = new THREE.LineSegments(edgeGeo, this._makeInstancedEdgeMaterial())
-    edges.name = `InstanceBatchEdges_${memberId}_${tag}`
+    edges.name = `InstanceBatchEdges_${memberId}_${tag}_${inherited}`
     // The base geometry's bounding sphere ignores the per-instance transforms
     // applied in the shader, so frustum culling would drop visible edges.
     edges.frustumCulled = false
@@ -1536,6 +1777,31 @@ export class SceneRenderer {
       )
     }
 
+    let tangent: THREE.LineSegments | null = null
+    if (cached.tangentEdgePositions.length > 0) {
+      const tGeo = new THREE.InstancedBufferGeometry()
+      tGeo.setAttribute('position', new THREE.BufferAttribute(cached.tangentEdgePositions, 3))
+      tGeo.instanceCount = entries.length
+      tGeo.setAttribute('imRow0', edgeRows[0])
+      tGeo.setAttribute('imRow1', edgeRows[1])
+      tGeo.setAttribute('imRow2', edgeRows[2])
+      tGeo.computeBoundingBox = () => {
+        if (mesh.boundingBox === null) mesh.computeBoundingBox()
+        tGeo.boundingBox = (tGeo.boundingBox ?? new THREE.Box3()).copy(mesh.boundingBox as THREE.Box3)
+      }
+      tGeo.computeBoundingSphere = () => {
+        if (mesh.boundingSphere === null) mesh.computeBoundingSphere()
+        tGeo.boundingSphere = (tGeo.boundingSphere ?? new THREE.Sphere()).copy(mesh.boundingSphere as THREE.Sphere)
+      }
+      const tMat = this._makeInstancedEdgeMaterial()
+      tMat.transparent = true
+      tMat.opacity = TANGENT_EDGE_OPACITY
+      tangent = new THREE.LineSegments(tGeo, tMat)
+      tangent.name = `InstanceBatchTangentEdges_${memberId}_${tag}`
+      tangent.frustumCulled = false
+      tangent.visible = this.tangentEdgesVisible
+    }
+
     const slotOf = new Map<bigint, number[]>()
     entries.forEach((e, i) => {
       const arr = slotOf.get(e.rec.instanceId)
@@ -1547,6 +1813,7 @@ export class SceneRenderer {
       side,
       mesh,
       edges,
+      tangent,
       edgeRows,
       slots: entries.map((e) => ({ instanceId: e.rec.instanceId, placementIndex: e.placementIndex })),
       slotOf,
@@ -1590,7 +1857,8 @@ export class SceneRenderer {
 
     this.instancesGroup.add(mesh)
     this.instancesGroup.add(edges)
-    this.batches.set(`${memberId}|${tag}`, batch)
+    if (tangent !== null) this.instancesGroup.add(tangent)
+    this.batches.set(`${memberId}|${tag}|${inherited}`, batch)
   }
 
   /**
@@ -1600,6 +1868,68 @@ export class SceneRenderer {
    * in the vertex shader. `customProgramCacheKey` keeps the patched program
    * from colliding with the stock line program in the shader cache.
    */
+  private _makeTangentEdgeMaterial(): THREE.LineBasicMaterial {
+    return new THREE.LineBasicMaterial({ color: EDGE_COLOR, transparent: true, opacity: TANGENT_EDGE_OPACITY })
+  }
+
+  private _makeCageMaterial(): THREE.LineBasicMaterial {
+    return new THREE.LineBasicMaterial({ color: CAGE_COLOR, transparent: true, opacity: CAGE_OPACITY, depthTest: false })
+  }
+
+  /** Show/hide the cage wire of Smooth objects (drawn whenever the active
+   *  tool is not Select, so the shape you are editing stays in view). */
+  setCageOverlay(visible: boolean): void {
+    this.cageOverlayVisible = visible
+    for (const g of this.objectGroups.values()) {
+      if (g.cageLines != null) g.cageLines.visible = visible
+    }
+  }
+
+  /** Test hook: how many Smooth objects have a cage, and how many draw it. */
+  getCageOverlayInfo(): { objects: number; visible: number } {
+    let objects = 0
+    let visible = 0
+    for (const g of this.objectGroups.values()) {
+      if (g.cageLines == null) continue
+      objects += 1
+      if (g.cageLines.visible && g.group.visible) visible += 1
+    }
+    return { objects, visible }
+  }
+
+  /** Show/hide the thin tangent-edge lines (View ▸ Tangent Edges). */
+  setTangentEdgesVisible(visible: boolean): void {
+    this.tangentEdgesVisible = visible
+    for (const g of this.objectGroups.values()) {
+      if (g.tangentLines !== null) g.tangentLines.visible = visible
+    }
+    for (const g of this.instanceGroups.values()) {
+      g.tangentLines.forEach((l, i) => {
+        if (l !== null) l.visible = visible && g.edgesLines[i].visible
+      })
+    }
+    for (const b of this.batches.values()) {
+      if (b.tangent !== null) b.tangent.visible = visible
+    }
+  }
+
+  /** Test hook: tangent-edge line counts and visibility (E2E). */
+  getTangentEdgeInfo(): { lines: number; visible: number; segments: number } {
+    let lines = 0
+    let visible = 0
+    let segments = 0
+    const note = (l: THREE.LineSegments | null): void => {
+      if (l === null) return
+      lines++
+      if (l.visible) visible++
+      segments += (l.geometry.getAttribute('position')?.count ?? 0) / 2
+    }
+    for (const g of this.objectGroups.values()) note(g.tangentLines)
+    for (const g of this.instanceGroups.values()) g.tangentLines.forEach(note)
+    for (const b of this.batches.values()) note(b.tangent)
+    return { lines, visible, segments }
+  }
+
   private _makeInstancedEdgeMaterial(): THREE.LineBasicMaterial {
     const mat = new THREE.LineBasicMaterial({ color: this._edgeColor() })
     mat.onBeforeCompile = (shader) => {
@@ -1657,6 +1987,10 @@ export class SceneRenderer {
     batch.mesh.boundingSphere = null
     batch.edges.geometry.boundingBox = null
     batch.edges.geometry.boundingSphere = null
+    if (batch.tangent !== null) {
+      batch.tangent.geometry.boundingBox = null
+      batch.tangent.geometry.boundingSphere = null
+    }
   }
 
   /** Re-write every batch slot owned by one instance — every placement of
@@ -1717,6 +2051,11 @@ export class SceneRenderer {
       if (this.instanceRecords.has(id)) desired.add(id)
       else this.previewMaterialized.delete(id)
     }
+    // The Paint tool's hovered placement is outlined, which needs its own
+    // edge materials.
+    if (this.hoveredInstance !== null && this.instanceRecords.has(this.hoveredInstance)) {
+      desired.add(this.hoveredInstance)
+    }
     // Isolation's faded context needs per-instance opacity too.
     if (this.isolationFade !== null) {
       for (const id of this.isolationFade.instances.keys()) {
@@ -1765,10 +2104,11 @@ export class SceneRenderer {
 
     const facesMeshes: THREE.Mesh[] = []
     const edgesLinesList: THREE.LineSegments[] = []
+    const tangentLinesList: (THREE.LineSegments | null)[] = []
     const placementMemberIds: bigint[] = []
     rec.placements.forEach((placement, pi) => {
       const memberId = placement.memberId
-      const cached = this._getMemberGeometry(memberId)
+      const cached = this._getMemberGeometry(memberId, placement.inherited)
       // Open (non-watertight) shells have inward-wound faces on some
       // triangles, so a single-sided material renders them invisible from the
       // "wrong" side; render those double-sided.
@@ -1823,6 +2163,19 @@ export class SceneRenderer {
       edgesLinesList.push(edgesLines)
       facesMesh.visible = placement.shown
       edgesLines.visible = placement.shown
+      let tangentLines: THREE.LineSegments | null = null
+      if (cached.tangentEdgePositions.length > 0) {
+        const tGeo = new THREE.BufferGeometry()
+        tGeo.setAttribute('position', new THREE.BufferAttribute(cached.tangentEdgePositions, 3))
+        tangentLines = new THREE.LineSegments(tGeo, this._makeTangentEdgeMaterial())
+        tangentLines.name = `InstanceTangentEdge_${instanceId}_${memberId}_${pi}`
+        tangentLines.matrixAutoUpdate = false
+        tangentLines.matrix.copy(placement.localMatrix)
+        tangentLines.matrixWorldNeedsUpdate = true
+        tangentLines.visible = placement.shown && this.tangentEdgesVisible
+        group.add(tangentLines)
+      }
+      tangentLinesList.push(tangentLines)
     })
 
     this.instancesGroup.add(group)
@@ -1832,6 +2185,7 @@ export class SceneRenderer {
       group,
       facesMeshes,
       edgesLines: edgesLinesList,
+      tangentLines: tangentLinesList,
     })
 
     // The batch keeps the slot but stops drawing it.
@@ -1840,6 +2194,8 @@ export class SceneRenderer {
     // Re-apply the per-instance state that forced materialization.
     if (this.selectedInstanceIds.includes(instanceId)) {
       this._applyInstanceColors(instanceId, true)
+    } else if (this.hoveredInstance === instanceId) {
+      this._applyInstanceColors(instanceId, false)
     }
     if (this.selectedMemberInstance === instanceId) {
       this._applyInstanceMemberColors(instanceId)
@@ -1884,6 +2240,11 @@ export class SceneRenderer {
       ;(lines.material as THREE.Material).dispose()
       lines.geometry.dispose()
     }
+    for (const lines of g.tangentLines) {
+      if (lines === null) continue
+      ;(lines.material as THREE.Material).dispose()
+      lines.geometry.dispose()
+    }
 
     this.instancesGroup.remove(g.group)
     this.instanceGroups.delete(instanceId)
@@ -1915,6 +2276,11 @@ export class SceneRenderer {
     batch.mesh.dispose() // frees the instanceMatrix GPU buffer
     batch.edges.geometry.dispose()
     ;(batch.edges.material as THREE.Material).dispose()
+    if (batch.tangent !== null) {
+      batch.tangent.geometry.dispose()
+      ;(batch.tangent.material as THREE.Material).dispose()
+      this.instancesGroup.remove(batch.tangent)
+    }
     this.instancesGroup.remove(batch.mesh)
     this.instancesGroup.remove(batch.edges)
     this.batches.delete(key)
@@ -2062,7 +2428,9 @@ export class SceneRenderer {
           polygonOffsetUnits: DEPTH_BIAS.FACE,
         })
         m.userData.baseOpacity = baseOpacity
+        m.userData.baseColor = m.color.clone()
         this._applyFaceMat(m, 1)
+        if (info !== undefined) this._applyPbrLook(m, midStr, info, tex !== undefined)
         // Which palette entry this material renders — the hook that lets
         // `syncPaletteOpacity` re-read live palette state (alpha) in place
         // instead of re-tessellating anything.
@@ -2114,6 +2482,58 @@ export class SceneRenderer {
     return materials
   }
 
+  /**
+   * Shade a face material with its palette entry's metallic and roughness
+   * factors (`pbrLook`), and its normal map when the material is textured
+   * (the only face material that carries UVs). A material with no
+   * physically based properties keeps Phong's defaults. Safe to re-run: it
+   * rebuilds the look from the material's remembered base colour.
+   */
+  private _applyPbrLook(
+    m: THREE.MeshPhongMaterial,
+    midStr: string,
+    info: MaterialJs,
+    textured: boolean,
+  ): void {
+    const base = (m.userData.baseColor as THREE.Color | undefined) ?? new THREE.Color(1, 1, 1)
+    if (!info.has_pbr()) {
+      m.color.copy(base)
+      m.shininess = 30
+      m.specular.setRGB(0x11 / 255, 0x11 / 255, 0x11 / 255)
+      return
+    }
+    // The tint the palette colour gives a textured face, or the colour the
+    // per-vertex colours carry: either way the palette entry's own colour.
+    const look = phongLook(
+      [info.r() / 255, info.g() / 255, info.b() / 255].map((c) =>
+        new THREE.Color().setRGB(c, c, c, THREE.SRGBColorSpace).r,
+      ) as [number, number, number],
+      info.metallic(),
+      info.roughness(),
+    )
+    m.color.copy(base).multiplyScalar(look.diffuseScale)
+    m.shininess = look.shininess
+    m.specular.setRGB(look.specular[0], look.specular[1], look.specular[2])
+    if (textured && info.has_normal_map() && m.normalMap === null) {
+      const key = `${midStr}:normal`
+      if (!this.textureCache.has(key)) {
+        const bytes = this.wasmScene.material_normal_map_bytes(BigInt(midStr))
+        if (bytes !== undefined) {
+          const url = URL.createObjectURL(new Blob([new Uint8Array(bytes)], { type: 'image/png' }))
+          const t = new THREE.TextureLoader().load(url, () => URL.revokeObjectURL(url))
+          t.wrapS = THREE.RepeatWrapping
+          t.wrapT = THREE.RepeatWrapping
+          this.textureCache.set(key, t)
+        }
+      }
+      const t = this.textureCache.get(key)
+      if (t !== undefined) {
+        m.normalMap = t
+        m.needsUpdate = true
+      }
+    }
+  }
+
   private _refreshObject(objectId: bigint): void {
     // Capture selectedness BEFORE the removal below: _removeObjectGroup
     // prunes the id from selectedObjectIds (correct for a real deletion),
@@ -2129,7 +2549,11 @@ export class SceneRenderer {
       this._removeObjectGroup(objectId)
     }
 
-    const mesh = this.wasmScene.object_mesh(objectId)
+    const mesh = this._tryObjectMesh(objectId)
+    if (mesh === null) {
+      this.watertightMap.delete(objectId)
+      return
+    }
     try {
       const watertight = mesh.watertight()
       this.watertightMap.set(objectId, watertight)
@@ -2144,6 +2568,7 @@ export class SceneRenderer {
       const groupCounts = mesh.group_counts()
       const groupBacks = mesh.group_backs()
       const edgePositions = mesh.edge_positions()
+      const tangentEdgePositions = mesh.tangent_edge_positions()
 
       // Face mesh — multi-material: one BufferGeometry with addGroup per material.
       const faceGeo = new THREE.BufferGeometry()
@@ -2180,11 +2605,30 @@ export class SceneRenderer {
       group.name = `Object_${objectId}`
       group.add(facesMesh)
       group.add(edgesLines)
+      let tangentLines: THREE.LineSegments | null = null
+      if (tangentEdgePositions.length > 0) {
+        const tGeo = new THREE.BufferGeometry()
+        tGeo.setAttribute('position', new THREE.BufferAttribute(tangentEdgePositions, 3))
+        tangentLines = new THREE.LineSegments(tGeo, this._makeTangentEdgeMaterial())
+        tangentLines.visible = this.tangentEdgesVisible
+        group.add(tangentLines)
+      }
       const imprints = this._buildImprintOverlay(objectId)
       if (imprints !== null) group.add(imprints)
+      // Smooth: the cage the surface was made from, as thin wire.
+      let cageLines: THREE.LineSegments | null = null
+      const cagePositions = mesh.cage_edge_positions()
+      if (cagePositions.length > 0) {
+        const cGeo = new THREE.BufferGeometry()
+        cGeo.setAttribute('position', new THREE.BufferAttribute(cagePositions, 3))
+        cageLines = new THREE.LineSegments(cGeo, this._makeCageMaterial())
+        cageLines.name = `ObjectCage_${objectId}`
+        cageLines.visible = this.cageOverlayVisible
+        group.add(cageLines)
+      }
 
       this.objectsGroup.add(group)
-      this.objectGroups.set(objectId, { objectId, facesMesh, edgesLines, group, imprints })
+      this.objectGroups.set(objectId, { objectId, facesMesh, edgesLines, tangentLines, cageLines, group, imprints })
 
       // Re-apply the selection highlight to the rebuilt nodes, and put the
       // id back into the renderer's selected list (the removal above pruned
@@ -2202,6 +2646,7 @@ export class SceneRenderer {
     const g = this.objectGroups.get(objectId)
     if (g === undefined) return
 
+    this.faceMasks.delete(objectId)
     g.facesMesh.geometry.dispose()
     const mat = g.facesMesh.material
     if (Array.isArray(mat)) {
@@ -2213,6 +2658,14 @@ export class SceneRenderer {
     }
     g.edgesLines.geometry.dispose()
     ;(g.edgesLines.material as THREE.Material).dispose()
+    if (g.tangentLines !== null) {
+      g.tangentLines.geometry.dispose()
+      ;(g.tangentLines.material as THREE.Material).dispose()
+    }
+    if (g.cageLines != null) {
+      g.cageLines.geometry.dispose()
+      ;(g.cageLines.material as THREE.Material).dispose()
+    }
     if (g.imprints !== null) this._disposeImprintOverlay(g.imprints)
     this.objectsGroup.remove(g.group)
     this.objectGroups.delete(objectId)
@@ -2227,9 +2680,9 @@ export class SceneRenderer {
 
   /**
    * The drawing overlay for a world object (see `ObjectMeshGroup.imprints`):
-   * one fat `SKETCH_LINE_COLOR` line batch over every Topology-store edge of
+   * one fat attached-orange line batch over every Topology-store edge of
    * the object on each of its drawing planes (owned sketch edges draw through
-   * the sketch overlay) and one translucent `SKETCH_REGION_COLOR` fill per
+   * the sketch overlay) and one translucent attached-orange fill per
    * region over a face whose outer ring is wholly drawing edges (every hole
    * cut out, so a shape inside a shape reads as two fills, and a boss it was
    * drawn around is not tinted). Both use the sketch depth biases so they sit
@@ -2239,6 +2692,12 @@ export class SceneRenderer {
    * poses correctly.
    */
   private _buildImprintOverlay(objectId: bigint): THREE.Group | null {
+    // (lines and fills are the attached/orange pair)
+    // A foreign file's topology edges and faces draw as plain native edges;
+    // the overlay returns the moment the user draws on the object (the
+    // kernel clears the mark, and the rebuild re-reads it).
+    const importedFn = (this.wasmScene as { object_is_imported?: (o: bigint) => boolean }).object_is_imported
+    if (importedFn !== undefined && importedFn.call(this.wasmScene, objectId)) return null
     const planes = objectDrawingPlanes(this.wasmScene, objectId)
     if (planes.length === 0) return null
     const group = new THREE.Group()
@@ -2246,12 +2705,10 @@ export class SceneRenderer {
     const lines: number[] = []
     for (const plane of planes) {
       const ctx = ctxOfObjectPlane(plane, objectId)
-      let pu
-      try {
-        pu = parsePlaneUnits(ctx, this.wasmScene.plane_units_json(ctx))
-      } catch {
-        continue
-      }
+      // Through the per-revision cache the tools read too: the listing of a
+      // dense mesh's plane is costly, and one refresh asks for it again.
+      const pu = readPlaneUnits(this.wasmScene, ctx)
+      if (pu === null) continue
       for (const u of pu.units) {
         for (const e of u.edges) {
           if (e.store.kind !== 'topology') continue
@@ -2260,18 +2717,13 @@ export class SceneRenderer {
       }
       for (const r of pu.regions) {
         if (r.over === null || r.extrude !== null || !ringAllDrawn(pu, r.outer)) continue
-        const mesh = this._buildPlanarFillMesh(r.outer, r.holes)
+        const mesh = this._buildPlanarFillMesh(r.outer, r.holes, 'attached')
         if (mesh !== null) group.add(mesh)
       }
     }
     if (lines.length > 0) {
       group.add(
-        makeFatSegments(new Float32Array(lines), {
-          color: SKETCH_LINE_COLOR,
-          widthPx: SKETCH_LINE_WIDTH_PX,
-          transparent: true,
-          depthBias: DEPTH_BIAS.SKETCH_LINE,
-        }),
+        this._drawLine(lines, 'attached'),
       )
     }
     return group.children.length > 0 ? group : null
@@ -2292,7 +2744,7 @@ export class SceneRenderer {
   /** A translucent sketch-region fill over the planar polygon `outer` with
    *  `holes` cut out — `_buildRegionFillMesh`'s triangulation (Newell
    *  normal, project, ear-clip) lifted out so imprints share it. */
-  private _buildPlanarFillMesh(outer: readonly V3[], holes: readonly V3[][]): THREE.Mesh | null {
+  private _buildPlanarFillMesh(outer: readonly V3[], holes: readonly V3[][], kind: DrawKind): THREE.Mesh | null {
     const n = outer.length
     if (n < 3) return null
     const verts3 = outer.map((p) => new THREE.Vector3(p[0], p[1], p[2]))
@@ -2333,7 +2785,7 @@ export class SceneRenderer {
     const geo = new THREE.BufferGeometry()
     geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(positions), 3))
     const mat = new THREE.MeshBasicMaterial({
-      color: SKETCH_REGION_COLOR,
+      color: this._drawColor(kind, true),
       transparent: true,
       opacity: SKETCH_REGION_OPACITY,
       side: THREE.DoubleSide,
@@ -2343,6 +2795,7 @@ export class SceneRenderer {
       polygonOffsetUnits: DEPTH_BIAS.REGION_FILL,
       colorWrite: this._filmsDrawn(),
     })
+    mat.userData.drawKind = kind
     return new THREE.Mesh(geo, mat)
   }
 
@@ -2373,7 +2826,8 @@ export class SceneRenderer {
       overlay !== null &&
       prev.rev === overlay.rev &&
       sameIds(prev.ids, overlay.ids) &&
-      sameIds(prev.warnIds, overlay.warnIds)
+      sameIds(prev.warnIds, overlay.warnIds) &&
+      prev.segments === overlay.segments
     // Listed rims: the expensive read (every listed object's rims), kept while
     // only the current finding / preview moves.
     if (!sameRims) this._rebuildHealthRims()
@@ -2417,6 +2871,17 @@ export class SceneRenderer {
       this.isolationFade === null ? [...ids] : ids.filter((id) => !this.hiddenObjectIds.has(id))
     const ids = keep(overlay.ids)
     const warnIds = keep(overlay.warnIds)
+    // Loose segments (drawn faces Make Solid could not close): the same two
+    // colors as the rims, not tied to any Object.
+    // The sketches being made solid are selected, and their highlight (3.8 px,
+    // render order 999, no depth test) would bury a 2.5 px line beneath it, so
+    // these draw wider and after it: a colored band either side of the highlight.
+    if (overlay.segments !== undefined) {
+      // Open edges last: a non-planar loop's edges are also open, so the red
+      // sits on the warn halo.
+      this._addHealthLine(this.healthRimLines, overlay.segments.warn, dark ? 0xe8c84a : 0xb8860b, LOOSE_HEALTH_WIDTH_PX + 4, LOOSE_HEALTH_ORDER)
+      this._addHealthLine(this.healthRimLines, overlay.segments.open, dark ? 0xe0714f : 0xc4543f, LOOSE_HEALTH_WIDTH_PX, LOOSE_HEALTH_ORDER + 1)
+    }
     if (ids.length > 0) {
       this._addHealthLine(this.healthRimLines, this.wasmScene.health_rim_segments(BigUint64Array.from(ids)), dark ? 0xe0714f : 0xc4543f, 2.5, 990)
     }
@@ -2425,8 +2890,31 @@ export class SceneRenderer {
     }
   }
 
+  private _clearHealthPoints(): void {
+    for (const cloud of this.healthPointClouds) {
+      cloud.geometry.dispose()
+      ;(cloud.material as THREE.Material).dispose()
+      this.sketchGroup.remove(cloud)
+    }
+    this.healthPointClouds.length = 0
+  }
+
+  /** Dots at `positions` (`[x, y, z, …]`), a fixed size on screen. */
+  private _addHealthPoints(positions: ArrayLike<number>, color: number): void {
+    if (positions.length < 3) return
+    const geometry = new THREE.BufferGeometry()
+    geometry.setAttribute('position', new THREE.BufferAttribute(Float32Array.from(positions), 3))
+    const material = new THREE.PointsMaterial({ color, size: 7, sizeAttenuation: false, depthTest: false, transparent: true })
+    const cloud = new THREE.Points(geometry, material)
+    cloud.renderOrder = 993
+    cloud.frustumCulled = false
+    this.sketchGroup.add(cloud)
+    this.healthPointClouds.push(cloud)
+  }
+
   private _rebuildHealthFocus(): void {
     this._clearHealthLines(this.healthFocusLines)
+    this._clearHealthPoints()
     const overlay = this.healthOverlay
     if (overlay === null) return
     const dark = getResolvedTheme() === 'dark'
@@ -2438,6 +2926,13 @@ export class SceneRenderer {
         5,
         991,
       )
+    }
+    // Mend preview: points that would merge in the rim red, points that
+    // would split in blue (the warning gold vanishes on the orange selection
+    // fill).
+    if (overlay.mendPoints != null) {
+      this._addHealthPoints(overlay.mendPoints.merge, dark ? 0xe0714f : 0xc4543f)
+      this._addHealthPoints(overlay.mendPoints.split, dark ? 0x79b8ff : 0x1f6feb)
     }
     // Close-button preview: the rims that will gain a face, in the solid color.
     for (const { id, rim } of overlay.capPreview ?? []) {
@@ -2473,16 +2968,23 @@ export class SceneRenderer {
     // Every mutation (and every hide/unhide) lands here: what the plane-unit
     // listings answer may have changed, so drop their cache.
     invalidatePlaneUnits()
+    this.drawColors = this._readDrawColors()
     this._clearSketchLines()
     this._clearSketchRegions()
 
     const allLinePositions: number[] = []
+    const attachedLinePositions: number[] = []
+    const plainLinePositions: number[] = []
     for (const sketchHandle of this.wasmScene.sketch_ids()) {
+      // Read per rebuild, never cached: a kernel edit clears the mark.
+      const kind = this._sketchDrawKind(sketchHandle)
+      const out = kind === 'plain' ? plainLinePositions : kind === 'attached' ? attachedLinePositions : allLinePositions
       const linePositions = this.wasmScene.sketch_lines(sketchHandle)
       for (let i = 0; i < linePositions.length; i++) {
-        allLinePositions.push(linePositions[i])
+        out.push(linePositions[i])
       }
-      this._buildRegionFills(sketchHandle)
+      // Imported drawing is plain edge ink: no region fill.
+      if (kind !== 'plain') this._buildRegionFills(sketchHandle, kind)
     }
 
     if (allLinePositions.length > 0) {
@@ -2492,17 +2994,20 @@ export class SceneRenderer {
       // sketch-isolation fade can animate opacity. Resolution is kept current
       // by the fat-line registry (makeFatSegments registers the material;
       // Viewport calls updateFatLineResolutions on mount/resize).
-      this.sketchLines = makeFatSegments(new Float32Array(allLinePositions), {
-        color: SKETCH_LINE_COLOR,
-        widthPx: SKETCH_LINE_WIDTH_PX,
-        transparent: true,
-        // Sketch lines are coincident with the object edges they were
-        // consumed into (and with each other across sketches); bias them one
-        // rung in front of native edges so the tie is deterministic
-        // (depthPolicy.ts).
-        depthBias: DEPTH_BIAS.SKETCH_LINE,
-      })
+      // Sketch lines are coincident with the object edges they were
+      // consumed into (and with each other across sketches); `_drawLine`
+      // biases them one rung in front of native edges so the tie is
+      // deterministic (depthPolicy.ts).
+      this.sketchLines = this._drawLine(allLinePositions, 'free')
       this.sketchGroup.add(this.sketchLines)
+    }
+    if (attachedLinePositions.length > 0) {
+      this.sketchLinesAttached = this._drawLine(attachedLinePositions, 'attached')
+      this.sketchGroup.add(this.sketchLinesAttached)
+    }
+    if (plainLinePositions.length > 0) {
+      this.sketchLinesPlain = this._drawLine(plainLinePositions, 'plain')
+      this.sketchGroup.add(this.sketchLinesPlain)
     }
 
     // Sketches DRAWN INSIDE A COMPONENT (component-edit-parity.md Finding 1)
@@ -2547,21 +3052,58 @@ export class SceneRenderer {
    */
   private _refreshDefSketches(): void {
     this._clearDefSketchGroups()
+    if (!this._mayDrawDefinitionSketches()) {
+      this._reassertSectionClip()
+      return
+    }
     for (const instanceId of this.wasmScene.instance_ids()) {
-      const componentId = this.wasmScene.instance_def(instanceId)
-      if (componentId === undefined) continue
-      const sketchIds = this.wasmScene.component_member_sketches(componentId)
-      if (sketchIds.length === 0) continue
       const pose = this.wasmScene.instance_pose(instanceId)
       if (pose === undefined) continue
-      this._buildDefSketchGroup(instanceId, pose, sketchIds)
+      // `instance_sketch_placements`: the kernel's one walk of what the
+      // instance draws — its definition's own sketches and every nested
+      // definition's, each with the pose into the instance's frame; a
+      // definition on loan to an open session shows the session's live
+      // drawing at the inverse session pose, so a sibling placement shows
+      // lines drawn inside the session as they are drawn (ARCHITECTURE.md
+      // 2.11). The instance's own visibility is applied below, not there.
+      const placements = this.wasmScene.instance_sketch_placements(instanceId)
+      try {
+        if (placements.is_empty()) continue
+        this._buildDefSketchGroup(instanceId, pose, placements.sketches(), placements.poses())
+      } finally {
+        placements.free()
+      }
     }
+    // The groups above were built with fresh, unclipped materials; the
+    // callers' own section-clip reassertion may have run before this rebuild
+    // (`refreshTouched` syncs materialized instances first), so reassert the
+    // active cut onto them here, whichever caller got us here.
+    this._reassertSectionClip()
+  }
+
+  /**
+   * Cheap conservative test of whether any instance could draw lines from
+   * inside a definition (mirrors the kernel's `has_definition_drawing`, which
+   * the wasm surface does not expose): some definition renders a sketch
+   * (`component_rendered_sketches` is the session's live drawing while a
+   * definition is on loan, so an open component session counts too).
+   * Nested definitions are components themselves, so checking each one
+   * covers every placement. `false` lets a refresh skip the per-instance
+   * placement walk entirely.
+   */
+  private _mayDrawDefinitionSketches(): boolean {
+    for (const c of this.wasmScene.component_ids()) {
+      if (this.wasmScene.component_rendered_sketches(c).length > 0) return true
+    }
+    return false
   }
 
   /** Dispose and clear every rendered def-sketch group. */
   private _clearDefSketchGroups(): void {
     for (const g of this.defSketchGroups.values()) {
       if (g.lines !== null) disposeFatSegments(g.lines)
+      if (g.linesAttached !== null) disposeFatSegments(g.linesAttached)
+      if (g.linesPlain !== null) disposeFatSegments(g.linesPlain)
       for (const mesh of g.regionMeshes.values()) {
         mesh.geometry.dispose()
         ;(mesh.material as THREE.Material).dispose()
@@ -2572,16 +3114,20 @@ export class SceneRenderer {
   }
 
   /**
-   * Build one instance's `DefSketchGroup`: a Group transformed by `pose`
-   * (row-major 3×4, same convention as `_pullInstanceRecord`) holding a
-   * merged fat-line for every live sketch's edges plus one fill mesh per
-   * region. `sketchIds` are already definition-local and already filtered to
-   * LIVE ones by the caller.
+   * Build one instance's `DefSketchGroup`: a Group transformed by the
+   * instance's `pose` (row-major 3×4, same convention as
+   * `_pullInstanceRecord`) holding a merged fat-line for every live sketch's
+   * edges plus one fill mesh per region. Each sketch sits at its own
+   * placement pose (`sketchPoses`, 12 floats per sketch, into the instance's
+   * frame): identity for the definition's own, the nested placement's for a
+   * nested definition's — lines are carried through it as they merge, and a
+   * fill mesh takes it as its own matrix.
    */
   private _buildDefSketchGroup(
     instanceId: bigint,
     pose: Float64Array,
     sketchIds: BigUint64Array | bigint[],
+    sketchPoses: Float64Array | number[],
   ): void {
     const group = new THREE.Group()
     group.name = `DefSketch_${instanceId}`
@@ -2595,37 +3141,53 @@ export class SceneRenderer {
     group.matrixWorldNeedsUpdate = true
 
     const allLinePositions: number[] = []
+    const attachedLinePositions: number[] = []
+    const plainLinePositions: number[] = []
     const regionMeshes = new Map<string, THREE.Mesh>()
-    for (const sketchHandle of sketchIds) {
+    for (let k = 0; k < sketchIds.length; k++) {
+      const sketchHandle = sketchIds[k]
+      const placement = Array.from({ length: 12 }, (_, j) => sketchPoses[k * 12 + j])
+      const kind = this._sketchDrawKind(sketchHandle)
+      const out = kind === 'plain' ? plainLinePositions : kind === 'attached' ? attachedLinePositions : allLinePositions
       const linePositions = this.wasmScene.sketch_lines(sketchHandle)
-      for (let i = 0; i < linePositions.length; i++) {
-        allLinePositions.push(linePositions[i])
+      for (let i = 0; i + 2 < linePositions.length; i += 3) {
+        const [x, y, z] = applyAffineToPoint(placement, [linePositions[i], linePositions[i + 1], linePositions[i + 2]])
+        out.push(x, y, z)
       }
+      if (kind === 'plain') continue // imported: edge ink only, no fill
       const regionHandles = this.wasmScene.sketch_regions(sketchHandle)
       for (let i = 0; i < regionHandles.length; i++) {
         const regionHandle = regionHandles[i]
-        const mesh = this._buildRegionFillMesh(sketchHandle, regionHandle)
+        const mesh = this._buildRegionFillMesh(sketchHandle, regionHandle, kind)
         if (mesh === null) continue
+        mesh.matrixAutoUpdate = false
+        mesh.matrix.copy(rowMajorToMatrix4(placement))
+        mesh.matrixWorldNeedsUpdate = true
         group.add(mesh)
-        regionMeshes.set(`${sketchHandle}:${regionHandle}`, mesh)
+        regionMeshes.set(`${k}:${sketchHandle}:${regionHandle}`, mesh)
       }
     }
 
     let lines: LineSegments2 | null = null
     if (allLinePositions.length > 0) {
-      lines = makeFatSegments(new Float32Array(allLinePositions), {
-        color: SKETCH_LINE_COLOR,
-        widthPx: SKETCH_LINE_WIDTH_PX,
-        transparent: true,
-        depthBias: DEPTH_BIAS.SKETCH_LINE,
-      })
+      lines = this._drawLine(allLinePositions, 'free')
       group.add(lines)
     }
+    let linesAttached: LineSegments2 | null = null
+    if (attachedLinePositions.length > 0) {
+      linesAttached = this._drawLine(attachedLinePositions, 'attached')
+      group.add(linesAttached)
+    }
+    let linesPlain: LineSegments2 | null = null
+    if (plainLinePositions.length > 0) {
+      linesPlain = this._drawLine(plainLinePositions, 'plain')
+      group.add(linesPlain)
+    }
 
-    if (lines === null && regionMeshes.size === 0) return // nothing to show
+    if (lines === null && linesAttached === null && linesPlain === null && regionMeshes.size === 0) return // nothing to show
 
     this.sketchGroup.add(group)
-    this.defSketchGroups.set(instanceId, { group, lines, regionMeshes })
+    this.defSketchGroups.set(instanceId, { group, lines, linesAttached, linesPlain, regionMeshes })
   }
 
   /**
@@ -2634,11 +3196,11 @@ export class SceneRenderer {
    * vertex 0 is correct. Every closed region fills and picks — all of them
    * extrude (interpenetration is allowed everywhere in Hew).
    */
-  private _buildRegionFills(sketchHandle: bigint): void {
+  private _buildRegionFills(sketchHandle: bigint, kind: DrawKind): void {
     const regionHandles = this.wasmScene.sketch_regions(sketchHandle)
     for (let i = 0; i < regionHandles.length; i++) {
       const regionHandle = regionHandles[i]
-      const mesh = this._buildRegionFillMesh(sketchHandle, regionHandle)
+      const mesh = this._buildRegionFillMesh(sketchHandle, regionHandle, kind)
       if (mesh === null) continue
       this.sketchGroup.add(mesh)
       this.sketchRegionMeshes.set(`${sketchHandle}:${regionHandle}`, mesh)
@@ -2652,58 +3214,27 @@ export class SceneRenderer {
    * degenerate region (fewer than 3 boundary vertices, or a near-zero
    * polygon normal).
    */
-  private _buildRegionFillMesh(sketchHandle: bigint, regionHandle: bigint): THREE.Mesh | null {
+  private _buildRegionFillMesh(sketchHandle: bigint, regionHandle: bigint, kind: DrawKind): THREE.Mesh | null {
     const boundary = this.wasmScene.region_boundary(sketchHandle, regionHandle)
     // boundary is flat [x0,y0,z0, x1,y1,z1, ...]; n vertices
     const n = Math.floor(boundary.length / 3)
     if (n < 3) return null
 
-    const verts3: THREE.Vector3[] = []
-    for (let i = 0; i < n; i++) {
-      verts3.push(new THREE.Vector3(boundary[i * 3], boundary[i * 3 + 1], boundary[i * 3 + 2]))
-    }
-
-    // Robust planar triangulation. The old code fanned from vertex 0, which is
-    // only correct for CONVEX polygons — a non-convex region (an L-shaped or
-    // freehand polyline sketch) produced overlapping/absent triangles, so its
-    // fill "only sometimes" appeared (Refinement pass). Newell's method gives
-    // the polygon normal (works on the ground OR on a face), we project into
-    // that plane, ear-clip via THREE.ShapeUtils, then emit triangles at the
-    // original 3D verts — exactly in the region's plane. (A former +1mm lift
-    // along the normal, there to dodge z-fighting, made ground fills visibly
-    // float at cm scale; the REGION_FILL depth bias below replaces it.)
-    const normal = new THREE.Vector3()
-    for (let i = 0; i < n; i++) {
-      const cur = verts3[i]
-      const nxt = verts3[(i + 1) % n]
-      normal.x += (cur.y - nxt.y) * (cur.z + nxt.z)
-      normal.y += (cur.z - nxt.z) * (cur.x + nxt.x)
-      normal.z += (cur.x - nxt.x) * (cur.y + nxt.y)
-    }
-    if (normal.lengthSq() < 1e-12) return null
-    normal.normalize()
-
-    const u = new THREE.Vector3()
-    if (Math.abs(normal.z) < 0.9) u.set(0, 0, 1).cross(normal).normalize()
-    else u.set(1, 0, 0).cross(normal).normalize()
-    const v = new THREE.Vector3().crossVectors(normal, u).normalize()
-
-    const pts2 = verts3.map((p) => new THREE.Vector2(p.dot(u), p.dot(v)))
-    const tris = THREE.ShapeUtils.triangulateShape(pts2, [])
-
-    const positions: number[] = []
-    for (const tri of tris) {
-      for (const idx of tri) {
-        const p = verts3[idx]
-        positions.push(p.x, p.y, p.z)
-      }
-    }
-    if (positions.length === 0) return null
+    // Robust planar triangulation (`triangulatePlanarLoop`): the old code
+    // fanned from vertex 0, which is only correct for CONVEX polygons — a
+    // non-convex region (an L-shaped or freehand polyline sketch) produced
+    // overlapping/absent triangles, so its fill "only sometimes" appeared
+    // (Refinement pass). Triangles land at the original 3D verts — exactly
+    // in the region's plane. (A former +1mm lift along the normal, there to
+    // dodge z-fighting, made ground fills visibly float at cm scale; the
+    // REGION_FILL depth bias below replaces it.)
+    const positions = triangulatePlanarLoop(boundary)
+    if (positions === null) return null
 
     const geo = new THREE.BufferGeometry()
     geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(positions), 3))
     const mat = new THREE.MeshBasicMaterial({
-      color: SKETCH_REGION_COLOR,
+      color: this._drawColor(kind, true),
       transparent: true,
       opacity: SKETCH_REGION_OPACITY,
       side: THREE.DoubleSide,
@@ -2716,6 +3247,7 @@ export class SceneRenderer {
       polygonOffsetUnits: DEPTH_BIAS.REGION_FILL,
       colorWrite: this._filmsDrawn(),
     })
+    mat.userData.drawKind = kind
     return new THREE.Mesh(geo, mat)
   }
 
@@ -2725,7 +3257,8 @@ export class SceneRenderer {
    * `refreshAllSketches`'s "clear and rebuild from scratch" approach since
    * guide counts are small and this is cheap.
    *
-   * Line guides render as a dashed segment through `origin` along
+   * Line guides render as a stippled segment (the guide's own dash
+   * pattern; short dashes by default) through `origin` along
    * `direction`, sized to the view each frame (`updateGuideExtents` — a
    * fixed long segment breaks depth ordering on the face a guide lies on);
    * point guides render as a small
@@ -2737,6 +3270,7 @@ export class SceneRenderer {
 
     const linePositions: number[] = []
     const lineDistances: number[] = []
+    const lineStipples: number[] = []
     const markerPositions: number[] = []
 
     for (const guideId of this.wasmScene.guide_ids()) {
@@ -2771,7 +3305,9 @@ export class SceneRenderer {
           ox + ux * s1, oy + uy * s1, oz + uz * s1,
         )
         lineDistances.push(s0, s1)
-        this.guideDefs.push({ o: [ox, oy, oz], d: [ux, uy, uz], lo, hi, win: null })
+        const stipple = this.wasmScene.guide_dash(guideId) ?? GUIDE_DEFAULT_STIPPLE
+        lineStipples.push(stipple, stipple)
+        this.guideDefs.push({ o: [ox, oy, oz], d: [ux, uy, uz], lo, hi, stipple, win: null })
       } else if (kind === 'point') {
         // [x, y, z] — a small 3-axis cross marker.
         const [x, y, z] = geometry
@@ -2790,7 +3326,10 @@ export class SceneRenderer {
       // dashSize/gapSize are placeholders — updateGuideDashScale() sets the
       // screen-constant values every frame from the camera distance.
       const mat = new THREE.LineDashedMaterial({ color: GUIDE_COLOR, dashSize: 0.05, gapSize: 0.05 })
+      applyGuideStipple(mat)
       geo.setAttribute('lineDistance', new THREE.BufferAttribute(new Float32Array(lineDistances), 1))
+      // Each guide's own dash pattern (its 16-bit stipple mask), per vertex.
+      geo.setAttribute('stipple', new THREE.BufferAttribute(new Float32Array(lineStipples), 1))
       this.guideLines = new THREE.LineSegments(geo, mat)
       // The segment is rewritten as the view moves; its bounding sphere would
       // go stale, and a guide is always at least partly in view when drawn.
@@ -2829,16 +3368,17 @@ export class SceneRenderer {
     }
   }
 
-  /** Mark `id` as the selected guide and redraw its bright overlay;
-   * `null` clears it. The caller schedules the render. */
-  setSelectedGuide(id: bigint | null): void {
-    this.selectedGuideId = id
+  /** Mark `ids` as the selected guides and redraw their bright overlay;
+   * an empty list clears it. The caller schedules the render. */
+  setSelectedGuides(ids: readonly bigint[]): void {
+    this.selectedGuideIds = ids
     this._rebuildGuideHighlight()
   }
 
-  /** (Re)build the bright overlay for the selected guide — a solid line/cross in
-   * the selection color, drawn on top so it reads as picked over the dashed
-   * grey. Cleared if nothing is selected or the guide no longer exists. */
+  /** (Re)build the bright overlay for the selected guides — a solid
+   * line/cross each in the selection color, drawn on top so they read as
+   * picked over the dashed grey. A guide that no longer exists is skipped;
+   * with none left the overlay is cleared. */
   private _rebuildGuideHighlight(): void {
     if (this.guideHighlight !== null) {
       this.guideHighlight.geometry.dispose()
@@ -2846,31 +3386,15 @@ export class SceneRenderer {
       this.guidesGroup.remove(this.guideHighlight)
       this.guideHighlight = null
     }
-    if (this.selectedGuideId === null) return
-    const kind = this.wasmScene.guide_kind(this.selectedGuideId)
-    const geometry = this.wasmScene.guide_geometry(this.selectedGuideId)
-    if (kind === undefined || geometry === undefined) return
-
     const pts: number[] = []
-    if (kind === 'line') {
-      const [ox, oy, oz, dx, dy, dz] = geometry
-      const len = Math.sqrt(dx * dx + dy * dy + dz * dz)
-      if (len < 1e-9) return
-      const ux = dx / len
-      const uy = dy / len
-      const uz = dz / len
-      const { lo, hi } = guideSpanOf(geometry)
-      const span = stretchToUse(-GUIDE_HIGHLIGHT_HALF_LENGTH, GUIDE_HIGHLIGHT_HALF_LENGTH, lo, hi)
-      if (span === null) return
-      const [s0, s1] = span
-      pts.push(ox + ux * s0, oy + uy * s0, oz + uz * s0, ox + ux * s1, oy + uy * s1, oz + uz * s1)
-    } else if (kind === 'point') {
-      const [x, y, z] = geometry
-      const k = GUIDE_POINT_MARKER_HALF_SIZE
-      pts.push(x - k, y, z, x + k, y, z, x, y - k, z, x, y + k, z, x, y, z - k, x, y, z + k)
-    } else {
-      return
+    for (const id of this.selectedGuideIds) {
+      const kind = this.wasmScene.guide_kind(id)
+      const geometry = this.wasmScene.guide_geometry(id)
+      if (kind === undefined || geometry === undefined) continue
+      const overlay = guideOverlayPositions(kind, geometry)
+      if (overlay !== null) for (const v of overlay) pts.push(v)
     }
+    if (pts.length === 0) return
     const geo = new THREE.BufferGeometry()
     geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(pts), 3))
     const mat = new THREE.LineBasicMaterial({ color: EDGE_COLOR_SELECTED, depthTest: false })
@@ -3189,10 +3713,10 @@ export class SceneRenderer {
     this._installAnnotationLineBatch('highlight', [], EDGE_COLOR_SELECTED)
   }
 
-  /** Mark `id` as the selected annotation and redraw its bright overlay;
-   * `null` clears it. The caller schedules the render. */
-  setSelectedAnnotation(id: bigint | null): void {
-    this.selectedAnnotationId = id
+  /** Mark `ids` as the selected annotations and redraw their bright
+   * overlay; an empty list clears it. The caller schedules the render. */
+  setSelectedAnnotations(ids: readonly bigint[]): void {
+    this.selectedAnnotationIds = new Set(ids)
     this._rebuildAnnotationHighlight()
   }
 
@@ -3217,24 +3741,20 @@ export class SceneRenderer {
     return this.annotationBase.get(id)?.label ?? null
   }
 
-  /** (Re)build the bright overlay for the selected annotation, straight from
+  /** (Re)build the bright overlay for the selected annotations, straight from
    * `annotationBase` (camera-independent — the per-frame path in
    * `updateAnnotationBillboards` overwrites this with the gap-laid-out +
    * biased version on the very next frame, same one-frame-nicety-gap
    * tradeoff as `refreshAnnotations`' own initial paint). */
   private _rebuildAnnotationHighlight(): void {
-    if (this.selectedAnnotationId === null) {
-      this._installAnnotationLineBatch('highlight', [], EDGE_COLOR_SELECTED)
-      return
-    }
-    const info = this.annotationBase.get(this.selectedAnnotationId)
-    if (info === undefined) {
-      this._installAnnotationLineBatch('highlight', [], EDGE_COLOR_SELECTED)
-      return
-    }
-    const positions = [...info.fixed]
-    if (info.dimLine !== null) {
-      positions.push(info.dimLine.a[0], info.dimLine.a[1], info.dimLine.a[2], info.dimLine.b[0], info.dimLine.b[1], info.dimLine.b[2])
+    const positions: number[] = []
+    for (const id of this.selectedAnnotationIds) {
+      const info = this.annotationBase.get(id)
+      if (info === undefined) continue
+      for (const v of info.fixed) positions.push(v)
+      if (info.dimLine !== null) {
+        positions.push(info.dimLine.a[0], info.dimLine.a[1], info.dimLine.a[2], info.dimLine.b[0], info.dimLine.b[1], info.dimLine.b[2])
+      }
     }
     this._installAnnotationLineBatch('highlight', positions, EDGE_COLOR_SELECTED)
   }
@@ -3270,7 +3790,7 @@ export class SceneRenderer {
 
     const normalPositions: number[] = []
     const detachedPositions: number[] = []
-    let highlightPositions: number[] = []
+    const highlightPositions: number[] = []
 
     for (const [id, info] of this.annotationBase) {
       const billboard = this.annotationBillboards.get(id)
@@ -3383,14 +3903,16 @@ export class SceneRenderer {
       }
       billboard.update(camera, viewportHeight, faceQuaternion)
 
-      if (id === this.selectedAnnotationId) {
-        highlightPositions = [...info.fixed, ...dimSegments, ...arrowSegments]
+      if (this.selectedAnnotationIds.has(id)) {
+        for (const v of info.fixed) highlightPositions.push(v)
+        for (const v of dimSegments) highlightPositions.push(v)
+        for (const v of arrowSegments) highlightPositions.push(v)
       }
     }
 
     this._installAnnotationLineBatch('normal', normalPositions, normalColor)
     this._installAnnotationLineBatch('detached', detachedPositions, warningColor)
-    if (this.selectedAnnotationId !== null) {
+    if (this.selectedAnnotationIds.size > 0) {
       this._installAnnotationLineBatch('highlight', highlightPositions, EDGE_COLOR_SELECTED)
     }
   }
@@ -3540,7 +4062,7 @@ export class SceneRenderer {
 
   /**
    * Highlight exactly the given sketches as a bright overlay drawn on
-   * top of the normal sketch-line color, mirroring `setSelectedGuide`'s
+   * top of the normal sketch-line color, mirroring `setSelectedGuides`'
    * "separate overlay object" approach rather than recoloring the merged
    * per-sketch-agnostic `sketchLines` buffer in place. Pass `[]` to clear.
    */
@@ -3567,33 +4089,7 @@ export class SceneRenderer {
     }
     if (this.selectedSketchIds.length === 0) return
 
-    const positions: number[] = []
-    const pose = this.selectedSketchInstance !== null
-      ? this.wasmScene.instance_pose(this.selectedSketchInstance)
-      : undefined
-    const pushLines = (lines: Float32Array | number[]): void => {
-      for (let i = 0; i + 2 < lines.length; i += 3) {
-        const x = lines[i], y = lines[i + 1], z = lines[i + 2]
-        if (pose === undefined) {
-          positions.push(x, y, z)
-        } else {
-          positions.push(
-            pose[0] * x + pose[1] * y + pose[2] * z + pose[3],
-            pose[4] * x + pose[5] * y + pose[6] * z + pose[7],
-            pose[8] * x + pose[9] * y + pose[10] * z + pose[11],
-          )
-        }
-      }
-    }
-    for (const id of this.selectedSketchIds) {
-      let linePositions: Float32Array | number[]
-      try {
-        linePositions = this.wasmScene.sketch_lines(id)
-      } catch {
-        continue // stale/deleted handle — simply contributes nothing
-      }
-      pushLines(linePositions)
-    }
+    const positions = this._sketchLinePositions(this.selectedSketchIds, this.selectedSketchInstance)
     if (positions.length === 0) return
 
     // Fat line (LineSegments2), like the base sketch lines — a plain
@@ -3608,6 +4104,145 @@ export class SceneRenderer {
     })
     this.sketchHighlight.renderOrder = 999
     this.sketchGroup.add(this.sketchHighlight)
+  }
+
+  /** World line positions of the given sketches; `instance`'s pose maps
+   * definition-owned sketch geometry into world space (null: world sketches).
+   * A stale or deleted handle simply contributes nothing. */
+  private _sketchLinePositions(sketchIds: readonly bigint[], instance: bigint | null): number[] {
+    const positions: number[] = []
+    const pose = instance !== null ? this.wasmScene.instance_pose(instance) : undefined
+    for (const id of sketchIds) {
+      let lines: Float32Array | number[]
+      try {
+        lines = this.wasmScene.sketch_lines(id)
+      } catch {
+        continue
+      }
+      for (let i = 0; i + 2 < lines.length; i += 3) {
+        const x = lines[i], y = lines[i + 1], z = lines[i + 2]
+        if (pose === undefined) {
+          positions.push(x, y, z)
+        } else {
+          positions.push(
+            pose[0] * x + pose[1] * y + pose[2] * z + pose[3],
+            pose[4] * x + pose[5] * y + pose[6] * z + pose[7],
+            pose[8] * x + pose[9] * y + pose[10] * z + pose[11],
+          )
+        }
+      }
+    }
+    return positions
+  }
+
+  /** The hover highlight shown now (`setHoverHighlight`), null when none. */
+  getHoverHighlight(): HoverHighlight | null {
+    return this.hover
+  }
+
+  /**
+   * Highlight what a click would pick up — the transform tools' hover
+   * (Move/Rotate/Scale with nothing selected), SketchUp's pre-selection
+   * highlight. It looks exactly like the selection highlight would once the
+   * click selects it, but it is a separate overlay: the selection state,
+   * instance batching, and materialization are untouched. A solid's edges are
+   * redrawn in the selection color over its own edges (same positions, same
+   * depth, drawn later); sketches, drawn shapes, and guides get the same
+   * on-top overlay their selection uses. `null` clears it. Ids that no longer
+   * render are skipped. The caller schedules the render.
+   */
+  setHoverHighlight(hover: HoverHighlight | null): void {
+    this.hover = hover
+    this._rebuildHoverHighlight()
+  }
+
+  private _clearHoverHighlight(): void {
+    for (const child of [...this.hoverGroup.children]) {
+      if (child instanceof LineSegments2) {
+        disposeFatSegments(child)
+      } else if (child instanceof THREE.LineSegments) {
+        child.geometry.dispose()
+        if (child.material !== this.hoverEdgeMaterial) (child.material as THREE.Material).dispose()
+      }
+      this.hoverGroup.remove(child)
+    }
+    this.hoverEdgeMaterial?.dispose()
+    this.hoverEdgeMaterial = null
+  }
+
+  private _rebuildHoverHighlight(): void {
+    this._clearHoverHighlight()
+    const hover = this.hover
+    if (hover === null) return
+
+    const plane = this.sectionClipPlane
+    const edgeMaterial = new THREE.LineBasicMaterial({
+      color: EDGE_COLOR_SELECTED,
+      clippingPlanes: plane !== null ? [plane] : null,
+    })
+    this.hoverEdgeMaterial = edgeMaterial
+    const addEdges = (positions: ArrayLike<number>, matrixWorld: THREE.Matrix4): void => {
+      if (positions.length === 0) return
+      const geo = new THREE.BufferGeometry()
+      geo.setAttribute('position', new THREE.BufferAttribute(positions as Float32Array, 3))
+      const lines = new THREE.LineSegments(geo, edgeMaterial)
+      lines.matrixAutoUpdate = false
+      lines.matrix.copy(matrixWorld)
+      lines.matrixWorldNeedsUpdate = true
+      // Same positions and depth as the object's own edges: drawn after them,
+      // the default less-or-equal depth test lets the overlay win.
+      lines.renderOrder = 1
+      this.hoverGroup.add(lines)
+    }
+
+    for (const id of hover.objects) {
+      const g = this.objectGroups.get(id)
+      if (g === undefined || !g.group.visible) continue
+      g.edgesLines.updateWorldMatrix(true, false)
+      addEdges(g.edgesLines.geometry.getAttribute('position').array, g.edgesLines.matrixWorld)
+    }
+    this.instancesGroup.updateWorldMatrix(true, false)
+    const addPlacements = (instanceId: bigint, only: ReadonlySet<bigint> | null): void => {
+      const rec = this.instanceRecords.get(instanceId)
+      if (rec === undefined || this.hiddenInstanceIds.has(instanceId)) return
+      for (const placement of rec.placements) {
+        if (!placement.shown) continue
+        if (only !== null && !only.has(placement.memberId)) continue
+        const world = new THREE.Matrix4()
+          .multiplyMatrices(this.instancesGroup.matrixWorld, rec.matrix)
+          .multiply(placement.localMatrix)
+        addEdges(this._getMemberGeometry(placement.memberId, placement.inherited).edgePositions, world)
+      }
+    }
+    for (const id of hover.instances) addPlacements(id, null)
+    if (hover.member !== null) addPlacements(hover.member.instance, new Set(hover.member.memberIds))
+
+    const addOnTop = (positions: ArrayLike<number>): void => {
+      if (positions.length === 0) return
+      const lines = makeFatSegments(new Float32Array(positions), {
+        color: EDGE_COLOR_SELECTED,
+        widthPx: SKETCH_HIGHLIGHT_WIDTH_PX,
+        depthTest: false,
+      })
+      lines.renderOrder = 999
+      this.hoverGroup.add(lines)
+    }
+    if (hover.sketches.length > 0) addOnTop(this._sketchLinePositions(hover.sketches, hover.sketchInstance))
+    addOnTop(hover.draftSegments)
+
+    if (hover.guide !== null) {
+      const kind = this.wasmScene.guide_kind(hover.guide)
+      const geometry = this.wasmScene.guide_geometry(hover.guide)
+      const pts = kind !== undefined && geometry !== undefined ? guideOverlayPositions(kind, geometry) : null
+      if (pts !== null) {
+        const geo = new THREE.BufferGeometry()
+        geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(pts), 3))
+        const lines = new THREE.LineSegments(geo, new THREE.LineBasicMaterial({ color: EDGE_COLOR_SELECTED, depthTest: false }))
+        lines.renderOrder = 999
+        lines.visible = this.guidesGroup.visible
+        this.hoverGroup.add(lines)
+      }
+    }
   }
 
   /**
@@ -3893,6 +4528,8 @@ export class SceneRenderer {
       })
       g.edgesLines.forEach((l, i) => {
         l.visible = shown[i]
+        const t = g.tangentLines[i]
+        if (t !== null) t.visible = shown[i] && this.tangentEdgesVisible
       })
     }
   }
@@ -3982,15 +4619,26 @@ export class SceneRenderer {
 
     // Native edges (replaced by the caller's fat overlay) and every
     // selection/hover overlay.
-    for (const g of this.objectGroups.values()) hideObj(g.edgesLines)
-    for (const g of this.instanceGroups.values()) for (const e of g.edgesLines) hideObj(e)
-    for (const b of this.batches.values()) hideObj(b.edges)
+    for (const g of this.objectGroups.values()) {
+      hideObj(g.edgesLines)
+      hideObj(g.tangentLines)
+    }
+    for (const g of this.instanceGroups.values()) {
+      for (const e of g.edgesLines) hideObj(e)
+      for (const t of g.tangentLines) hideObj(t)
+    }
+    for (const b of this.batches.values()) {
+      hideObj(b.edges)
+      hideObj(b.tangent)
+    }
     hideObj(this.guideHighlight)
     hideObj(this.annotationHighlight)
     hideObj(this.sketchHighlight)
     hideObj(this.imprintHighlight)
+    hideObj(this.hoverGroup)
     for (const line of this.healthRimLines) hideObj(line)
     for (const line of this.healthFocusLines) hideObj(line)
+    for (const cloud of this.healthPointClouds) hideObj(cloud)
     if (!opts.includeGuides) hideObj(this.guidesGroup)
 
     if (opts.sketchLineWidthPx !== undefined) {
@@ -4010,7 +4658,13 @@ export class SceneRenderer {
         })
       }
       setWidth(this.sketchLines)
-      for (const d of this.defSketchGroups.values()) setWidth(d.lines)
+      setWidth(this.sketchLinesAttached)
+      setWidth(this.sketchLinesPlain)
+      for (const d of this.defSketchGroups.values()) {
+        setWidth(d.lines)
+        setWidth(d.linesAttached)
+        setWidth(d.linesPlain)
+      }
     }
 
     if (opts.style === 'lineart') {
@@ -4060,7 +4714,13 @@ export class SceneRenderer {
         })
       }
       inkLine(this.sketchLines)
-      for (const d of this.defSketchGroups.values()) inkLine(d.lines)
+      inkLine(this.sketchLinesAttached)
+      inkLine(this.sketchLinesPlain)
+      for (const d of this.defSketchGroups.values()) {
+        inkLine(d.lines)
+        inkLine(d.linesAttached)
+        inkLine(d.linesPlain)
+      }
       undo.push(() => {
         for (const m of cache.values()) m.dispose()
       })
@@ -4106,6 +4766,10 @@ export class SceneRenderer {
       if (!g.group.visible) continue
       const pos = positionsOf(g.edgesLines)
       if (pos !== null) pushTransformed(pos, g.edgesLines.matrixWorld)
+      if (this.tangentEdgesVisible && g.tangentLines !== null) {
+        const tpos = positionsOf(g.tangentLines)
+        if (tpos !== null) pushTransformed(tpos, g.tangentLines.matrixWorld)
+      }
     }
     for (const g of this.instanceGroups.values()) {
       if (!g.group.visible) continue
@@ -4115,17 +4779,24 @@ export class SceneRenderer {
         if (g.facesMeshes[i]?.visible === false) continue
         const pos = positionsOf(e)
         if (pos !== null) pushTransformed(pos, e.matrixWorld)
+        const t = g.tangentLines[i]
+        if (this.tangentEdgesVisible && t !== null) {
+          const tpos = positionsOf(t)
+          if (tpos !== null) pushTransformed(tpos, t.matrixWorld)
+        }
       }
     }
     const slotMatrix = new THREE.Matrix4()
     for (const b of this.batches.values()) {
       const pos = positionsOf(b.edges)
       if (pos === null) continue
+      const tpos = this.tangentEdgesVisible && b.tangent !== null ? positionsOf(b.tangent) : null
       const count = b.mesh.count
       for (let slot = 0; slot < count; slot++) {
         if (b.suppressedSlots.has(slot)) continue
         b.mesh.getMatrixAt(slot, slotMatrix)
         pushTransformed(pos, slotMatrix)
+        if (tpos !== null) pushTransformed(tpos, slotMatrix)
       }
     }
     const out = new Float32Array(total)
@@ -4182,7 +4853,7 @@ export class SceneRenderer {
 
   /** World-space guide line segments and point-marker segments (may be
    * empty) for a print pass that includes guides. */
-  collectGuideSegments(): { lines: Float32Array; markers: Float32Array } {
+  collectGuideSegments(): { lines: Float32Array; markers: Float32Array; solid: Float32Array } {
     const grab = (obj: THREE.LineSegments | null): Float32Array => {
       if (obj === null) return new Float32Array(0)
       const attr = obj.geometry.getAttribute('position') as THREE.BufferAttribute | undefined
@@ -4201,13 +4872,16 @@ export class SceneRenderer {
     }
     // Lines are rebuilt at a fixed long reach, not copied from the live
     // window: a page is rendered from its own camera and zoom.
-    const lines = new Float32Array(this.guideDefs.length * 6)
-    this.guideDefs.forEach(({ o, d, lo, hi }, i) => {
+    // A fat line carries one dash pattern, so a print draws a guide either
+    // dashed or, when its stipple is solid (0xFFFF), unbroken.
+    const dashed: number[] = []
+    const solid: number[] = []
+    this.guideDefs.forEach(({ o, d, lo, hi, stipple }) => {
       const h = GUIDE_PRINT_HALF_LENGTH
       const [s0, s1] = stretchToUse(-h, h, lo, hi) ?? [0, 0]
-      lines.set([o[0] + d[0] * s0, o[1] + d[1] * s0, o[2] + d[2] * s0, o[0] + d[0] * s1, o[1] + d[1] * s1, o[2] + d[2] * s1], i * 6)
+      ;(stipple === 0xffff ? solid : dashed).push(o[0] + d[0] * s0, o[1] + d[1] * s0, o[2] + d[2] * s0, o[0] + d[0] * s1, o[1] + d[1] * s1, o[2] + d[2] * s1)
     })
-    return { lines, markers: grab(this.guideMarkers) }
+    return { lines: new Float32Array(dashed), markers: grab(this.guideMarkers), solid: new Float32Array(solid) }
   }
 
   /**
@@ -4349,6 +5023,37 @@ export class SceneRenderer {
     for (const b of this.batches.values()) set(b.mesh)
   }
 
+  /** Every solid face mesh the renderer draws — object faces, materialized
+   * instance faces, instanced batches (never edges, sketch, or guides). The
+   * set `setFacesLayer` walks; read by the drawn-visibility pick rule
+   * (`drawnVisibility.ts`). */
+  faceMeshes(): THREE.Object3D[] {
+    const out: THREE.Object3D[] = []
+    for (const g of this.objectGroups.values()) out.push(g.facesMesh)
+    for (const g of this.instanceGroups.values()) for (const m of g.facesMeshes) out.push(m)
+    for (const b of this.batches.values()) out.push(b.mesh)
+    return out
+  }
+
+  /** The face meshes that draw one kernel face owner: the world object's mesh,
+   * or, for a definition member picked through `instance`, that instance's
+   * materialized per-placement meshes plus every batch holding one of its
+   * slots. Null when none can be resolved (the caller must then not assume
+   * anything about how the owner is drawn). */
+  faceMeshesForOwner(object: bigint, instance: bigint | undefined): THREE.Object3D[] | null {
+    if (instance === undefined) {
+      const g = this.objectGroups.get(object)
+      return g === undefined ? null : [g.facesMesh]
+    }
+    const out: THREE.Object3D[] = []
+    const g = this.instanceGroups.get(instance)
+    if (g !== undefined) g.memberIds.forEach((m, i) => { if (m === object) out.push(g.facesMeshes[i]) })
+    for (const b of this.batches.values()) {
+      if (b.memberId === object && b.slotOf.has(instance)) out.push(b.mesh)
+    }
+    return out.length === 0 ? null : out
+  }
+
   /** The active section clip plane(s) as the face materials carry them —
    * for an override material that must cut the same way. */
   getSectionClipPlanes(): THREE.Plane[] {
@@ -4485,21 +5190,21 @@ export class SceneRenderer {
    * owns the transparent/depthWrite flags.
    */
   syncPaletteOpacity(): void {
-    const alphaCache = new Map<string, number>()
-    const alphaOf = (midStr: string): number => {
-      let a = alphaCache.get(midStr)
-      if (a === undefined) {
-        const info = this.wasmScene.material_info(BigInt(midStr))
-        a = info !== undefined ? info.a() / 255 : 1
-        info?.free?.()
-        alphaCache.set(midStr, a)
-      }
-      return a
+    const infoCache = new Map<string, MaterialJs | undefined>()
+    const infoOf = (midStr: string): MaterialJs | undefined => {
+      if (!infoCache.has(midStr)) infoCache.set(midStr, this.wasmScene.material_info(BigInt(midStr)))
+      return infoCache.get(midStr)
     }
     const touch = (mat: THREE.Material | THREE.Material[]) => {
       for (const m of Array.isArray(mat) ? mat : [mat]) {
         const midStr = m.userData.materialId as string | undefined
-        if (midStr !== undefined) m.userData.baseOpacity = alphaOf(midStr)
+        if (midStr === undefined) continue
+        const info = infoOf(midStr)
+        m.userData.baseOpacity = info !== undefined ? info.a() / 255 : 1
+        // The surface factors are palette state too (`set_material_pbr`).
+        if (info !== undefined) {
+          this._applyPbrLook(m as THREE.MeshPhongMaterial, midStr, info, (m as THREE.MeshPhongMaterial).map !== null)
+        }
       }
     }
     for (const g of this.objectGroups.values()) touch(g.facesMesh.material)
@@ -4507,6 +5212,7 @@ export class SceneRenderer {
     for (const g of this.instanceGroups.values()) {
       for (const mesh of g.facesMeshes) touch(mesh.material)
     }
+    for (const info of infoCache.values()) info?.free?.()
     this._applyIsolation()
   }
 
@@ -4540,22 +5246,29 @@ export class SceneRenderer {
       for (const m of Array.isArray(mat) ? mat : [mat]) fn(m)
     }
     if (this.sketchLines !== null) touch(this.sketchLines.material)
+    if (this.sketchLinesAttached !== null) touch(this.sketchLinesAttached.material)
+    if (this.sketchLinesPlain !== null) touch(this.sketchLinesPlain.material)
     for (const mesh of this.sketchRegionMeshes.values()) touch(mesh.material)
     for (const g of this.defSketchGroups.values()) {
       if (g.lines !== null) touch(g.lines.material)
+      if (g.linesAttached !== null) touch(g.linesAttached.material)
+      if (g.linesPlain !== null) touch(g.linesPlain.material)
       for (const mesh of g.regionMeshes.values()) touch(mesh.material)
     }
     for (const g of this.objectGroups.values()) {
       touch(g.facesMesh.material)
       touch(g.edgesLines.material)
+      if (g.tangentLines !== null) touch(g.tangentLines.material)
     }
     for (const b of this.batches.values()) {
       touch(b.mesh.material)
       touch(b.edges.material)
+      if (b.tangent !== null) touch(b.tangent.material)
     }
     for (const g of this.instanceGroups.values()) {
       for (const mesh of g.facesMeshes) touch(mesh.material)
       for (const lines of g.edgesLines) touch(lines.material)
+      for (const lines of g.tangentLines) if (lines !== null) touch(lines.material)
     }
   }
 
@@ -4580,6 +5293,7 @@ export class SceneRenderer {
         (m as THREE.MeshPhongMaterial).side = plane !== null ? THREE.DoubleSide : naturalSide
       }
     })
+    if (this.hoverEdgeMaterial !== null) this.hoverEdgeMaterial.clippingPlanes = planes
   }
 
   /** Rebuild the cut outlines before the next frame (see `sectionCutDirty`). */
@@ -4639,8 +5353,8 @@ export class SceneRenderer {
     }
     if (out.length === 0) return
     this.sectionCutLines = makeFatSegments(new Float32Array(out), {
-      color: SECTION_CUT_COLOR,
-      widthPx: SECTION_CUT_WIDTH_PX,
+      color: this.sectionCutColor,
+      widthPx: this.sectionCutWidthPx,
       // A face lying in the plane on the kept side is coincident with its
       // neighbors' cut lines; the bias settles that tie for the line.
       depthBias: DEPTH_BIAS.SKETCH_LINE,
@@ -4685,6 +5399,16 @@ export class SceneRenderer {
    * material at all (DESIGN §3: "update the plane in place on offset ...
    * do not rebuild materials").
    */
+  setSectionCutStyle(color: [number, number, number] | null, widthPx: number | null): void {
+    const hex = color === null ? SECTION_CUT_COLOR : (color[0] << 16) | (color[1] << 8) | color[2]
+    // A stored width is in pixels; keep it where a line still reads as a line.
+    const width = widthPx === null ? SECTION_CUT_WIDTH_PX : Math.min(Math.max(widthPx, 1), SECTION_CUT_WIDTH_MAX_PX)
+    if (hex === this.sectionCutColor && width === this.sectionCutWidthPx) return
+    this.sectionCutColor = hex
+    this.sectionCutWidthPx = width
+    this._markSectionCutDirty()
+  }
+
   setSectionPlane(plane: SectionPlane | null): void {
     this.currentSectionPlane = plane
     this._rebuildSectionWidget(plane)
@@ -5152,6 +5876,88 @@ export class SceneRenderer {
     const before = this._edgeColor()
     this.edgeTheme = theme
     if (this._edgeColor() !== before) this._recolorPlainEdges()
+    this._recolorDrawing()
+  }
+
+  /** Read the `--draw-*` theme tokens (fallbacks outside a DOM). */
+  private _readDrawColors(): DrawColors {
+    return {
+      free: readPreviewTint('--draw-free', DRAW_FREE_FALLBACK),
+      freeFill: readPreviewTint('--draw-free-fill', DRAW_FREE_FILL_FALLBACK),
+      attached: readPreviewTint('--draw-attached', DRAW_ATTACHED_FALLBACK),
+      attachedFill: readPreviewTint('--draw-attached-fill', DRAW_ATTACHED_FILL_FALLBACK),
+    }
+  }
+
+  private _drawColor(kind: DrawKind, fill: boolean): number {
+    if (kind === 'plain') return this._edgeColor()
+    const c = this.drawColors
+    return kind === 'free' ? (fill ? c.freeFill : c.free) : fill ? c.attachedFill : c.attached
+  }
+
+  /** One fat sketch-line batch in the free (blue) or attached (orange) ink. */
+  private _drawLine(positions: number[], kind: DrawKind): LineSegments2 {
+    // Fat lines (LineSegments2) — a plain THREE.LineSegments ignores
+    // `linewidth` on WebGL and renders 1px. `transparent: true` so the
+    // sketch-isolation fade can animate opacity. Resolution is kept current
+    // by the fat-line registry (makeFatSegments registers the material).
+    const line = makeFatSegments(new Float32Array(positions), {
+      color: this._drawColor(kind, false),
+      widthPx: kind === 'plain' ? PLAIN_LINE_WIDTH_PX : SKETCH_LINE_WIDTH_PX,
+      transparent: true,
+      depthBias: DEPTH_BIAS.SKETCH_LINE,
+    })
+    ;(line.material as THREE.Material).userData.drawKind = kind
+    return line
+  }
+
+  /** Whether `sketch`'s edges are owned by an Object (part of a solid's
+   *  face: orange) rather than free (world, detached, group-held, member). */
+  private _sketchDrawKind(sketch: bigint): DrawKind {
+    const fn = (this.wasmScene as { sketch_is_imported?: (s: bigint) => boolean }).sketch_is_imported
+    const imported = fn !== undefined && fn.call(this.wasmScene, sketch)
+    return drawKindFor(imported, this._sketchIsAttached(sketch))
+  }
+
+  private _sketchIsAttached(sketch: bigint): boolean {
+    const fn = (this.wasmScene as { sketch_owner_object?: (s: bigint) => bigint | undefined }).sketch_owner_object
+    return fn !== undefined && fn.call(this.wasmScene, sketch) !== undefined
+  }
+
+  /** Re-read the draw tokens and recolor every drawing material in place
+   *  (a theme switch changes them; geometry is untouched). */
+  private _recolorDrawing(): void {
+    this._recolorPlainDrawing()
+    const next = this._readDrawColors()
+    const c = this.drawColors
+    if (next.free === c.free && next.freeFill === c.freeFill && next.attached === c.attached && next.attachedFill === c.attachedFill) return
+    this.drawColors = next
+    const paint = (obj: THREE.Object3D | null): void => {
+      if (obj === null) return
+      const mat = (obj as THREE.Mesh).material as THREE.Material | undefined
+      const kind = mat?.userData.drawKind as DrawKind | undefined
+      if (mat === undefined || kind === undefined) return
+      ;(mat as THREE.MeshBasicMaterial).color.setHex(this._drawColor(kind, !(obj instanceof LineSegments2)))
+    }
+    paint(this.sketchLines)
+    paint(this.sketchLinesAttached)
+    for (const mesh of this.sketchRegionMeshes.values()) paint(mesh)
+    for (const g of this.defSketchGroups.values()) {
+      paint(g.lines)
+      paint(g.linesAttached)
+      for (const mesh of g.regionMeshes.values()) paint(mesh)
+    }
+    for (const g of this.objectGroups.values()) if (g.imprints !== null) for (const child of g.imprints.children) paint(child)
+  }
+
+  /** Imported (plain) sketch lines follow the edge colour, not the draw tokens. */
+  private _recolorPlainDrawing(): void {
+    const hex = this._edgeColor()
+    const paint = (line: LineSegments2 | null): void => {
+      if (line !== null) (line.material as LineMaterial).color.setHex(hex)
+    }
+    paint(this.sketchLinesPlain)
+    for (const g of this.defSketchGroups.values()) paint(g.linesPlain)
   }
 
   /** The plain (unselected) edge color right now. */
@@ -5163,6 +5969,7 @@ export class SceneRenderer {
    *  selection orange stays where it is. */
   private _recolorPlainEdges(): void {
     const plain = this._edgeColor()
+    this._recolorPlainDrawing()
     for (const batch of this.batches.values()) {
       ;(batch.edges.material as THREE.LineBasicMaterial).color.setHex(plain)
     }
@@ -5231,6 +6038,9 @@ export class SceneRenderer {
     const edgeMat = batch.edges.material as THREE.LineBasicMaterial
     edgeMat.opacity = opacity
     edgeMat.transparent = opacity < 1
+    if (batch.tangent !== null) {
+      ;(batch.tangent.material as THREE.LineBasicMaterial).opacity = opacity * TANGENT_EDGE_OPACITY
+    }
   }
 
   private _setInstanceOpacity(g: InstanceMeshGroup, opacity: number): void {
@@ -5250,6 +6060,8 @@ export class SceneRenderer {
       const edgeMat = g.edgesLines[i].material as THREE.LineBasicMaterial
       edgeMat.opacity = op
       edgeMat.transparent = op < 1
+      const tangent = g.tangentLines[i]
+      if (tangent !== null) (tangent.material as THREE.LineBasicMaterial).opacity = op * TANGENT_EDGE_OPACITY
     })
   }
 
@@ -5267,6 +6079,9 @@ export class SceneRenderer {
     const edgeMat = g.edgesLines.material as THREE.LineBasicMaterial
     edgeMat.opacity = opacity
     edgeMat.transparent = opacity < 1
+    if (g.tangentLines !== null) {
+      ;(g.tangentLines.material as THREE.LineBasicMaterial).opacity = opacity * TANGENT_EDGE_OPACITY
+    }
   }
 
   /**
@@ -5281,8 +6096,9 @@ export class SceneRenderer {
   private _applySketchIsolation(): void {
     const anyContextActive = this.activeLitSet !== null || this.activeLitInstanceSet !== null
     const dim = this._dimOpacity()
-    if (this.sketchLines !== null) {
-      const mat = this.sketchLines.material as LineMaterial
+    for (const lines of [this.sketchLines, this.sketchLinesAttached, this.sketchLinesPlain]) {
+      if (lines === null) continue
+      const mat = lines.material as LineMaterial
       mat.opacity = anyContextActive ? dim : 1
       mat.transparent = anyContextActive
     }
@@ -5293,8 +6109,9 @@ export class SceneRenderer {
     for (const [instanceId, g] of this.defSketchGroups) {
       const isLit = this.activeLitInstanceSet !== null && this.activeLitInstanceSet.has(instanceId)
       const dimmed = anyContextActive && !isLit
-      if (g.lines !== null) {
-        const mat = g.lines.material as LineMaterial
+      for (const lines of [g.lines, g.linesAttached, g.linesPlain]) {
+        if (lines === null) continue
+        const mat = lines.material as LineMaterial
         mat.opacity = dimmed ? dim : 1
         mat.transparent = dimmed
       }
@@ -5310,18 +6127,27 @@ export class SceneRenderer {
     if (g === undefined) return
 
     // Face fill is owned by material color — only edge color changes for selection.
-    const edgeColor = selected ? EDGE_COLOR_SELECTED : this._edgeColor()
+    const edgeColor = selected ? this._selectedColor('object', objectId) : this._edgeColor()
     const edgeMat = g.edgesLines.material as THREE.LineBasicMaterial
     edgeMat.color.setHex(edgeColor)
+    if (g.tangentLines !== null) (g.tangentLines.material as THREE.LineBasicMaterial).color.setHex(edgeColor)
   }
 
   private _applyInstanceColors(instanceId: bigint, selected: boolean): void {
     const g = this.instanceGroups.get(instanceId)
     if (g === undefined) return
-    // Face fill is owned by material color — only edge color changes for selection.
-    const edgeColor = selected ? EDGE_COLOR_SELECTED : this._edgeColor()
+    // Face fill is owned by material color — only edge color changes for
+    // selection (and for the Paint tool's hovered placement).
+    const edgeColor = selected
+      ? this._selectedColor('instance', instanceId)
+      : instanceId === this.hoveredInstance
+        ? EDGE_COLOR_HOVER
+        : this._edgeColor()
     for (const lines of g.edgesLines) {
       ;(lines.material as THREE.LineBasicMaterial).color.setHex(edgeColor)
+    }
+    for (const lines of g.tangentLines) {
+      if (lines !== null) (lines.material as THREE.LineBasicMaterial).color.setHex(edgeColor)
     }
   }
 
@@ -5332,16 +6158,50 @@ export class SceneRenderer {
       ? new Set(this.selectedMemberIds)
       : new Set<bigint>()
     const wholeInstanceSelected = this.selectedInstanceIds.includes(instanceId)
+    // A whole selected placement of a locked shape draws red; members being
+    // edited are never frozen, so they keep the usual selection color.
+    const wholeColor = wholeInstanceSelected ? this._selectedColor('instance', instanceId) : EDGE_COLOR_SELECTED
     for (let i = 0; i < g.edgesLines.length; i++) {
       const highlighted = wholeInstanceSelected || selected.has(g.memberIds[i])
+      const color = wholeInstanceSelected ? wholeColor : EDGE_COLOR_SELECTED
       ;(g.edgesLines[i].material as THREE.LineBasicMaterial).color.setHex(
-        highlighted ? EDGE_COLOR_SELECTED : this._edgeColor(),
+        highlighted ? color : this._edgeColor(),
       )
+      const t = g.tangentLines[i]
+      if (t !== null) (t.material as THREE.LineBasicMaterial).color.setHex(highlighted ? color : EDGE_COLOR)
     }
   }
 
   clearSketchRegion(): void {
     this._clearSketchRegions()
+  }
+
+  /**
+   * Outline the placement the Paint tool would paint (`null` clears it):
+   * the placement draws out of its batch with hover-colored edges, the
+   * same per-instance path a selection uses.
+   */
+  setHoveredInstance(instanceId: bigint | null): void {
+    if (instanceId === this.hoveredInstance) return
+    const prev = this.hoveredInstance
+    this.hoveredInstance = instanceId
+    this._syncMaterialized()
+    if (prev !== null) this._applyInstanceColors(prev, this.selectedInstanceIds.includes(prev))
+    if (instanceId !== null) {
+      this._applyInstanceColors(instanceId, this.selectedInstanceIds.includes(instanceId))
+    }
+  }
+
+  /** The material each placement of `instanceId` inherits, as rendered
+   * (`NO_INHERITED` for none), or null when it is not rendered. Test/E2E. */
+  debugInstanceInherited(instanceId: bigint): bigint[] | null {
+    const rec = this.instanceRecords.get(instanceId)
+    return rec === undefined ? null : rec.placements.map((p) => p.inherited)
+  }
+
+  /** The placement `setHoveredInstance` outlines, or null. Test/E2E. */
+  getHoveredInstance(): bigint | null {
+    return this.hoveredInstance
   }
 
   /**
@@ -5364,10 +6224,206 @@ export class SceneRenderer {
     return this.instanceGroups.get(instanceId)?.group ?? null
   }
 
+  /**
+   * Face geometry of one placement's shown members for screen-space hit
+   * testing, read straight from the shared member cache. Unlike
+   * `getInstanceGroup` this never materializes the placement out of its batch
+   * (a marquee over a brick wall would otherwise pull thousands of placements
+   * out of their batches and rebuild materials for each). `matrixWorld`
+   * composes the outer pose with the member's local pose. `onlyMember`
+   * limits the parts to one definition member. Null when the instance is
+   * not rendered.
+   */
+  instanceFaceParts(instanceId: bigint, onlyMember?: bigint): { positions: Float32Array; indices: Uint32Array; matrixWorld: THREE.Matrix4 }[] | null {
+    const rec = this.instanceRecords.get(instanceId)
+    if (rec === undefined) return null
+    const outer = new THREE.Matrix4().multiplyMatrices(this.instancesGroup.matrixWorld, rec.matrix)
+    const parts: { positions: Float32Array; indices: Uint32Array; matrixWorld: THREE.Matrix4 }[] = []
+    for (const placement of rec.placements) {
+      if (!placement.shown) continue
+      if (onlyMember !== undefined && placement.memberId !== onlyMember) continue
+      const cached = this._getMemberGeometry(placement.memberId, placement.inherited)
+      parts.push({
+        positions: cached.positions,
+        indices: cached.indices,
+        matrixWorld: new THREE.Matrix4().multiplyMatrices(outer, placement.localMatrix),
+      })
+    }
+    return parts
+  }
+
   /** The rendered group for one object id — map-backed, unlike a name walk
    * over `objectsGroup` (marquee hit-testing calls this per candidate). */
   getObjectGroup(objectId: bigint): THREE.Group | null {
     return this.objectGroups.get(objectId)?.group ?? null
+  }
+
+  /**
+   * Hides `faceIds` of a world object while the Fillet tool previews what
+   * replaces them. The object's index buffer is rebuilt without the
+   * triangles whose first vertex falls in a masked face's vertex range (the
+   * ranges come from `face_mesh_range`); the original buffer and groups are
+   * kept for `clearFaceMask`. The rebuild runs only when the masked set
+   * changes — it is constant while the size changes for one pick.
+   *
+   * Best-effort: returns false (nothing masked) for an object that is not a
+   * plain world object here, or when its index buffer holds more than
+   * `maxTriangles` triangles (the caller then draws its patch over the
+   * object with a depth offset instead). Returns true when the mask is in
+   * place.
+   */
+  setFaceMask(objectId: bigint, faceIds: readonly bigint[], maxTriangles: number): boolean {
+    const wg = this.objectGroups.get(objectId)
+    if (wg === undefined) return false
+    const geo = wg.facesMesh.geometry
+    let entry = this.faceMasks.get(objectId)
+    const current = geo.getIndex()
+    if (current === null) return false
+    if (entry === undefined && current.count / 3 > maxTriangles) return false
+    const key = faceIds.map((f) => f.toString()).join(',')
+    if (entry !== undefined && entry.key === key) return true
+    if (entry === undefined) {
+      entry = {
+        index: current,
+        groups: geo.groups.map((g) => ({ start: g.start, count: g.count, materialIndex: g.materialIndex ?? 0 })),
+        key,
+      }
+      this.faceMasks.set(objectId, entry)
+    }
+    const vertexCount = (geo.getAttribute('position') as THREE.BufferAttribute).count
+    const masked = new Uint8Array(vertexCount)
+    for (const f of faceIds) {
+      const range = this.wasmScene.face_mesh_range(objectId, f)
+      if (range === undefined) {
+        // A face the mesh does not know: leave everything unmasked so the
+        // caller draws its patch with the depth offset instead.
+        this.faceMasks.delete(objectId)
+        geo.setIndex(entry.index)
+        geo.clearGroups()
+        for (const g of entry.groups) geo.addGroup(g.start, g.count, g.materialIndex)
+        return false
+      }
+      masked.fill(1, range[0], Math.min(vertexCount, range[0] + range[1]))
+    }
+    const src = entry.index.array as ArrayLike<number>
+    const out = new Uint32Array(src.length)
+    let n = 0
+    const groups: { start: number; count: number; materialIndex: number }[] = []
+    for (const g of entry.groups) {
+      const start = n
+      const end = Math.min(src.length, g.start + g.count)
+      for (let i = g.start; i + 3 <= end; i += 3) {
+        if (masked[src[i]] === 1) continue
+        out[n++] = src[i]
+        out[n++] = src[i + 1]
+        out[n++] = src[i + 2]
+      }
+      groups.push({ start, count: n - start, materialIndex: g.materialIndex })
+    }
+    entry.key = key
+    geo.setIndex(new THREE.BufferAttribute(out.slice(0, n), 1))
+    geo.clearGroups()
+    for (const g of groups) geo.addGroup(g.start, g.count, g.materialIndex)
+    return true
+  }
+
+  /**
+   * Where a leaf member is drawn under `instanceId`: the outer instance pose
+   * times the placement's definition-local pose (identity for a flat
+   * definition), as a row-major 3x4. `undefined` when the instance has no
+   * placement of that member (the caller falls back to the instance pose);
+   * `null` when the member is placed more than once at different poses, since
+   * the pick names only the instance and a cue must not guess which copy
+   * (a missing cue beats a misplaced one).
+   */
+  memberPlacementPose(memberId: bigint, instanceId: bigint): number[] | null | undefined {
+    const rec = this.instanceRecords.get(instanceId)
+    if (rec === undefined) return undefined
+    let local: THREE.Matrix4 | null = null
+    for (const placement of rec.placements) {
+      if (placement.memberId !== memberId || !placement.shown) continue
+      if (local === null) local = placement.localMatrix
+      else if (!local.equals(placement.localMatrix)) return null
+    }
+    if (local === null) return undefined
+    const e = new THREE.Matrix4().multiplyMatrices(rec.matrix, local).elements
+    // Column-major 4x4 to the row-major 3x4 `mapThroughPose` takes.
+    return [e[0], e[4], e[8], e[12], e[1], e[5], e[9], e[13], e[2], e[6], e[10], e[14]]
+  }
+
+  /**
+   * The triangles of one object face as drawn right now, flat `x,y,z`
+   * triples in WORLD space, for the face cue (`FaceCueLayer`). The
+   * `[base, count]` vertex range comes from `face_mesh_range`; the positions
+   * are copied out of the buffers the renderer already holds: the object's
+   * own geometry for a world object, or the shared member cache for a
+   * component member (definition-local, mapped through `instanceId`'s pose).
+   * `null` for anything it cannot answer (a stale handle, a hidden or
+   * un-drawn object, a range over the cue's vertex cap): the cue then draws
+   * the outline alone, or nothing.
+   */
+  faceTrianglePositions(objectId: bigint, faceId: bigint, instanceId: bigint | null): Float32Array | null {
+    const range = this.wasmScene.face_mesh_range(objectId, faceId)
+    if (range === undefined) return null
+    const base = range[0]
+    const count = range[1]
+    if (instanceId === null || !this.memberGeometryCache.has(objectId)) {
+      const wg = this.objectGroups.get(objectId)
+      if (wg === undefined) return null
+      const geo = wg.facesMesh.geometry
+      const pos = geo.getAttribute('position') as THREE.BufferAttribute | undefined
+      const index = geo.getIndex()
+      if (pos === undefined || index === null) return null
+      const tris = trianglesInVertexRange(pos.array as ArrayLike<number>, index.array as ArrayLike<number>, base, count)
+      if (tris === null) return null
+      wg.facesMesh.updateWorldMatrix(true, false)
+      const m = wg.facesMesh.matrixWorld
+      if (m.equals(new THREE.Matrix4())) return tris
+      // Column-major 4x4 to the row-major 3x4 `mapThroughPose` takes.
+      const e = m.elements
+      return mapThroughPose(tris, [e[0], e[4], e[8], e[12], e[1], e[5], e[9], e[13], e[2], e[6], e[10], e[14]])
+    }
+    // The member is drawn at its PLACEMENT's pose, not the outer instance's.
+    const placed = this.memberPlacementPose(objectId, instanceId)
+    if (placed === null) return null
+    const pose = placed ?? this.wasmScene.instance_pose(instanceId)
+    const cached = this.memberGeometryCache.get(objectId)?.values().next().value
+    if (pose === undefined || cached === undefined) return null
+    const tris = trianglesInVertexRange(cached.positions, cached.indices, base, count)
+    return tris === null ? null : mapThroughPose(tris, pose)
+  }
+
+  /**
+   * The triangles of one sketch region, flat `x,y,z` triples in WORLD space,
+   * for the face cue: the region's own fill mesh when it has one (a world
+   * sketch), otherwise a triangulation of `region_boundary` (a definition-
+   * owned sketch's is definition-local, mapped through `instanceId`'s pose).
+   * `null` for a stale region or a degenerate loop.
+   */
+  regionTrianglePositions(sketchId: bigint, regionId: bigint, instanceId: bigint | null): Float32Array | null {
+    if (instanceId === null) {
+      const mesh = this.sketchRegionMeshes.get(`${sketchId}:${regionId}`)
+      const pos = mesh?.geometry.getAttribute('position') as THREE.BufferAttribute | undefined
+      if (pos !== undefined) return new Float32Array(pos.array as ArrayLike<number>)
+    }
+    const tris = triangulatePlanarLoop(this.wasmScene.region_boundary(sketchId, regionId))
+    if (tris === null) return null
+    if (instanceId === null) return new Float32Array(tris)
+    const pose = this.wasmScene.instance_pose(instanceId)
+    return pose === undefined ? null : mapThroughPose(tris, pose)
+  }
+
+  /** Undoes `setFaceMask`: the object draws its full index buffer again. */
+  clearFaceMask(objectId: bigint): void {
+    const entry = this.faceMasks.get(objectId)
+    if (entry === undefined) return
+    this.faceMasks.delete(objectId)
+    const wg = this.objectGroups.get(objectId)
+    if (wg === undefined) return
+    const geo = wg.facesMesh.geometry
+    geo.setIndex(entry.index)
+    geo.clearGroups()
+    for (const g of entry.groups) geo.addGroup(g.start, g.count, g.materialIndex)
   }
 
   /**
@@ -5414,9 +6470,12 @@ export class SceneRenderer {
     // slot AND every materialized instance's face geometry with the SAME
     // underlying Float32Array, so one write covers them all — only the
     // THREE.BufferAttribute wrapper objects need their `needsUpdate` flagged.
-    const cached = this.memberGeometryCache.get(objectId)
-    if (cached === undefined) return
-    writeFrameUvs(cached.positions, base, count, frame, cached.uvs)
+    const variants = this.memberGeometryCache.get(objectId)
+    if (variants === undefined) return
+    // Every inherited variant has its own arrays; the positions are the same.
+    for (const cached of variants.values()) {
+      writeFrameUvs(cached.positions, base, count, frame, cached.uvs)
+    }
     for (const batch of this.batches.values()) {
       if (batch.memberId !== objectId) continue
       const attr = batch.mesh.geometry.getAttribute('uv') as THREE.BufferAttribute | undefined
@@ -5439,6 +6498,16 @@ export class SceneRenderer {
       this.sketchGroup.remove(this.sketchLines)
       this.sketchLines = null
     }
+    if (this.sketchLinesAttached !== null) {
+      disposeFatSegments(this.sketchLinesAttached)
+      this.sketchGroup.remove(this.sketchLinesAttached)
+      this.sketchLinesAttached = null
+    }
+    if (this.sketchLinesPlain !== null) {
+      disposeFatSegments(this.sketchLinesPlain)
+      this.sketchGroup.remove(this.sketchLinesPlain)
+      this.sketchLinesPlain = null
+    }
   }
 
   private _clearSketchRegions(): void {
@@ -5452,6 +6521,8 @@ export class SceneRenderer {
 
   /** Dispose all GPU resources */
   dispose(): void {
+    this.hover = null
+    this._clearHoverHighlight()
     this._clearSectionCut()
     for (const id of [...this.objectGroups.keys()]) {
       this._removeObjectGroup(id)

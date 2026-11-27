@@ -10,6 +10,7 @@
 //! sets; see `document.rs`).
 
 use crate::math::{Point3, Vec3};
+use crate::trig;
 
 /// Which projection [`CameraState`] describes. Mirrors the app's
 /// `CameraRig.projection` (`'perspective' | 'parallel'`) one-to-one; kept as
@@ -45,6 +46,15 @@ pub struct CameraState {
     pub eye: Point3,
     pub target: Point3,
     pub up: Vec3,
+    /// The width of the view in meters that a camera set to an image's
+    /// width holds (a `.skp` Match Photo camera's); `None` when unset.
+    /// Carried and saved only: no navigation reads it, and a camera the
+    /// user moves replaces it with `None` ([`Document::set_camera_state`]).
+    pub image_width: Option<f64>,
+    /// The width-to-height ratio the view is held to (a `.skp` Match Photo
+    /// camera's image ratio); `None` when the view follows the window.
+    /// Carried like [`CameraState::image_width`].
+    pub aspect_ratio: Option<f64>,
 }
 
 impl CameraState {
@@ -54,7 +64,7 @@ impl CameraState {
     /// existed, or one given by eye, target and fov alone).
     pub fn height_at_target(eye: Point3, target: Point3, fov_deg: f64) -> f64 {
         let dist = (eye - target).length();
-        CameraState::usable_height(2.0 * dist * (fov_deg.to_radians() / 2.0).tan())
+        CameraState::usable_height(2.0 * dist * trig::tan(fov_deg.to_radians() / 2.0))
     }
 
     /// `height` when it is a height a view can span (finite and positive),
@@ -98,6 +108,22 @@ impl CameraState {
             eye,
             target,
             up,
+            image_width: None,
+            aspect_ratio: None,
         }
+    }
+
+    /// Whether `other` looks the same way: the same projection, field of
+    /// view, framing, eye, target and up, within the merge tolerance
+    /// (`image_width` and `aspect_ratio` aside).
+    pub fn same_view(&self, other: &CameraState) -> bool {
+        let tol = crate::tol::POINT_MERGE;
+        let near = |a: f64, b: f64| (a - b).abs() <= tol;
+        self.projection == other.projection
+            && near(self.fov_deg, other.fov_deg)
+            && near(self.parallel_height, other.parallel_height)
+            && (self.eye - other.eye).length() <= tol
+            && (self.target - other.target).length() <= tol
+            && (self.up - other.up).length() <= tol
     }
 }

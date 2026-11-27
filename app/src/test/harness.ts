@@ -32,8 +32,19 @@ import type { PrintPageModel } from '../print/PrintDocument'
 import type { PrintPlan } from '../print/printJob'
 import type { ViewportApi } from '../viewport/Viewport'
 import type { IsolationTarget } from '../viewport/isolation'
-import { nodeKindToNumber, type NodeKind, type NodeRef } from '../panels/treeModel'
+import { nodeKindToNumber, type NodeKind, type NodeRef, type SelItem } from '../panels/treeModel'
+import { worldBoundsForSelection } from '../panels/objectBounds'
 import { curveRunsView, imprintView } from './drawingView'
+import * as kernelModule from '../wasm/pkg/wasm_api.js'
+import { setBusy } from '../api/busyState'
+import { paletteEntries } from '../palette/registry'
+import { rankEntries } from '../palette/search'
+import { RAIL_GROUPS, TOOL_REGISTRY, toolsInGroup } from '../tools/toolRegistry'
+import { TOOL_ACTIONS } from '../tools/toolActions'
+import { dockVerbsFor } from '../panels/dockLogic'
+import { NATIVE_COMMANDS } from '../keymap/nativeMenu'
+import { boundCommandIds, commandForChord } from '../keymap/keymap'
+import { applyPendingViewDirectives, directiveTargets, dispatchFrameNow, type LiveBridgeDeps } from '../api/liveBridge'
 import {
   ctxGround,
   ctxOfFace,
@@ -97,10 +108,14 @@ export interface HarnessDeps {
   reconcile: () => void
   /** Current object/group/instance selection. */
   getSelection: () => NodeRef[]
+  /** The selected construction guides, in pick order. */
+  getSelectedGuides?: () => bigint[]
+  /** The selected annotations (dimensions / leader texts), in pick order. */
+  getSelectedAnnotations?: () => bigint[]
   /** Replace the selection with these object handles. */
   setSelectedObjects: (ids: bigint[]) => void
-  /** Replace the selection with arbitrary nodes (objects/groups/instances). */
-  setSelection: (nodes: NodeRef[]) => void
+  /** Replace the selection with arbitrary entries (nodes, guides, annotations). */
+  setSelection: (items: SelItem[]) => void
   /**
    * Reload `.hew` bytes through the app's real Open path (the same
    * `scene.load` + UI reset + viewport `notifyLoaded` re-tessellation a user's
@@ -134,6 +149,14 @@ export interface HarnessDeps {
    * without a print surface (Shop Mode boot) can omit it.
    */
   setPrintRecorder?: (recorder: PrintRecorder | null) => void
+  /** Re-read the app's hidden-state mirrors from the document
+   * (`App.reseedHiddenStateFromScene`): the abort tail of a plugin command.
+   * Optional so headless callers without visibility state can omit it. */
+  reseedViewState?: () => void
+  /** The live bridge's deps (App.tsx shares one set), so `apiDispatch`
+   * applies a dispatch exactly the way a socket frame is applied. Optional
+   * so headless callers without the bridge can omit it. */
+  liveBridge?: LiveBridgeDeps
 }
 
 /** What App wires the harness's print recorder into (see App.tsx). */
@@ -161,6 +184,13 @@ export interface HewTestHarness {
   isReady(): boolean
   // modeling
   drawRectangle(p0: Vec3, p1: Vec3): { sketch: string; region: string }
+  /**
+   * Axis-aligned rectangle p0→p1 on p0's z plane with every corner rounded by
+   * a true arc of `radius`: four straight sides plus four curve chains, each
+   * carrying its analytic circle (as the Rectangle tool's rounded corners
+   * commit). `segmentsPerCorner` facets per quarter arc.
+   */
+  drawRoundedRectangle(p0: Vec3, p1: Vec3, radius: number, segmentsPerCorner?: number): { sketch: string; region: string }
   extrudeRegion(sketch: string, region: string, distance: number): string
   /** Convenience: rectangle on the ground from p0→p1, extruded `height`. */
   drawBox(p0: Vec3, p1: Vec3, height: number): string
@@ -170,6 +200,21 @@ export interface HewTestHarness {
    *  `pick_face`'s own `instance()` accessor returns. */
   pickFace(rayOrigin: Vec3, rayDir: Vec3): { object: string; face: string; instance: string | null } | null
   pushPull(object: string, face: string, distance: number): void
+  /**
+   * Blends the sharp edges of `object` nearest each of `points` (each point's
+   * whole smooth chain, like a click on it) with `profileJson`, a kernel
+   * `BlendProfile` (`{"kind":"round","radius":0.01,"segments":6}`), as one
+   * undo step. Returns the new blend ids. Edges are found by their segments'
+   * distance to the point — the harness' stand-in for hovering them.
+   */
+  filletEdges(object: string, points: Vec3[], profileJson: string): number[]
+  /** The blends on `object`: `{id, kind, faces, size, intact}` rows. */
+  blendFeatures(object: string): Array<{ id: number; kind: string; faces: string[]; size: number | null; intact: boolean }>
+  /** One blend's row of `blendFeatures`, checking that blend alone; null
+   *  when the object has no such blend. */
+  blendFeature(object: string, id: number): { id: number; kind: string; faces: string[]; size: number | null; intact: boolean } | null
+  /** Removes blend `blendId` from `object` (one undo step). */
+  removeBlend(object: string, blendId: number): void
   boolean(op: number, a: string, b: string): string
   /**
    * Combine two tree nodes — plain solids or whole groups (`boolean_nodes`,
@@ -202,6 +247,9 @@ export interface HewTestHarness {
   getNodeParent(kind: string, id: string): string | null
   /** Whether an object is currently a watertight solid (`object_solid`). */
   isObjectSolid(id: string): boolean
+  /** Whether a node (`object` / `group` / `instance`) is locked: its own
+   *  lock, or for a placement its shape's (OW-1). A read. */
+  isNodeLocked(kind: string, id: string): boolean
   /**
    * World-axis-aligned bounding box of `object`'s current mesh, as
    * `[minX,minY,minZ,maxX,maxY,maxZ]` (meters) — read from `object_mesh`'s
@@ -209,6 +257,19 @@ export interface HewTestHarness {
    * on the UI side.
    */
   getObjectBounds(id: string): [number, number, number, number, number, number]
+  /**
+   * The object's distinct vertex positions (world meters, f32 from the mesh,
+   * merged within 1e-6): for asserting what a shape tool (Revolve, Deform,
+   * Follow Me twist) actually built, e.g. that a top face turned by 90°.
+   */
+  getObjectVertices(id: string): [number, number, number][]
+  /**
+   * Every vertex of the object's tessellated mesh with the normal the
+   * tessellator emitted for it (not merged: faces meeting at a position each
+   * report their own). For asserting how a blend shades, e.g. that a strip
+   * meets a wall with the wall's normal.
+   */
+  getObjectVertexNormals(id: string): Array<{ p: Vec3; n: Vec3 }>
   /**
    * Deep-copy ANY tree node — object, group, or instance — offset by
    * `(dx, dy, dz)` meters: `duplicate_node` on the node's own kind, exactly
@@ -257,10 +318,44 @@ export interface HewTestHarness {
    * `ViewportApi.setAxesVisible` the menu item calls.
    */
   setAxesVisible(visible: boolean): void
+  /** The part-axes overlay as drawn now: whether View ▸ Part Axes is on, and each triad's origin. */
+  getPartAxesInfo(): { visible: boolean; origins: [number, number, number][] }
   /** Show/hide the ground grid (View ▸ Grid). Same rationale as setAxesVisible. */
   setGridVisible(visible: boolean): void
+  /** The first selected guide / annotation id as a decimal string, or null
+   *  (the Select tool's pick of a construction guide, dimension or leader). */
+  getSelectedGuide(): string | null
+  getSelectedAnnotation(): string | null
+  /** Every selected guide / annotation id as a decimal string, in pick order. */
+  getSelectedGuides(): string[]
+  getSelectedAnnotations(): string[]
+  /** Render mode (View ▸ X-ray / Wireframe), through `ViewportApi.setRenderMode`. */
+  setRenderMode(mode: 'shaded' | 'xray' | 'wireframe'): void
+  /** Place a session section plane (`ViewportApi.setSectionPlane`); normal points at the removed side. */
+  setSectionPlane(plane: { origin: Vec3; normal: Vec3; active: boolean } | null): void
+  /** Camera ▸ Parallel Projection toggle (`ViewportApi.toggleProjection`) and the live projection. */
+  toggleProjection(): void
+  getProjection(): 'perspective' | 'parallel'
   /** Show/hide all construction guides (View ▸ Guides). */
   setGuidesVisible(visible: boolean): void
+  /** Tangent-edge LineSegments in the viewport: how many exist, how many are
+   *  visible, and their total segment count (View ▸ Tangent Edges). */
+  getTangentEdgeInfo(): { lines: number; visible: number; segments: number }
+  /** Smooth cage wires in the viewport: how many objects have one, and how
+   *  many are showing (they show while any tool but Select is active). */
+  getCageOverlayInfo(): { objects: number; visible: number }
+  /** The volume (m³) enclosed by an object's displayed mesh, by the
+   *  divergence theorem; a closed solid reads positive. */
+  getObjectVolume(id: string): number
+  /** An object's Smooth level (0 = Off). */
+  getSmoothLevel(id: string): number
+  /** Softens every edge of an object whose faces meet within `degrees` (the
+   *  Soften command); returns how many edges changed. */
+  softenByAngle(id: string, degrees: number): number
+  /** How many of an object's sharp edges carry a crease flag. */
+  getCreasedEdgeCount(id: string): number
+  /** Sets an object's Smooth level (0–3) the way the Object Info row does. */
+  setSmoothLevel(id: string, level: number): void
 
   // -------- scenes (docs/design/scenes.md) --------
   /** Adds a Scene capturing every property (`Scene.add_scene`'s full
@@ -322,6 +417,13 @@ export interface HewTestHarness {
     clipPlane: { normal: Vec3; constant: number } | null
   }
 
+  /** Set (or clear with null) the document's view style JSON (kernel `ViewStyle`). */
+  setViewStyleJson(json: string | null): void
+  /** The document's stored view style JSON, or null. */
+  getViewStyleJson(): string | null
+  /** The viewport backdrop as painted: clear color, ground color, ground fill. */
+  getBackdropInfo(): { clearColor: number; groundColor: number; groundFilled: boolean }
+
   replay(recordingJson: string): string
   // serialization ( — round-trips the live `.hew` container through the
   // app's real save/open path). Bytes cross `page.evaluate` as a plain number[]
@@ -369,7 +471,7 @@ export interface HewTestHarness {
    * Additive, exactly like File▸Import's kernel call. Test-only. */
   importStl(bytes: number[], unitScale: number): StlImportReportJs
   /** `Scene.skp_container(bytes)`: which `.skp` container the bytes are
-   * (`'skp2026'`, `'skp2017'`, or `''`). Reads nothing from the document. Test-only. */
+   * (`'skp2026'`, a stream release such as `'skp2017'` or `'skp8'`, or `''`). Reads nothing from the document. Test-only. */
   skpContainer(bytes: number[]): string
   // recording ( high + low, one artifact)
   startRecording(): void
@@ -378,9 +480,17 @@ export interface HewTestHarness {
   takeRecording(): string
   // queries
   getStateHash(): string
+  /** The state hash with the saved view pinned to a fixed pose first: the
+   *  autosave tick writes the live (drifting) camera into the document, so
+   *  `getStateHash` can change between two reads with nothing edited. */
+  getModelStateHash(): string
   getObjectCount(): number
   getObjectIds(): string[]
   getSelection(): { kind: string; id: string; ctx?: string; key?: string }[]
+  /** The selection's world bounding box as `[minX,minY,minZ,maxX,maxY,maxZ]`
+   *  — the Object Info panel's box (`worldBoundsForSelection`) — or null
+   *  when the selection has no geometry. */
+  getSelectionBounds(): [number, number, number, number, number, number] | null
   /** The drawn, unpushed shapes an object carries on its faces, read from the
    *  object's drawing planes (`object_drawing_planes` + the object-scoped
    *  `plane_units_json`): a `sub_face` per region the drawing closes off, a
@@ -406,6 +516,30 @@ export interface HewTestHarness {
    *  (one row per connected shape: "Shape", numbered when several). */
   getOutlinerShapeLabels(object: string): string[]
   getLastError(): string | null
+  /**
+   * What this build offers on each Preview-wall surface (the effective lists,
+   * after the wall filtered them): the rail's tools, every tool, the tool
+   * command table, the palette's command ids, the dock's chip ids across every
+   * selection, the native menu's command set, and the commands that have a key.
+   */
+  wallSurfaces(): {
+    rail: string[]
+    tools: string[]
+    toolCommands: string[]
+    palette: string[]
+    dock: string[]
+    nativeCommands: string[]
+    bound: string[]
+  }
+  /**
+   * Which flavor the loaded WASM module is, from its own `preview_build()`:
+   * `'unknown'` for a module built before that export existed.
+   */
+  wasmFlavor(): 'production' | 'preview' | 'unknown'
+  /** The command ids the palette ranks for `query` (the same ranking the UI uses). */
+  paletteSearch(query: string): string[]
+  /** The command a key chord (e.g. `Shift+F`, `Ctrl+Alt+9`) runs right now, if any. */
+  commandForChord(chord: string): string | undefined
   /**
    * The document's current movable drawing axes (tool-parity §4): the flat
    * 12-float `Scene::axes()` buffer — `[ox,oy,oz, xx,xy,xz, yx,yy,yz,
@@ -538,8 +672,9 @@ export interface HewTestHarness {
    * viewed from +Z). With `close`, also adds the chord b→a so the arc closes
    * into a region. Equivalent to ArcTool's ground commit:
    * begin_ground_sketch → N × sketch_add_segment along `arcPolylineOnPlane`.
+   * `analytic: false` leaves the facets a plain curve chain with no circle.
    */
-  drawArc(a: Vec3, b: Vec3, sagitta: number, close?: boolean): { sketch: string; regions: string[] }
+  drawArc(a: Vec3, b: Vec3, sagitta: number, close?: boolean, analytic?: boolean): { sketch: string; regions: string[] }
 
   /**
    * Cut `face` of `object` along a faceted 2-point arc. `a`/`b` must
@@ -629,6 +764,35 @@ export interface HewTestHarness {
   undo(): void
 
   /**
+   * Holds the document as a plugin command would (docs/agents/PLUGINS.md
+   * "Compounds"): a mutating command of the harness's own plugin
+   * (`org.hew3d.harness`, model write) is forwarded on its own connection
+   * and a compound opened around it, labeled `label`. Until it ends the UI
+   * refuses input and shows the busy notice (whose Cancel aborts it).
+   * Returns the compound's token. Nests: a second call inside the first
+   * opens an inner compound.
+   */
+  beginCompound(label: string): number
+  /** Ends the compound `token` names (the innermost); answers the forward. */
+  endCompound(token: number): void
+  /** Aborts the compound `token` names (the innermost): the document goes
+   * back whole to how it was at its begin. */
+  abortCompound(token: number): void
+  /** Whether a plugin command holds the document (`Scene.busy()`). */
+  isBusy(): boolean
+  /**
+   * Dispatches one JSON-RPC request object on the harness's own live API
+   * connection (the app grant; opened, greeted, and attached on first use)
+   * through the live bridge's own path, its view directives applied, and
+   * returns the parsed reply. The harness has no socket; this is how a
+   * spec drives the bus (docs/agents/HEW_API.md §11.2) in a real window.
+   */
+  apiDispatch(request: { method: string; params?: unknown; id?: number }): {
+    result?: unknown
+    error?: { code: number; message: string; data?: Record<string, unknown> }
+  }
+
+  /**
    * Document-level redo. Calls `scene_redo()` and reconciles the viewport.
    * Throws if there is nothing to redo.
    */
@@ -636,9 +800,13 @@ export interface HewTestHarness {
 
   /** True if there is a document action to undo. */
   canUndo(): boolean
+  /** The undo stack's depth (the net step count). */
+  getUndoDepth(): number
 
   /** True if there is a document action to redo. */
   canRedo(): boolean
+  /** The redo stack's depth. */
+  getRedoDepth(): number
 
   /**
    * Set the active display/parse length unit ( VCB). `format` is one
@@ -703,6 +871,23 @@ export interface HewTestHarness {
    * to reset the face to the (unpainted) default. Undoable.
    */
   paintFace(object: string, face: string, material: string | null): void
+
+  /**
+   * Paint a component placement: set `instance`'s own material, which its
+   * unpainted faces show (neither the face nor its object's base painted).
+   * Wraps `set_instance_material`. `null` clears it. Undoable.
+   */
+  paintInstance(instance: string, material: string | null): void
+
+  /** `instance`'s own material, or `null` for none (or a stale handle). */
+  getInstanceMaterial(instance: string): string | null
+
+  /**
+   * The material each rendered placement of `instance` inherits, from the
+   * renderer's own record (`null` entries for none), or `null` when the
+   * instance is not rendered.
+   */
+  getInstanceRenderedMaterials(instance: string): (string | null)[] | null
 
   /**
    * Read back `face`'s own material and its object's base material — wraps
@@ -774,8 +959,8 @@ export interface HewTestHarness {
   /**
    * Detach an instance onto its own private definition copy (Make Unique).
    * Returns the new definition handle. A set instance name is promoted to
-   * the new definition's name; otherwise the copy is named "<def> Copy"
-   * (disambiguated "<def> Copy 2", …).
+   * the new definition's name; otherwise the copy keeps the definition's
+   * name.
    */
   makeUnique(instance: string): string
 
@@ -801,6 +986,9 @@ export interface HewTestHarness {
   /** The definition an instance places, or `null` if the handle is stale. */
   getInstanceDef(instance: string): string | null
 
+  /** An instance's pose as a row-major 3x4 affine, or `null` if stale. */
+  getInstancePose(instance: string): number[] | null
+
   /** Every visible instance of a definition, as decimal handle strings. */
   getInstancesOf(component: string): string[]
 
@@ -811,6 +999,23 @@ export interface HewTestHarness {
    * silently opening a session (`explode_session_instance`).
    */
   getExplodeSessionInstance(): string | null
+
+  /**
+   * Every live world instance rendering a definition on loan to an open
+   * component session — the entered instance's live sibling placements
+   * (ARCHITECTURE.md 2.11) — as decimal handle strings; empty with no
+   * session open (`session_placements`).
+   */
+  getSessionPlacements(): string[]
+
+  /**
+   * The leaf objects an instance's placement draws, as decimal handle
+   * strings, in placement order (`instance_expanded_members`). With the
+   * instance's definition on loan to a session these are the session's
+   * WORLD objects, so a spec can prove a sibling renders the in-progress
+   * geometry rather than a stale copy.
+   */
+  getInstanceExpandedMembers(instance: string): string[]
 
   /**
    * A component definition's live member OBJECTS, as decimal handle
@@ -829,9 +1034,9 @@ export interface HewTestHarness {
    */
   getComponentMemberSketches(component: string): string[]
 
-  /** Replace the selection with arbitrary nodes (kind + handle string; an
-   *  imprint ref carries its owning `object`, a sketch sub-entity its
-   *  `sketch`). */
+  /** Replace the selection with arbitrary entries, in this order (kind +
+   *  handle string; `guide` and `annotation` are kinds too; an imprint ref
+   *  carries its owning `object`, a sketch sub-entity its `sketch`). */
   selectNodes(nodes: { kind: string; id: string; ctx?: string; key?: string }[]): void
   /** The drawing on a plane (`plane_units_json`) — units, their edges with
    *  stores, and regions; keys are 16-hex strings. */
@@ -871,6 +1076,8 @@ export interface HewTestHarness {
   /** Every live sketch handle, as decimal strings — lets a spec find the
    * sketch a TOOL created (the tool's cached handle is internal). */
   getSketchIds(): string[]
+  /** The Object (handle string) whose face owns the sketch's edges, or null for a free sketch. */
+  getSketchOwnerObject(sketch: string): string | null
 
   /** All of `sketch`'s edges as flat endpoint pairs
    * `[ax,ay,az, bx,by,bz, ...]` — the geometry probe for asserting where a
@@ -1092,6 +1299,39 @@ export interface HewTestHarness {
    * grabbing a Scale-gizmo grip by its exact projected position instead of a
    * hard-coded pixel). `behind` true = the point is behind the camera. */
   worldToScreen(world: Vec3): { x: number; y: number; behind: boolean }
+
+  /** The drawing-plane cue the viewport shows right now: a face outline or
+   *  the small patch, its plane normal, a point it is drawn through (the
+   *  patch's center, the outline's centroid), and whether it is drawn at
+   *  held weight; null when none shows. */
+  getDrawPlaneCue(): { kind: 'outline' | 'patch'; normal: Vec3; through: Vec3; held: boolean } | null
+
+  /** The face cue the viewport lights right now (a tool's `hoverFace`: the
+   *  face or sketch region a click would act on), ids as decimal strings;
+   *  `owner` is the object (face) or sketch (region), `id` its face or
+   *  region, `instance` the one it was picked through, `color` the preview
+   *  theme token ('--preview-pushpull' orange, '--preview-extrude-new' blue);
+   *  null when none shows. */
+  getFaceCue(): { kind: 'face' | 'region'; owner: string; id: string; instance: string | null; color: string; tinted: boolean; outlined: boolean } | null
+
+  /** The active draw tool's drawing-plane state (view die): its pip
+   *  ('red' | 'green' | 'blue' | 'custom'), its hold ('inferred' | 'locked'
+   *  | 'pinned' | 'anchored'), the plane's normal, and the hover kind (null
+   *  off the canvas); null for a tool that draws on no plane. */
+  getDrawPlaneState(): { pip: string; hold: string; normal: Vec3; origin: Vec3; hover: string | null } | null
+
+  /** Whether a click on the view die's `pip` would do anything right now
+   *  (`ViewportApi.pipEnabled`), read live rather than off the widget. */
+  pipEnabled(pip: 'red' | 'green' | 'blue' | 'custom'): boolean
+
+  /** What the transform tools' hover highlight (Move/Rotate/Scale with
+   *  nothing selected) covers right now, ids as decimal strings, or null
+   *  when nothing is highlighted. */
+  getHoverHighlight(): { objects: string[]; instances: string[]; guide: string | null } | null
+
+  /** The world ray the pointer at canvas-relative CSS pixel (`x`, `y`)
+   *  casts for the camera as it is now. */
+  rayAtCanvasPoint(x: number, y: number): { origin: Vec3; direction: Vec3 }
   /**
    * View-only isolation (`ViewportApi.isolate`), through the app's own handler
    * so the kernel's hide state follows exactly as it does from Model Health.
@@ -1270,6 +1510,121 @@ export function installTestHarness(deps: HarnessDeps): () => void {
     },
   }
 
+  // ------------------------------------------------- compounds (P1.3)
+  // The harness's own plugin and connection, opened on first use.
+  const HARNESS_PLUGIN = 'org.hew3d.harness'
+  let harnessConn: number | null = null
+  // Open compounds, innermost last: the kernel token and the forward it
+  // serves.
+  const harnessCompounds: Array<{ kernelToken: bigint; forward: bigint }> = []
+
+  const refreshAfterCompound = (aborted: boolean): void => {
+    if (aborted) {
+      deps.reseedViewState?.()
+      deps.reconcileVisibility?.()
+    }
+    const api = deps.getViewportApi()
+    if (api !== null) api.refreshScene()
+    else deps.reconcile()
+  }
+
+  const popHarnessCompound = (token: number): { kernelToken: bigint; forward: bigint } => {
+    const top = harnessCompounds[harnessCompounds.length - 1]
+    if (top === undefined || top.kernelToken !== BigInt(token)) {
+      throw new Error(`__hew_test: compound ${token} is not the innermost one open`)
+    }
+    harnessCompounds.pop()
+    return top
+  }
+
+  const endHarnessCompound = (token: number, aborted: boolean): void => {
+    const s = scene()
+    const top = popHarnessCompound(token)
+    if (aborted) s.compound_abort(top.kernelToken)
+    else s.compound_end(top.kernelToken)
+    // An abort puts back the selection and isolation the command changed.
+    const restored = aborted ? s.take_pending_view_directives() : '[]'
+    const conn = harnessConn
+    if (conn !== null) {
+      s.api_complete_forward(conn, top.forward, JSON.stringify(aborted ? { failed: 'cancelled' } : { ok: {} }))
+    }
+    refreshAfterCompound(aborted)
+    if (deps.liveBridge !== undefined) applyPendingViewDirectives(restored, directiveTargets(deps.liveBridge))
+    if (!s.busy()) setBusy(null)
+  }
+
+  // The harness's own bus connection for `apiDispatch`, opened lazily.
+  let apiConn: number | null = null
+  let apiNextId = 1
+  const apiDispatch: HewTestHarness['apiDispatch'] = (request) => {
+    const s = scene()
+    const bridge = deps.liveBridge
+    if (bridge === undefined) throw new Error('__hew_test.apiDispatch: no live bridge wired')
+    const send = (conn: number, method: string, params: unknown, id?: number): string => {
+      const frame = JSON.stringify({ jsonrpc: '2.0', id: id ?? apiNextId++, method, params: params ?? {} })
+      const reply = dispatchFrameNow(bridge, s, conn, frame)
+      if (reply === undefined) throw new Error(`__hew_test.apiDispatch: ${method} answered nothing`)
+      return reply
+    }
+    if (apiConn === null) {
+      const conn = s.api_connection_open()
+      send(conn, 'hew.meta.hello', { protocol: 1 })
+      send(conn, 'hew.doc.attach', {})
+      apiConn = conn
+    }
+    return JSON.parse(send(apiConn, request.method, request.params, request.id)) as ReturnType<
+      HewTestHarness['apiDispatch']
+    >
+  }
+
+  const beginHarnessCompound = (label: string): number => {
+    const s = scene()
+    const outer = harnessCompounds[harnessCompounds.length - 1]
+    if (outer === undefined) {
+      // The command carries the label, so it is declared afresh each time
+      // no compound is open; nested calls keep the outer declaration.
+      s.unregister_plugin_commands(HARNESS_PLUGIN)
+      s.register_plugin_commands(
+        HARNESS_PLUGIN,
+        JSON.stringify([{ id: 'hold', class: 'mutating', summary: 'Holds the document.', label, permission: 'model.write' }]),
+      )
+    }
+    if (harnessConn === null) {
+      const conn = s.api_plugin_connection_open(
+        JSON.stringify({ ceiling: 'core', permissions: ['model.write'], plugin: HARNESS_PLUGIN, app: null, document: null }),
+      )
+      for (const frame of [
+        '{"jsonrpc":"2.0","id":0,"method":"hew.meta.hello","params":{"protocol":1}}',
+        '{"jsonrpc":"2.0","id":1,"method":"hew.doc.attach","params":{}}',
+      ]) {
+        s.api_dispatch(conn, frame)
+      }
+      harnessConn = conn
+    }
+    const frame = `{"jsonrpc":"2.0","id":2,"method":"${HARNESS_PLUGIN}.hold","params":{}}`
+    const answer =
+      outer === undefined ? s.api_dispatch(harnessConn, frame) : s.api_dispatch_in_forward(harnessConn, outer.forward, frame)
+    const pending = (JSON.parse(answer ?? '{}') as { pending?: { token?: number } }).pending
+    if (pending?.token === undefined) throw new Error(`__hew_test: the hold command did not forward: ${answer}`)
+    const forward = BigInt(pending.token)
+    const kernelToken = s.compound_begin(harnessConn, forward)
+    harnessCompounds.push({ kernelToken, forward })
+    if (outer === undefined) {
+      setBusy({
+        plugin: HARNESS_PLUGIN,
+        label,
+        startedAt: performance.now(),
+        // Cancel aborts every compound the harness holds, innermost first.
+        cancel: () => {
+          while (harnessCompounds.length > 0) {
+            endHarnessCompound(Number(harnessCompounds[harnessCompounds.length - 1].kernelToken), true)
+          }
+        },
+      })
+    }
+    return Number(kernelToken)
+  }
+
   const harness: HewTestHarness = {
     // Ready = kernel scene live AND the viewport API wired. Both are needed
     // before callers drive the harness: drawBox/setCamera/pickFace go through the
@@ -1279,11 +1634,68 @@ export function installTestHarness(deps: HarnessDeps): () => void {
     // `waitForFunction(isReady)` then `setCamera` flaked. Gate on both.
     isReady: () => deps.getScene() !== null && deps.getViewportApi() !== null,
 
+    beginCompound: (label) => beginHarnessCompound(label),
+    endCompound: (token) => endHarnessCompound(token, false),
+    abortCompound: (token) => endHarnessCompound(token, true),
+    isBusy: () => scene().busy(),
+    apiDispatch,
+
     drawRectangle: (p0, p1) =>
       act((s) => {
         const sketch = s.begin_ground_sketch()
         const region = addRectangle(s, sketch, p0, p1)
         return { sketch: sketch.toString(), region: region.toString() }
+      }),
+
+    drawRoundedRectangle: (p0, p1, radius, segmentsPerCorner = 8) =>
+      act((s) => {
+        const x0 = Math.min(p0[0], p1[0])
+        const x1 = Math.max(p0[0], p1[0])
+        const y0 = Math.min(p0[1], p1[1])
+        const y1 = Math.max(p0[1], p1[1])
+        const z = p0[2]
+        if (radius <= 0 || 2 * radius >= Math.min(x1 - x0, y1 - y0)) {
+          throw new Error('drawRoundedRectangle: radius must fit inside the rectangle')
+        }
+        const sketch = s.begin_ground_sketch()
+        // Counter-clockwise from the bottom side: side, corner arc, side, …
+        const corners: { c: [number, number]; from: number }[] = [
+          { c: [x1 - radius, y0 + radius], from: -Math.PI / 2 },
+          { c: [x1 - radius, y1 - radius], from: 0 },
+          { c: [x0 + radius, y1 - radius], from: Math.PI / 2 },
+          { c: [x0 + radius, y0 + radius], from: Math.PI },
+        ]
+        const arcPts = (c: [number, number], from: number): Vec3[] => {
+          const pts: Vec3[] = []
+          for (let i = 0; i <= segmentsPerCorner; i++) {
+            const t = from + ((Math.PI / 2) * i) / segmentsPerCorner
+            pts.push([c[0] + radius * Math.cos(t), c[1] + radius * Math.sin(t), z])
+          }
+          return pts
+        }
+        const arcs = corners.map((k) => arcPts(k.c, k.from))
+        s.sketch_begin_gesture(sketch)
+        try {
+          for (let k = 0; k < 4; k++) {
+            const arc = arcs[k]
+            const next = arcs[(k + 1) % 4]
+            s.sketch_begin_curve_with(sketch, corners[k].c[0], corners[k].c[1], z, radius)
+            for (let i = 0; i < arc.length - 1; i++) {
+              const a = arc[i]
+              const b = arc[i + 1]
+              s.sketch_add_segment(sketch, a[0], a[1], a[2], b[0], b[1], b[2])
+            }
+            s.sketch_end_curve(sketch)
+            const a = arc[arc.length - 1]
+            const b = next[0]
+            s.sketch_add_segment(sketch, a[0], a[1], a[2], b[0], b[1], b[2])
+          }
+        } finally {
+          s.sketch_end_gesture(sketch)
+        }
+        const regions = s.sketch_regions(sketch)
+        if (regions.length === 0) throw new Error('drawRoundedRectangle: no closed region formed')
+        return { sketch: sketch.toString(), region: regions[0].toString() }
       }),
 
     extrudeRegion: (sketch, region, distance) =>
@@ -1315,6 +1727,52 @@ export function installTestHarness(deps: HarnessDeps): () => void {
 
     pushPull: (object, face, distance) => {
       act((s) => s.push_pull(BigInt(object), BigInt(face), distance))
+    },
+
+    filletEdges: (object, points, profileJson) =>
+      act((s) => {
+        const oid = BigInt(object)
+        const edges: bigint[] = []
+        for (const p of points) {
+          let best: { d: number; edge: bigint } | null = null
+          for (const e of s.object_sharp_edges(oid)) {
+            const chain = s.logical_edge(oid, e, false)
+            let seg: Float32Array
+            try {
+              seg = chain.segments()
+            } finally {
+              chain.free()
+            }
+            const a: Vec3 = [seg[0], seg[1], seg[2]]
+            const b: Vec3 = [seg[3], seg[4], seg[5]]
+            const ab: Vec3 = [b[0] - a[0], b[1] - a[1], b[2] - a[2]]
+            const l2 = ab[0] * ab[0] + ab[1] * ab[1] + ab[2] * ab[2]
+            const t = l2 > 0 ? Math.max(0, Math.min(1, ((p[0] - a[0]) * ab[0] + (p[1] - a[1]) * ab[1] + (p[2] - a[2]) * ab[2]) / l2)) : 0
+            const d = Math.hypot(a[0] + ab[0] * t - p[0], a[1] + ab[1] * t - p[1], a[2] + ab[2] * t - p[2])
+            if (best === null || d < best.d) best = { d, edge: e }
+          }
+          if (best === null) throw new Error('filletEdges: the object has no sharp edge')
+          const chain = s.picked_edge(oid, best.edge, true)
+          try {
+            for (const e of chain.edges()) if (!edges.includes(e)) edges.push(e)
+          } finally {
+            chain.free()
+          }
+        }
+        const spec = JSON.stringify({ edges: edges.map(String), profile: JSON.parse(profileJson) })
+        const report = s.blend_edges(oid, spec)
+        try {
+          return Array.from(report.blend_ids())
+        } finally {
+          report.free()
+        }
+      }),
+
+    blendFeatures: (object) => query((s) => JSON.parse(s.blend_features_json(BigInt(object)))),
+    blendFeature: (object, id) => query((s) => JSON.parse(s.blend_feature_json(BigInt(object), id))),
+
+    removeBlend: (object, blendId) => {
+      act((s) => s.remove_blend(BigInt(object), blendId))
     },
 
     boolean: (op, a, b) =>
@@ -1349,6 +1807,8 @@ export function installTestHarness(deps: HarnessDeps): () => void {
       }),
 
     isObjectSolid: (id) => query((s) => s.object_solid(BigInt(id))),
+    isNodeLocked: (kind, id) =>
+      query((s) => s.node_locked(kind === 'group' ? 1 : kind === 'instance' ? 2 : 0, BigInt(id))),
 
     getObjectBounds: (id) =>
       query((s) => {
@@ -1371,6 +1831,41 @@ export function installTestHarness(deps: HarnessDeps): () => void {
             if (z > maxZ) maxZ = z
           }
           return [minX, minY, minZ, maxX, maxY, maxZ]
+        } finally {
+          mesh.free()
+        }
+      }),
+
+    getObjectVertices: (id) =>
+      query((s) => {
+        const mesh = s.object_mesh(BigInt(id))
+        try {
+          const pos = mesh.positions()
+          const seen = new Set<string>()
+          const out: [number, number, number][] = []
+          for (let i = 0; i + 2 < pos.length; i += 3) {
+            const key = `${Math.round(pos[i] * 1e6)},${Math.round(pos[i + 1] * 1e6)},${Math.round(pos[i + 2] * 1e6)}`
+            if (seen.has(key)) continue
+            seen.add(key)
+            out.push([pos[i], pos[i + 1], pos[i + 2]])
+          }
+          return out
+        } finally {
+          mesh.free()
+        }
+      }),
+
+    getObjectVertexNormals: (id) =>
+      query((s) => {
+        const mesh = s.object_mesh(BigInt(id))
+        try {
+          const pos = mesh.positions()
+          const nor = mesh.normals()
+          const out: Array<{ p: Vec3; n: Vec3 }> = []
+          for (let i = 0; i + 2 < pos.length; i += 3) {
+            out.push({ p: [pos[i], pos[i + 1], pos[i + 2]], n: [nor[i], nor[i + 1], nor[i + 2]] })
+          }
+          return out
         } finally {
           mesh.free()
         }
@@ -1439,6 +1934,37 @@ export function installTestHarness(deps: HarnessDeps): () => void {
       api.setAxesVisible(visible)
     },
 
+    getPartAxesInfo: () => {
+      const api = deps.getViewportApi()
+      if (api === null) throw new Error('__hew_test: viewport not ready')
+      return api.getPartAxesInfo()
+    },
+
+    getSelectedGuide: () => deps.getSelectedGuides?.()[0]?.toString() ?? null,
+    getSelectedAnnotation: () => deps.getSelectedAnnotations?.()[0]?.toString() ?? null,
+    getSelectedGuides: () => (deps.getSelectedGuides?.() ?? []).map(String),
+    getSelectedAnnotations: () => (deps.getSelectedAnnotations?.() ?? []).map(String),
+    setRenderMode: (mode) => {
+      const api = deps.getViewportApi()
+      if (api === null) throw new Error('__hew_test: viewport not ready')
+      api.setRenderMode(mode)
+    },
+    setSectionPlane: (plane) => {
+      const api = deps.getViewportApi()
+      if (api === null) throw new Error('__hew_test: viewport not ready')
+      api.setSectionPlane(plane)
+    },
+    toggleProjection: () => {
+      const api = deps.getViewportApi()
+      if (api === null) throw new Error('__hew_test: viewport not ready')
+      api.toggleProjection()
+    },
+    getProjection: () => {
+      const api = deps.getViewportApi()
+      if (api === null) throw new Error('__hew_test: viewport not ready')
+      return api.getProjection()
+    },
+
     setGridVisible: (visible) => {
       const api = deps.getViewportApi()
       if (api === null) throw new Error('__hew_test: viewport not ready')
@@ -1449,6 +1975,58 @@ export function installTestHarness(deps: HarnessDeps): () => void {
       const api = deps.getViewportApi()
       if (api === null) throw new Error('__hew_test: viewport not ready')
       api.setGuidesVisible(visible)
+    },
+
+    getTangentEdgeInfo: () => {
+      const api = deps.getViewportApi()
+      if (api === null) throw new Error('__hew_test: viewport not ready')
+      return api.getTangentEdgeInfo()
+    },
+
+    getCageOverlayInfo: () => {
+      const api = deps.getViewportApi()
+      if (api === null || api.getCageOverlayInfo === undefined) throw new Error('__hew_test: viewport not ready')
+      return api.getCageOverlayInfo()
+    },
+
+    getObjectVolume: (id) =>
+      query((s) => {
+        const mesh = s.object_mesh(BigInt(id))
+        try {
+          const p = mesh.positions()
+          const idx = mesh.indices()
+          let v = 0
+          for (let i = 0; i + 2 < idx.length; i += 3) {
+            const a = idx[i] * 3
+            const b = idx[i + 1] * 3
+            const c = idx[i + 2] * 3
+            // Signed tetrahedron volume against the origin.
+            v +=
+              (p[a] * (p[b + 1] * p[c + 2] - p[b + 2] * p[c + 1]) -
+                p[a + 1] * (p[b] * p[c + 2] - p[b + 2] * p[c]) +
+                p[a + 2] * (p[b] * p[c + 1] - p[b + 1] * p[c])) / 6
+          }
+          return v
+        } finally {
+          mesh.free()
+        }
+      }),
+
+    getSmoothLevel: (id) => query((s) => s.smooth_level(BigInt(id))),
+    softenByAngle: (id, degrees) => act((s) => s.soften_by_angle(BigInt(id), (degrees * Math.PI) / 180)),
+    getCreasedEdgeCount: (id) =>
+      query((s) => {
+        const oid = BigInt(id)
+        let n = 0
+        for (const e of s.object_sharp_edges(oid)) if (s.edge_is_creased(oid, e)) n++
+        return n
+      }),
+
+    setSmoothLevel: (id, level) => {
+      act((s) => {
+        s.set_smooth_level(BigInt(id), level).free()
+        return null
+      })
     },
 
     addScene: (name) => {
@@ -1484,6 +2062,14 @@ export function installTestHarness(deps: HarnessDeps): () => void {
       const api = deps.getViewportApi()
       if (api === null) throw new Error('__hew_test: viewport not ready')
       return api.getSectionRenderInfo(kind, BigInt(id))
+    },
+
+    setViewStyleJson: (json) => act((s) => s.set_view_style_json(json ?? undefined)),
+    getViewStyleJson: () => query((s) => s.view_style_json() ?? null),
+    getBackdropInfo: () => {
+      const api = deps.getViewportApi()
+      if (api === null) throw new Error('__hew_test: viewport not ready')
+      return api.getBackdropInfo()
     },
 
     replay: (json) => act((s) => s.replay(json).toString()),
@@ -1604,6 +2190,18 @@ export function installTestHarness(deps: HarnessDeps): () => void {
       buildSessionRecording(scene().take_recording(), inputRecorder.take()),
 
     getStateHash: () => query((s) => s.state_hash().toString()),
+    getModelStateHash: () =>
+      query((s) => {
+        s.set_camera_state(
+          'perspective',
+          45,
+          1,
+          new Float64Array([1, 1, 1]),
+          new Float64Array([0, 0, 0]),
+          new Float64Array([0, 0, 1]),
+        )
+        return s.state_hash().toString()
+      }),
     getObjectCount: () => query((s) => s.object_ids().length),
     getObjectIds: () => query((s) => Array.from(s.object_ids()).map(String)),
     getSelection: () =>
@@ -1613,6 +2211,11 @@ export function installTestHarness(deps: HarnessDeps): () => void {
         ...(n.ctx !== undefined ? { ctx: n.ctx } : {}),
         ...(n.key !== undefined ? { key: n.key } : {}),
       })),
+    getSelectionBounds: () =>
+      query((s) => {
+        const b = worldBoundsForSelection(s, deps.getSelection())
+        return b === null ? null : [b.min[0], b.min[1], b.min[2], b.max[0], b.max[1], b.max[2]]
+      }),
     getPlaneUnits: (ctx) => query((s) => JSON.parse(s.plane_units_json(ctx))),
     ctxOfFace: (object, face, instance) =>
       query((s) => ctxOfFace(s, BigInt(object), BigInt(face), instance === undefined ? null : BigInt(instance))),
@@ -1630,6 +2233,28 @@ export function installTestHarness(deps: HarnessDeps): () => void {
         )
       }),
     getLastError: () => lastError,
+    wallSurfaces: () => {
+      const dock = new Set<string>()
+      const gates = { canGroup: true, canMakeComponent: true, canBoolean: true, canSaveToLibrary: true, canUnlink: true, canUnlinkAll: true }
+      for (const ctx of ['empty', 'object', 'group', 'instance', 'multi', 'sketch'] as const) {
+        for (const g of [undefined, gates, { ...gates, canUnlink: false }]) for (const v of dockVerbsFor(ctx, g)) dock.add(v.id)
+      }
+      return {
+        rail: RAIL_GROUPS.flatMap((g) => toolsInGroup(g).map((t) => t.name as string)),
+        tools: TOOL_REGISTRY.map((t) => t.name as string),
+        toolCommands: TOOL_ACTIONS.map((a) => a.id),
+        palette: paletteEntries().map((e) => e.id),
+        dock: [...dock],
+        nativeCommands: [...NATIVE_COMMANDS],
+        bound: boundCommandIds(),
+      }
+    },
+    wasmFlavor: () => {
+      const flag = (kernelModule as { preview_build?: () => boolean }).preview_build
+      return flag === undefined ? 'unknown' : flag() ? 'preview' : 'production'
+    },
+    paletteSearch: (query) => rankEntries(query, paletteEntries(), []).map((e) => e.id),
+    commandForChord: (chord) => commandForChord(chord),
     getDrawingAxes: () => query((s) => Array.from(s.axes())),
 
     getAnnotationIds: () => query((s) => Array.from(s.annotation_ids()).map(String)),
@@ -1780,7 +2405,7 @@ export function installTestHarness(deps: HarnessDeps): () => void {
         return sub.over.face.toString()
       }),
 
-    drawArc: (a, b, sagitta, close = false) =>
+    drawArc: (a, b, sagitta, close = false, analytic = true) =>
       act((s) => {
         const pts = arcPolylineOnPlane(a, b, sagitta, [1, 0, 0], [0, 1, 0])
         if (pts === null) throw new Error('drawArc: degenerate chord or flat sagitta')
@@ -1793,8 +2418,12 @@ export function installTestHarness(deps: HarnessDeps): () => void {
         }
         // The arc's facets are one curve chain carrying the analytic circle,
         // exactly as ArcTool commits; the closing chord stays a plain line.
-        if (arc !== null) {
+        // `analytic = false` leaves the chain a plain faceted curve (what an
+        // imported or boolean-cut round looks like), with no circle behind it.
+        if (arc !== null && analytic) {
           s.sketch_begin_curve_with(sketch, arc.center[0], arc.center[1], 0, arc.radius)
+        } else if (!analytic) {
+          s.sketch_begin_curve(sketch)
         }
         for (let i = 0; i < pts.length - 1; i++) addSeg(pts[i], pts[i + 1])
         s.sketch_end_curve(sketch)
@@ -1949,7 +2578,9 @@ export function installTestHarness(deps: HarnessDeps): () => void {
     },
 
     canUndo: () => query((s) => s.can_scene_undo()),
+    getUndoDepth: () => query((s) => s.undo_depth()),
     canRedo: () => query((s) => s.can_scene_redo()),
+    getRedoDepth: () => query((s) => s.redo_depth()),
 
     setLengthUnit: (format) => setLengthUnit(format as LengthFormat),
     getLengthUnit: () => getLengthUnit(),
@@ -1979,6 +2610,21 @@ export function installTestHarness(deps: HarnessDeps): () => void {
 
     paintFace: (object, face, material) => {
       act((s) => s.paint_face(BigInt(object), BigInt(face), materialHandle(material)))
+    },
+
+    paintInstance: (instance, material) => {
+      act((s) => s.set_instance_material(BigInt(instance), materialHandle(material)))
+    },
+
+    getInstanceMaterial: (instance) =>
+      query((s) => {
+        const m = s.instance_material(BigInt(instance))
+        return m === MATERIAL_NONE ? null : m.toString()
+      }),
+
+    getInstanceRenderedMaterials: (instance) => {
+      const rendered = deps.getViewportApi()?.getInstanceRenderedInherited(BigInt(instance)) ?? null
+      return rendered === null ? null : rendered.map((m) => (m === MATERIAL_NONE ? null : m.toString()))
     },
 
     getFaceMaterial: (object, face) =>
@@ -2056,6 +2702,11 @@ export function installTestHarness(deps: HarnessDeps): () => void {
     },
 
     getSketchIds: () => query((s) => Array.from(s.sketch_ids(), (id) => id.toString())),
+    getSketchOwnerObject: (sketch) =>
+      query((s) => {
+        const o = s.sketch_owner_object(BigInt(sketch))
+        return o === undefined ? null : o.toString()
+      }),
 
     getSketchLines: (sketch) => query((s) => Array.from(s.sketch_lines(BigInt(sketch)))),
     getSketchPlane: (sketch) =>
@@ -2213,6 +2864,12 @@ export function installTestHarness(deps: HarnessDeps): () => void {
     getInstanceDef: (instance) =>
       query((s) => s.instance_def(BigInt(instance))?.toString() ?? null),
 
+    getInstancePose: (instance) =>
+      query((s) => {
+        const p = s.instance_pose(BigInt(instance))
+        return p === undefined ? null : Array.from(p)
+      }),
+
     getInstancesOf: (component) =>
       query((s) => Array.from(s.instances_of(BigInt(component))).map(String)),
 
@@ -2221,6 +2878,12 @@ export function installTestHarness(deps: HarnessDeps): () => void {
         const i = s.explode_session_instance()
         return i === undefined ? null : String(i)
       }),
+
+    getSessionPlacements: () =>
+      query((s) => Array.from(s.session_placements()).map(String)),
+
+    getInstanceExpandedMembers: (instance) =>
+      query((s) => Array.from(s.instance_expanded_members(BigInt(instance))).map(String)),
 
     getComponentMemberObjects: (component) =>
       query((s) => Array.from(s.component_member_objects(BigInt(component))).map(String)),
@@ -2231,7 +2894,7 @@ export function installTestHarness(deps: HarnessDeps): () => void {
     selectNodes: (nodes) =>
       deps.setSelection(
         nodes.map((n) => ({
-          kind: n.kind as NodeKind,
+          kind: n.kind as NodeKind | 'guide' | 'annotation',
           id: n.key !== undefined ? BigInt('0x' + n.key) : BigInt(n.id),
           ...(n.ctx !== undefined ? { ctx: n.ctx } : {}),
           ...(n.key !== undefined ? { key: n.key } : {}),
@@ -2361,6 +3024,60 @@ export function installTestHarness(deps: HarnessDeps): () => void {
       const api = deps.getViewportApi()
       if (api === null) throw new Error('__hew_test: viewport not ready')
       return api.worldToScreen(world)
+    },
+
+    getDrawPlaneCue: () => {
+      const api = deps.getViewportApi()
+      if (api === null) throw new Error('__hew_test: viewport not ready')
+      return api.getDrawPlaneCue()
+    },
+
+    getFaceCue: () => {
+      const api = deps.getViewportApi()
+      if (api === null) throw new Error('__hew_test: viewport not ready')
+      const c = api.getFaceCue()
+      if (c === null) return null
+      return {
+        kind: c.kind,
+        owner: String(c.owner),
+        id: String(c.id),
+        instance: c.instance === null ? null : String(c.instance),
+        color: c.colorToken,
+        tinted: c.tinted,
+        outlined: c.outlined,
+      }
+    },
+
+    getDrawPlaneState: () => {
+      const api = deps.getViewportApi()
+      if (api === null) throw new Error('__hew_test: viewport not ready')
+      const state = api.getDrawPlaneState()
+      if (state === null) return null
+      return { pip: state.pip, hold: state.hold, normal: [...state.plane.normal], origin: [...state.plane.origin], hover: state.hover?.kind ?? null }
+    },
+
+    pipEnabled: (pip) => {
+      const api = deps.getViewportApi()
+      if (api === null) throw new Error('__hew_test: viewport not ready')
+      return api.pipEnabled(pip)
+    },
+
+    getHoverHighlight: () => {
+      const api = deps.getViewportApi()
+      if (api === null) throw new Error('__hew_test: viewport not ready')
+      const h = api.getHoverHighlight()
+      if (h === null) return null
+      return {
+        objects: h.objects.map(String),
+        instances: h.instances.map(String),
+        guide: h.guide === null ? null : String(h.guide),
+      }
+    },
+
+    rayAtCanvasPoint: (x, y) => {
+      const api = deps.getViewportApi()
+      if (api === null) throw new Error('__hew_test: viewport not ready')
+      return api.rayAtCanvasPoint(x, y)
     },
 
     isolate: (targets) => {

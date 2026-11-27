@@ -21,17 +21,23 @@
  *                     default, or the box CENTER if Ctrl's durable toggle is
  *                     on (see below).
  *   2. Move         : per driven axis, `s_axis = (cursor − pivot)·axis /
- *                     (grab − pivot)·axis`, clamped to `MIN_SCALE` — dragging
- *                     a grip past its anchor clamps rather than reflecting
- *                     (the kernel refuses reflection typed; mirroring is a
- *                     separate future tool). A corner grip's "axis" is the
+ *                     (grab − pivot)·axis`. Dragging a grip through the
+ *                     anchor to the far side yields a NEGATIVE factor and
+ *                     mirrors, as SketchUp's does (the kernel bakes the
+ *                     reflection). The magnitude is floored at `MIN_SCALE`
+ *                     with its sign kept; a factor of exactly zero (the
+ *                     cursor ON the anchor) is a skipped frame — the
+ *                     previous preview stays and a click there is ignored,
+ *                     so a singular transform never reaches the kernel. A
+ *                     corner grip's "axis" is the
  *                     pivot→grab diagonal, driving sx=sy=sz by one shared
  *                     ratio (uniform). Updates a THREE.js ghost preview.
  *   3. Second click : commit the scale (one node → the per-kind transform; a
  *                     multi-selection → one transform_selection call, one
  *                     undo step), then redraw the gizmo at the new size so a
  *                     follow-up grip can be grabbed right away.
- *   4. Esc          : cancel — the ghost clears, the gizmo redraws unchanged.
+ *   4. Esc          : cancel — the ghost and the gizmo clear; the gizmo
+ *                     returns unchanged on the next pointer move or click.
  *
  * Anchor (Ctrl, durable toggle — like Move's copy toggle, tap not hold): off
  * (default) anchors at the grabbed grip's OPPOSITE grip (grab the top face →
@@ -47,7 +53,12 @@
  * If nothing is selected, the first click auto-selects whatever is under the
  * cursor (via the Viewport-injected selection acquirer) and reveals its
  * gizmo in the same gesture; only a click over empty space shows a hint toast
- * and stays idle.
+ * and stays idle. With a selection, a click off the grips re-targets: on an
+ * object it selects that one instead (its gizmo ready for a grip), on
+ * nothing it clears the selection — SketchUp's Scale stays on its selection.
+ * The hovered grip lights with the point it scales about, joined by a dashed
+ * line (the hot pair, kept through the drag); off the grips the object a
+ * click would select lights instead (types.ts `ClickAcquire`).
  *
  * The gizmo box is computed from the selection's rendered mesh positions —
  * TODO: reuse Object Info's world-AABB helper (`panels/objectBounds.ts`)
@@ -63,17 +74,21 @@
 import { formatNumber } from '../i18n/format'
 import { t } from '@lingui/core/macro'
 import * as THREE from 'three'
-import type { Tool, Snap, EditContext } from './types'
+import type { ClickAcquire, Tool, Snap, EditContext } from './types'
 import { displayedFactor, isFreePick } from './displayedValue'
 import { editContextEq } from './types'
 import type { Ray } from '../viewport/math'
 import { screenConstantWorldHalfFromWorldPerPixel } from '../viewport/math'
+import { WORLD_DRAWING_AXES } from './drawingAxes'
+import { DashedLink, LINK_COLOR } from './dashedLink'
 import type { Scene as WasmScene } from '../wasm/loader'
 import { nonUniformScaleAboutPivot, affineToFloat64 } from './transformMath'
 import { parseKernelErrorCode, kernelErrorMessage } from '../kernelErrors'
 import { resolveDraft } from './planeUnits'
 import { clearPreview } from './transformPreview'
+import { leaveBehind } from '../lock/lockGate'
 import { commitSelectionTransform, buildSelectionPreview } from './transformSelection'
+import { surfaceSketchTransformReports } from './draftCommit'
 import { editLengthBuffer, isLengthInputKey, parseDistance } from './moveInput'
 import { RetypeWindow, idleRetypeCapturesKey, retypeStaleMessage } from './retypeWindow'
 import { parseLengthToMeters, getLengthUnit, typedReadout } from '../settings/units'
@@ -89,9 +104,22 @@ export type OnMeasurement = (text: string) => void
 
 type Vec3 = [number, number, number]
 
-/** Never let a driven axis reach or cross zero (reflection/singular) — the
- * same floor the kernel's typed refusal exists to keep the UI away from. */
+/** Floor on a driven axis's factor MAGNITUDE: a factor may be negative (a
+ * mirror) but never reaches zero (singular). */
 const MIN_SCALE = 0.01
+
+/**
+ * Sign-preserving magnitude floor for a raw scale factor. Returns `null` for
+ * a factor that is zero (or non-finite) — the kernel would refuse the
+ * singular transform, so callers skip the frame / treat entry as incomplete.
+ * Otherwise `|f|` is raised to at least `MIN_SCALE` keeping the sign, so a
+ * drag through the anchor mirrors (negative) instead of clamping.
+ * @internal exported for unit tests
+ */
+export function floorScaleFactor(raw: number): number | null {
+  if (!Number.isFinite(raw) || Math.abs(raw) < 1e-9) return null
+  return Math.sign(raw) * Math.max(Math.abs(raw), MIN_SCALE)
+}
 
 /** A grip on the gizmo box: its world position, the grip that anchors it by
  * default (the geometric opposite), and which axes it drives. `axisIndex`
@@ -133,6 +161,15 @@ const FALLBACK_GRIP_HALF_M = 0.02
  * half-size — forgiving enough to grab a small handle without pixel-precise
  * aiming. */
 const GRIP_PICK_MULTIPLIER = 3
+/** The hot pair — the grip under the cursor (or the one being dragged) and
+ * the point that stays put, its opposite grip or, with Ctrl's toggle, the
+ * box center — as SketchUp shows them: in the selection highlight color,
+ * the size of a plain grip, drawn over the grip beneath. */
+const GRIP_HOT_COLOR = 0xffaa00
+const GRIP_HOT_SCALE = 1
+/** The hot pair's outline: the gray of the dashed line joining them
+ * (dashedLink.ts). */
+const GRIP_HOT_INK = LINK_COLOR
 /** Neutral color for the 8 uniform (corner) grips — face/edge grips are
  * colored by the axis (axes) they drive instead. */
 const GIZMO_CORNER_COLOR = 0xdddddd
@@ -260,6 +297,14 @@ export class ScaleTool implements Tool {
   /** Click-drag-release works as well as click-click (Tool.dragCommits). */
   readonly dragCommits = true
 
+  /** Hover highlight (types.ts `ClickAcquire`): idle, a click off the grips
+   * selects whatever it lands on and shows its gizmo (`onPointerDown`). Over
+   * a grip the click grabs it — the hot pair shows that instead. */
+  clickAcquire(): ClickAcquire | null {
+    if (this.stage.kind !== 'idle' || this.hotGrip !== null || this.acquireSelection === null) return null
+    return { guides: false, nodes: true }
+  }
+
   /** Live status-bar guidance for the current stage (see Tool.statusHint). */
   statusHint(): string {
     if (this.stage.kind === 'dragging') {
@@ -271,7 +316,7 @@ export class ScaleTool implements Tool {
     if (this.selection.length === 0) {
       return t`Click the object you want to scale.`
     }
-    return t`Drag a grip to scale — a face stretches one axis, an edge two, a corner all three. Ctrl anchors at the center.`
+    return t`Drag a grip to scale — a face stretches one axis, an edge two, a corner all three. Ctrl anchors at the center. Click another object to scale it instead.`
   }
 
   private stage: Stage = { kind: 'idle' }
@@ -308,14 +353,33 @@ export class ScaleTool implements Tool {
    * — cached so `_pickGrip` (which only has a ray, not the camera/rig) can
    * reproduce the SAME on-screen size for pick tolerance, in either
    * projection (docs/design/camera.md §1). Null before the first tick (unit
-   * tests never drive a real render loop) — `_pickToleranceAt` falls back to
-   * a fixed reasonable tolerance then. */
+   * tests never drive a real render loop, the app only for the first frame
+   * after activation) — `_pickToleranceAt` falls back to a fixed reasonable
+   * tolerance then. */
   private _pickWorldPerPixel: ((dist: number) => number) | null = null
+  /** The idle grip under the cursor (`_updateHotGrip`), null when none. */
+  private hotGrip: Grip | null = null
+  /** The pointer's latest ray (a move or a press), null once it left the
+   * canvas: a gizmo redrawn under a parked cursor (the app's selection echo
+   * after a click or a commit) lights the grip beneath it again at once. */
+  private lastRay: Ray | null = null
+  /** The hot pair's markers (`_refreshHotMarkers`): [grip, anchor], in their
+   * own group in the preview — apart from the gizmo, which hides while a
+   * drag runs, so the pair stays up through the drag. Null when not shown. */
+  private hotGroup: THREE.Group | null = null
+  private hotMeshes: [THREE.Mesh, THREE.Mesh] | null = null
+  private hotLine: DashedLink | null = null
 
   /** Auto-select fallback, injected by the Viewport (see MoveTool's). */
   private acquireSelection: ((ray: Ray) => NodeRef[] | null) | null = null
-  setSelectionAcquirer(acquire: ((ray: Ray) => NodeRef[] | null) | null): void {
+  /** Empties the app selection — a click off the grips on nothing. */
+  private releaseSelection: (() => void) | null = null
+  setSelectionAcquirer(
+    acquire: ((ray: Ray) => NodeRef[] | null) | null,
+    release: (() => void) | null = null,
+  ): void {
     this.acquireSelection = acquire
+    this.releaseSelection = release
   }
 
   /** The current editing context (component-edit-parity.md phase A1). When
@@ -338,8 +402,13 @@ export class ScaleTool implements Tool {
   setSelection(nodes: NodeRef[]): void {
     this.selection = nodes
     if (this.stage.kind === 'idle') {
-      if (nodes.length > 0) this._showGizmo(nodes)
-      else this._hideGizmo()
+      if (nodes.length > 0) {
+        this._showGizmo(nodes)
+      } else {
+        this._hideGizmo()
+        this.hotGrip = null
+        this._hideHotMarkers()
+      }
     }
   }
 
@@ -379,6 +448,7 @@ export class ScaleTool implements Tool {
   }
 
   onPointerMove(snap: Snap | null, ray: Ray): void {
+    this.lastRay = ray
     if (this.stage.kind === 'idle') {
       // Bring the gizmo back on the next pointer move if a prior cancel()
       // cleared it (Esc aborting a drag empties the shared preview group — see
@@ -388,6 +458,7 @@ export class ScaleTool implements Tool {
       if (this.gizmoGroup === null && this.selection.length > 0) {
         this._showGizmo(this.selection)
       }
+      this._updateHotGrip(ray)
       return
     }
     const cursor = this._resolveCursor(snap, ray)
@@ -396,21 +467,73 @@ export class ScaleTool implements Tool {
     this._renderDrag()
   }
 
+  /** The view moved under a parked cursor: the grip under it is another one
+   * now (or none). */
+  onViewChanged(ray: Ray | undefined): void {
+    this.lastRay = ray ?? null
+    if (this.stage.kind !== 'idle') return
+    if (ray === undefined) {
+      this.hotGrip = null
+      this._hideHotMarkers()
+    } else {
+      this._updateHotGrip(ray)
+    }
+  }
+
+  /** The pointer left the canvas (or something came up over it): a gizmo
+   * redrawn now has no cursor over it to light a grip under. */
+  onPointerLeave(): void {
+    this.lastRay = null
+    // Nothing is hovered any more: the idle hot pair goes (a drag's pair is
+    // the drag's own).
+    if (this.stage.kind !== 'idle') return
+    this.hotGrip = null
+    this._hideHotMarkers()
+  }
+
   onPointerDown(snap: Snap | null, ray: Ray): void {
     // Any pointer action ends the retype window — the next scale begins.
     this.disarmRetype()
-    if (snap === null) return
+    this.lastRay = ray
 
     if (this.stage.kind === 'idle') {
       let nodes = this.selection
+      // An idle click needs no snap: it picks along the ray, and a click on
+      // empty space often has none.
+      // Until the render loop has handed over the screen-constant pick size
+      // (`updateGripScale`), the fixed fallback tolerance could call a near
+      // miss "off the grips" and clear the selection, so a click then only
+      // looks for a grip.
+      if (nodes.length > 0 && this._pickWorldPerPixel !== null && this._offGrips(ray)) {
+        // A click off the grips re-targets (better than SketchUp, whose Scale
+        // stays on the selection): on an object it selects THAT one and moves
+        // the gizmo to it, ready for a grip; on nothing it clears the
+        // selection. Selecting something already selected is a plain-click
+        // replace, as the Select tool's.
+        const acquired = this.acquireSelection?.(ray) ?? null
+        if (acquired !== null && acquired.length > 0) {
+          this.selection = acquired
+          this._showGizmo(acquired)
+          this._updateHotGrip(ray)
+        } else {
+          this.selection = []
+          this._hideGizmo()
+          this.releaseSelection?.()
+        }
+        return
+      }
       if (nodes.length === 0 && this.acquireSelection !== null) {
         // Empty selection: auto-select whatever the click landed on and
-        // reveal its gizmo — this click does not grab a grip (grip
-        // positions depend on the box, which didn't exist until now).
+        // reveal its gizmo. This click only selects — it never grabs a grip,
+        // not even one of the new box that happens to lie under it (a click
+        // on a face lands on or near its center grip): the grips weren't
+        // there to aim at when the click was made.
         const acquired = this.acquireSelection(ray)
         if (acquired !== null && acquired.length > 0) {
           this.selection = acquired
-          nodes = acquired
+          this._showGizmo(acquired)
+          this._updateHotGrip(ray)
+          return
         }
       }
       if (nodes.length === 0) {
@@ -422,10 +545,20 @@ export class ScaleTool implements Tool {
       if (this.gizmoGrips === null || this._gizmoCenter === null) return // no geometry to scale
 
       const grip = this._pickGrip(ray, this.gizmoGrips)
-      if (grip === null) return // revealed the gizmo; wait for a click ON a grip
+      if (grip === null) {
+        // Revealed the gizmo; wait for a click ON a grip — which may already
+        // be under the cursor.
+        this._updateHotGrip(ray)
+        return
+      }
 
       const boxExtent = this._boxExtent()
       if (boxExtent === null) return
+
+      // Locked things are left behind (OW-1): the scale runs on the rest.
+      const go = leaveBehind(this.wasmScene, nodes, this.onToast, { descendants: true })
+      if (go === null) return
+      nodes = go
 
       const previewMesh = this._buildPreview(nodes)
       if (previewMesh !== null) this.preview.add(previewMesh)
@@ -446,7 +579,8 @@ export class ScaleTool implements Tool {
       }
       this.typed = ''
       this._reportFactors([1, 1, 1])
-    } else if (this.stage.kind === 'dragging') {
+      this._refreshHotMarkers()
+    } else if (this.stage.kind === 'dragging' && snap !== null) {
       // Resolve against THIS click's position, not a stale `lastCursor` from
       // the last move (there may have been none — a click straight after
       // grabbing, with no intervening pointer move, must still land where
@@ -456,6 +590,9 @@ export class ScaleTool implements Tool {
       if (cursor !== null) this.stage.lastCursor = cursor
       const { nodes, axisIndex, axisIndex2, boxExtent } = this.stage
       let factors = this._currentFactors()
+      // The cursor sits exactly on the anchor (factor 0): a singular scale
+      // must not commit. Ignore the click and keep dragging.
+      if (factors === null) return
       // A free pick commits the DISPLAYED per-axis factors (×f.toFixed(2)),
       // exactly as if typed. A typed buffer still wins, and a hard snap or a
       // factor that would display as 0 keeps the raw value.
@@ -472,6 +609,8 @@ export class ScaleTool implements Tool {
       clearPreview(this.preview)
       this.onMeasurementCb('')
       this._commitAndArm({ nodes, pivot, factors, axisIndex, axisIndex2, boxExtent })
+      // The cursor rests where the dragged grip landed — a grip of the new box.
+      this._updateHotGrip(ray)
     }
   }
 
@@ -593,6 +732,7 @@ export class ScaleTool implements Tool {
   toggleCenterAnchor(): void {
     this.anchorAtCenter = !this.anchorAtCenter
     if (this.stage.kind === 'dragging') this._renderDrag()
+    else this._refreshHotMarkers()
   }
 
   cancel(): void {
@@ -612,6 +752,10 @@ export class ScaleTool implements Tool {
     // every frame after an idle Esc, until the next pointer move redraws).
     this.gizmoGroup = null
     this.gizmoGripMeshes = null
+    this.hotGrip = null
+    this.hotGroup = null
+    this.hotMeshes = null
+    this.hotLine = null
     this.onMeasurementCb('')
   }
 
@@ -732,6 +876,11 @@ export class ScaleTool implements Tool {
   /** (Re)compute the box + grips for `nodes` and redraw the idle gizmo. */
   private _showGizmo(nodes: NodeRef[]): void {
     this._hideGizmo()
+    // The old box's grips are gone; the new box's grip under the cursor, if
+    // any, lights below. A drag's pair is the drag's own (its grip and
+    // pivot), so it stays.
+    this.hotGrip = null
+    if (this.stage.kind === 'idle') this._hideHotMarkers()
     const box = this._selectionBox(nodes)
     if (box === null) {
       this._gizmoCenter = null
@@ -747,6 +896,7 @@ export class ScaleTool implements Tool {
     this._gizmoCenter = [(min[0] + max[0]) / 2, (min[1] + max[1]) / 2, (min[2] + max[2]) / 2]
     this.gizmoGrips = gripsFromBox(min, max, INCLUDE_EDGE_GRIPS)
     this._drawGizmo(min, max, this.gizmoGrips)
+    if (this.stage.kind === 'idle' && this.lastRay !== null) this._updateHotGrip(this.lastRay)
   }
 
   private _drawGizmo(min: Vec3, max: Vec3, grips: Grip[]): void {
@@ -846,13 +996,126 @@ export class ScaleTool implements Tool {
    * widgets share this same helper.
    */
   updateGripScale(camera: THREE.Camera, worldPerPixel: (dist: number) => number): void {
-    if (this.gizmoGripMeshes === null) return
+    // Kept even with no gizmo up, so the first click on a gizmo revealed
+    // later already picks at the size it renders.
     this._pickWorldPerPixel = worldPerPixel
-    for (const mesh of this.gizmoGripMeshes) {
+    if (this.gizmoGripMeshes === null && this.hotMeshes === null) return
+    const fit = (mesh: THREE.Mesh, factor: number): void => {
       const dist = camera.position.distanceTo(mesh.position)
       const half = screenConstantWorldHalfFromWorldPerPixel(GRIP_SCREEN_PX, worldPerPixel(dist), MIN_GRIP_WORLD_HALF)
-      mesh.scale.setScalar(half)
+      mesh.scale.setScalar(half * factor)
     }
+    for (const mesh of this.gizmoGripMeshes ?? []) fit(mesh, 1)
+    for (const mesh of this.hotMeshes ?? []) fit(mesh, GRIP_HOT_SCALE)
+    this.hotLine?.fitDash(camera, worldPerPixel)
+  }
+
+  /** Idle with a selection: does a click at `ray` miss every grip? Draws
+   * the gizmo first if a cancel cleared it, so its grips can be tested. */
+  private _offGrips(ray: Ray): boolean {
+    if (this.gizmoGroup === null) this._showGizmo(this.selection)
+    return this.gizmoGrips === null || this._pickGrip(ray, this.gizmoGrips) === null
+  }
+
+  /** Idle: pick the grip under `ray` (the click's own `_pickGrip`, so what
+   * lights is what a click grabs) and redraw the hot pair. */
+  private _updateHotGrip(ray: Ray): void {
+    this.hotGrip = this.stage.kind === 'idle' && this.gizmoGroup !== null && this.gizmoGrips !== null
+      ? this._pickGrip(ray, this.gizmoGrips)
+      : null
+    this._refreshHotMarkers()
+  }
+
+  /** Place the hot pair: idle, the hovered grip and the point it scales
+   * about (its opposite, or the box center with Ctrl's toggle); dragging,
+   * the grabbed grip where the scale carries it and the drag's pivot.
+   * Hidden when neither applies. */
+  private _refreshHotMarkers(): void {
+    let grip: Vec3 | null = null
+    let anchor: Vec3 | null = null
+    if (this.stage.kind === 'dragging') {
+      anchor = this._pivot()
+      const f = this._currentFactors()
+      // A zero factor skips the frame, as the drag preview does: the pair
+      // stays where it last was.
+      if (f === null) return
+      const g = this.stage.grab
+      grip = [
+        anchor[0] + (g[0] - anchor[0]) * f[0],
+        anchor[1] + (g[1] - anchor[1]) * f[1],
+        anchor[2] + (g[2] - anchor[2]) * f[2],
+      ]
+    } else if (this.hotGrip !== null && this._gizmoCenter !== null) {
+      grip = this.hotGrip.pos
+      anchor = this.anchorAtCenter ? this._gizmoCenter : this.hotGrip.opposite
+    }
+    if (grip === null || anchor === null) {
+      this._hideHotMarkers()
+      return
+    }
+    const [gripMesh, anchorMesh] = this._ensureHotMarkers()
+    gripMesh.position.set(grip[0], grip[1], grip[2])
+    anchorMesh.position.set(anchor[0], anchor[1], anchor[2])
+    this.hotLine?.set(grip, anchor)
+  }
+
+  /** The hot pair's meshes, (re)built when missing — `clearPreview` (cancel,
+   * commit) disposes and detaches everything in the preview group. */
+  private _ensureHotMarkers(): [THREE.Mesh, THREE.Mesh] {
+    if (this.hotMeshes !== null && this.hotGroup !== null && this.hotGroup.parent === this.preview) {
+      return this.hotMeshes
+    }
+    const group = new THREE.Group()
+    group.name = 'ScaleHotGrips'
+    // A unit cube scaled per frame by `updateGripScale`, as the grips are.
+    const geo = new THREE.BoxGeometry(2, 2, 2)
+    const outlineGeo = new THREE.EdgesGeometry(geo)
+    const make = (): THREE.Mesh => {
+      const mesh = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color: GRIP_HOT_COLOR, depthTest: false }))
+      mesh.scale.setScalar(FALLBACK_GRIP_HALF_M * GRIP_HOT_SCALE)
+      // Always on top: over the dashed line's ends and the plain grip it
+      // sits on, its outline in the dashed line's gray over it (a child, so it
+      // scales along).
+      mesh.renderOrder = 2
+      const outline = new THREE.LineSegments(
+        outlineGeo,
+        new THREE.LineBasicMaterial({ color: GRIP_HOT_INK, depthTest: false }),
+      )
+      outline.renderOrder = 3
+      mesh.add(outline)
+      group.add(mesh)
+      return mesh
+    }
+    const meshes: [THREE.Mesh, THREE.Mesh] = [make(), make()]
+    // The dashed line from grip to anchor, under the markers; endpoints and
+    // dash set by `_refreshHotMarkers` and `updateGripScale`.
+    // Colored against the WORLD axes, not the drawing axes: the grips sit on
+    // the world-aligned box, so a world axis is what a grip pair drives.
+    const line = new DashedLink(() => WORLD_DRAWING_AXES)
+    line.line.renderOrder = 1
+    group.add(line.line)
+    this.preview.add(group)
+    this.hotGroup = group
+    this.hotMeshes = meshes
+    this.hotLine = line
+    return meshes
+  }
+
+  private _hideHotMarkers(): void {
+    const group = this.hotGroup
+    this.hotGroup = null
+    this.hotMeshes = null
+    this.hotLine = null
+    if (group === null || group.parent !== this.preview) return // already cleared with the preview
+    group.traverse((child) => {
+      // The markers (and their outlines) share geometry; disposing it twice
+      // is harmless.
+      if (child instanceof THREE.Mesh || child instanceof THREE.LineSegments) {
+        child.geometry.dispose()
+        ;(child.material as THREE.Material).dispose()
+      }
+    })
+    this.preview.remove(group)
   }
 
   /** The pick tolerance (world units) at `pos`, matching what `pos` actually
@@ -862,10 +1125,10 @@ export class ScaleTool implements Tool {
    * clip plane, ~1 cm from the eye — negligible next to any real grip
    * distance). Falls back to a fixed placeholder tolerance before the first
    * tick ever runs — in unit tests (jsdom never drives a real render loop),
-   * and in one narrow real-app path: the session's FIRST Scale click when it
-   * auto-selects and probes the just-revealed gizmo synchronously, before any
-   * render tick has cached the callback (safe — the fallback is close to the
-   * old fixed clamp). */
+   * and in the app only for a click within the first frame after the tool
+   * is activated (`updateGripScale` caches the callback from that frame on,
+   * gizmo or not). A click off the grips does not re-target or clear the
+   * selection on the fallback (`onPointerDown`). */
   private _pickToleranceAt(ray: Ray, pos: Vec3): number {
     if (this._pickWorldPerPixel === null) {
       return FALLBACK_GRIP_HALF_M * GRIP_PICK_MULTIPLIER
@@ -970,27 +1233,28 @@ export class ScaleTool implements Tool {
    * driven axis reads only its own component: a face grip drives one axis, an
    * edge grip drives its two INDEPENDENTLY (SketchUp's edge grips scale their
    * two axes independently; Shift-to-lock-proportional is out of scope, as is
-   * comma-separated per-axis VCB). Clamped to `MIN_SCALE` — dragging past the
-   * anchor clamps, never reflects.
+   * comma-separated per-axis VCB). Dragging through the
+   * anchor goes negative (a mirror); see `floorScaleFactor`. `null` = the
+   * cursor is exactly on the anchor (skip).
    */
-  private _perAxisRatio(pivot: Vec3, grab: Vec3, cursor: Vec3, axis: 0 | 1 | 2): number {
+  private _perAxisRatio(pivot: Vec3, grab: Vec3, cursor: Vec3, axis: 0 | 1 | 2): number | null {
     const denom = grab[axis] - pivot[axis]
     if (Math.abs(denom) < 1e-9) return 1 // zero-extent box on this axis — no-op
-    return Math.max((cursor[axis] - pivot[axis]) / denom, MIN_SCALE)
+    return floorScaleFactor((cursor[axis] - pivot[axis]) / denom)
   }
 
   /**
    * The uniform ratio a CORNER grip resolves to: one shared scalar along the
    * pivot→grab 3D diagonal, applied to all three axes, which is what keeps a
-   * corner drag proportional (SketchUp's corner default). Clamped to
-   * `MIN_SCALE`.
+   * corner drag proportional (SketchUp's corner default). Negative past the
+   * anchor (a point mirror); `null` = exactly on the anchor (skip).
    */
-  private _diagonalRatio(pivot: Vec3, grab: Vec3, cursor: Vec3): number {
+  private _diagonalRatio(pivot: Vec3, grab: Vec3, cursor: Vec3): number | null {
     const dx = grab[0] - pivot[0], dy = grab[1] - pivot[1], dz = grab[2] - pivot[2]
     const len = Math.sqrt(dx * dx + dy * dy + dz * dz)
     if (len < 1e-9) return 1 // degenerate (zero-extent) box — no-op
     const numer = (cursor[0] - pivot[0]) * dx + (cursor[1] - pivot[1]) * dy + (cursor[2] - pivot[2]) * dz
-    return Math.max(numer / (len * len), MIN_SCALE)
+    return floorScaleFactor(numer / (len * len))
   }
 
   /** [sx,sy,sz] for driving `axisIndex`/`axisIndex2` (or all three, for a
@@ -1011,8 +1275,9 @@ export class ScaleTool implements Tool {
    * parses to a valid factor/dimension; otherwise the last resolved cursor
    * position drives the ratio. Face/edge grips scale each driven axis
    * INDEPENDENTLY (per-axis ratio); a corner grip scales all three by one
-   * uniform diagonal ratio. */
-  private _currentFactors(): Vec3 {
+   * uniform diagonal ratio. `null` when a driven axis sits exactly on the
+   * anchor (factor 0): the frame is skipped and the click ignored. */
+  private _currentFactors(): Vec3 | null {
     if (this.stage.kind !== 'dragging') return [1, 1, 1]
     const typedFactors = this._parseTypedFactors()
     if (typedFactors !== null) return typedFactors
@@ -1023,13 +1288,17 @@ export class ScaleTool implements Tool {
     if (axisIndex === null) {
       // Corner: one uniform ratio along the pivot→grab diagonal.
       const s = this._diagonalRatio(pivot, grab, lastCursor)
-      return [s, s, s]
+      return s === null ? null : [s, s, s]
     }
     // Face (one axis) or edge (two axes), each driven axis independent.
     const f: Vec3 = [1, 1, 1]
-    f[axisIndex] = this._perAxisRatio(pivot, grab, lastCursor, axisIndex)
+    const a = this._perAxisRatio(pivot, grab, lastCursor, axisIndex)
+    if (a === null) return null
+    f[axisIndex] = a
     if (axisIndex2 !== null) {
-      f[axisIndex2] = this._perAxisRatio(pivot, grab, lastCursor, axisIndex2)
+      const b = this._perAxisRatio(pivot, grab, lastCursor, axisIndex2)
+      if (b === null) return null
+      f[axisIndex2] = b
     }
     return f
   }
@@ -1050,15 +1319,17 @@ export class ScaleTool implements Tool {
 
     if (this._isBareFactor(this.typed)) {
       const n = parseDistance(this.typed)
-      if (n === null || n <= 0) return null
-      return this._factorsForScalar(axisIndex, axisIndex2, Math.max(n, MIN_SCALE))
+      if (n === null) return null
+      const s = floorScaleFactor(n)
+      return s === null ? null : this._factorsForScalar(axisIndex, axisIndex2, s)
     }
 
     const meters = parseLengthToMeters(this.typed, getLengthUnit())
-    if (meters === null || meters <= 0) return null
+    if (meters === null) return null
     const extent = this._referenceExtent(axisIndex, axisIndex2, boxExtent)
     if (extent < 1e-9) return null
-    return this._factorsForScalar(axisIndex, axisIndex2, Math.max(meters / extent, MIN_SCALE))
+    const s = floorScaleFactor(meters / extent)
+    return s === null ? null : this._factorsForScalar(axisIndex, axisIndex2, s)
   }
 
   /** The extent a typed target dimension divides against: a face grip's
@@ -1081,10 +1352,13 @@ export class ScaleTool implements Tool {
   private _renderDrag(): void {
     if (this.stage.kind !== 'dragging') return
     const factors = this._currentFactors()
+    // Exactly on the anchor: keep the previous preview and readout.
+    if (factors === null) return
     if (this.stage.previewMesh !== null) {
       this._applyPreviewScale(this.stage.previewMesh, this._pivot(), factors)
     }
     if (this.typed === '') this._reportFactors(factors)
+    this._refreshHotMarkers()
   }
 
   private _buildPreview(nodes: NodeRef[]): THREE.Object3D | null {
@@ -1141,7 +1415,7 @@ export class ScaleTool implements Tool {
   }
 
   /** Commit the scale from the typed VCB buffer, then reset to idle. A typed
-   * buffer that doesn't yet parse to a positive factor/dimension is a no-op
+   * buffer that doesn't yet parse to a nonzero factor/dimension (0 included) is a no-op
    * (Enter is ignored, matching Move/Rotate's incomplete-entry behavior). */
   private _commitFromTyped(): void {
     if (this.stage.kind !== 'dragging') return
@@ -1200,14 +1474,16 @@ export class ScaleTool implements Tool {
   private _factorsFor(buf: string, axisIndex: 0 | 1 | 2 | null, axisIndex2: 0 | 1 | 2 | null, boxExtent: Vec3): Vec3 | null {
     if (this._isBareFactor(buf)) {
       const n = parseDistance(buf)
-      if (n === null || n <= 0) return null
-      return this._factorsForScalar(axisIndex, axisIndex2, Math.max(n, MIN_SCALE))
+      if (n === null) return null
+      const s = floorScaleFactor(n)
+      return s === null ? null : this._factorsForScalar(axisIndex, axisIndex2, s)
     }
     const meters = parseLengthToMeters(buf, getLengthUnit())
-    if (meters === null || meters <= 0) return null
+    if (meters === null) return null
     const extent = this._referenceExtent(axisIndex, axisIndex2, boxExtent)
     if (extent < 1e-9) return null
-    return this._factorsForScalar(axisIndex, axisIndex2, Math.max(meters / extent, MIN_SCALE))
+    const s = floorScaleFactor(meters / extent)
+    return s === null ? null : this._factorsForScalar(axisIndex, axisIndex2, s)
   }
 
   /** True when a non-identity scale reached the kernel (false = identity, or
@@ -1231,7 +1507,10 @@ export class ScaleTool implements Tool {
         return false
       }
     }
+    this.selection = committed
     this.onCommit(committed)
+    // An identity scale committed nothing: no held report is its own.
+    if (!isIdentity) surfaceSketchTransformReports((m) => this.onToast(m))
     // Redraw the gizmo at the (possibly new) size so a follow-up grip can be
     // grabbed right away — handles stay stable through a transform (kernel
     // strong guarantee; a drawn shape is re-found above), so `committed`

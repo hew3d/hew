@@ -25,7 +25,19 @@ import { render, screen, fireEvent, waitFor, within, act } from '@testing-librar
 import { describe, expect, it, vi, beforeEach } from 'vitest'
 
 vi.hoisted(() => {
-  Object.defineProperty(window, '__TAURI_INTERNALS__', { value: {}, configurable: true })
+  // The harness can hand a concurrent first-time dynamic import of
+  // `@tauri-apps/api/core` the real package instead of the mock below (see
+  // the note above makeNonPristine). The real `invoke` forwards to this
+  // object, so route it to the same mock: a call is then recorded whichever
+  // module the import resolved to. The real `invoke` defaults a missing
+  // argument object to `{}`; drop it again so recorded calls match.
+  const internals = {
+    invoke: (cmd: string, args?: Record<string, unknown>) =>
+      args !== undefined && Object.keys(args).length > 0
+        ? (invokeMock as unknown as (c: string, a: unknown) => Promise<unknown>)(cmd, args)
+        : invokeMock(cmd),
+  }
+  Object.defineProperty(window, '__TAURI_INTERNALS__', { value: internals, configurable: true })
 })
 
 const menubar = () => within(screen.getByTestId('menu-bar'))
@@ -35,6 +47,18 @@ const menubar = () => within(screen.getByTestId('menu-bar'))
 // ---------------------------------------------------------------------------
 
 const mockScene = {
+  // Events (docs/agents/HEW_API.md §4.5): the units mirror and the
+  // document lifecycle notes.
+  set_display_units: vi.fn(),
+  set_ui_context: vi.fn(),
+  // Selection and view state (docs/agents/HEW_API.md §7): the mirrors the
+  // bus reads.
+  set_ui_selection: vi.fn(),
+  set_ui_isolation: vi.fn(),
+  note_tool_changed: vi.fn(),
+  note_document_event: vi.fn(),
+  document_id: vi.fn(() => undefined),
+  ensure_document_id: vi.fn(() => '00000000-0000-4000-8000-000000000000'),
   object_ids: () => new BigUint64Array(),
   group_ids: () => new BigUint64Array(),
   instance_ids: () => new BigUint64Array(),
@@ -70,6 +94,7 @@ const mockScene = {
   undo_depth: () => 0,
   redo_depth: () => 0,
   history_entries_json: () => JSON.stringify({ undo: [], redo: [], savedDepth: null }),
+  geo_reference_json: () => 'null',
   save: () => new Uint8Array(),
   load: vi.fn(),
   camera_state: () => undefined,
@@ -113,21 +138,25 @@ vi.mock('./viewport/Viewport', () => ({
 
 const openAnyMock = vi.fn()
 const openForImportMock = vi.fn()
+const writeToMock = vi.fn()
+const fileSaveMock = vi.fn()
 vi.mock('./io/fileHost', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./io/fileHost')>()
   return {
     ...actual,
     makeFileHost: () => ({
       open: vi.fn(),
-      save: vi.fn(),
+      save: fileSaveMock,
       saveAs: vi.fn(),
       openForImport: openForImportMock,
       openAny: openAnyMock,
       exportBinary: vi.fn(),
+      writeTo: writeToMock,
     }),
   }
 })
 
+const recoveryClaimMock = vi.fn(async (_slot: string): Promise<unknown> => null)
 vi.mock('./io/recoveryStore', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./io/recoveryStore')>()
   return {
@@ -135,10 +164,41 @@ vi.mock('./io/recoveryStore', async (importOriginal) => {
     makeRecoveryStore: () => ({
       write: async () => {},
       list: async () => [],
-      claim: async () => null,
+      claim: (slot: string) => recoveryClaimMock(slot),
       clear: async () => {},
       discardAll: async () => {},
     }),
+  }
+})
+
+// The Library store: no folder and no items unless a test sets nameForPath.
+const libStoreMock = {
+  available: () => true,
+  folderInfo: async () => ({ path: null }),
+  chooseFolder: async () => null,
+  list: vi.fn(async (): Promise<unknown[]> => []),
+  read: vi.fn(async (_n: string) => new Uint8Array([1])),
+  write: vi.fn(async (_n: string, _b: Uint8Array) => {}),
+  remove: async () => {},
+  readThumbnail: async () => null,
+  writeThumbnail: async () => {},
+  reveal: async () => {},
+  itemPath: async () => null,
+  nameForPath: vi.fn(async (_p: string): Promise<string | null> => null),
+  capabilities: () => ({ canReveal: true, canChooseFolder: true, canDownload: false }),
+  subscribe: () => () => {},
+}
+vi.mock('./io/libraryStore', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./io/libraryStore')>()
+  return { ...actual, libraryStore: () => libStoreMock }
+})
+const readItemSummaryMock = vi.fn(async (_b: Uint8Array): Promise<unknown> => ({ doc_attrs: {} }))
+vi.mock('./library/itemFiles', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./library/itemFiles')>()
+  return {
+    ...actual,
+    readItemSummary: (b: Uint8Array) => readItemSummaryMock(b),
+    renderItemThumbnail: async () => null,
   }
 })
 
@@ -149,7 +209,7 @@ vi.mock('./io/recoveryStore', async (importOriginal) => {
 // effects (title push, menu sync, startup handoff, window-list fetch) fire
 // on every render regardless of what a given test cares about, and must not
 // throw or hang the test.
-const invokeMock = vi.fn(async (cmd: string) => {
+const invokeMock = vi.fn(async (cmd: string): Promise<unknown> => {
   switch (cmd) {
     case 'get_recents':
     case 'list_windows':
@@ -189,13 +249,19 @@ const dragDropMock = vi.fn(
 vi.mock('@tauri-apps/api/webview', () => ({
   getCurrentWebview: () => ({ onDragDropEvent: dragDropMock }),
 }))
+// Stable so the close-guard tests can grab the registered close handler and
+// see whether the window was destroyed.
+type CloseHandler = (event: { preventDefault: () => void }) => Promise<void>
+const closeRequestedMock = vi.fn(async (_handler: CloseHandler) => () => {})
+const destroyMock = vi.fn(async () => {})
 vi.mock('@tauri-apps/api/window', () => ({
   getCurrentWindow: () => ({
     label: 'main',
     setTitle: vi.fn(async () => {}),
     close: vi.fn(async () => {}),
+    destroy: destroyMock,
     onFocusChanged: vi.fn(async () => () => {}),
-    onCloseRequested: vi.fn(async () => () => {}),
+    onCloseRequested: closeRequestedMock,
   }),
   getAllWindows: vi.fn(async () => []),
 }))
@@ -288,6 +354,25 @@ describe('App — File ▸ Open onto a non-pristine window (Tauri)', () => {
     expect(await screen.findByText('my-house.hew')).toBeInTheDocument()
     expect(mockScene.load).toHaveBeenCalledTimes(1)
     expect(invokeMock).not.toHaveBeenCalledWith('open_in_new_window', expect.anything())
+  })
+
+  it('announces a picked .hew as opened, with its path', async () => {
+    await renderAndLoad()
+    vi.mocked(mockScene.note_document_event).mockClear()
+    openAnyMock.mockResolvedValueOnce({
+      kind: 'hew',
+      name: 'my-house.hew',
+      bytes: new Uint8Array([7, 7, 7]),
+      handle: '/tmp/my-house.hew',
+    })
+    triggerOpen()
+    expect(await screen.findByText('my-house.hew')).toBeInTheDocument()
+    expect(mockScene.note_document_event).toHaveBeenCalledWith(
+      'opened',
+      'my-house.hew',
+      '/tmp/my-house.hew',
+      undefined,
+    )
   })
 
   it('an import pick (no .hew handle) onto a non-pristine window routes through its `path` field', async () => {
@@ -490,5 +575,310 @@ describe('App — native drag-drop follows the pristine-else-new-window rule (Ta
     await new Promise((r) => setTimeout(r, 0))
     expect(mockScene.load).not.toHaveBeenCalled()
     expect(invokeMock).not.toHaveBeenCalledWith('open_in_new_window', expect.anything())
+  })
+})
+
+describe('App — the document id reaches the shell with the save (Tauri)', () => {
+  it('Save As reports the minted document id before the save is announced', async () => {
+    const id = '3f2c9107-5ed4-40a8-806b-1ec297405d83'
+    const scene = mockScene as Record<string, unknown>
+    scene.set_skp_source = vi.fn()
+    scene.commit_skp_save = vi.fn()
+    vi.mocked(mockScene.document_id).mockReturnValue(id as never)
+    invokeMock.mockImplementation(async (cmd: string) => {
+      switch (cmd) {
+        case 'get_recents':
+        case 'list_windows':
+          return []
+        case 'pick_save_target':
+          return { path: '/tmp/m.hew', format: 'hew', options: {} } as unknown as ArrayBuffer
+        case 'take_pending_recovery':
+        case 'take_pending_window_open':
+        case 'take_pending_open':
+        case 'updater_available':
+          return null
+        default:
+          return undefined
+      }
+    })
+    writeToMock.mockResolvedValue({ name: 'm.hew', format: 'hew', handle: '/tmp/m.hew' })
+    await renderAndLoad()
+    fireEvent.click(screen.getByRole('button', { name: /^file$/i }))
+    fireEvent.mouseDown(menubar().getByText('Save As…'))
+    await waitFor(() =>
+      expect(mockScene.note_document_event).toHaveBeenCalledWith('saved', 'm.hew', expect.anything(), 'hew'),
+    )
+    expect(mockScene.ensure_document_id).toHaveBeenCalled()
+    const reportCall = (invokeMock.mock.calls as unknown as [string, { id?: string } | undefined][]).findIndex(
+      ([cmd, args]) => cmd === 'set_document_id' && args?.id === id,
+    )
+    expect(reportCall).toBeGreaterThanOrEqual(0)
+    const reportOrder = invokeMock.mock.invocationCallOrder[reportCall]
+    const savedCall = vi
+      .mocked(mockScene.note_document_event)
+      .mock.calls.findIndex(([kind]) => kind === 'saved')
+    const savedOrder = vi.mocked(mockScene.note_document_event).mock.invocationCallOrder[savedCall]
+    expect(reportOrder).toBeLessThan(savedOrder)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// KB-9: a window made for an open the kernel refuses hands the error back to
+// the window that asked for it and closes itself.
+// ---------------------------------------------------------------------------
+
+describe('App — a refused open in a new window (Tauri)', () => {
+  const pending = { path: '/tmp/old.hew', as_copy: false, name: null }
+  const useHandoff = (refusedAnswer: () => Promise<boolean>) => {
+    mockScene.load.mockImplementationOnce(() => {
+      throw new Error('this file is not a Hew document')
+    })
+    invokeMock.mockImplementation(async (cmd: string) => {
+      switch (cmd) {
+        case 'take_pending_window_open':
+          return pending
+        case 'window_open_refused':
+          return refusedAnswer()
+        case 'get_recents':
+        case 'list_windows':
+          return []
+        case 'read_file':
+          return new ArrayBuffer(0)
+        case 'take_pending_recovery':
+        case 'take_pending_open':
+        case 'updater_available':
+          return null
+        default:
+          return undefined
+      }
+    })
+  }
+  // The mock's calls are typed as 1-tuples; widen so the payload (index 1) reads.
+  const refusedCall = () =>
+    invokeMock.mock.calls.find(([c]) => c === 'window_open_refused') as unknown[] | undefined
+
+  it('hands a refusal to the opener and shows no toast here when the shell closes the window', async () => {
+    useHandoff(async () => true)
+    await renderAndLoad()
+    await waitFor(() => expect(refusedCall()).toBeDefined())
+    expect(refusedCall()?.[1]).toMatchObject({
+      path: '/tmp/old.hew',
+      asCopy: false,
+      message: 'this file is not a Hew document',
+    })
+    await act(async () => {})
+    expect(screen.queryByText('this file is not a Hew document')).not.toBeInTheDocument()
+  })
+
+  it('shows the toast here when the shell says the opener is gone', async () => {
+    useHandoff(async () => false)
+    await renderAndLoad()
+    expect(await screen.findByText('this file is not a Hew document')).toBeInTheDocument()
+  })
+
+  it('shows the toast here when the command fails (older shell)', async () => {
+    useHandoff(async () => {
+      throw new Error('unknown command')
+    })
+    await renderAndLoad()
+    expect(await screen.findByText('this file is not a Hew document')).toBeInTheDocument()
+  })
+
+  it('never calls the command when the handoff open succeeds', async () => {
+    invokeMock.mockImplementation(async (cmd: string) => {
+      switch (cmd) {
+        case 'take_pending_window_open':
+          return pending
+        case 'read_file':
+          return new ArrayBuffer(0)
+        case 'get_recents':
+        case 'list_windows':
+          return []
+        case 'take_pending_recovery':
+        case 'take_pending_open':
+        case 'updater_available':
+          return null
+        default:
+          return undefined
+      }
+    })
+    await renderAndLoad()
+    await waitFor(() => expect(mockScene.load).toHaveBeenCalled())
+    await act(async () => {})
+    expect(refusedCall()).toBeUndefined()
+  })
+})
+
+// The close guard drives both a click on the window's close button and the
+// update restart, which closes every document window through it and stops
+// when one answers Cancel (updater.rs, "Restart"). Cancel must tell the shell
+// (`close_cancelled`); nothing else may, and the guard is otherwise as it
+// was: Don't Save and a clean document close the window.
+describe('App — the close guard reports Cancel to the shell (Tauri)', () => {
+  async function closeHandler(): Promise<CloseHandler> {
+    await waitFor(() => expect(closeRequestedMock).toHaveBeenCalled())
+    return closeRequestedMock.mock.calls[0][0]
+  }
+  const closeCancelledCalls = () => invokeMock.mock.calls.filter(([c]) => c === 'close_cancelled').length
+
+  it('Cancel keeps the window open and calls close_cancelled once', async () => {
+    await renderAndLoad()
+    await makeNonPristine()
+    const handler = await closeHandler()
+    const preventDefault = vi.fn()
+    let closing!: Promise<void>
+    act(() => {
+      closing = handler({ preventDefault })
+    })
+    expect(preventDefault).toHaveBeenCalled()
+    const dialog = await screen.findByRole('dialog', { name: 'Unsaved changes' })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }))
+    await act(async () => {
+      await closing
+    })
+    await waitFor(() => expect(closeCancelledCalls()).toBe(1))
+    expect(destroyMock).not.toHaveBeenCalled()
+  })
+
+  it('Don’t Save closes the window and never calls close_cancelled', async () => {
+    await renderAndLoad()
+    await makeNonPristine()
+    const handler = await closeHandler()
+    let closing!: Promise<void>
+    act(() => {
+      closing = handler({ preventDefault: () => {} })
+    })
+    const dialog = await screen.findByRole('dialog', { name: 'Unsaved changes' })
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Don’t Save' }))
+    await act(async () => {
+      await closing
+    })
+    expect(destroyMock).toHaveBeenCalledTimes(1)
+    expect(closeCancelledCalls()).toBe(0)
+  })
+
+  // An update restart can reach a window whose prompt the person already
+  // opened by hand. Replacing that prompt would answer it Cancel for them
+  // and stop the restart; the second request is dropped instead, and the
+  // person's answer to the prompt that is up settles both.
+  it('a second close request while the prompt is up changes nothing', async () => {
+    await renderAndLoad()
+    await makeNonPristine()
+    const handler = await closeHandler()
+    let first!: Promise<void>
+    act(() => {
+      first = handler({ preventDefault: () => {} })
+    })
+    const dialog = await screen.findByRole('dialog', { name: 'Unsaved changes' })
+    const secondPrevent = vi.fn()
+    await act(async () => {
+      await handler({ preventDefault: secondPrevent })
+    })
+    expect(secondPrevent).toHaveBeenCalled()
+    expect(closeCancelledCalls()).toBe(0)
+    expect(screen.getAllByRole('dialog', { name: 'Unsaved changes' })).toHaveLength(1)
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Don’t Save' }))
+    await act(async () => {
+      await first
+    })
+    expect(destroyMock).toHaveBeenCalledTimes(1)
+    expect(closeCancelledCalls()).toBe(0)
+  })
+
+  it('a clean document closes without a prompt and never calls close_cancelled', async () => {
+    await renderAndLoad()
+    const handler = await closeHandler()
+    await act(async () => {
+      await handler({ preventDefault: () => {} })
+    })
+    expect(screen.queryByRole('dialog', { name: 'Unsaved changes' })).toBeNull()
+    expect(destroyMock).toHaveBeenCalledTimes(1)
+    expect(closeCancelledCalls()).toBe(0)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// A Library item recovered after a crash is still the Library item: Save goes
+// through the Library, never as a plain document over the item's file.
+// ---------------------------------------------------------------------------
+
+describe('App — recovering a Library item file keeps it the Library item (Tauri)', () => {
+  it('Save writes through the Library and never writes a plain document over the file', async () => {
+    const itemPath = '/lib/Components/Leg.hew'
+    const scene = mockScene as Record<string, unknown>
+    scene.set_skp_source = vi.fn()
+    scene.commit_skp_save = vi.fn()
+    scene.extract_document_item = vi.fn(() => new Uint8Array([9, 9]))
+    libStoreMock.nameForPath.mockImplementation(async (p: string) => (p === itemPath ? 'Components/Leg.hew' : null))
+    libStoreMock.list.mockResolvedValue([{ fileName: 'Components/Leg.hew', size: 1, mtimeMs: 0 }])
+    readItemSummaryMock.mockResolvedValue({
+      doc_attrs: { 'hew.library': { id: 'item-1', name: 'Leg', category: 'component' } },
+      objects: 0,
+      materials: 0,
+      components: 1,
+      groups: 0,
+      material_entries: [],
+    })
+    recoveryClaimMock.mockResolvedValue({
+      bytes: new Uint8Array([1, 2, 3]),
+      source: null,
+      meta: { name: 'Leg.hew', path: itemPath, format: 'hew', savedAt: 1 },
+    })
+    invokeMock.mockImplementation(async (cmd: string) => {
+      switch (cmd) {
+        case 'take_pending_recovery':
+          return 'main'
+        case 'get_recents':
+        case 'list_windows':
+          return []
+        case 'take_pending_window_open':
+        case 'take_pending_open':
+        case 'updater_available':
+          return null
+        default:
+          return undefined
+      }
+    })
+    await renderAndLoad()
+    await waitFor(() => expect(libStoreMock.nameForPath).toHaveBeenCalledWith(itemPath))
+    await waitFor(() => expect(readItemSummaryMock).toHaveBeenCalled())
+    // The binding lands after the summary read; give React its render.
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 50))
+    })
+    fireEvent.click(screen.getByRole('button', { name: /^file$/i }))
+    fireEvent.mouseDown(menubar().getByText('Save'))
+    await waitFor(() => expect(libStoreMock.write).toHaveBeenCalledWith('Components/Leg.hew', expect.anything()))
+    expect(fileSaveMock).not.toHaveBeenCalled()
+    expect(writeToMock).not.toHaveBeenCalled()
+  })
+})
+
+describe('App — File ▸ Open of a Library item file (Tauri)', () => {
+  it('opens in place as the Library item: announces the edit and Save writes through the Library', async () => {
+    const itemPath = '/lib/Components/Leg.hew'
+    const scene = mockScene as Record<string, unknown>
+    scene.set_skp_source = vi.fn()
+    scene.commit_skp_save = vi.fn()
+    scene.extract_document_item = vi.fn(() => new Uint8Array([9, 9]))
+    libStoreMock.nameForPath.mockImplementation(async (p: string) => (p === itemPath ? 'Components/Leg.hew' : null))
+    libStoreMock.list.mockResolvedValue([{ fileName: 'Components/Leg.hew', size: 1, mtimeMs: 0 }])
+    readItemSummaryMock.mockResolvedValue({
+      doc_attrs: { 'hew.library': { id: 'item-1', name: 'Leg', category: 'component' } },
+      objects: 0,
+      materials: 0,
+      components: 1,
+      groups: 0,
+      material_entries: [],
+    })
+    await renderAndLoad()
+    openAnyMock.mockResolvedValueOnce({ kind: 'hew', name: 'Leg.hew', bytes: new Uint8Array([1, 2, 3]), handle: itemPath })
+    triggerOpen()
+    expect(await screen.findByText('Editing "Leg" from the Library. Saving updates the Library.')).toBeInTheDocument()
+    expect(invokeMock).not.toHaveBeenCalledWith('open_in_new_window', expect.anything())
+    fireEvent.click(screen.getByRole('button', { name: /^file$/i }))
+    fireEvent.mouseDown(menubar().getByText('Save'))
+    await waitFor(() => expect(libStoreMock.write).toHaveBeenCalledWith('Components/Leg.hew', expect.anything()))
+    expect(fileSaveMock).not.toHaveBeenCalled()
   })
 })

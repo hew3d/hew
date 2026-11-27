@@ -23,6 +23,8 @@ import {
 } from './LibraryDialog'
 import type { LibraryItemSummary } from '../library/types'
 import { loadListColWidths } from './library/LibraryListHead'
+import { requiresPreview } from '../test/requiresPreview'
+import { featureEnabled } from '../preview'
 
 /** Scopes a name lookup to the tile grid (`role="listbox"`). Plain
  * `screen.getByText`/`findByText` are ambiguous for whichever item is
@@ -63,15 +65,11 @@ async function awaitDefaultSelection(): Promise<void> {
   )
 }
 
-// jsdom implements neither — the dialog creates an object URL per thumbnail
-// and per texture preview, so a no-op stub keeps the load effects from
-// throwing without pretending to model real blob semantics.
-if (typeof URL.createObjectURL !== 'function') {
-  URL.createObjectURL = () => 'blob:mock'
-}
-if (typeof URL.revokeObjectURL !== 'function') {
-  URL.revokeObjectURL = () => {}
-}
+// The dialog creates an object URL per thumbnail and per texture preview. Always
+// stub, even where jsdom has the API: jsdom 30.1.3 implements createObjectURL but
+// rejects the Node Blob these tests build, so the real one throws asynchronously.
+URL.createObjectURL = () => 'blob:mock'
+URL.revokeObjectURL = () => {}
 
 /** Every dialog's Escape handler must `stopPropagation()` alongside its
  * `preventDefault()` — see `panels/dialogs.test.tsx`'s identical helper,
@@ -114,6 +112,8 @@ const fx = vi.hoisted(() => ({
   reconnectCalls: 0,
   // Forces list() itself to reject — the load-level (not per-item) failure.
   failList: false,
+  // The built-in profiles `bundledProfiles` reports (none by default).
+  builtIns: [] as { id: string; name: string }[],
 }))
 
 function bytesFor(marker: string): Uint8Array {
@@ -205,6 +205,15 @@ vi.mock('../library/nativeChrome', () => ({
   },
 }))
 
+// The built-in profiles and profile thumbnails come from the wasm kernel,
+// which these jsdom tests never load: built-ins only as `fx.builtIns` names,
+// no profile thumbnails.
+vi.mock('../library/profiles', () => ({
+  bundledProfiles: async () => fx.builtIns,
+  profileShapeOfBytes: async () => null,
+  profileThumbnailPng: async () => new Uint8Array(),
+}))
+
 vi.mock('../library/itemFiles', () => ({
   readItemSummary: async (bytes: Uint8Array) => {
     const s = fx.summaries.get(markerOf(bytes))
@@ -251,6 +260,7 @@ function summary(overrides: Partial<LibraryItemSummary> = {}): LibraryItemSummar
     first_root_name: null,
     doc_attrs: {},
     material_entries: [],
+    profile_chain_only: false,
     ...overrides,
   }
 }
@@ -329,6 +339,7 @@ beforeEach(() => {
   fx.reconnectResult = true
   fx.reconnectCalls = 0
   fx.failList = false
+  fx.builtIns = []
   gridMeasureFx.columns = 3
   localStorage.removeItem('hew.library.view')
   localStorage.removeItem('hew.library.listCols')
@@ -369,7 +380,9 @@ describe('LibraryDialog', () => {
     // All: every item = 5. Components: chair, hinge = 2. Materials: oak = 1.
     // Models: house + the errored "broken" fixture (erroredItem defaults to
     // 'model') = 2.
-    expect(counts).toEqual(['5', '2', '1', '2'])
+    // Profiles: none in this fixture library; the tab itself is a Fillet
+    // feature, so a production build has no Profiles count at all.
+    expect(counts).toEqual(featureEnabled('fillet') ? ['5', '2', '1', '2', '0'] : ['5', '2', '1', '2'])
   })
 
   it('switches category', async () => {
@@ -486,6 +499,15 @@ describe('LibraryDialog', () => {
     expect(fx.reconnectCalls).toBe(1)
     // reconnect() cleared the flag — the reload lists the items again.
     await within(grid()).findByText('Theater Chair')
+  })
+
+  it('a folder waiting for permission shows no item count, built-ins or not', async () => {
+    fx.needsReconnect = true
+    fx.builtIns = [{ id: 'builtin:ogee', name: 'Ogee' }]
+    render(<LibraryDialog {...baseProps()} />)
+    await screen.findByText(/needs permission again/i)
+    expect(screen.queryByText(/built-in/)).toBeNull()
+    expect(screen.queryByText(/\d+ items?\b/)).toBeNull()
   })
 
   it('a denied Reconnect explains itself instead of silently no-oping', async () => {
@@ -1417,6 +1439,36 @@ describe('LibraryDialog', () => {
     })
   })
 
+  // The built-in profiles are Library items: an empty folder still lists
+  // them, under All and Profiles alike, and every count agrees.
+  describe('the built-in profiles', () => {
+    it('show and count under All and Profiles even when the folder is empty', async (ctx) => {
+      requiresPreview(ctx, 'fillet')
+      fx.builtIns = [
+        { id: 'builtin:ogee', name: 'Ogee' },
+        { id: 'builtin:cove', name: 'Cove' },
+      ]
+      const { container } = render(<LibraryDialog {...baseProps()} />)
+      fireEvent.click(screen.getByRole('tab', { name: /profiles/i }))
+      await within(grid()).findByText('Ogee')
+      expect(within(grid()).getByText('Cove')).toBeInTheDocument()
+
+      const counts = Array.from(container.querySelectorAll('.hwlib__cat-count')).map((el) => el.textContent)
+      expect(counts).toEqual(['2', '0', '0', '0', '2'])
+      expect(screen.getByText(/2 items, 2 built-in/)).toBeInTheDocument()
+
+      fireEvent.click(screen.getByRole('tab', { name: ALL_TAB }))
+      await within(grid()).findByText('Ogee')
+      expect(within(grid()).getByText('Cove')).toBeInTheDocument()
+
+      // A category with nothing in it points at Save to Library, and the
+      // detail pane shows nothing the grid doesn't.
+      fireEvent.click(screen.getByRole('tab', { name: /components/i }))
+      await within(grid()).findByText(/to get started/)
+      expect(screen.queryByText('Ogee')).not.toBeInTheDocument()
+    })
+  })
+
   // --- Playtest round-3 finding #4: the "All" category ----------------------
   describe('the "All" category', () => {
     it('lists every category together, with its count summing every item', async () => {
@@ -1794,5 +1846,90 @@ describe('LibraryDialog', () => {
       expect(screen.getByText(/from workshop-project\.hew/i)).toBeInTheDocument()
       expect(screen.getByRole('button', { name: /remove source info/i })).toBeInTheDocument()
     })
+  })
+})
+
+describe('LibraryDialog: status and Edit', () => {
+  beforeEach(() => {
+    seedDefault()
+    fx.builtIns = []
+  })
+
+  async function ready(props: Partial<LibraryDialogProps>) {
+    render(<LibraryDialog {...baseProps(props)} />)
+    await within(grid()).findByText('Theater Chair')
+    await awaitDefaultSelection()
+    await within(grid()).findByText('Door Hinge')
+    fireEvent.click(within(grid()).getByText('Theater Chair'))
+  }
+
+  const LINES: Array<[import('../library/libraryUpdates').MarkedState, string]> = [
+    ['library_newer', 'A newer version of this part is in the Library.'],
+    ['edited_here', 'You changed this part here. The Library still has the older version.'],
+    ['both_changed', 'This part changed here and in the Library.'],
+    ['different', 'This part differs from the Library, and Hew can’t tell which one is newer.'],
+  ]
+
+  for (const [state, line] of LINES) {
+    it(`shows the ${state} line in the detail pane and a mark on the tile`, async () => {
+      await ready({ linkStates: { 'src-chair': state } })
+      const pane = await screen.findByTestId('library-item-state')
+      expect(pane).toHaveAttribute('data-state', state)
+      expect(within(pane).getByText(line)).toBeInTheDocument()
+      expect(within(grid()).getAllByTestId('library-mark')).toHaveLength(1)
+    })
+  }
+
+  it('edited here has no Review button and says how to put the change in the Library', async () => {
+    await ready({ linkStates: { 'src-chair': 'edited_here' }, onReviewUpdates: vi.fn() })
+    const pane = await screen.findByTestId('library-item-state')
+    expect(within(pane).queryByRole('button')).toBeNull()
+    expect(within(pane).getByText(/select the part and choose Save to Library/)).toBeInTheDocument()
+  })
+
+  it('Review calls the callback for the other states', async () => {
+    const onReviewUpdates = vi.fn()
+    await ready({ linkStates: { 'src-chair': 'library_newer' }, onReviewUpdates })
+    fireEvent.click(within(await screen.findByTestId('library-item-state')).getByRole('button', { name: /review/i }))
+    expect(onReviewUpdates).toHaveBeenCalledOnce()
+  })
+
+  it('an item that is in step shows no line and no mark', async () => {
+    await ready({ linkStates: {} })
+    expect(screen.queryByTestId('library-item-state')).toBeNull()
+    expect(screen.queryByTestId('library-mark')).toBeNull()
+  })
+
+  it('Edit is offered for a component and a model, and calls back with the item', async () => {
+    const onEdit = vi.fn()
+    await ready({ onEdit })
+    fireEvent.click(screen.getByTestId('library-edit'))
+    expect(onEdit).toHaveBeenCalledOnce()
+    expect(onEdit.mock.calls[0]![0].displayName).toBe('Theater Chair')
+    fireEvent.click(screen.getByRole('tab', { name: ALL_TAB }))
+    fireEvent.click(await within(grid()).findByText('Little House'))
+    expect(screen.getByTestId('library-edit')).toBeInTheDocument()
+  })
+
+  it('Edit is not offered for a material or an unreadable item', async () => {
+    await ready({ onEdit: vi.fn() })
+    fireEvent.click(screen.getByRole('tab', { name: ALL_TAB }))
+    for (const name of ['Oak', 'broken']) {
+      fireEvent.click(await within(grid()).findByText(name))
+      expect(screen.queryByTestId('library-edit')).toBeNull()
+    }
+  })
+
+  it('Edit is not offered for a profile or a built-in', async (ctx) => {
+    requiresPreview(ctx, 'fillet')
+    fx.files.set('round.hew', bytesFor('round'))
+    fx.summaries.set('round', summary({ doc_attrs: { 'hew.library': { id: 'src-round', name: 'Round Edge', category: 'profile' } }, profile_chain_only: true }))
+    fx.builtIns = [{ id: 'builtin:chamfer', name: 'Chamfer' }]
+    await ready({ onEdit: vi.fn() })
+    fireEvent.click(screen.getByRole('tab', { name: ALL_TAB }))
+    for (const name of ['Round Edge', 'Chamfer']) {
+      fireEvent.click(await within(grid()).findByText(name))
+      expect(screen.queryByTestId('library-edit')).toBeNull()
+    }
   })
 })

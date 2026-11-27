@@ -1,0 +1,651 @@
+# The curves scoreboard. Written by scripts/scoreboard.sh; do not edit.
+# 647 cases: 438 correct, 169 limit, 40 generic, 0 wrong.
+# Open: 8 refused or wrong at a size that must build; 123 limits where nothing larger can exist.
+model	case	size	expect	class	detail
+box	one-edge-round	0.1mm	fits	correct	
+box	one-edge-round	1mm	fits	correct	
+box	one-edge-round	5mm	fits	correct	
+box	one-edge-round	20mm	fits	correct	
+box	one-edge-round	39mm	fits	correct	
+box	one-edge-round	45mm	over	limit	radius_too_large max=40mm by=neighbor_edge
+box	one-edge-round	70mm	over	limit	radius_too_large max=40mm by=neighbor_edge
+box	one-edge-chamfer	0.1mm	fits	correct	
+box	one-edge-chamfer	1mm	fits	correct	
+box	one-edge-chamfer	5mm	fits	correct	
+box	one-edge-chamfer	20mm	fits	correct	
+box	one-edge-chamfer	39mm	fits	correct	
+box	one-edge-chamfer	45mm	over	limit	radius_too_large max=40mm by=other_geometry
+box	one-edge-chamfer	70mm	over	limit	radius_too_large max=40mm by=other_geometry
+box	top-loop-round	0.1mm	fits	correct	
+box	top-loop-round	1mm	fits	correct	
+box	top-loop-round	5mm	fits	correct	
+box	top-loop-round	20mm	fits	correct	
+box	top-loop-round	29mm	fits	correct	
+box	top-loop-round	35mm	over	limit	radius_too_large max=30mm by=short_edge
+box	top-loop-chamfer	0.1mm	fits	correct	
+box	top-loop-chamfer	1mm	fits	correct	
+box	top-loop-chamfer	5mm	fits	correct	
+box	top-loop-chamfer	20mm	fits	correct	
+box	top-loop-chamfer	29mm	fits	correct	
+box	top-loop-chamfer	35mm	over	limit	radius_too_large max=30mm by=short_edge
+box	all-edges-round	0.1mm	fits	correct	
+box	all-edges-round	1mm	fits	correct	
+box	all-edges-round	5mm	fits	correct	
+box	all-edges-round	10mm	fits	correct	
+box	all-edges-round	19mm	fits	correct	
+box	all-edges-round	25mm	over	limit	radius_too_large max=20mm by=short_edge
+box	all-edges-chamfer	0.1mm	fits	correct	
+box	all-edges-chamfer	1mm	fits	correct	
+box	all-edges-chamfer	5mm	fits	correct	
+box	all-edges-chamfer	10mm	fits	correct	
+box	all-edges-chamfer	19mm	fits	correct	
+box	all-edges-chamfer	25mm	over	limit	radius_too_large max=20mm by=short_edge
+caps-opposite-cylinder	cyl-top12-then-bottom-round	0.1mm	fits	correct	
+caps-opposite-cylinder	cyl-top12-then-bottom-round	1mm	fits	correct	
+caps-opposite-cylinder	cyl-top12-then-bottom-round	5mm	fits	correct	
+caps-opposite-cylinder	cyl-top12-then-bottom-round	10mm	fits	correct	
+caps-opposite-cylinder	cyl-top12-then-bottom-round	15mm	fits	correct	
+caps-opposite-cylinder	cyl-top12-then-bottom-round	17mm	fits	correct	
+caps-opposite-cylinder	cyl-top12-then-bottom-round	18mm		limit	radius_too_large max=18mm by=neighbor_edge
+caps-opposite-cylinder	cyl-top12-then-bottom-round	19mm	over	limit	radius_too_large max=18mm by=neighbor_edge
+caps-opposite-cylinder	cyl-top12-then-bottom-round	22mm	over	limit	radius_too_large max=18mm by=neighbor_edge
+caps-opposite-cylinder	cyl-bottom12-then-top-round	0.1mm	fits	correct	
+caps-opposite-cylinder	cyl-bottom12-then-top-round	1mm	fits	correct	
+caps-opposite-cylinder	cyl-bottom12-then-top-round	5mm	fits	correct	
+caps-opposite-cylinder	cyl-bottom12-then-top-round	10mm	fits	correct	
+caps-opposite-cylinder	cyl-bottom12-then-top-round	15mm	fits	correct	
+caps-opposite-cylinder	cyl-bottom12-then-top-round	17mm	fits	correct	
+caps-opposite-cylinder	cyl-bottom12-then-top-round	18mm		limit	radius_too_large max=18mm by=neighbor_edge
+caps-opposite-cylinder	cyl-bottom12-then-top-round	19mm	over	limit	radius_too_large max=18mm by=neighbor_edge
+caps-opposite-cylinder	cyl-bottom12-then-top-round	22mm	over	limit	radius_too_large max=18mm by=neighbor_edge
+caps-opposite-cylinder	cyl-top12-then-bottom-chamfer	0.1mm	fits	correct	
+caps-opposite-cylinder	cyl-top12-then-bottom-chamfer	1mm	fits	correct	
+caps-opposite-cylinder	cyl-top12-then-bottom-chamfer	5mm	fits	correct	
+caps-opposite-cylinder	cyl-top12-then-bottom-chamfer	10mm	fits	correct	
+caps-opposite-cylinder	cyl-top12-then-bottom-chamfer	15mm	fits	correct	
+caps-opposite-cylinder	cyl-top12-then-bottom-chamfer	17mm	fits	correct	
+caps-opposite-cylinder	cyl-top12-then-bottom-chamfer	18mm		limit	radius_too_large max=18mm by=other_geometry
+caps-opposite-cylinder	cyl-top12-then-bottom-chamfer	19mm	over	limit	radius_too_large max=18mm by=neighbor_edge
+caps-opposite-cylinder	cyl-top12-then-bottom-chamfer	22mm	over	limit	radius_too_large max=18mm by=other_geometry
+caps-opposite-cylinder	cyl-bottom12-then-top-chamfer	0.1mm	fits	correct	
+caps-opposite-cylinder	cyl-bottom12-then-top-chamfer	1mm	fits	correct	
+caps-opposite-cylinder	cyl-bottom12-then-top-chamfer	5mm	fits	correct	
+caps-opposite-cylinder	cyl-bottom12-then-top-chamfer	10mm	fits	correct	
+caps-opposite-cylinder	cyl-bottom12-then-top-chamfer	15mm	fits	correct	
+caps-opposite-cylinder	cyl-bottom12-then-top-chamfer	17mm	fits	correct	
+caps-opposite-cylinder	cyl-bottom12-then-top-chamfer	18mm		limit	radius_too_large max=18mm by=other_geometry
+caps-opposite-cylinder	cyl-bottom12-then-top-chamfer	19mm	over	limit	radius_too_large max=18mm by=neighbor_edge
+caps-opposite-cylinder	cyl-bottom12-then-top-chamfer	22mm	over	limit	radius_too_large max=18mm by=other_geometry
+caps-opposite-cylinder	cyl-top18-then-bottom-round	0.1mm	fits	correct	
+caps-opposite-cylinder	cyl-top18-then-bottom-round	1mm	fits	correct	
+caps-opposite-cylinder	cyl-top18-then-bottom-round	5mm	fits	correct	
+caps-opposite-cylinder	cyl-top18-then-bottom-round	10mm	fits	correct	
+caps-opposite-cylinder	cyl-top18-then-bottom-round	11mm	fits	correct	
+caps-opposite-cylinder	cyl-top18-then-bottom-round	12mm		limit	radius_too_large max=12mm by=neighbor_edge
+caps-opposite-cylinder	cyl-top18-then-bottom-round	13mm	over	limit	radius_too_large max=12mm by=neighbor_edge
+caps-opposite-cylinder	cyl-top18-then-bottom-round	20mm	over	limit	radius_too_large max=12mm by=neighbor_edge
+caps-opposite-cylinder	cyl-bottom18-then-top-round	0.1mm	fits	correct	
+caps-opposite-cylinder	cyl-bottom18-then-top-round	1mm	fits	correct	
+caps-opposite-cylinder	cyl-bottom18-then-top-round	5mm	fits	correct	
+caps-opposite-cylinder	cyl-bottom18-then-top-round	10mm	fits	correct	
+caps-opposite-cylinder	cyl-bottom18-then-top-round	11mm	fits	correct	
+caps-opposite-cylinder	cyl-bottom18-then-top-round	12mm		limit	radius_too_large max=12mm by=neighbor_edge
+caps-opposite-cylinder	cyl-bottom18-then-top-round	13mm	over	limit	radius_too_large max=12mm by=neighbor_edge
+caps-opposite-cylinder	cyl-bottom18-then-top-round	20mm	over	limit	radius_too_large max=12mm by=neighbor_edge
+caps-opposite-hexagon	hex-top10-then-bottom-round	0.1mm	fits	correct	
+caps-opposite-hexagon	hex-top10-then-bottom-round	1mm	fits	correct	
+caps-opposite-hexagon	hex-top10-then-bottom-round	5mm	fits	correct	
+caps-opposite-hexagon	hex-top10-then-bottom-round	10mm	fits	correct	
+caps-opposite-hexagon	hex-top10-then-bottom-round	14mm	fits	correct	
+caps-opposite-hexagon	hex-top10-then-bottom-round	15mm		limit	radius_too_large max=15mm by=neighbor_edge
+caps-opposite-hexagon	hex-top10-then-bottom-round	16mm	over	limit	radius_too_large max=15mm by=neighbor_edge
+caps-opposite-hexagon	hex-top10-then-bottom-round	20mm	over	limit	radius_too_large max=15mm by=neighbor_edge
+caps-opposite-hexagon	hex-bottom10-then-top-round	0.1mm	fits	correct	
+caps-opposite-hexagon	hex-bottom10-then-top-round	1mm	fits	correct	
+caps-opposite-hexagon	hex-bottom10-then-top-round	5mm	fits	correct	
+caps-opposite-hexagon	hex-bottom10-then-top-round	10mm	fits	correct	
+caps-opposite-hexagon	hex-bottom10-then-top-round	14mm	fits	correct	
+caps-opposite-hexagon	hex-bottom10-then-top-round	15mm		limit	radius_too_large max=15mm by=neighbor_edge
+caps-opposite-hexagon	hex-bottom10-then-top-round	16mm	over	limit	radius_too_large max=15mm by=neighbor_edge
+caps-opposite-hexagon	hex-bottom10-then-top-round	20mm	over	limit	radius_too_large max=15mm by=neighbor_edge
+caps-opposite-hexagon	hex-top10-then-bottom-chamfer	0.1mm	fits	correct	
+caps-opposite-hexagon	hex-top10-then-bottom-chamfer	1mm	fits	correct	
+caps-opposite-hexagon	hex-top10-then-bottom-chamfer	5mm	fits	correct	
+caps-opposite-hexagon	hex-top10-then-bottom-chamfer	10mm	fits	correct	
+caps-opposite-hexagon	hex-top10-then-bottom-chamfer	14mm	fits	correct	
+caps-opposite-hexagon	hex-top10-then-bottom-chamfer	15mm		limit	radius_too_large max=15mm by=neighbor_edge
+caps-opposite-hexagon	hex-top10-then-bottom-chamfer	16mm	over	limit	radius_too_large max=15mm by=neighbor_edge
+caps-opposite-hexagon	hex-top10-then-bottom-chamfer	20mm	over	limit	radius_too_large max=15mm by=neighbor_edge
+caps-opposite-hexagon	hex-bottom10-then-top-chamfer	0.1mm	fits	correct	
+caps-opposite-hexagon	hex-bottom10-then-top-chamfer	1mm	fits	correct	
+caps-opposite-hexagon	hex-bottom10-then-top-chamfer	5mm	fits	correct	
+caps-opposite-hexagon	hex-bottom10-then-top-chamfer	10mm	fits	correct	
+caps-opposite-hexagon	hex-bottom10-then-top-chamfer	14mm	fits	correct	
+caps-opposite-hexagon	hex-bottom10-then-top-chamfer	15mm		limit	radius_too_large max=15mm by=neighbor_edge
+caps-opposite-hexagon	hex-bottom10-then-top-chamfer	16mm	over	limit	radius_too_large max=15mm by=neighbor_edge
+caps-opposite-hexagon	hex-bottom10-then-top-chamfer	20mm	over	limit	radius_too_large max=15mm by=neighbor_edge
+caps-opposite-hexagon	hex-top20-then-bottom-round	0.1mm	fits	correct	
+caps-opposite-hexagon	hex-top20-then-bottom-round	1mm	fits	correct	
+caps-opposite-hexagon	hex-top20-then-bottom-round	3mm	fits	correct	
+caps-opposite-hexagon	hex-top20-then-bottom-round	4mm	fits	correct	
+caps-opposite-hexagon	hex-top20-then-bottom-round	5mm		limit	radius_too_large max=5mm by=neighbor_edge
+caps-opposite-hexagon	hex-top20-then-bottom-round	6mm	over	limit	radius_too_large max=5mm by=neighbor_edge
+caps-opposite-hexagon	hex-top20-then-bottom-round	10mm	over	limit	radius_too_large max=5mm by=neighbor_edge
+caps-opposite-hexagon	hex-bottom20-then-top-round	0.1mm	fits	correct	
+caps-opposite-hexagon	hex-bottom20-then-top-round	1mm	fits	correct	
+caps-opposite-hexagon	hex-bottom20-then-top-round	3mm	fits	correct	
+caps-opposite-hexagon	hex-bottom20-then-top-round	4mm	fits	correct	
+caps-opposite-hexagon	hex-bottom20-then-top-round	5mm		limit	radius_too_large max=5mm by=neighbor_edge
+caps-opposite-hexagon	hex-bottom20-then-top-round	6mm	over	limit	radius_too_large max=5mm by=neighbor_edge
+caps-opposite-hexagon	hex-bottom20-then-top-round	10mm	over	limit	radius_too_large max=5mm by=neighbor_edge
+cylinder-024	top-rim-round	0.1mm	fits	correct	
+cylinder-024	top-rim-round	1mm	fits	correct	
+cylinder-024	top-rim-round	5mm	fits	correct	
+cylinder-024	top-rim-round	10mm	fits	correct	
+cylinder-024	top-rim-round	15mm	fits	correct	
+cylinder-024	top-rim-round	17mm	fits	correct	
+cylinder-024	top-rim-round	19mm		correct	
+cylinder-024	top-rim-round	20mm		correct	
+cylinder-024	top-rim-round	22mm	over	limit	radius_too_large max=20mm by=rim_radius
+cylinder-024	top-rim-chamfer	0.1mm	fits	correct	
+cylinder-024	top-rim-chamfer	1mm	fits	correct	
+cylinder-024	top-rim-chamfer	5mm	fits	correct	
+cylinder-024	top-rim-chamfer	10mm	fits	correct	
+cylinder-024	top-rim-chamfer	15mm	fits	correct	
+cylinder-024	top-rim-chamfer	17mm	fits	correct	
+cylinder-024	top-rim-chamfer	19mm		correct	
+cylinder-024	top-rim-chamfer	20mm		limit	radius_too_large max=20mm by=other_geometry
+cylinder-024	top-rim-chamfer	22mm	over	limit	radius_too_large max=20mm by=other_geometry
+cylinder-032	top-rim-round	0.1mm	fits	correct	
+cylinder-032	top-rim-round	1mm	fits	correct	
+cylinder-032	top-rim-round	5mm	fits	correct	
+cylinder-032	top-rim-round	10mm	fits	correct	
+cylinder-032	top-rim-round	15mm	fits	correct	
+cylinder-032	top-rim-round	17mm	fits	correct	
+cylinder-032	top-rim-round	19mm		correct	
+cylinder-032	top-rim-round	20mm		correct	
+cylinder-032	top-rim-round	22mm	over	limit	radius_too_large max=20mm by=rim_radius
+cylinder-032	top-rim-chamfer	0.1mm	fits	correct	
+cylinder-032	top-rim-chamfer	1mm	fits	correct	
+cylinder-032	top-rim-chamfer	5mm	fits	correct	
+cylinder-032	top-rim-chamfer	10mm	fits	correct	
+cylinder-032	top-rim-chamfer	15mm	fits	correct	
+cylinder-032	top-rim-chamfer	17mm	fits	correct	
+cylinder-032	top-rim-chamfer	19mm		correct	
+cylinder-032	top-rim-chamfer	20mm		limit	radius_too_large max=20mm by=other_geometry
+cylinder-032	top-rim-chamfer	22mm	over	limit	radius_too_large max=20mm by=other_geometry
+cylinder-048	top-rim-round	0.1mm	fits	correct	
+cylinder-048	top-rim-round	1mm	fits	correct	
+cylinder-048	top-rim-round	5mm	fits	correct	
+cylinder-048	top-rim-round	10mm	fits	correct	
+cylinder-048	top-rim-round	15mm	fits	correct	
+cylinder-048	top-rim-round	17mm	fits	correct	
+cylinder-048	top-rim-round	19mm		correct	
+cylinder-048	top-rim-round	20mm		correct	
+cylinder-048	top-rim-round	22mm	over	limit	radius_too_large max=20mm by=rim_radius
+cylinder-048	top-rim-chamfer	0.1mm	fits	correct	
+cylinder-048	top-rim-chamfer	1mm	fits	correct	
+cylinder-048	top-rim-chamfer	5mm	fits	correct	
+cylinder-048	top-rim-chamfer	10mm	fits	correct	
+cylinder-048	top-rim-chamfer	15mm	fits	correct	
+cylinder-048	top-rim-chamfer	17mm	fits	correct	
+cylinder-048	top-rim-chamfer	19mm		correct	
+cylinder-048	top-rim-chamfer	20mm		limit	radius_too_large max=20mm by=other_geometry
+cylinder-048	top-rim-chamfer	22mm	over	limit	radius_too_large max=20mm by=other_geometry
+cylinder-064	top-rim-round	0.1mm	fits	correct	
+cylinder-064	top-rim-round	1mm	fits	correct	
+cylinder-064	top-rim-round	5mm	fits	correct	
+cylinder-064	top-rim-round	10mm	fits	correct	
+cylinder-064	top-rim-round	15mm	fits	correct	
+cylinder-064	top-rim-round	17mm	fits	correct	
+cylinder-064	top-rim-round	19mm		correct	
+cylinder-064	top-rim-round	20mm		correct	
+cylinder-064	top-rim-round	22mm	over	limit	radius_too_large max=20mm by=rim_radius
+cylinder-064	top-rim-chamfer	0.1mm	fits	correct	
+cylinder-064	top-rim-chamfer	1mm	fits	correct	
+cylinder-064	top-rim-chamfer	5mm	fits	correct	
+cylinder-064	top-rim-chamfer	10mm	fits	correct	
+cylinder-064	top-rim-chamfer	15mm	fits	correct	
+cylinder-064	top-rim-chamfer	17mm	fits	correct	
+cylinder-064	top-rim-chamfer	19mm		correct	
+cylinder-064	top-rim-chamfer	20mm		limit	radius_too_large max=20mm by=other_geometry
+cylinder-064	top-rim-chamfer	22mm	over	limit	radius_too_large max=20mm by=other_geometry
+cylinder-128	top-rim-round	0.1mm	fits	correct	
+cylinder-128	top-rim-round	1mm	fits	correct	
+cylinder-128	top-rim-round	5mm	fits	correct	
+cylinder-128	top-rim-round	10mm	fits	correct	
+cylinder-128	top-rim-round	15mm	fits	correct	
+cylinder-128	top-rim-round	17mm	fits	correct	
+cylinder-128	top-rim-round	19mm		correct	
+cylinder-128	top-rim-round	20mm		correct	
+cylinder-128	top-rim-round	22mm	over	limit	radius_too_large max=20mm by=rim_radius
+cylinder-128	top-rim-chamfer	0.1mm	fits	correct	
+cylinder-128	top-rim-chamfer	1mm	fits	correct	
+cylinder-128	top-rim-chamfer	5mm	fits	correct	
+cylinder-128	top-rim-chamfer	10mm	fits	correct	
+cylinder-128	top-rim-chamfer	15mm	fits	correct	
+cylinder-128	top-rim-chamfer	17mm	fits	correct	
+cylinder-128	top-rim-chamfer	19mm		correct	
+cylinder-128	top-rim-chamfer	20mm		limit	radius_too_large max=20mm by=other_geometry
+cylinder-128	top-rim-chamfer	22mm	over	limit	radius_too_large max=20mm by=other_geometry
+cylinder-256	top-rim-round	0.1mm	fits	correct	
+cylinder-256	top-rim-round	1mm	fits	correct	
+cylinder-256	top-rim-round	5mm	fits	correct	
+cylinder-256	top-rim-round	10mm	fits	correct	
+cylinder-256	top-rim-round	15mm	fits	correct	
+cylinder-256	top-rim-round	17mm	fits	correct	
+cylinder-256	top-rim-round	19mm		correct	
+cylinder-256	top-rim-round	20mm		correct	
+cylinder-256	top-rim-round	22mm	over	limit	radius_too_large max=20mm by=rim_radius
+cylinder-256	top-rim-chamfer	0.1mm	fits	correct	
+cylinder-256	top-rim-chamfer	1mm	fits	correct	
+cylinder-256	top-rim-chamfer	5mm	fits	correct	
+cylinder-256	top-rim-chamfer	10mm	fits	correct	
+cylinder-256	top-rim-chamfer	15mm	fits	correct	
+cylinder-256	top-rim-chamfer	17mm	fits	correct	
+cylinder-256	top-rim-chamfer	19mm		correct	
+cylinder-256	top-rim-chamfer	20mm		limit	radius_too_large max=20mm by=other_geometry
+cylinder-256	top-rim-chamfer	22mm	over	limit	radius_too_large max=20mm by=other_geometry
+cylinder-imperial	top-rim-round	0.1mm	fits	correct	
+cylinder-imperial	top-rim-round	1/16in	fits	correct	
+cylinder-imperial	top-rim-round	1/8in	fits	correct	
+cylinder-imperial	top-rim-round	1/4in	fits	correct	
+cylinder-imperial	top-rim-round	3/8in	fits	correct	
+cylinder-imperial	top-rim-round	1/2in	fits	correct	
+cylinder-imperial	top-rim-round	3/4in	fits	correct	
+cylinder-imperial	top-rim-round	5/4in	over	limit	radius_too_large max=25.4mm by=neighbor_edge
+cylinder-imperial	bottom-rim-round	0.1mm	fits	correct	
+cylinder-imperial	bottom-rim-round	1/16in	fits	correct	
+cylinder-imperial	bottom-rim-round	1/8in	fits	correct	
+cylinder-imperial	bottom-rim-round	1/4in	fits	correct	
+cylinder-imperial	bottom-rim-round	3/8in	fits	correct	
+cylinder-imperial	bottom-rim-round	1/2in	fits	correct	
+cylinder-imperial	bottom-rim-round	3/4in	fits	correct	
+cylinder-imperial	bottom-rim-round	5/4in	over	limit	radius_too_large max=25.4mm by=neighbor_edge
+cylinder-imperial	top-rim-chamfer	0.1mm	fits	correct	
+cylinder-imperial	top-rim-chamfer	1/16in	fits	correct	
+cylinder-imperial	top-rim-chamfer	1/8in	fits	correct	
+cylinder-imperial	top-rim-chamfer	1/4in	fits	correct	
+cylinder-imperial	top-rim-chamfer	3/8in	fits	correct	
+cylinder-imperial	top-rim-chamfer	1/2in	fits	correct	
+cylinder-imperial	top-rim-chamfer	3/4in	fits	correct	
+cylinder-imperial	top-rim-chamfer	5/4in	over	limit	radius_too_large max=25.4mm by=other_geometry
+cylinder-imperial	bottom-rim-chamfer	0.1mm	fits	correct	
+cylinder-imperial	bottom-rim-chamfer	1/16in	fits	correct	
+cylinder-imperial	bottom-rim-chamfer	1/8in	fits	correct	
+cylinder-imperial	bottom-rim-chamfer	1/4in	fits	correct	
+cylinder-imperial	bottom-rim-chamfer	3/8in	fits	correct	
+cylinder-imperial	bottom-rim-chamfer	1/2in	fits	correct	
+cylinder-imperial	bottom-rim-chamfer	3/4in	fits	correct	
+cylinder-imperial	bottom-rim-chamfer	5/4in	over	limit	radius_too_large max=25.4mm by=other_geometry
+faceted-plinth-seam	seam-loop-round	0.1mm	fits	correct	
+faceted-plinth-seam	seam-loop-round	0.3mm	fits	correct	
+faceted-plinth-seam	seam-loop-round	0.5mm	fits	correct	
+faceted-plinth-seam	seam-loop-round	1mm	fits	correct	
+faceted-plinth-seam	seam-loop-round	1.2mm	fits	correct	
+faceted-plinth-seam	seam-loop-round	1.5mm	fits	correct	
+faceted-plinth-seam	seam-loop-round	1.7mm	fits	correct	
+faceted-plinth-seam	seam-loop-round	1.72mm	fits	correct	
+faceted-plinth-seam	seam-loop-round	1.75mm	fits	correct	
+faceted-plinth-seam	seam-loop-round	1.79mm	fits	correct	
+faceted-plinth-seam	seam-loop-round	2.5mm	over	limit	radius_too_large max=1.8mm by=adjacent_face
+faceted-plinth-seam	seam-click-round	0.5mm		correct	
+faceted-plinth-seam	seam-click-round	1mm		correct	
+grooved-knob	one-groove-top-rim-round	0.1mm	fits	generic	unsupported_vertex at=(19.6, -1.67, 25)mm
+grooved-knob	one-groove-top-rim-round	1mm	fits	generic	unsupported_vertex at=(19.6, -1.67, 25)mm
+grooved-knob	one-groove-top-rim-round	2mm	fits	generic	unsupported_vertex at=(19.6, -1.67, 25)mm
+grooved-knob	one-groove-top-rim-round	3mm	fits	generic	unsupported_vertex at=(19.6, -1.67, 25)mm
+grooved-knob	one-groove-top-rim-round	4mm	fits	generic	unsupported_vertex at=(19.6, -1.67, 25)mm
+grooved-knob	one-groove-top-rim-round	6mm		generic	unsupported_vertex at=(19.6, -1.67, 25)mm
+grooved-knob	one-groove-top-rim-round	10mm		generic	unsupported_vertex at=(19.6, -1.67, 25)mm
+grooved-knob	one-groove-top-rim-round	26mm	over	generic	unsupported_vertex at=(19.6, -1.67, 25)mm
+grooved-knob	one-groove-top-rim-chamfer	0.1mm	fits	correct	
+grooved-knob	one-groove-top-rim-chamfer	1mm	fits	correct	
+grooved-knob	one-groove-top-rim-chamfer	2mm	fits	correct	
+grooved-knob	one-groove-top-rim-chamfer	3mm	fits	correct	
+grooved-knob	one-groove-top-rim-chamfer	4mm	fits	correct	
+grooved-knob	one-groove-top-rim-chamfer	6mm		correct	
+grooved-knob	one-groove-top-rim-chamfer	10mm		generic	unsupported_vertex at=(19.6, -1.67, 25)mm
+grooved-knob	one-groove-top-rim-chamfer	26mm	over	generic	unsupported_vertex at=(19.6, -1.67, 25)mm
+grooved-knob	every-groove-top-rim-round	0.1mm	fits	generic	unsupported_vertex at=(19.6, -1.67, 25)mm
+grooved-knob	every-groove-top-rim-round	1mm	fits	generic	unsupported_vertex at=(19.6, -1.67, 25)mm
+grooved-knob	every-groove-top-rim-round	2mm	fits	generic	unsupported_vertex at=(19.6, -1.67, 25)mm
+grooved-knob	every-groove-top-rim-round	3mm		generic	unsupported_vertex at=(19.6, -1.67, 25)mm
+grooved-knob	every-groove-top-rim-round	4mm		generic	unsupported_vertex at=(19.6, -1.67, 25)mm
+grooved-knob	every-groove-top-rim-round	6mm		generic	unsupported_vertex at=(19.6, -1.67, 25)mm
+grooved-knob	every-groove-top-rim-round	10mm		generic	unsupported_vertex at=(19.6, -1.67, 25)mm
+grooved-knob	every-groove-top-rim-round	26mm	over	generic	unsupported_vertex at=(19.6, -1.67, 25)mm
+grooved-knob	every-groove-top-rim-chamfer	0.1mm	fits	correct	
+grooved-knob	every-groove-top-rim-chamfer	1mm	fits	correct	
+grooved-knob	every-groove-top-rim-chamfer	2mm	fits	correct	
+grooved-knob	every-groove-top-rim-chamfer	3mm		generic	unsupported_vertex at=(19.6, -1.67, 25)mm
+grooved-knob	every-groove-top-rim-chamfer	4mm		generic	unsupported_vertex at=(19.6, -1.67, 25)mm
+grooved-knob	every-groove-top-rim-chamfer	6mm		generic	unsupported_vertex at=(19.6, -1.67, 25)mm
+grooved-knob	every-groove-top-rim-chamfer	10mm		generic	unsupported_vertex at=(19.6, -1.67, 25)mm
+grooved-knob	every-groove-top-rim-chamfer	26mm	over	generic	unsupported_vertex at=(19.6, -1.67, 25)mm
+grooved-knob	one-groove-vertical-edge-round	0.1mm		generic	unsupported_vertex at=(19.8, -1.68, 0)mm
+grooved-knob	one-groove-vertical-edge-round	1mm		generic	unsupported_vertex at=(19.8, -1.68, 0)mm
+grooved-knob	one-groove-vertical-edge-round	2mm		generic	unsupported_vertex at=(19.8, -1.68, 0)mm
+grooved-knob	one-groove-vertical-edge-round	3mm		generic	unsupported_vertex at=(19.8, -1.68, 0)mm
+grooved-knob	one-groove-vertical-edge-round	4mm		generic	unsupported_vertex at=(19.8, -1.68, 0)mm
+grooved-knob	one-groove-vertical-edge-round	6mm		generic	unsupported_vertex at=(19.8, -1.68, 0)mm
+grooved-knob	one-groove-vertical-edge-round	10mm		generic	unsupported_vertex at=(19.8, -1.68, 0)mm
+grooved-knob	one-groove-vertical-edge-round	26mm		generic	unsupported_vertex at=(19.8, -1.68, 0)mm
+grooved-knob	outer-top-rim-round	0.1mm		generic	unsupported_vertex at=(-19.8, 1.68, 25)mm
+grooved-knob	outer-top-rim-round	1mm		generic	unsupported_vertex at=(-19.8, 1.68, 25)mm
+grooved-knob	outer-top-rim-round	2mm		generic	unsupported_vertex at=(-19.8, 1.68, 25)mm
+grooved-knob	outer-top-rim-round	3mm		generic	unsupported_vertex at=(-19.8, 1.68, 25)mm
+grooved-knob	outer-top-rim-round	4mm		generic	unsupported_vertex at=(-19.8, 1.68, 25)mm
+grooved-knob	outer-top-rim-round	6mm		generic	unsupported_vertex at=(-19.8, 1.68, 25)mm
+grooved-knob	outer-top-rim-round	10mm		generic	unsupported_vertex at=(-19.8, 1.68, 25)mm
+grooved-knob	outer-top-rim-round	26mm	over	generic	unsupported_vertex at=(-19.8, 1.68, 25)mm
+grooved-knob	outer-top-rim-chamfer	0.1mm		correct	
+grooved-knob	outer-top-rim-chamfer	1mm		limit	radius_too_large max=0.221mm by=facet_width
+grooved-knob	outer-top-rim-chamfer	2mm		limit	radius_too_large max=0.221mm by=facet_width
+grooved-knob	outer-top-rim-chamfer	3mm		limit	radius_too_large max=0.221mm by=facet_width
+grooved-knob	outer-top-rim-chamfer	4mm		limit	radius_too_large max=0.221mm by=facet_width
+grooved-knob	outer-top-rim-chamfer	6mm		limit	radius_too_large max=0.221mm by=facet_width
+grooved-knob	outer-top-rim-chamfer	10mm		limit	radius_too_large max=0.221mm by=facet_width
+grooved-knob	outer-top-rim-chamfer	26mm	over	limit	radius_too_large max=0.221mm by=facet_width
+prism-08-sides	top-rim-round	0.1mm	fits	correct	
+prism-08-sides	top-rim-round	1mm	fits	correct	
+prism-08-sides	top-rim-round	5mm	fits	correct	
+prism-08-sides	top-rim-round	10mm	fits	correct	
+prism-08-sides	top-rim-round	15mm	fits	correct	
+prism-08-sides	top-rim-round	17mm	fits	correct	
+prism-08-sides	top-rim-round	19mm	over	limit	radius_too_large max=18.5mm by=short_edge
+prism-08-sides	top-rim-round	20mm	over	limit	radius_too_large max=18.5mm by=short_edge
+prism-08-sides	top-rim-round	22mm	over	limit	radius_too_large max=18.5mm by=short_edge
+prism-08-sides	top-rim-chamfer	0.1mm	fits	correct	
+prism-08-sides	top-rim-chamfer	1mm	fits	correct	
+prism-08-sides	top-rim-chamfer	5mm	fits	correct	
+prism-08-sides	top-rim-chamfer	10mm	fits	correct	
+prism-08-sides	top-rim-chamfer	15mm	fits	correct	
+prism-08-sides	top-rim-chamfer	17mm	fits	correct	
+prism-08-sides	top-rim-chamfer	19mm	over	limit	radius_too_large max=18.5mm by=short_edge
+prism-08-sides	top-rim-chamfer	20mm	over	limit	radius_too_large max=18.5mm by=short_edge
+prism-08-sides	top-rim-chamfer	22mm	over	limit	radius_too_large max=18.5mm by=short_edge
+prism-16-sides	top-rim-round	0.1mm	fits	correct	
+prism-16-sides	top-rim-round	1mm	fits	correct	
+prism-16-sides	top-rim-round	5mm	fits	correct	
+prism-16-sides	top-rim-round	10mm	fits	correct	
+prism-16-sides	top-rim-round	15mm	fits	correct	
+prism-16-sides	top-rim-round	17mm	fits	correct	
+prism-16-sides	top-rim-round	19mm		correct	
+prism-16-sides	top-rim-round	20mm	over	limit	radius_too_large max=19.6mm by=short_edge
+prism-16-sides	top-rim-round	22mm	over	limit	radius_too_large max=19.6mm by=short_edge
+prism-16-sides	top-rim-chamfer	0.1mm	fits	correct	
+prism-16-sides	top-rim-chamfer	1mm	fits	correct	
+prism-16-sides	top-rim-chamfer	5mm	fits	correct	
+prism-16-sides	top-rim-chamfer	10mm	fits	correct	
+prism-16-sides	top-rim-chamfer	15mm	fits	correct	
+prism-16-sides	top-rim-chamfer	17mm	fits	correct	
+prism-16-sides	top-rim-chamfer	19mm		correct	
+prism-16-sides	top-rim-chamfer	20mm	over	limit	radius_too_large max=19.6mm by=short_edge
+prism-16-sides	top-rim-chamfer	22mm	over	limit	radius_too_large max=19.6mm by=short_edge
+prism-hexagon-imperial	top-loop-round	0.1mm	fits	correct	
+prism-hexagon-imperial	top-loop-round	1/16in	fits	correct	
+prism-hexagon-imperial	top-loop-round	1/8in	fits	correct	
+prism-hexagon-imperial	top-loop-round	1/4in	fits	correct	
+prism-hexagon-imperial	top-loop-round	3/8in	fits	correct	
+prism-hexagon-imperial	top-loop-round	1/2in	fits	correct	
+prism-hexagon-imperial	top-loop-round	3/4in	fits	correct	
+prism-hexagon-imperial	top-loop-round	7/8in	over	limit	radius_too_large max=22mm by=short_edge
+prism-hexagon-imperial	top-loop-round	1in	over	limit	radius_too_large max=22mm by=short_edge
+prism-hexagon-imperial	top-loop-chamfer	0.1mm	fits	correct	
+prism-hexagon-imperial	top-loop-chamfer	1/16in	fits	correct	
+prism-hexagon-imperial	top-loop-chamfer	1/8in	fits	correct	
+prism-hexagon-imperial	top-loop-chamfer	1/4in	fits	correct	
+prism-hexagon-imperial	top-loop-chamfer	3/8in	fits	correct	
+prism-hexagon-imperial	top-loop-chamfer	1/2in	fits	correct	
+prism-hexagon-imperial	top-loop-chamfer	3/4in	fits	correct	
+prism-hexagon-imperial	top-loop-chamfer	7/8in	over	limit	radius_too_large max=22mm by=short_edge
+prism-hexagon-imperial	top-loop-chamfer	1in	over	limit	radius_too_large max=22mm by=short_edge
+prism-hexagon-imperial	bottom-loop-round	0.1mm	fits	correct	
+prism-hexagon-imperial	bottom-loop-round	1/16in	fits	correct	
+prism-hexagon-imperial	bottom-loop-round	1/8in	fits	correct	
+prism-hexagon-imperial	bottom-loop-round	1/4in	fits	correct	
+prism-hexagon-imperial	bottom-loop-round	3/8in	fits	correct	
+prism-hexagon-imperial	bottom-loop-round	1/2in	fits	correct	
+prism-hexagon-imperial	bottom-loop-round	3/4in	fits	correct	
+prism-hexagon-imperial	bottom-loop-round	7/8in	over	limit	radius_too_large max=22mm by=short_edge
+prism-hexagon-imperial	bottom-loop-round	1in	over	limit	radius_too_large max=22mm by=short_edge
+prism-hexagon-imperial	bottom-loop-chamfer	0.1mm	fits	correct	
+prism-hexagon-imperial	bottom-loop-chamfer	1/16in	fits	correct	
+prism-hexagon-imperial	bottom-loop-chamfer	1/8in	fits	correct	
+prism-hexagon-imperial	bottom-loop-chamfer	1/4in	fits	correct	
+prism-hexagon-imperial	bottom-loop-chamfer	3/8in	fits	correct	
+prism-hexagon-imperial	bottom-loop-chamfer	1/2in	fits	correct	
+prism-hexagon-imperial	bottom-loop-chamfer	3/4in	fits	correct	
+prism-hexagon-imperial	bottom-loop-chamfer	7/8in	over	limit	radius_too_large max=22mm by=short_edge
+prism-hexagon-imperial	bottom-loop-chamfer	1in	over	limit	radius_too_large max=22mm by=short_edge
+prism-hexagon	top-loop-round	0.1mm	fits	correct	
+prism-hexagon	top-loop-round	1mm	fits	correct	
+prism-hexagon	top-loop-round	5mm	fits	correct	
+prism-hexagon	top-loop-round	10mm	fits	correct	
+prism-hexagon	top-loop-round	20mm	fits	correct	
+prism-hexagon	top-loop-round	24mm	fits	correct	
+prism-hexagon	top-loop-round	25mm		limit	radius_too_large max=25mm by=neighbor_edge
+prism-hexagon	top-loop-round	28mm	over	limit	radius_too_large max=25mm by=neighbor_edge
+prism-hexagon	top-loop-round	40mm	over	limit	radius_too_large max=25mm by=neighbor_edge
+prism-hexagon	top-loop-chamfer	0.1mm	fits	correct	
+prism-hexagon	top-loop-chamfer	1mm	fits	correct	
+prism-hexagon	top-loop-chamfer	5mm	fits	correct	
+prism-hexagon	top-loop-chamfer	10mm	fits	correct	
+prism-hexagon	top-loop-chamfer	20mm	fits	correct	
+prism-hexagon	top-loop-chamfer	24mm	fits	correct	
+prism-hexagon	top-loop-chamfer	25mm		limit	radius_too_large max=25mm by=neighbor_edge
+prism-hexagon	top-loop-chamfer	28mm	over	limit	radius_too_large max=25mm by=neighbor_edge
+prism-hexagon	top-loop-chamfer	40mm	over	limit	radius_too_large max=25mm by=other_geometry
+prism-hexagon	bottom-loop-round	0.1mm	fits	correct	
+prism-hexagon	bottom-loop-round	1mm	fits	correct	
+prism-hexagon	bottom-loop-round	5mm	fits	correct	
+prism-hexagon	bottom-loop-round	10mm	fits	correct	
+prism-hexagon	bottom-loop-round	20mm	fits	correct	
+prism-hexagon	bottom-loop-round	24mm	fits	correct	
+prism-hexagon	bottom-loop-round	25mm		limit	radius_too_large max=25mm by=neighbor_edge
+prism-hexagon	bottom-loop-round	28mm	over	limit	radius_too_large max=25mm by=neighbor_edge
+prism-hexagon	bottom-loop-round	40mm	over	limit	radius_too_large max=25mm by=neighbor_edge
+prism-hexagon	bottom-loop-chamfer	0.1mm	fits	correct	
+prism-hexagon	bottom-loop-chamfer	1mm	fits	correct	
+prism-hexagon	bottom-loop-chamfer	5mm	fits	correct	
+prism-hexagon	bottom-loop-chamfer	10mm	fits	correct	
+prism-hexagon	bottom-loop-chamfer	20mm	fits	correct	
+prism-hexagon	bottom-loop-chamfer	24mm	fits	correct	
+prism-hexagon	bottom-loop-chamfer	25mm		limit	radius_too_large max=25mm by=neighbor_edge
+prism-hexagon	bottom-loop-chamfer	28mm	over	limit	radius_too_large max=25mm by=neighbor_edge
+prism-hexagon	bottom-loop-chamfer	40mm	over	limit	radius_too_large max=25mm by=other_geometry
+prism-hexagon	vertical-edge-round	0.1mm	fits	correct	
+prism-hexagon	vertical-edge-round	1mm	fits	correct	
+prism-hexagon	vertical-edge-round	5mm	fits	correct	
+prism-hexagon	vertical-edge-round	15mm	fits	correct	
+prism-hexagon	vertical-edge-round	30mm	fits	correct	
+prism-hexagon	vertical-edge-round	50mm	fits	correct	
+prism-hexagon	vertical-edge-round	55mm	over	limit	radius_too_large max=52mm by=other_geometry
+prism-hexagon	vertical-edge-round	60mm	over	limit	radius_too_large max=52mm by=other_geometry
+prism-hexagon	vertical-edge-chamfer	0.1mm	fits	correct	
+prism-hexagon	vertical-edge-chamfer	1mm	fits	correct	
+prism-hexagon	vertical-edge-chamfer	5mm	fits	correct	
+prism-hexagon	vertical-edge-chamfer	15mm	fits	correct	
+prism-hexagon	vertical-edge-chamfer	25mm	fits	correct	
+prism-hexagon	vertical-edge-chamfer	29mm	fits	correct	
+prism-hexagon	vertical-edge-chamfer	30mm		limit	radius_too_large max=30mm by=neighbor_edge
+prism-hexagon	vertical-edge-chamfer	35mm	over	limit	radius_too_large max=30mm by=neighbor_edge
+prism-hexagon	vertical-edge-chamfer	40mm	over	limit	radius_too_large max=30mm by=neighbor_edge
+prism-hexagon	all-edges-round	0.1mm	fits	correct	
+prism-hexagon	all-edges-round	1mm	fits	correct	
+prism-hexagon	all-edges-round	5mm	fits	correct	
+prism-hexagon	all-edges-round	10mm	fits	correct	
+prism-hexagon	all-edges-round	12mm	fits	correct	
+prism-hexagon	all-edges-round	12.5mm		limit	radius_too_large max=12.5mm by=short_edge
+prism-hexagon	all-edges-round	14mm	over	limit	radius_too_large max=12.5mm by=short_edge
+prism-hexagon	all-edges-round	20mm	over	limit	radius_too_large max=12.5mm by=short_edge
+prism-hexagon	all-edges-chamfer	0.1mm	fits	correct	
+prism-hexagon	all-edges-chamfer	1mm	fits	correct	
+prism-hexagon	all-edges-chamfer	5mm	fits	correct	
+prism-hexagon	all-edges-chamfer	10mm	fits	correct	
+prism-hexagon	all-edges-chamfer	12mm	fits	correct	
+prism-hexagon	all-edges-chamfer	12.5mm		limit	radius_too_large max=12.5mm by=short_edge
+prism-hexagon	all-edges-chamfer	14mm	over	limit	radius_too_large max=12.5mm by=short_edge
+prism-hexagon	all-edges-chamfer	20mm	over	limit	radius_too_large max=12.5mm by=short_edge
+prism-trapezoid	top-loop-round	0.1mm	fits	correct	
+prism-trapezoid	top-loop-round	1mm	fits	correct	
+prism-trapezoid	top-loop-round	5mm	fits	correct	
+prism-trapezoid	top-loop-round	10mm	fits	correct	
+prism-trapezoid	top-loop-round	14mm	fits	correct	
+prism-trapezoid	top-loop-round	15mm		limit	radius_too_large max=15mm by=short_edge
+prism-trapezoid	top-loop-round	16mm	over	limit	radius_too_large max=15mm by=short_edge
+prism-trapezoid	top-loop-round	20mm	over	limit	radius_too_large max=15mm by=short_edge
+prism-trapezoid	top-loop-round	30mm	over	limit	radius_too_large max=15mm by=short_edge
+prism-trapezoid	top-loop-chamfer	0.1mm	fits	correct	
+prism-trapezoid	top-loop-chamfer	1mm	fits	correct	
+prism-trapezoid	top-loop-chamfer	5mm	fits	correct	
+prism-trapezoid	top-loop-chamfer	10mm	fits	correct	
+prism-trapezoid	top-loop-chamfer	14mm	fits	correct	
+prism-trapezoid	top-loop-chamfer	15mm		limit	radius_too_large max=15mm by=short_edge
+prism-trapezoid	top-loop-chamfer	16mm	over	limit	radius_too_large max=15mm by=short_edge
+prism-trapezoid	top-loop-chamfer	20mm	over	limit	radius_too_large max=15mm by=short_edge
+prism-trapezoid	top-loop-chamfer	30mm	over	limit	radius_too_large max=15mm by=short_edge
+prism-trapezoid	bottom-loop-round	0.1mm	fits	correct	
+prism-trapezoid	bottom-loop-round	1mm	fits	correct	
+prism-trapezoid	bottom-loop-round	5mm	fits	correct	
+prism-trapezoid	bottom-loop-round	10mm	fits	correct	
+prism-trapezoid	bottom-loop-round	14mm	fits	correct	
+prism-trapezoid	bottom-loop-round	15mm		limit	radius_too_large max=15mm by=short_edge
+prism-trapezoid	bottom-loop-round	16mm	over	limit	radius_too_large max=15mm by=short_edge
+prism-trapezoid	bottom-loop-round	20mm	over	limit	radius_too_large max=15mm by=short_edge
+prism-trapezoid	bottom-loop-round	30mm	over	limit	radius_too_large max=15mm by=short_edge
+prism-trapezoid	bottom-loop-chamfer	0.1mm	fits	correct	
+prism-trapezoid	bottom-loop-chamfer	1mm	fits	correct	
+prism-trapezoid	bottom-loop-chamfer	5mm	fits	correct	
+prism-trapezoid	bottom-loop-chamfer	10mm	fits	correct	
+prism-trapezoid	bottom-loop-chamfer	14mm	fits	correct	
+prism-trapezoid	bottom-loop-chamfer	15mm		limit	radius_too_large max=15mm by=short_edge
+prism-trapezoid	bottom-loop-chamfer	16mm	over	limit	radius_too_large max=15mm by=short_edge
+prism-trapezoid	bottom-loop-chamfer	20mm	over	limit	radius_too_large max=15mm by=short_edge
+prism-trapezoid	bottom-loop-chamfer	30mm	over	limit	radius_too_large max=15mm by=short_edge
+prism-trapezoid	acute-vertical-edge-round	0.1mm	fits	correct	
+prism-trapezoid	acute-vertical-edge-round	1mm	fits	correct	
+prism-trapezoid	acute-vertical-edge-round	5mm	fits	correct	
+prism-trapezoid	acute-vertical-edge-round	15mm	fits	correct	
+prism-trapezoid	acute-vertical-edge-round	19mm	fits	correct	
+prism-trapezoid	acute-vertical-edge-round	19.5mm	over	limit	radius_too_large max=19.3mm by=neighbor_edge
+prism-trapezoid	acute-vertical-edge-round	25mm	over	limit	radius_too_large max=19.3mm by=neighbor_edge
+prism-trapezoid	acute-vertical-edge-chamfer	0.1mm	fits	correct	
+prism-trapezoid	acute-vertical-edge-chamfer	1mm	fits	correct	
+prism-trapezoid	acute-vertical-edge-chamfer	5mm	fits	correct	
+prism-trapezoid	acute-vertical-edge-chamfer	15mm	fits	correct	
+prism-trapezoid	acute-vertical-edge-chamfer	25mm	fits	correct	
+prism-trapezoid	acute-vertical-edge-chamfer	35mm	fits	correct	
+prism-trapezoid	acute-vertical-edge-chamfer	36mm		correct	
+prism-trapezoid	acute-vertical-edge-chamfer	36.5mm	over	limit	radius_too_large max=36.1mm by=neighbor_edge
+prism-trapezoid	acute-vertical-edge-chamfer	40mm	over	limit	radius_too_large max=36.1mm by=other_geometry
+prism-trapezoid	obtuse-vertical-edge-round	0.1mm	fits	correct	
+prism-trapezoid	obtuse-vertical-edge-round	1mm	fits	correct	
+prism-trapezoid	obtuse-vertical-edge-round	5mm	fits	correct	
+prism-trapezoid	obtuse-vertical-edge-round	15mm	fits	correct	
+prism-trapezoid	obtuse-vertical-edge-round	30mm	fits	correct	
+prism-trapezoid	obtuse-vertical-edge-round	60mm	fits	correct	
+prism-trapezoid	obtuse-vertical-edge-round	67mm		correct	
+prism-trapezoid	obtuse-vertical-edge-round	70mm	over	limit	radius_too_large max=67.4mm by=other_geometry
+prism-trapezoid	obtuse-vertical-edge-round	80mm	over	limit	radius_too_large max=67.4mm by=other_geometry
+prism-trapezoid	obtuse-vertical-edge-chamfer	0.1mm	fits	correct	
+prism-trapezoid	obtuse-vertical-edge-chamfer	1mm	fits	correct	
+prism-trapezoid	obtuse-vertical-edge-chamfer	5mm	fits	correct	
+prism-trapezoid	obtuse-vertical-edge-chamfer	15mm	fits	correct	
+prism-trapezoid	obtuse-vertical-edge-chamfer	25mm	fits	correct	
+prism-trapezoid	obtuse-vertical-edge-chamfer	35mm	fits	correct	
+prism-trapezoid	obtuse-vertical-edge-chamfer	36mm		correct	
+prism-trapezoid	obtuse-vertical-edge-chamfer	36.5mm	over	limit	radius_too_large max=36.1mm by=neighbor_edge
+prism-trapezoid	obtuse-vertical-edge-chamfer	40mm	over	limit	radius_too_large max=36.1mm by=other_geometry
+prism-trapezoid	all-edges-round	0.1mm		correct	
+prism-trapezoid	all-edges-round	1mm		correct	
+prism-trapezoid	all-edges-round	5mm		correct	
+prism-trapezoid	all-edges-round	10mm		correct	
+prism-trapezoid	all-edges-round	12mm		correct	
+prism-trapezoid	all-edges-round	12.5mm		limit	radius_too_large max=12.5mm by=short_edge
+prism-trapezoid	all-edges-round	14mm	over	limit	radius_too_large max=12.5mm by=short_edge
+prism-trapezoid	all-edges-round	20mm	over	limit	radius_too_large max=12.5mm by=short_edge
+prism-trapezoid	all-edges-chamfer	0.1mm		correct	
+prism-trapezoid	all-edges-chamfer	1mm		correct	
+prism-trapezoid	all-edges-chamfer	5mm		correct	
+prism-trapezoid	all-edges-chamfer	10mm		correct	
+prism-trapezoid	all-edges-chamfer	12mm		correct	
+prism-trapezoid	all-edges-chamfer	12.5mm		limit	radius_too_large max=12.5mm by=short_edge
+prism-trapezoid	all-edges-chamfer	14mm	over	limit	radius_too_large max=12.5mm by=short_edge
+prism-trapezoid	all-edges-chamfer	20mm	over	limit	radius_too_large max=12.5mm by=short_edge
+slotted-box	slot-rim-round	0.1mm	fits	correct	
+slotted-box	slot-rim-round	1mm	fits	correct	
+slotted-box	slot-rim-round	3mm	fits	correct	
+slotted-box	slot-rim-round	6mm	fits	correct	
+slotted-box	slot-rim-round	11mm	fits	correct	
+slotted-box	slot-rim-round	12mm		limit	radius_too_large max=12mm by=neighbor_edge
+slotted-box	slot-rim-round	13mm	over	limit	radius_too_large max=12mm by=neighbor_edge
+slotted-box	slot-rim-round	20mm	over	limit	radius_too_large max=12mm by=neighbor_edge
+slotted-box	slot-rim-chamfer	0.1mm	fits	correct	
+slotted-box	slot-rim-chamfer	1mm	fits	correct	
+slotted-box	slot-rim-chamfer	3mm	fits	correct	
+slotted-box	slot-rim-chamfer	6mm	fits	correct	
+slotted-box	slot-rim-chamfer	11mm	fits	correct	
+slotted-box	slot-rim-chamfer	12mm		limit	radius_too_large max=12mm by=neighbor_edge
+slotted-box	slot-rim-chamfer	13mm	over	limit	radius_too_large max=12mm by=other_geometry
+slotted-box	slot-rim-chamfer	20mm	over	limit	radius_too_large max=12mm by=other_geometry
+slotted-box	slot-floor-round	0.1mm	fits	correct	
+slotted-box	slot-floor-round	1mm	fits	correct	
+slotted-box	slot-floor-round	3mm	fits	correct	
+slotted-box	slot-floor-round	6mm	fits	correct	
+slotted-box	slot-floor-round	7mm	fits	correct	
+slotted-box	slot-floor-round	8mm		generic	blend_degenerate
+slotted-box	slot-floor-round	9mm	over	limit	radius_too_large max=8mm by=other_geometry
+slotted-box	slot-floor-round	12mm	over	limit	radius_too_large max=8mm by=other_geometry
+slotted-box	outer-top-round	0.1mm	fits	correct	
+slotted-box	outer-top-round	1mm	fits	correct	
+slotted-box	outer-top-round	5mm	fits	correct	
+slotted-box	outer-top-round	10mm	fits	correct	
+slotted-box	outer-top-round	20mm	fits	correct	
+slotted-box	outer-top-round	27mm	fits	correct	
+slotted-box	outer-top-round	29mm	fits	correct	
+slotted-box	outer-top-round	30mm		limit	radius_too_large max=30mm by=neighbor_edge
+slotted-box	outer-top-round	35mm	over	limit	radius_too_large max=30mm by=neighbor_edge
+slotted-box	outer-top-chamfer	0.1mm	fits	correct	
+slotted-box	outer-top-chamfer	1mm	fits	correct	
+slotted-box	outer-top-chamfer	5mm	fits	correct	
+slotted-box	outer-top-chamfer	10mm	fits	correct	
+slotted-box	outer-top-chamfer	20mm	fits	correct	
+slotted-box	outer-top-chamfer	27mm	fits	correct	
+slotted-box	outer-top-chamfer	29mm	fits	correct	
+slotted-box	outer-top-chamfer	30mm		limit	radius_too_large max=30mm by=neighbor_edge
+slotted-box	outer-top-chamfer	35mm	over	limit	radius_too_large max=30mm by=neighbor_edge
+slotted-box	seq-slot-2mm-then-outer-round	0.1mm	fits	correct	
+slotted-box	seq-slot-2mm-then-outer-round	1mm	fits	correct	
+slotted-box	seq-slot-2mm-then-outer-round	5mm	fits	correct	
+slotted-box	seq-slot-2mm-then-outer-round	10mm	fits	correct	
+slotted-box	seq-slot-2mm-then-outer-round	20mm	fits	correct	
+slotted-box	seq-slot-2mm-then-outer-round	27mm	fits	correct	
+slotted-box	seq-slot-2mm-then-outer-round	29mm		limit	radius_too_large max=28mm by=hole
+slotted-box	seq-slot-2mm-then-outer-round	30mm		limit	radius_too_large max=28mm by=hole
+slotted-box	seq-slot-2mm-then-outer-round	35mm	over	limit	radius_too_large max=28mm by=hole
+slotted-box	seq-outer-2mm-then-slot-round	0.1mm	fits	correct	
+slotted-box	seq-outer-2mm-then-slot-round	1mm	fits	correct	
+slotted-box	seq-outer-2mm-then-slot-round	3mm	fits	correct	
+slotted-box	seq-outer-2mm-then-slot-round	6mm	fits	correct	
+slotted-box	seq-outer-2mm-then-slot-round	11mm	fits	correct	
+slotted-box	seq-outer-2mm-then-slot-round	12mm		limit	radius_too_large max=12mm by=neighbor_edge
+slotted-box	seq-outer-2mm-then-slot-round	13mm	over	limit	radius_too_large max=12mm by=neighbor_edge
+slotted-box	seq-outer-2mm-then-slot-round	20mm	over	limit	radius_too_large max=12mm by=neighbor_edge
+slotted-box	slot-and-outer-together-round	0.1mm	fits	correct	
+slotted-box	slot-and-outer-together-round	1mm	fits	correct	
+slotted-box	slot-and-outer-together-round	3mm	fits	correct	
+slotted-box	slot-and-outer-together-round	6mm	fits	correct	
+slotted-box	slot-and-outer-together-round	11mm	fits	correct	
+slotted-box	slot-and-outer-together-round	12mm		limit	radius_too_large max=12mm by=neighbor_edge
+slotted-box	slot-and-outer-together-round	13mm	over	limit	radius_too_large max=12mm by=neighbor_edge
+slotted-box	slot-and-outer-together-round	20mm	over	limit	radius_too_large max=12mm by=neighbor_edge
+slotted-box	slot-and-outer-together-chamfer	0.1mm	fits	correct	
+slotted-box	slot-and-outer-together-chamfer	1mm	fits	correct	
+slotted-box	slot-and-outer-together-chamfer	3mm	fits	correct	
+slotted-box	slot-and-outer-together-chamfer	6mm	fits	correct	
+slotted-box	slot-and-outer-together-chamfer	11mm	fits	correct	
+slotted-box	slot-and-outer-together-chamfer	12mm		limit	radius_too_large max=12mm by=neighbor_edge
+slotted-box	slot-and-outer-together-chamfer	13mm	over	limit	radius_too_large max=12mm by=other_geometry
+slotted-box	slot-and-outer-together-chamfer	20mm	over	limit	radius_too_large max=12mm by=other_geometry

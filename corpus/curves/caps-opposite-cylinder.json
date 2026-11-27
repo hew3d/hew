@@ -1,0 +1,132 @@
+{
+  "title": "Opposite cap rims on a 32-sided cylinder",
+  "from": "Sequences: one rim blended first, then the other swept.",
+  "build": [
+    {
+      "method": "hew.sketch.draw_circle",
+      "as": "c",
+      "params": {"plane": {"ground": true}, "center": [0, 0, 0], "radius": "20mm", "segments": 32}
+    },
+    {
+      "method": "hew.solid.extrude",
+      "as": "cyl",
+      "params": {"region": {"$ref": "c#/region_id"}, "distance": "30mm"}
+    }
+  ],
+  "cases": [
+    {
+      "id": "cyl-top12-then-bottom-round",
+      "note": "32-gon cylinder 20 mm radius, 30 mm tall. Top rim at 12 mm first, then sweep the bottom rim. 12 + size must stay under 30 mm: limit 18 mm, so 19 and 22 mm make the two blends meet.",
+      "before": [
+        {
+          "method": "hew.solid.fillet",
+          "params": {
+            "edges": [{"face": {"object": {"$ref": "cyl#/object_id"}, "at": [0, 0, "30mm"]}}],
+            "radius": "12mm"
+          }
+        }
+      ],
+      "method": "hew.solid.fillet",
+      "params": {"edges": [{"face": {"object": {"$ref": "cyl#/object_id"}, "at": [0, 0, 0]}}]},
+      "sizes": ["0.1mm", "1mm", "5mm", "10mm", "15mm", "17mm", "18mm", "19mm", "22mm"],
+      "volume": "less",
+      "fits_to": "17mm",
+      "never_above": "18mm"
+    },
+    {
+      "id": "cyl-bottom12-then-top-round",
+      "note": "Reverse order: bottom rim at 12 mm first, then sweep the top rim. Same limit 18 mm.",
+      "before": [
+        {
+          "method": "hew.solid.fillet",
+          "params": {
+            "edges": [{"face": {"object": {"$ref": "cyl#/object_id"}, "at": [0, 0, 0]}}],
+            "radius": "12mm"
+          }
+        }
+      ],
+      "method": "hew.solid.fillet",
+      "params": {"edges": [{"face": {"object": {"$ref": "cyl#/object_id"}, "at": [0, 0, "30mm"]}}]},
+      "sizes": ["0.1mm", "1mm", "5mm", "10mm", "15mm", "17mm", "18mm", "19mm", "22mm"],
+      "volume": "less",
+      "fits_to": "17mm",
+      "never_above": "18mm"
+    },
+    {
+      "id": "cyl-top12-then-bottom-chamfer",
+      "note": "32-gon cylinder 20 mm radius, 30 mm tall. Top rim at 12 mm first, then sweep the bottom rim. 12 + size must stay under 30 mm: limit 18 mm, so 19 and 22 mm make the two blends meet.",
+      "before": [
+        {
+          "method": "hew.solid.chamfer",
+          "params": {
+            "edges": [{"face": {"object": {"$ref": "cyl#/object_id"}, "at": [0, 0, "30mm"]}}],
+            "distance": "12mm"
+          }
+        }
+      ],
+      "method": "hew.solid.chamfer",
+      "params": {"edges": [{"face": {"object": {"$ref": "cyl#/object_id"}, "at": [0, 0, 0]}}]},
+      "sizes": ["0.1mm", "1mm", "5mm", "10mm", "15mm", "17mm", "18mm", "19mm", "22mm"],
+      "volume": "less",
+      "fits_to": "17mm",
+      "never_above": "18mm"
+    },
+    {
+      "id": "cyl-bottom12-then-top-chamfer",
+      "note": "Reverse order: bottom rim at 12 mm first, then sweep the top rim. Same limit 18 mm.",
+      "before": [
+        {
+          "method": "hew.solid.chamfer",
+          "params": {
+            "edges": [{"face": {"object": {"$ref": "cyl#/object_id"}, "at": [0, 0, 0]}}],
+            "distance": "12mm"
+          }
+        }
+      ],
+      "method": "hew.solid.chamfer",
+      "params": {"edges": [{"face": {"object": {"$ref": "cyl#/object_id"}, "at": [0, 0, "30mm"]}}]},
+      "sizes": ["0.1mm", "1mm", "5mm", "10mm", "15mm", "17mm", "18mm", "19mm", "22mm"],
+      "volume": "less",
+      "fits_to": "17mm",
+      "never_above": "18mm"
+    },
+    {
+      "id": "cyl-top18-then-bottom-round",
+      "note": "Top rim rounded at 18 mm first, leaving a 12 mm wall: the bottom round can be 12 mm at most (and then the walls vanish).",
+      "before": [
+        {
+          "method": "hew.solid.fillet",
+          "params": {
+            "edges": [{"face": {"object": {"$ref": "cyl#/object_id"}, "at": [0, 0, "30mm"]}}],
+            "radius": "18mm"
+          }
+        }
+      ],
+      "method": "hew.solid.fillet",
+      "params": {"edges": [{"face": {"object": {"$ref": "cyl#/object_id"}, "at": [0, 0, 0]}}]},
+      "sizes": ["0.1mm", "1mm", "5mm", "10mm", "11mm", "12mm", "13mm", "20mm"],
+      "volume": "less",
+      "fits_to": "11mm",
+      "never_above": "12mm"
+    },
+    {
+      "id": "cyl-bottom18-then-top-round",
+      "note": "Reverse of the above.",
+      "before": [
+        {
+          "method": "hew.solid.fillet",
+          "params": {
+            "edges": [{"face": {"object": {"$ref": "cyl#/object_id"}, "at": [0, 0, 0]}}],
+            "radius": "18mm"
+          }
+        }
+      ],
+      "method": "hew.solid.fillet",
+      "params": {"edges": [{"face": {"object": {"$ref": "cyl#/object_id"}, "at": [0, 0, "30mm"]}}]},
+      "sizes": ["0.1mm", "1mm", "5mm", "10mm", "11mm", "12mm", "13mm", "20mm"],
+      "volume": "less",
+      "fits_to": "11mm",
+      "never_above": "12mm"
+    }
+  ]
+}

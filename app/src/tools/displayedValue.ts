@@ -19,7 +19,7 @@
  *    length from the anchor would land a hair off it, so it is hard.
  *  - HARD picks keep the snapped point exactly: `endpoint`, `center`,
  *    `quadrant`, `midpoint`, `intersection`, `tangent`, `on-edge`,
- *    `on-guide`, `on-axis` WITH `projectedFrom` (the axis line was
+ *    `on-intersection-line`, `on-guide`, `on-axis` WITH `projectedFrom` (the axis line was
  *    projected from a real candidate), LineTool's synthetic `from-point`
  *    alignment, and any kind not listed above. Rounding there would land
  *    a hair off the vertex or edge the user aimed at.

@@ -6,6 +6,9 @@ import init, {
   init_logging,
   set_log_drain,
 } from './pkg/wasm_api.js'
+import * as kernelModule from './pkg/wasm_api.js'
+import { previewBuild } from '../preview/build'
+import { kernelFlavorProblem } from '../preview/flavor'
 import { installKernelDrain, bridgeLogStore } from '../log/diagnosticLog'
 import { registerScene, installFailureHandlers } from '../log/reproducerDump'
 import { getDebugMode } from '../settings/debugMode'
@@ -40,6 +43,11 @@ export interface KernelApi {
 
 export async function loadKernel(): Promise<KernelApi> {
   await getInitPromise()
+  // The module and the app must be the same build flavor (src/preview/flavor.ts).
+  // A module built before `preview_build()` existed has nothing to compare.
+  const kernelPreview = (kernelModule as { preview_build?: () => boolean }).preview_build
+  const mismatch = kernelFlavorProblem(previewBuild, kernelPreview?.())
+  if (mismatch !== null) throw new Error(mismatch)
   if (!logDrainInstalled) {
     logDrainInstalled = true
     // : install the diagnostic-log sink — route kernel LogRecords into

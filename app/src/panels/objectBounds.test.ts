@@ -47,6 +47,8 @@ function makeScene(opts: {
   objectMeshes?: Record<string, Float32Array>
   groups?: Record<string, NodeRef[]>
   instances?: Record<string, { def: bigint; pose: number[]; memberIds: bigint[]; placements?: MockPlacement[] }>
+  /** World bounds of the lines drawn inside an instance (`instance_sketch_bounds`). */
+  lineBounds?: Record<string, number[]>
 }): WasmScene {
   const objectMeshes = opts.objectMeshes ?? {}
   const groups = opts.groups ?? {}
@@ -61,6 +63,7 @@ function makeScene(opts: {
       return b === null ? new Float64Array() : Float64Array.from([...b.min, ...b.max])
     },
     group_members: (id: bigint) => groups[id.toString()] ?? [],
+    instance_sketch_bounds: (id: bigint) => Float64Array.from(opts.lineBounds?.[id.toString()] ?? []),
     instance_pose: (id: bigint) => {
       const inst = instances[id.toString()]
       return inst !== undefined ? Float64Array.from(inst.pose) : undefined
@@ -180,6 +183,28 @@ describe('worldBoundsForSelection', () => {
     })
     const bounds = worldBoundsForSelection(scene, [{ kind: 'instance', id: 1n }])
     expect(bounds).toEqual({ min: [9.5, 19.5, 29.5], max: [10.5, 20.5, 30.5] })
+  })
+
+  it('counts the lines drawn inside a component in its extent, and leaves them out of the part size ({ lines: false })', () => {
+    const scene = makeScene({
+      objectMeshes: { '100': boxCorners(0.5, 0.5, 0.5) },
+      instances: { '1': { def: 5n, pose: [1, 0, 0, 10, 0, 1, 0, 20, 0, 0, 1, 30], memberIds: [100n] } },
+      // A line reaching 5 m past the cube along +x.
+      lineBounds: { '1': [10, 20, 30, 15, 20, 30] },
+    })
+    const instance: NodeRef[] = [{ kind: 'instance', id: 1n }]
+    expect(worldBoundsForSelection(scene, instance)).toEqual({ min: [9.5, 19.5, 29.5], max: [15, 20.5, 30.5] })
+    expect(worldBoundsForSelection(scene, instance, { lines: false })).toEqual({ min: [9.5, 19.5, 29.5], max: [10.5, 20.5, 30.5] })
+  })
+
+  it('an instance holding only lines has an extent but no part size', () => {
+    const scene = makeScene({
+      instances: { '1': { def: 5n, pose: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0], memberIds: [] } },
+      lineBounds: { '1': [0, 0, 0, 2, 3, 0] },
+    })
+    const instance: NodeRef[] = [{ kind: 'instance', id: 1n }]
+    expect(worldBoundsForSelection(scene, instance)).toEqual({ min: [0, 0, 0], max: [2, 3, 0] })
+    expect(worldBoundsForSelection(scene, instance, { lines: false })).toBeNull()
   })
 
   it("poses a NESTED definition's repeated member mesh by instancePose × placement's local pose", () => {

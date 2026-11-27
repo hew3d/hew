@@ -15,10 +15,12 @@
  * existing toast path (kernelErrors.ts).
  */
 
+import { t } from '@lingui/core/macro'
 import type { DrawPlane } from './drawPlane'
 import { applyAffine3x4 } from '../viewport/geoHelpers'
 import type { SketchTarget } from './sketchGesture'
 import type { Scene as WasmScene } from '../wasm/loader'
+import { frozenCause } from '../lock/lockModel'
 
 /** What a draft lowered: objects whose face topology changed, sketches
  *  (owned or free) that gained edges, and the loose segments kept as
@@ -27,24 +29,67 @@ export interface DraftReport {
   objects: bigint[]
   sketches: bigint[]
   keptAsSketch: Array<[[number, number, number], [number, number, number]]>
+  /** Free sketches on other planes that closed into faces (wireframe
+   *  faces §4.2). Non-empty means "the loop closed". */
+  facesClosed: bigint[]
+  /** Outcomes of automatic solid formation (wireframe faces §5). */
+  cells: CellOutcome[]
+}
+
+/** One `cells` entry of the draft report (`cell_json` in draft_api.rs). */
+export type CellOutcome =
+  | { kind: 'created'; object: bigint }
+  | { kind: 'grew'; from: bigint; to: bigint }
+  | { kind: 'unjoined'; object: bigint; with: bigint }
+  | { kind: 'declined'; reason: string }
+
+export function parseCell(c: Record<string, unknown>): CellOutcome | null {
+  if (typeof c.created === 'number') return { kind: 'created', object: BigInt(c.created) }
+  const grew = c.grew as { from: number; to: number } | undefined
+  if (grew !== undefined) return { kind: 'grew', from: BigInt(grew.from), to: BigInt(grew.to) }
+  const un = c.unjoined as { object: number; with: number } | undefined
+  if (un !== undefined) return { kind: 'unjoined', object: BigInt(un.object), with: BigInt(un.with) }
+  const dec = c.declined as { reason: string } | undefined
+  if (dec !== undefined) return { kind: 'declined', reason: dec.reason }
+  return null
 }
 
 /** The drafting context a draw tool commits into. `instance` is the entered
  *  component instance's handle (definition-owned target) or `null`. */
 export type DraftTarget =
-  | { kind: 'plane'; plane: DrawPlane; instance: bigint | null }
-  | { kind: 'face'; object: bigint; face: bigint; instance: bigint | null }
+  | { kind: 'plane'; plane: DrawPlane; instance: bigint | null; detached?: true }
+  | { kind: 'face'; object: bigint; face: bigint; instance: bigint | null; detached?: true }
   | { kind: 'sketch'; handle: bigint; instance: bigint | null }
   /** The exact canonical plane context string a `plane_units_json` listing
    *  used (planeUnits.ts) — the one way to edit listed unit keys. */
   | { kind: 'ctx'; ctx: string }
 
 /** The draft target a tool's plane-mode `SketchTarget` commits into: a
- *  hover-adopted sketch opens as that sketch, a plane as the plane. */
-export function draftTargetFromSketchTarget(t: SketchTarget): DraftTarget {
+ *  hover-adopted sketch opens as that sketch, a plane as the plane. A
+ *  `detached` shape (separate-shapes design §6.4) always opens a fresh
+ *  detached sketch on its plane. */
+export function draftTargetFromSketchTarget(
+  t: SketchTarget,
+  detached = false,
+  /** The world plane the shape is drawn on; a detached shape opens as that
+   *  plane even when a hovered sketch was adopted (it joins nothing). */
+  plane?: DrawPlane,
+): DraftTarget {
+  if (detached) {
+    const on = t.kind === 'plane' ? t.plane : plane
+    if (on !== undefined) return { kind: 'plane', plane: on, instance: t.instance, detached: true }
+  }
   return t.kind === 'existing'
     ? { kind: 'sketch', handle: t.handle, instance: t.instance }
     : { kind: 'plane', plane: t.plane, instance: t.instance }
+}
+
+/** Whether a draw tool's face draft on `object` opens detached on its own:
+ *  the kernel keeps a locked (frozen) Object's face untouched, so a shape
+ *  drawn there is a free sketch on the face's plane, never an imprint. The
+ *  app matches so its cue (blue preview) and its post-commit paths agree. */
+export function faceDrawsDetached(scene: Pick<WasmScene, 'node_frozen'>, object: bigint): boolean {
+  return frozenCause(scene, { kind: 'object', id: object }) !== null
 }
 
 function openDraft(wasmScene: WasmScene, target: DraftTarget, label: string): bigint {
@@ -55,11 +100,31 @@ function openDraft(wasmScene: WasmScene, target: DraftTarget, label: string): bi
       const { plane, instance } = target
       const [px, py, pz] = plane.origin
       const [nx, ny, nz] = plane.normal
+      if (target.detached === true) {
+        // A detached shape: its own sketch, joined to no arrangement
+        // (detached shapes §6.4).
+        return wasmScene.draft_begin_detached(
+          JSON.stringify({
+            plane: [px, py, pz, nx, ny, nz],
+            ...(instance !== null ? { instance: Number(instance) } : {}),
+          }),
+          label,
+        )
+      }
       return instance !== null
         ? wasmScene.draft_begin_plane_in_instance(instance, px, py, pz, nx, ny, nz, label)
         : wasmScene.draft_begin_plane(px, py, pz, nx, ny, nz, label)
     }
     case 'face':
+      if (target.detached === true) {
+        return wasmScene.draft_begin_detached(
+          JSON.stringify({
+            face: { object: Number(target.object), face: Number(target.face) },
+            ...(target.instance !== null ? { instance: Number(target.instance) } : {}),
+          }),
+          label,
+        )
+      }
       return target.instance !== null
         ? wasmScene.draft_begin_face_in_instance(target.instance, target.object, target.face, label)
         : wasmScene.draft_begin_face(target.object, target.face, label)
@@ -84,16 +149,25 @@ function openDraft(wasmScene: WasmScene, target: DraftTarget, label: string): bi
   }
 }
 
-function parseReport(json: string): DraftReport {
+/** Parse a draft-report JSON string (`draft_end`, and the sketch transform
+ *  and copy calls, wireframe faces R20). */
+export function parseDraftReport(json: string): DraftReport {
   const raw = JSON.parse(json) as {
     objects?: number[]
     sketches?: number[]
     kept_as_sketch?: DraftReport['keptAsSketch']
+    faces_closed?: number[]
+    cells?: Array<Record<string, unknown>>
   }
   return {
     objects: (raw.objects ?? []).map((n) => BigInt(n)),
     sketches: (raw.sketches ?? []).map((n) => BigInt(n)),
     keptAsSketch: raw.kept_as_sketch ?? [],
+    facesClosed: (raw.faces_closed ?? []).map((n) => BigInt(n)),
+    cells: (raw.cells ?? []).flatMap((c) => {
+      const cell = parseCell(c)
+      return cell === null ? [] : [cell]
+    }),
   }
 }
 
@@ -111,7 +185,7 @@ export function runDraft<T>(
   const d = openDraft(wasmScene, target, label)
   try {
     const result = body(d)
-    const report = parseReport(wasmScene.draft_end(d))
+    const report = parseDraftReport(wasmScene.draft_end(d))
     return { result, report }
   } catch (err) {
     try {
@@ -176,6 +250,53 @@ export function addDraftLoop(
   return last
 }
 
+/** True when the draft closed a loop into a face or formed a solid: Line
+ *  ends its chain on this. */
+export function draftClosedLoop(report: DraftReport): boolean {
+  return (
+    report.facesClosed.length > 0 ||
+    report.cells.some((c) => c.kind === 'created' || c.kind === 'grew' || c.kind === 'unjoined')
+  )
+}
+
+/** The Object a formed solid should leave selected: the first created or
+ *  grown cell's result that still exists (extrusion likewise selects its
+ *  new Object). A merged report can create an Object and then grow it into
+ *  another one; the chain is followed, so a result a later cell consumed
+ *  (`grew.from`) is skipped. */
+export function solidToSelect(report: DraftReport): bigint | null {
+  const consumed = new Set<bigint>()
+  for (const c of report.cells) if (c.kind === 'grew') consumed.add(c.from)
+  for (const c of report.cells) {
+    if (c.kind === 'created' && !consumed.has(c.object)) return c.object
+    if (c.kind === 'grew' && !consumed.has(c.to)) return c.to
+  }
+  return null
+}
+
+/** The toast for a report's solid-formation outcomes, or null. One toast
+ *  per commit; the refused join outranks the successes. */
+export function cellOutcomeMessage(report: DraftReport): string | null {
+  if (report.cells.some((c) => c.kind === 'unjoined')) {
+    return t`The closed shape is now a solid of its own. It could not be joined to the one it touches.`
+  }
+  // A solid the same commit created and then grew is a new solid, not a join
+  // to one that was already there.
+  const createdHere = new Set<bigint>()
+  for (const c of report.cells) if (c.kind === 'created') createdHere.add(c.object)
+  if (report.cells.some((c) => c.kind === 'grew' && !createdHere.has(c.from))) {
+    return t`The closed shape joined the solid it was drawn on.`
+  }
+  if (report.cells.some((c) => c.kind === 'created')) return t`The closed shape is now a solid.`
+  return null
+}
+
+/** Selects an Object after a solid formed; registered once by the viewport. */
+let solidSelector: ((object: bigint) => void) | null = null
+export function setDraftSolidSelector(fn: ((object: bigint) => void) | null): void {
+  solidSelector = fn
+}
+
 /**
  * Call the refresh hooks matching what a draft's report says changed:
  * `onObject` per object whose face topology changed (the face-imprint /
@@ -184,10 +305,63 @@ export function addDraftLoop(
  */
 export function refreshAfterDraft(
   report: DraftReport,
-  hooks: { onObject: (object: bigint) => void; onSketch: (sketch: bigint) => void },
+  hooks: {
+    onObject: (object: bigint) => void
+    onSketch: (sketch: bigint) => void
+    /** Surfaces the solid-formation toast (wireframe faces §8). */
+    onToast?: (message: string) => void
+  },
 ): void {
   for (const object of report.objects) hooks.onObject(object)
   if (report.sketches.length > 0 || report.objects.length === 0) {
     hooks.onSketch(report.sketches[0] ?? 0n)
   }
+  const message = cellOutcomeMessage(report)
+  if (message !== null) hooks.onToast?.(message)
+  const formed = solidToSelect(report)
+  if (formed !== null) solidSelector?.(formed)
+}
+
+/**
+ * Reports from the sketch transform and copy calls of one Move, Rotate,
+ * Scale or Copy commit (wireframe faces R20). The commit code notes each
+ * report as the kernel call returns; the tool surfaces them once, after the
+ * commit lands, through `surfaceSketchTransformReports`.
+ */
+let pendingTransformReports: DraftReport[] = []
+
+/** Forget reports noted by an earlier commit (call at the start of one). */
+export function resetSketchTransformReports(): void {
+  pendingTransformReports = []
+}
+
+/** Parse and hold the report a `transform_sketch_islands`,
+ *  `copy_sketch_islands` or in-plane draft call returned; returns it. */
+export function noteSketchTransformReport(json: string | DraftReport): DraftReport {
+  const report = typeof json === 'string' ? parseDraftReport(json) : json
+  pendingTransformReports.push(report)
+  return report
+}
+
+/**
+ * Toast and select once for everything the commit's sketch calls reported:
+ * one toast (unjoined outranks grew outranks created), the first formed
+ * solid selected. A declined or empty result stays silent. Clears the held
+ * reports.
+ */
+export function surfaceSketchTransformReports(onToast: (message: string) => void): void {
+  const reports = pendingTransformReports
+  pendingTransformReports = []
+  if (reports.length === 0) return
+  const merged: DraftReport = {
+    objects: reports.flatMap((r) => r.objects),
+    sketches: reports.flatMap((r) => r.sketches),
+    keptAsSketch: reports.flatMap((r) => r.keptAsSketch),
+    facesClosed: reports.flatMap((r) => r.facesClosed),
+    cells: reports.flatMap((r) => r.cells),
+  }
+  const message = cellOutcomeMessage(merged)
+  if (message !== null) onToast(message)
+  const formed = solidToSelect(merged)
+  if (formed !== null) solidSelector?.(formed)
 }

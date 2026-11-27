@@ -8,14 +8,29 @@ use std::collections::btree_map::Entry;
 
 use slotmap::SecondaryMap;
 
+use crate::attr::AttrDict;
 use crate::error::TopologyError;
 use crate::ids::{EdgeId, FaceId, HalfEdgeId, VertexId};
 use crate::material::{FaceMaterial, UvFrame};
 use crate::math::{Plane, Point3};
 use crate::tol;
 use crate::topo::{
-    Edge, Face, HalfEdge, Loop, LoopKind, Object, Shell, SurfaceRef, Vertex, WatertightState,
+    AttrSlot, Edge, Face, HalfEdge, Loop, LoopKind, Object, Shell, SurfaceRef, Vertex,
+    WatertightState,
 };
+
+/// One face for [`Object::from_faces_with_holes`]: outer indices, hole
+/// index lists, plane, material, UV frame, analytic surface, and attribute
+/// dictionary (empty = none).
+pub(crate) type FaceSpec = (
+    Vec<usize>,
+    Vec<Vec<usize>>,
+    Plane,
+    FaceMaterial,
+    Option<UvFrame>,
+    Option<SurfaceRef>,
+    AttrDict,
+);
 
 impl Object {
     /// Builds an Object from positions and faces given as CCW-wound (seen
@@ -30,21 +45,35 @@ impl Object {
         positions: &[Point3],
         faces: &[Vec<usize>],
     ) -> Result<Object, TopologyError> {
-        Object::from_polygons_impl(positions, faces, None, None, None, tol::PLANE_DIST, None)
+        Object::from_polygons_impl(
+            positions,
+            faces,
+            None,
+            None,
+            None,
+            None,
+            tol::PLANE_DIST,
+            None,
+        )
     }
 
-    /// Like [`Object::from_polygons`], but assigns each face the material and
-    /// per-face [`UvFrame`] at the same index in the parallel `materials` /
-    /// `uv_frames` slices ( + the UV-frame extension). Crate-internal: the
-    /// boolean assembler uses it so result faces carry their material and UV
-    /// frame. Uses the strict [`tol::PLANE_DIST`] gate (kernel-built f64
-    /// geometry is exact). Both slices must be parallel to `faces`.
-    pub(crate) fn from_polygons_with_materials_and_frames(
+    /// Like [`Object::from_polygons`], but assigns each face the material,
+    /// per-face [`UvFrame`], analytic surface and attribute dictionary at
+    /// the same index in the parallel slices (`attrs` empty = none, interned
+    /// into the new Object's own table), at planarity gate `plane_tol`
+    /// (never below [`tol::PLANE_DIST`]), recorded as the built object's
+    /// planarity tolerance: the boolean assembler builds a result at its
+    /// loosest operand's tolerance, so sub-faces of an imported face (flat
+    /// only to [`tol::IMPORT_PLANE_DIST`]) are not refused as non-planar.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn from_polygons_with_attrs_tol(
         positions: &[Point3],
         faces: &[Vec<usize>],
         materials: &[FaceMaterial],
         uv_frames: &[Option<UvFrame>],
         surfaces: &[Option<SurfaceRef>],
+        attrs: &[AttrDict],
+        plane_tol: f64,
     ) -> Result<Object, TopologyError> {
         Object::from_polygons_impl(
             positions,
@@ -52,12 +81,13 @@ impl Object {
             Some(materials),
             Some(uv_frames),
             Some(surfaces),
-            tol::PLANE_DIST,
+            Some(attrs),
+            plane_tol.max(tol::PLANE_DIST),
             None,
         )
     }
 
-    /// Like [`Object::from_polygons_with_materials_and_frames`], but for
+    /// Like [`Object::from_polygons_with_attrs_tol`], but for
     /// *imported* foreign geometry: uses the wider [`tol::IMPORT_PLANE_DIST`]
     /// planarity gate so f32-quantized SketchUp/COLLADA faces (flat to ~0.1 mm
     /// but past the nanometer [`tol::PLANE_DIST`]) are accepted as the single
@@ -77,8 +107,46 @@ impl Object {
             Some(materials),
             Some(uv_frames),
             None,
+            None,
             tol::IMPORT_PLANE_DIST,
             None,
+        )
+    }
+
+    /// [`Object::from_polygons_with_holes_import`] with no holes, materials
+    /// or UV frames, for the executable specs (an imported mesh built at
+    /// [`tol::IMPORT_PLANE_DIST`]). Test support only.
+    #[doc(hidden)]
+    pub fn from_polygons_import_for_test(
+        positions: &[Point3],
+        faces: &[Vec<usize>],
+    ) -> Result<Object, TopologyError> {
+        let n = faces.len();
+        Object::from_polygons_with_holes_import(
+            positions,
+            faces,
+            &vec![Vec::new(); n],
+            &vec![None; n],
+            &vec![None; n],
+        )
+    }
+
+    /// [`Object::from_polygons_with_holes_import`] with no materials or UV
+    /// frames, for the executable specs (an imported mesh with holed faces,
+    /// built at [`tol::IMPORT_PLANE_DIST`]). Test support only.
+    #[doc(hidden)]
+    pub fn from_polygons_with_holes_import_for_test(
+        positions: &[Point3],
+        faces: &[Vec<usize>],
+        holes: &[Vec<Vec<usize>>],
+    ) -> Result<Object, TopologyError> {
+        let n = faces.len();
+        Object::from_polygons_with_holes_import(
+            positions,
+            faces,
+            holes,
+            &vec![None; n],
+            &vec![None; n],
         )
     }
 
@@ -101,17 +169,67 @@ impl Object {
             Some(materials),
             Some(uv_frames),
             None,
+            None,
             tol::IMPORT_PLANE_DIST,
             Some(holes),
         )
     }
 
+    /// Native faces with holes at the strict [`tol::PLANE_DIST`] gate:
+    /// `holes[i]` is face `i`'s inner-loop index lists, wound against its
+    /// outer loop. Validated exactly like [`Object::from_polygons`]. Used
+    /// by the cells search (wireframe faces §5.3), whose faces are drawn,
+    /// not imported.
+    pub(crate) fn from_polygons_with_holes(
+        positions: &[Point3],
+        faces: &[Vec<usize>],
+        holes: &[Vec<Vec<usize>>],
+    ) -> Result<Object, TopologyError> {
+        Object::from_polygons_impl(
+            positions,
+            faces,
+            None,
+            None,
+            None,
+            None,
+            tol::PLANE_DIST,
+            Some(holes),
+        )
+    }
+
+    /// The builder with every column and a caller-chosen planarity gate:
+    /// what Mend rebuilds an object's polygon soup through
+    /// (`repair::mend`), at the object's own `planarity_tol`.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn from_polygons_full(
+        positions: &[Point3],
+        faces: &[Vec<usize>],
+        holes: &[Vec<Vec<usize>>],
+        materials: &[FaceMaterial],
+        uv_frames: &[Option<UvFrame>],
+        surfaces: &[Option<SurfaceRef>],
+        plane_tol: f64,
+    ) -> Result<Object, TopologyError> {
+        Object::from_polygons_impl(
+            positions,
+            faces,
+            Some(materials),
+            Some(uv_frames),
+            Some(surfaces),
+            None,
+            plane_tol,
+            Some(holes),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn from_polygons_impl(
         positions: &[Point3],
         faces: &[Vec<usize>],
         materials: Option<&[FaceMaterial]>,
         uv_frames: Option<&[Option<UvFrame>]>,
         surfaces: Option<&[Option<SurfaceRef>]>,
+        attrs: Option<&[AttrDict]>,
         plane_tol: f64,
         holes: Option<&[Vec<Vec<usize>>]>,
     ) -> Result<Object, TopologyError> {
@@ -155,6 +273,16 @@ impl Object {
         let mut directed: BTreeMap<(VertexId, VertexId), HalfEdgeId> = BTreeMap::new();
 
         let no_holes: Vec<Vec<usize>> = Vec::new();
+        // An imported mesh may carry faces below the area cutoff (Model Health
+        // lists and removes them), but only beside a real face: a mesh in which
+        // no face has a plane of its own is not an object, so it is refused as
+        // it always was.
+        let lenient = plane_tol > crate::tol::PLANE_DIST
+            && faces.iter().any(|polygon| {
+                let pts: Option<Vec<Point3>> =
+                    polygon.iter().map(|&i| positions.get(i).copied()).collect();
+                pts.is_some_and(|p| p.len() >= 3 && Plane::from_polygon(&p).is_ok())
+            });
         for (face_index, polygon) in faces.iter().enumerate() {
             if polygon.len() < 3 {
                 return Err(TopologyError::DegenerateFace { face: face_index });
@@ -164,8 +292,7 @@ impl Object {
                 .map(|v| v.as_slice())
                 .unwrap_or(&no_holes);
 
-            // Plane is fit from the outer loop; planarity is checked for the
-            // outer loop AND every hole vertex (a hole must lie in the face).
+            // Plane is fit from the outer loop.
             let pts: Vec<Point3> = polygon
                 .iter()
                 .map(|&i| {
@@ -178,22 +305,66 @@ impl Object {
                         })
                 })
                 .collect::<Result<_, _>>()?;
-            let plane = Plane::from_polygon(&pts)
+            // An imported face may be a ring smaller than the area cutoff
+            // (D-70): the plane the file format accepts for it is its plane.
+            let imported = lenient;
+            let fit = Plane::from_polygon(&pts)
+                .or_else(|e| {
+                    if imported {
+                        crate::serialize::outer_ring_plane(&pts, true)
+                    } else {
+                        Err(e)
+                    }
+                })
                 .map_err(|_| TopologyError::DegenerateFace { face: face_index })?;
             // The plane a saved file recomputes for this face must exist too
-            // (the validator holds every live face to it).
-            if crate::serialize::outer_ring_plane(&pts).is_err() {
-                return Err(TopologyError::DegenerateFace { face: face_index });
-            }
-            let on_plane = |i: usize| {
-                positions
-                    .get(i)
-                    .is_some_and(|&p| plane.signed_distance(p).abs() <= plane_tol)
+            // (the validator holds every live face to it). It is the face's
+            // plane whenever every point fits it, so a file need not store
+            // it (HEW_FILE_FORMAT.md §3.1); else the fit in ring order, as
+            // a face far from the origin can need
+            // ([`crate::serialize::own_ring_plane`]).
+            let refit = crate::serialize::outer_ring_plane(&pts, imported)
+                .map_err(|_| TopologyError::DegenerateFace { face: face_index })?;
+            let fits = |plane: &Plane| {
+                pts.iter()
+                    .all(|&p| plane.signed_distance(p).abs() <= plane_tol)
+                    && face_holes.iter().flatten().all(|&i| {
+                        positions
+                            .get(i)
+                            .is_some_and(|&p| plane.signed_distance(p).abs() <= plane_tol)
+                    })
             };
-            let outer_planar = polygon.iter().all(|&i| on_plane(i));
-            let holes_planar = face_holes.iter().flatten().all(|&i| on_plane(i));
-            if !outer_planar || !holes_planar {
+            // Planarity is checked for the outer loop AND every hole vertex
+            // (a hole must lie in the face).
+            let plane = if fits(&refit) {
+                refit
+            } else if fits(&fit) {
+                fit
+            } else {
                 return Err(TopologyError::NonPlanarFace { face: face_index });
+            };
+            // Holes are disjoint (`TopologyError::HolesOverlap`): checked
+            // here, always, so an import carrying overlapping holes is
+            // refused typed, never built (the validator holds only native
+            // objects to it, so old documents keep opening).
+            if face_holes.len() >= 2 {
+                let rings: Vec<Vec<Point3>> = face_holes
+                    .iter()
+                    .map(|h| {
+                        h.iter()
+                            .filter_map(|&i| positions.get(i).copied())
+                            .collect()
+                    })
+                    .collect();
+                if let Some((hole, other)) =
+                    crate::geom2d::first_overlapping_holes(&rings, plane.normal())
+                {
+                    return Err(TopologyError::OverlappingHoles {
+                        face: face_index,
+                        hole,
+                        other,
+                    });
+                }
             }
 
             // Create the face + its outer loop, then build outer and inner loops.
@@ -210,7 +381,13 @@ impl Object {
                 back_material: None,
                 uv_frame: uv_frames.and_then(|f| f.get(face_index).copied()).flatten(),
                 surface: surfaces.and_then(|s| s.get(face_index).copied()).flatten(),
+                blend: None,
+                attrs: AttrSlot::NONE,
             });
+            if let Some(dict) = attrs.and_then(|a| a.get(face_index)) {
+                let slot = obj.intern_attrs(dict.clone());
+                obj.faces[face_id].attrs = slot;
+            }
             obj.loops[outer_loop_id].face = face_id;
             build_validated_loop(
                 &mut obj,
@@ -264,7 +441,9 @@ impl Object {
                             twin_half_edge: Some(t),
                             curve: None,
                             soft: false,
+                            crease: false,
                             polygon: None,
+                            attrs: AttrSlot::NONE,
                         });
                         obj.half_edges[h].edge = edge;
                         obj.half_edges[t].edge = edge;
@@ -278,7 +457,9 @@ impl Object {
                         twin_half_edge: None,
                         curve: None,
                         soft: false,
+                        crease: false,
                         polygon: None,
+                        attrs: AttrSlot::NONE,
                     });
                     obj.half_edges[h].edge = edge;
                 }
@@ -298,20 +479,6 @@ impl Object {
         Ok(obj)
     }
 
-    /// Crate-internal construction path that supports faces with inner loops
-    /// (holes). Used by [`Object::from_extrusion`].
-    ///
-    /// `faces` is a list of `(outer_indices, inner_loops, plane, material,
-    /// uv_frame, surface)` tuples where `outer_indices` and each inner-loop
-    /// list are index lists into `positions`. All winding must be consistent
-    /// (outer CCW, inner CW seen from the face normal) — this function does
-    /// not validate; callers are responsible. `material` is the face's
-    /// material (`None` = default). `uv_frame` is the per-face affine UV
-    /// frame ( ext.; `None` =  `world_size` fallback). `surface` is the
-    /// face's analytic surface reference (`None` = plain planar face).
-    ///
-    /// The public signature/behaviour of [`Object::from_polygons`] is
-    /// unchanged; this function is a separate, internal path.
     /// Paints the backs of a freshly built object's faces, in the order
     /// they were built (a fresh object's faces iterate in insertion order).
     pub(crate) fn set_built_back_materials(&mut self, backs: &[FaceMaterial]) {
@@ -320,18 +487,34 @@ impl Object {
         }
     }
 
-    #[allow(clippy::type_complexity)]
-    pub(crate) fn from_faces_with_holes(
-        positions: &[Point3],
-        faces: &[(
-            Vec<usize>,
-            Vec<Vec<usize>>,
-            Plane,
-            FaceMaterial,
-            Option<UvFrame>,
-            Option<SurfaceRef>,
-        )],
-    ) -> Object {
+    /// Assigns blend tags to a freshly built object's faces, in build order
+    /// (the order of the builder's `faces` input; a fresh slotmap iterates in
+    /// insertion order). The builders take no blend column, exactly as with
+    /// back materials ([`Object::set_built_back_materials`]).
+    pub(crate) fn set_built_blends(&mut self, blends: &[Option<crate::topo::BlendTag>]) {
+        for ((_, f), &b) in self.faces.iter_mut().zip(blends) {
+            f.blend = b;
+        }
+    }
+
+    /// Crate-internal construction path that supports faces with inner loops
+    /// (holes). Used by [`Object::from_extrusion`].
+    ///
+    /// `faces` is a list of `(outer_indices, inner_loops, plane, material,
+    /// uv_frame, surface, attrs)` tuples ([`FaceSpec`]) where
+    /// `outer_indices` and each inner-loop list are index lists into
+    /// `positions`. All winding must be consistent
+    /// (outer CCW, inner CW seen from the face normal) — this function does
+    /// not validate; callers are responsible. `material` is the face's
+    /// material (`None` = default). `uv_frame` is the per-face affine UV
+    /// frame ( ext.; `None` =  `world_size` fallback). `surface` is the
+    /// face's analytic surface reference (`None` = plain planar face).
+    /// `attrs` is the face's attribute dictionary (empty = none), interned
+    /// into the new Object's table; every edge starts without one.
+    ///
+    /// The public signature/behaviour of [`Object::from_polygons`] is
+    /// unchanged; this function is a separate, internal path.
+    pub(crate) fn from_faces_with_holes(positions: &[Point3], faces: &[FaceSpec]) -> Object {
         let mut obj = Object::empty();
 
         // Insert all vertices.
@@ -352,7 +535,7 @@ impl Object {
         let mut directed: BTreeMap<(VertexId, VertexId), HalfEdgeId> = BTreeMap::new();
         let mut all_face_ids: Vec<FaceId> = Vec::new();
 
-        for (outer_indices, hole_index_lists, plane, material, uv_frame, surface) in faces {
+        for (outer_indices, hole_index_lists, plane, material, uv_frame, surface, attrs) in faces {
             // ---- outer loop ----
             let outer_loop_id = obj.loops.insert(Loop {
                 face: FaceId::default(),
@@ -368,7 +551,13 @@ impl Object {
                 back_material: None,
                 uv_frame: *uv_frame,
                 surface: *surface,
+                blend: None,
+                attrs: AttrSlot::NONE,
             });
+            if !attrs.is_empty() {
+                let slot = obj.intern_attrs(attrs.clone());
+                obj.faces[face_id].attrs = slot;
+            }
             obj.loops[outer_loop_id].face = face_id;
             all_face_ids.push(face_id);
 
@@ -409,7 +598,9 @@ impl Object {
                             twin_half_edge: Some(t),
                             curve: None,
                             soft: false,
+                            crease: false,
                             polygon: None,
+                            attrs: AttrSlot::NONE,
                         });
                         obj.half_edges[h].edge = edge;
                         obj.half_edges[t].edge = edge;
@@ -423,7 +614,9 @@ impl Object {
                         twin_half_edge: None,
                         curve: None,
                         soft: false,
+                        crease: false,
                         polygon: None,
+                        attrs: AttrSlot::NONE,
                     });
                     obj.half_edges[h].edge = edge;
                 }
@@ -831,11 +1024,15 @@ impl Object {
             let fids: Vec<FaceId> = self.faces.keys().collect();
             for f in fids {
                 let fits = |s: &SurfaceRef| -> bool {
+                    // Import extras carry cylinders only.
                     let SurfaceRef::Cylinder {
                         axis_point,
                         axis,
                         radius,
-                    } = *s;
+                    } = *s
+                    else {
+                        return false;
+                    };
                     let face = &self.faces[f];
                     if (axis.length() - 1.0).abs() > crate::tol::NORMAL_DIRECTION
                         || radius <= crate::tol::POINT_MERGE
@@ -1023,6 +1220,67 @@ mod tests {
         assert_eq!(face.inner_loops.len(), 1, "one hole");
         obj.validate().expect("validates"); // no UnreferencedVertex ⇒ hole verts used
         assert_eq!(obj.watertight(), WatertightState::Open);
+    }
+
+    /// A square face with a triangular hole whose first vertex sits `off`
+    /// outside the outer ring's left edge (negative: inside), at edge
+    /// length `k`; the rest of the hole is well inside.
+    fn square_with_poking_hole(k: f64, off: f64) -> Result<Object, TopologyError> {
+        let positions = vec![
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(k, 0.0, 0.0),
+            Point3::new(k, k, 0.0),
+            Point3::new(0.0, k, 0.0),
+            Point3::new(-off, 0.5 * k, 0.0),
+            Point3::new(0.4 * k, 0.2 * k, 0.0),
+            Point3::new(0.4 * k, 0.8 * k, 0.0),
+        ];
+        // Outer is counter-clockwise; the hole winds the other way.
+        let mut obj = Object::from_polygons_with_holes_import(
+            &positions,
+            &[vec![0, 1, 2, 3]],
+            &[vec![vec![4, 6, 5]]],
+            &[None],
+            &[None],
+        )?;
+        // Judged as native geometry: an import's planarity tolerance admits a
+        // hole that grazes its ring by that much (`geom2d::hole_leaves_outer`),
+        // which would hide the nanometre-scale rule these cases pin.
+        obj.planarity_tol = crate::tol::PLANE_DIST;
+        obj.validate()?;
+        Ok(obj)
+    }
+
+    /// A hole vertex 10 nm outside a 1 mm outer edge leaves the face: the
+    /// hole edges cross the ring beyond `POINT_MERGE`. (The crossing test
+    /// once measured square metres against a metre tolerance, so at this
+    /// size a 1 um dead band accepted it.)
+    #[test]
+    fn hole_vertex_ten_nanometres_outside_a_millimetre_edge_is_refused() {
+        let err = square_with_poking_hole(1e-3, 1e-8).unwrap_err();
+        assert!(
+            matches!(err, TopologyError::HoleOutsideFace { .. }),
+            "got {err:?}"
+        );
+    }
+
+    /// A micron outside the same edge is refused too, and a hole vertex
+    /// exactly on the edge is a touch and loads.
+    #[test]
+    fn hole_vertex_a_micron_outside_is_refused_and_one_on_the_edge_loads() {
+        let err = square_with_poking_hole(1e-3, 1e-6).unwrap_err();
+        assert!(
+            matches!(err, TopologyError::HoleOutsideFace { .. }),
+            "got {err:?}"
+        );
+        square_with_poking_hole(1e-3, 0.0).expect("a vertex on the edge is a touch");
+    }
+
+    /// The same vertex half a nanometre outside a 100 m edge is a touch
+    /// (within `POINT_MERGE`), not a crossing, and loads.
+    #[test]
+    fn hole_vertex_half_a_nanometre_outside_a_long_edge_is_a_touch() {
+        square_with_poking_hole(100.0, 0.5e-9).expect("a touch is not a crossing");
     }
 
     /// A hole vertex off the face plane is rejected like any non-planar face.

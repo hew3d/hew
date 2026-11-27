@@ -8,7 +8,7 @@
  */
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { ReportBugDialog } from './ReportBugDialog'
+import { ReportBugDialog, excerptOf } from './ReportBugDialog'
 import { ReportError } from '../io/reportClient'
 import type { ReportableScene } from '../log/reportBundle'
 import { beginOpenAttempt, clearOpenAttempt, openAttemptFailed } from '../log/failedOpen'
@@ -644,5 +644,74 @@ describe('ReportBugDialog — imported files and the compressed send', () => {
     } finally {
       vi.unstubAllGlobals()
     }
+  })
+})
+
+describe('ReportBugDialog — following the report', () => {
+  const FOLLOW_LABEL = /let me know what happens with this report/i
+
+  beforeEach(() => {
+    localStorage.removeItem('hew.report.follow')
+  })
+
+  it('shows the checkbox ticked by default, only when Send is available', async () => {
+    const { unmount } = render(<ReportBugDialog scene={fakeScene()} documentName="d.hew" crash={null} onClose={vi.fn()} />)
+    expect(screen.getByRole('checkbox', { name: FOLLOW_LABEL })).toBeChecked()
+    expect(screen.getByText(/no account, no email/i)).toBeInTheDocument()
+    unmount()
+
+    mockCanSend.mockReturnValue(false)
+    render(<ReportBugDialog scene={fakeScene()} documentName="d.hew" crash={null} onClose={vi.fn()} />)
+    expect(screen.queryByRole('checkbox', { name: FOLLOW_LABEL })).not.toBeInTheDocument()
+  })
+
+  it('remembers an unticked choice', () => {
+    const { unmount } = render(<ReportBugDialog scene={fakeScene()} documentName="d.hew" crash={null} onClose={vi.fn()} />)
+    fireEvent.click(screen.getByRole('checkbox', { name: FOLLOW_LABEL }))
+    expect(localStorage.getItem('hew.report.follow')).toBe('0')
+    unmount()
+    render(<ReportBugDialog scene={fakeScene()} documentName="d.hew" crash={null} onClose={vi.fn()} />)
+    expect(screen.getByRole('checkbox', { name: FOLLOW_LABEL })).not.toBeChecked()
+  })
+
+  it('passes follow, the first line, and the failed-open file name to submitReport', async () => {
+    mockSubmitReport.mockResolvedValue({ id: 'HEW-7K3F-Q9XB', following: true })
+    beginOpenAttempt({ name: 'Kitchen.skp', label: 'SketchUp model (.skp)', bytes: new Uint8Array([1, 2, 3]) })
+    openAttemptFailed('bad')
+    try {
+      render(<ReportBugDialog scene={fakeScene()} documentName="d.hew" crash={null} onClose={vi.fn()} />)
+      fireEvent.change(screen.getByLabelText(/what happened/i), { target: { value: 'First line here\nsecond line' } })
+      fireEvent.click(await readySendButton())
+      await screen.findByText(/HEW-7K3F-Q9XB/)
+      expect(mockSubmitReport.mock.calls[0]![2]).toEqual({ follow: true, excerpt: 'First line here', fileName: 'Kitchen.skp' })
+      expect(screen.getByTestId('report-follow-confirmation')).toHaveTextContent('Help ▸ Sent Reports…')
+      expect(screen.getByRole('button', { name: /also open a public github issue/i })).toBeInTheDocument()
+    } finally {
+      clearOpenAttempt()
+    }
+  })
+
+  it('omits the Sent Reports sentence when the report is not followed', async () => {
+    mockSubmitReport.mockResolvedValue({ id: 'HEW-7K3F-Q9XB', following: false })
+    render(<ReportBugDialog scene={fakeScene()} documentName="d.hew" crash={null} onClose={vi.fn()} />)
+    await typeValidDescription()
+    fireEvent.click(screen.getByRole('checkbox', { name: FOLLOW_LABEL }))
+    fireEvent.click(await readySendButton())
+    await screen.findByText(/HEW-7K3F-Q9XB/)
+    expect(mockSubmitReport.mock.calls[0]![2]).toMatchObject({ follow: false })
+    expect(screen.queryByTestId('report-follow-confirmation')).not.toBeInTheDocument()
+  })
+})
+
+describe('excerptOf', () => {
+  it('slices by code points so an emoji is never cut in half', () => {
+    const s = 'a'.repeat(199) + '😀' + 'tail'
+    const out = excerptOf(s)
+    expect(Array.from(out)).toHaveLength(200)
+    expect(out.endsWith('😀')).toBe(true)
+    expect(JSON.stringify(out)).not.toMatch(/\\ud[89ab]/i)
+  })
+  it('leaves short text alone', () => {
+    expect(excerptOf('hi')).toBe('hi')
   })
 })

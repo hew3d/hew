@@ -27,6 +27,12 @@
 
 ---
 
+**Opens and saves every version of SketchUp, from SketchUp 3 through
+SketchUp 2027.** A `.skp` file of any release (3 to 8 and 2013 to 2027)
+opens as a Hew document and saves back in its own release, and Save As
+writes any of them, through the clean-room
+[Skpwright](https://github.com/hew3d/skpwright) reader and writer.
+
 Hew keeps the interaction model that made SketchUp approachable — draw on faces,
 push/pull, pervasive inference snapping, even the same key bindings — and puts
 it on top of a stricter foundation:
@@ -47,8 +53,10 @@ it on top of a stricter foundation:
 
 Native desktop apps for macOS, Windows, and Linux — the recommended way to
 use Hew — are on the [download page](https://hew3d.com/download) and the
-[releases page](https://github.com/hew3d/hew/releases); desktop builds
-update themselves in place. The same app also runs in any WebGL2-capable
+[releases page](https://github.com/hew3d/hew/releases); the macOS and Windows
+apps and the Linux AppImage, .deb, and .rpm can install updates themselves,
+and Flatpak, Arch, and Gentoo installs show the command that updates them
+([Linux update help](https://hew3d.com/download/update-help)). The same app also runs in any WebGL2-capable
 browser at [app.hew3d.com](https://app.hew3d.com), with nothing to install.
 
 See [docs/ROADMAP.md](docs/ROADMAP.md) for what's shipped and what's
@@ -64,12 +72,15 @@ planned.
 - Materials with texturing, per-face painting, and translucency
 - Tags, an object tree, and per-Object solid/watertight reporting
 - SketchUp 2017 keyboard shortcuts
-- Open and save SketchUp `.skp` files as documents (the current 2026
-  format and the 2017 one), with names, hierarchy, materials, tags,
-  guides, and scenes carried both ways; Model Health and Make Solid
+- Open and save SketchUp `.skp` files of every version, from SketchUp 3
+  through 2027, as documents: releases 3 to 8 and 2013 to 2020 open and
+  save back in their own release, and the container that SketchUp 2021
+  and later save (2021 through 2027) opens and saves back as that
+  container, with names, hierarchy, materials, tags, guides, and scenes
+  carried both ways; Save As writes any of them; Model Health and Make Solid
   show and close what an imported model has that isn't solid
 - Import: COLLADA `.dae`, glTF, STL, and `.skp` into an open document
-- Export: SketchUp `.skp`, glTF, STL, 3MF, USDZ, SVG line drawings — see
+- Export: SketchUp `.skp` (any version, 3 through 2027), glTF, STL, 3MF, USDZ, SVG line drawings — see
   [docs/INTEROP.md](docs/INTEROP.md)
 - Print to paper or PDF: what you see, or a drawing at an exact scale
   tiled across sheets with trim marks and a scale bar, as a bitmap or as
@@ -106,12 +117,9 @@ pnpm --dir shells/tauri dev
 ```
 
 Both `dev` and `build` compile the Rust kernel to WASM automatically,
-rebuilding only when the kernel sources change. To build it on its own
-(or if `wasm-pack` isn't on your `PATH` and you want to run it manually):
-
-```sh
-wasm-pack build crates/wasm-api --target web --out-dir ../../app/src/wasm/pkg
-```
+rebuilding only when the kernel sources change. They need `wasm-pack` on
+your `PATH`; `scripts/install-wasm-pack.sh` installs the pinned version.
+The first build takes several minutes.
 
 ## Documentation
 
@@ -151,8 +159,8 @@ holds the exhaustive references AI agents work from.
 
 Contributions are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md). Note
 the project's licensing wall: nothing derived from the SketchUp SDK may
-enter this repository or its dependency chain. SketchUp import is powered
-by [OpenSKP](https://github.com/hew3d/openskp), a clean-room reader.
+enter this repository or its dependency chain. SketchUp import and export are powered
+by [Skpwright](https://github.com/hew3d/skpwright), a clean-room reader and writer.
 
 ## License
 

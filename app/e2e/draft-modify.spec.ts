@@ -61,7 +61,7 @@ async function pickTool(page: Page, name: string): Promise<void> {
 
 const lastError = (page: Page) => page.evaluate(() => window.__hew_test!.getLastError())
 const objectCount = (page: Page) => page.evaluate(() => window.__hew_test!.getObjectCount())
-const stateHash = (page: Page) => page.evaluate(() => window.__hew_test!.getStateHash())
+const stateHash = (page: Page) => page.evaluate(() => window.__hew_test!.getModelStateHash())
 const bounds = (page: Page, o: string) => page.evaluate((o) => window.__hew_test!.getObjectBounds(o), o)
 
 async function freeRegions(page: Page): Promise<Array<{ sketch: string; region: string }>> {

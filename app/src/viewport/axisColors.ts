@@ -99,3 +99,17 @@ export function axisColorForDirection(
   }
   return null
 }
+
+/**
+ * The custom-plane violet (view-die design §3.1): the fourth pip, and the
+ * cursor cue for any plane not parallel to a drawing axis. Mirrors the
+ * `--plane-custom` token of each theme.
+ */
+export const PLANE_CUSTOM_COLORS = { dark: 0xc77dff, light: 0x9d4edd } as const
+
+/** The color a drawing-plane pip stands for, for three.js: the axis color
+ *  of the theme for red, green and blue, the custom violet otherwise. */
+export function planePipColor(pip: 'red' | 'green' | 'blue' | 'custom', theme: 'light' | 'dark'): number {
+  if (pip === 'custom') return PLANE_CUSTOM_COLORS[theme]
+  return axisColorsForTheme(theme)[pip === 'red' ? 0 : pip === 'green' ? 1 : 2]
+}

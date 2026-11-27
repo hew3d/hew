@@ -41,17 +41,20 @@ non-negotiable and how the pins get bumped.
 Clone the repository, then:
 
 ```sh
-cargo build --workspace          # build every Rust crate
+scripts/install-wasm-pack.sh     # the pinned wasm-pack
 pnpm install                     # install JS/TS dependencies
-wasm-pack build crates/wasm-api --target web --out-dir ../../app/src/wasm/pkg
 pnpm --dir app dev               # UI dev server (web build)
 pnpm --dir shells/tauri dev      # desktop shell dev
 ```
 
-The WASM build step is required before the UI dev server will run — the app
-imports the kernel bindings from `app/src/wasm/pkg`, which is generated, not
-checked in. Re-run it whenever you change a kernel crate the bindings
-depend on (`kernel`, `inference`, `tessellate`, `wasm-api`).
+The app imports the kernel bindings from `app/src/wasm/pkg`, which is
+generated, not checked in. `pnpm --dir app dev` and `pnpm --dir app build`
+build it first when it is missing, older than its sources, or the wrong
+flavor for the command (`app/scripts/build-wasm.mjs`). The dev server is a
+preview build unless `HEW_PREVIEW=0` is set, so it gets the preview kernel;
+see [Preview features](#preview-features). The first build compiles the
+kernel crates and takes several minutes. `cargo build --workspace` builds
+every crate natively and is not needed to run the app.
 
 Before every commit, run the fast verification script:
 
@@ -60,11 +63,30 @@ scripts/verify.sh
 ```
 
 It covers Rust formatting and Clippy (with warnings denied), the whole Rust
-test suite, a release WASM build, the app's type-check/test/build steps, and
+test suite, a WASM build of the kernel (without `wasm-opt`; CI builds the
+size-optimized module that ships), the app's type-check/test/build steps, and
 the Tauri host crate's fmt/clippy. It is deliberately dependency-light and
 fast, so it does **not** run the browser- and runner-heavy CI lanes — the
 replay gate and the Playwright E2E suite. A green `verify.sh` is therefore
 necessary but not sufficient for a green CI run.
+
+While a change is still in progress, there is a quicker check that runs
+only what the change can reach:
+
+```sh
+scripts/verify.sh --changed        # or: scripts/verify-changed.sh [base]
+```
+
+It compares the working tree with the merge base on `main` (or the branch
+you name) and runs the checks for what differs: Clippy and tests for the
+changed crates and the crates that depend on them, the app's type-check,
+lint and the unit tests related to the changed files, a handful of smoke
+specs plus any spec you edited (the visual goldens aside), and so on. An edit to one small crate or
+one app file takes a minute or two; a kernel edit still rebuilds and
+tests every crate downstream of it. It skips whatever the change does not
+touch, so it does not replace `verify.sh`: run that before the change is
+done. The header of `scripts/verify-changed.sh` lists what each kind of
+change runs and what is left to the gate.
 
 Before **pushing**, run the comprehensive gate:
 
@@ -72,16 +94,30 @@ Before **pushing**, run the comprehensive gate:
 scripts/verify-full.sh
 ```
 
-It runs `verify.sh` and then the blocking CI lanes it is able to run (the
-golden state-hash replay gate and the chromium E2E smoke), in CI's order.
+It runs `verify.sh`, the dependency advisories, the golden state-hash
+replay gate, the relay contract, and the chromium E2E **smoke set** in both
+builds: the specs listed in `scripts/e2e-smoke-specs.txt`, the Preview wall
+spec, and every spec file the branch changed.
 
-A green run predicts a green CI run with one documented exception: the
-**visual-goldens lane blocks in CI but cannot run here**, because its PNGs are
-rasterized by the SwiftShader inside CI's pinned Chromium and false-fail on any
-other host. If you touched the render path — or bumped three.js or Playwright —
-CI has the last word. It also skips the non-blocking webkit lane and the
-Desktop E2E workflow (tauri-driver cannot drive the macOS WKWebView). The
-header of `scripts/verify-full.sh` carries the full rationale.
+The whole chromium suite is CI's job. It is serial by design and takes well
+over an hour on one machine; CI spreads it over eight runners and blocks the
+merge on it. Run it locally when a change is wide enough to earn the wait
+(the input pipeline, the tool state machines, the test harness, a Playwright
+bump):
+
+```sh
+scripts/verify-full.sh --full-e2e
+```
+
+A green run predicts a green CI run with two documented exceptions. The
+specs outside the smoke set run only in CI, unless `--full-e2e` is given.
+And the **visual-goldens lane blocks in CI but cannot run here**, because its
+PNGs are rasterized by the SwiftShader inside CI's pinned Chromium and
+false-fail on any other host. If you touched the render path — or bumped
+three.js or Playwright — CI has the last word. The gate also skips the
+non-blocking webkit run (nightly in CI) and the Desktop E2E workflow
+(tauri-driver cannot drive the macOS WKWebView). The header of
+`scripts/verify-full.sh` carries the full rationale.
 
 ## 2. Repository layout
 
@@ -94,13 +130,16 @@ crates/mesh-heal/     healing passes for imported foreign meshes
 crates/dae-import/    COLLADA .dae -> Objects/Instances
 crates/gltf-import/   glTF -> Objects/Instances
 crates/skp-import/    SketchUp .skp -> Objects/Instances, built on the
-                      clean-room OpenSKP reader (see rule 7)
+                      clean-room Skpwright reader (see rule 7)
 crates/stl-import/    STL (binary + ASCII) -> Objects; hand-written parser,
                       no external STL dependency
 crates/image-import/  PNG/JPEG -> a placed picture (one painted face in a
                       component, the .skp image shape); reads only the size
 crates/hlr/           hidden-line removal: visible line work of a view as 2D
                       segments (+ SVG), for vector Line-art printing and export
+crates/headless-render/ the renderers behind hew.view.snapshot and
+                      hew.view.line_drawing, shared by hew-cli and the app's
+                      live host (over softrender and hlr)
 crates/pdfwrite/      hand-written PDF 1.4 writer for Save PDF… and the
                       headless hew.print.pdf
 crates/wasm-api/      wasm-bindgen surface exposing the kernel to the UI
@@ -109,6 +148,13 @@ crates/hew-relay/     self-hostable "Open on Phone" relay binary (axum;
 crates/library/       the Hew Library's on-disk layout (folder resolution,
                       item naming, atomic list/read/write/remove), shared
                       by hew-cli's hew.library.* and the desktop shell
+crates/sources/       Library sources: the hew.json index and catalog.json
+                      formats, source references, request URLs, the
+                      public-host check; pure (no I/O, clock or network),
+                      used by hew-cli natively and by the app through
+                      crates/wasm-api/src/sources_api.rs
+crates/plugin-manifest/ the plugin manifest (hew-plugin.json) parser and
+                      validator; pure, shared by every host and crates/api
 crates/vendor/        vendored third-party code (dae-parser)
 app/                  TypeScript UI (viewport, tools, panels, E2E suite)
 shells/tauri/         desktop shell
@@ -119,10 +165,16 @@ workers/share-relay/  the public relay Worker, its unit suite, and the
 workers/bug-intake/   the private Help ▸ Report Bug intake Worker (chunked
                       upload, Access-protected admin page) and its unit suite
 tools/                replay runner and development tooling
+corpus/curves/        the curves scoreboard: test models as API scripts and
+                      the checked-in result table (section 7)
+corpus/determinism/   the determinism golden: hash table, case list, extra
+                      models (section 7)
 site/                 the hew3d.com website (Astro)
 docs/                 architecture, file format spec, roadmap, this guide
-scripts/              verify.sh (per-commit gate), verify-full.sh (pre-push),
-                      relay-contract.sh (relay conformance, both servers)
+scripts/              verify.sh (per-commit gate), verify-changed.sh (quick
+                      check of a change in progress), verify-full.sh
+                      (pre-push), relay-contract.sh (relay conformance,
+                      both servers)
 brand/                logo, mark, and icon assets
 ```
 
@@ -133,7 +185,7 @@ Hew's Objects/Instances, then hand off to the kernel:
   can export to, via a vendored `dae-parser`.
 - `gltf-import` reads glTF 2.0 (`.gltf`/`.glb`).
 - `skp-import` reads SketchUp's native `.skp` format directly, using
-  [OpenSKP](https://github.com/hew3d/openskp) (crates.io: `openskp`), a
+  [Skpwright](https://github.com/hew3d/skpwright) (crates.io: `skpwright`), a
   clean-room implementation with no SketchUp SDK in its history (rule 7).
 - `stl-import` reads STL (binary and ASCII, auto-detected), the format the
   maker community lives in. Hand-written on `std` — no external STL crate —
@@ -157,6 +209,48 @@ holding a JSON manifest and binary geometry buffers). Its spec lives in
 `docs/dev/HEW_FILE_FORMAT.md` and any serialization change must update that spec
 in the same commit.
 
+**The website** (`site/`) is built by Cloudflare Pages from the `site-live`
+branch, not from `main`, so hew3d.com describes the release people can
+download while `main` carries the Learn pages for features that have not
+shipped yet. Docs for a feature still land on `main` in the feature's own
+commit; nothing changes about how you write them. `site-live` is a pointer,
+never a branch anyone commits to: the release workflow moves it to each
+`vX.Y.Z` tag, and only forward, judged by the version in
+`site/src/data/releases.json`, so an out-of-order or re-run release never
+rewinds it. A `vX.Y.Z-pre.LABEL` pre-release tag (a build of an effort
+that has not shipped, cut from that effort's integration branch) builds
+every package but never moves it. The job runs from the workflow file at the tagged commit, so a
+patch tag cut from an older release branch moves the pointer only if that
+branch carries the job. With Pages' default preview setting, a push to `main`
+only produces a preview deployment at `https://main.<pages-project>.pages.dev`
+(the project name is in the Cloudflare dashboard), which is the user guide for
+the next release and the place to proofread it. A site fix that cannot wait
+for the next release goes to `main` first, then onto the branch from a
+throwaway worktree based on the remote tip, never on a stale local branch:
+
+```sh
+git fetch origin
+git worktree add -B site-live ../hew-site-fix origin/site-live
+# cherry-pick the fix, then a plain push; a rejected push means a stale base
+```
+
+The next release moves the pointer to its tag, so the fix must be in that
+tag's history: if the release is cut from a release branch rather than
+`main`, cherry-pick the fix there too.
+
+**The beta web app** (beta.hew3d.com) is a second Cloudflare Pages project,
+`hew-app-beta`, separate from the release app at app.hew3d.com. The
+`deploy-beta` job in `.github/workflows/ci.yml` deploys it on every push to
+`main`, once the gate jobs (`rust`, `web`, `tauri`, `replay`, `e2e-chromium`, `e2e-visual`, `relay-contract`, `bug-intake-tests`)
+are green. Builds that deploy there set `HEW_BETA_SHA`, which stamps the
+version as `<version>+beta.<sha>` and switches on the in-app beta cues and
+the "Hew Beta" PWA name. Releases, local builds, E2E builds and the
+self-hosting tarball never set it, so they are unchanged. The two Workers
+that serve same-origin routes, share-relay and bug-intake, carry
+`beta.hew3d.com` routes in their `wrangler.toml`; redeploy each with
+`npx wrangler deploy` whenever those routes change. The beta is deliberately
+unlinked from the website and the README, so do not add links to it there.
+
 ## 3. The rules
 
 These are non-negotiable. They are cited from code comments as
@@ -179,6 +273,16 @@ this list.
 4. **No silent geometry repair.** If an operation would produce invalid
    topology, it fails loudly with a typed error. The kernel never welds,
    drops, nudges, or reorders geometry to force an operation to succeed.
+   There is one exception, and it is bounded and reported: where a
+   boolean's own cut leaves a piece narrower than `tol::FEATURE_MIN`
+   (0.1 µm), the boolean merges that piece into its neighbors. It moves no
+   point farther than `tol::TIDY_REACH` (0.2 µm), moves only points within
+   that reach of such a piece, and returns what it merged, and where, in
+   its result and in the log. A tidied result must pass every check an
+   untidied one does; one that cannot is discarded, and the boolean
+   answers as it would have without the tidy. Geometry the cut does not
+   touch is never changed, and no other operation may merge geometry this
+   way without a change to this rule.
 5. **Tests pass before merge.** No change lands with a failing test or a
    Clippy warning. A failing test is never weakened or deleted to make it
    pass without an explicit, reviewed decision to do so.
@@ -188,8 +292,8 @@ this list.
 7. **Licensing wall.** Nothing derived from the SketchUp SDK — headers,
    constants, or format knowledge obtained under Trimble's license — enters
    this repository or any part of its dependency chain. That admissibility
-   test is the rule, full stop. [OpenSKP](https://github.com/hew3d/openskp)
-   (crates.io: `openskp`), the reader behind `crates/skp-import`, is
+   test is the rule, full stop. [Skpwright](https://github.com/hew3d/skpwright)
+   (crates.io: `skpwright`), the reader behind `crates/skp-import`, is
    derived solely from self-authored test corpora, their own COLLADA
    exports, and public documentation of the MFC `CArchive` serialization
    convention — no SketchUp SDK anywhere in its history. It passes this
@@ -382,7 +486,8 @@ whatever tool is active.
 **UI text is localized.** Every string a person reads goes through a
 Lingui macro (`t`, `<Trans>`, `msg`) and into the gettext catalogs under
 `app/src/locales/`; `pnpm --dir app i18n:extract` regenerates them and the
-verify gate fails if they are stale or if a shipped locale is incomplete.
+verify gate fails if they are stale. A shipped locale may lag: untranslated
+messages show in English and the gate only reports the coverage.
 `pnpm --dir app lint` (Oxlint with the Lingui plugin) rejects an unwrapped
 string. Numbers a person reads go through `app/src/i18n/format.ts`, never
 `toFixed`. Strings in `crates/` stay English: the kernel speaks in typed
@@ -432,14 +537,264 @@ merges, and it's what CI runs:
 cargo fmt --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
-wasm-pack build crates/wasm-api --target web --out-dir ../../app/src/wasm/pkg
-pnpm --dir app typecheck && pnpm --dir app test && pnpm --dir app build
+HEW_PREVIEW=1 cargo clippy / cargo test   (the crates the flag changes)
+scripts/wasm-flavors.sh build production web --no-opt; ... build preview web --no-opt
+pnpm --dir app typecheck && pnpm --dir app test (both builds) && pnpm --dir app build
 pnpm --dir site check && pnpm --dir site build
 ```
 
 It also holds the desktop shell crate to the same formatting/Clippy bar,
 even though it isn't a workspace member (it carries desktop-only
-dependencies that don't belong in the kernel test loop).
+dependencies that don't belong in the kernel test loop). Every step the
+Preview flag changes runs twice, once per build (see below).
+
+### Preview features
+
+Unfinished features live on `main` behind a build-time flag. A preview
+build has them; a production build, the one regular users get, has no way
+to reach them: no tool, menu item, palette entry, keyboard shortcut, dock
+chip or API command. The flag is fixed when Hew is built, so there is
+nothing to switch on in a production build.
+
+**The flag.** `HEW_PREVIEW=1` in the build environment makes a preview
+build. Any other value, or none, makes a production build. It reaches:
+
+- `crates/api` (its `build.rs` sets `cfg(hew_preview)`), and through it
+  `hew-cli`, the MCP server, the WASM module's live API, and the plugin
+  host's dispatch;
+- `crates/wasm-api` and `crates/hew-cli`, each with a `build.rs` of its
+  own that sets the same cfg, so an export or a subcommand of a feature
+  that loads code can be left out of a production build. Each crate fails
+  to compile if its flag and the API crate's disagree;
+- the desktop shell (`shells/tauri/src-tauri/build.rs`), for the native
+  menu and the updater: a preview build never updates itself;
+- the app, as `__HEW_PREVIEW__` (`app/vite.config.ts`). The dev server
+  defaults it to on and `vite build` to off; set `HEW_PREVIEW=0` or `1` to
+  choose.
+
+**One rule for the desktop shell and its page.** The flag has one
+resolution, and `shells/tauri/scripts/tauri-policy.mjs` applies it for the
+desktop shell: `1` is a preview build, `0` a production build, anything
+else an error, and unset or empty is a preview build for `dev` and a
+production build for `build`. The wrapper exports the answer (`1` or `0`)
+as `HEW_PREVIEW` to the Tauri CLI, so the Rust shell
+(`cfg(hew_preview)`), the page `vite dev` or `vite build` serves and the
+policy overlay can never disagree, even when the caller's variable was
+unset. `--print-args` prints what the wrapper would run, which
+`scripts/check-production-artifacts.mjs` and the wall tests read. Use the
+shell's package scripts only: the Tauri CLI run directly (`pnpm tauri`,
+`cargo tauri`) applies neither the overlay nor the flag. A preview shell
+started with a policy that does not allow the realm's boot script logs an
+error and refuses every plugin command.
+
+A `vX.Y.Z-pre.N` tag builds every package with the flag on, publishes a
+pre-release with no update feed, and deploys the web app to the `preview`
+Pages branch. A production tag never sets it, and the release workflow
+fails if it finds it set.
+
+**The registry.** `preview-features.json` at the repo root lists every
+Preview feature: an id, a name, a one-line state, an owner, and what it
+gates (`tools`, `actions`, `dockChips`, `apiCommands`, `behaviors`, and
+for a feature that loads code, `loader`; see "Code loading" below).
+Nothing is gated anywhere else. The app reads it in `app/src/preview/`,
+`crates/api` in `src/preview.rs`, and the desktop shell in
+`src/preview_menu.rs`. In a production build an API command of an entry
+is left out of the registry, so it appears in no listing, and a call
+naming it is refused with `preview_only`. A behavior that is an API
+parameter (Follow Me's `twist`, for one) is bound to its command in
+`GATED_PARAMS` in `crates/api/src/preview.rs`; the command stays, the
+parameter is refused. A behavior that is a value of a live field (the
+Library's `profile` category) is bound in `GATED_VALUES`: the value
+leaves the command's schemas, a request naming it is refused, and the
+handler neither lists nor touches an item that carries it. Refusal copy a
+handler writes that would name a Preview feature lives in
+`GATED_API_COPY`, with the production wording beside it; the wall test
+fails on any other handler string that names one.
+
+**Code loading.** A feature that loads and runs code (plugins are the
+first) has entry points no table holds, so its entry carries a `loader`
+object and `"defaultOn": false`. Its switch in Settings ▸ Preview starts
+off, and with the switch off a preview build behaves like a production
+one for that feature. The lists in `loader`, and how each is kept out of
+a production build:
+
+| List | What it names | Production build |
+|---|---|---|
+| `roots` | window roots picked by location hash in `app/src/main.tsx` | `previewBuild && rootAllowed('<id>')` ahead of the hash test; the root's lazy import is in `app/src/preview/loaderRoots.ts` behind the build literal, so the bundle has neither |
+| `panes` | Settings panes | `paneAllowed('<id>')` at the one tab table |
+| `shellCommands` | desktop commands | defined under `src/preview_only/`, a module compiled only with `cfg(hew_preview)`, and absent from the handler list every build registers |
+| `kernelExports` | exports of the WASM module | `#[cfg(hew_preview)]` in `crates/wasm-api` |
+| `cliCommands` | `hew-cli` subcommands | `#[cfg(hew_preview)]` on the match arm, the usage text, the "did you mean" list and the module behind it, so `hew-cli <word> --help` is answered as for any unknown word |
+| `storage` | folders, databases and settings-key prefixes | touched only by code in the gated modules |
+| `markers` | strings that must not be in a production artifact | scanned for |
+
+`rootAllowed`, `paneAllowed` and `loaderEnabled` (`app/src/preview/`)
+answer false for an id no entry lists, the reverse of the rule for tools
+and commands: nothing they guard is public in any build. A host that
+loads code asks `loaderEnabled('<feature>')` before it starts anything.
+The switch gates the app's side only. In a preview build the desktop
+commands a `shellCommands` list names answer whether the switch is on or
+off; what the switch decides is whether the app's UI and loader call
+them.
+An event name a loader feature adds is a `GATED_VALUES` row, as for any
+other feature. A bus command the desktop shell answers itself instead of
+forwarding it to the app (`hew.plugin.list`, `hew.plugin.dev`) is named
+in `PREVIEW_HOST_METHODS` in `shells/tauri/src-tauri/src/live_router.rs`,
+which is empty in a production build; there it is forwarded like any
+other method, and the app's dispatcher answers it from the registry.
+A production `hew-cli` does not rely on that: in `--live` mode
+(`dispatch`, `run`, `mcp`) `LiveSession::dispatch`, the one place every
+live request passes, refuses with `preview_only` any method the registry
+marks as a Preview command, bare or inside `hew.doc.transact`, before
+anything is sent. A method the registry does not know is forwarded, since
+a newer app may serve it. The MCP server of `hew-cli` also refuses every
+`hew.plugin.*` method but `hew.plugin.list` to an agent in every build; a
+production build leaves a name the registry marks to that `preview_only`
+answer and refuses any other with wording that names no feature.
+`crates/hew-cli/tests/live_preview_wall.rs` pairs each build of the CLI
+with a fake app socket that records what it is sent.
+
+Both shells' content security policies live in
+`shells/csp/policies.json`: a `production` and a `preview` policy for
+each shell, a `web.strict` policy, and the `probe` policy the realm
+probe is measured under, which no release serves. The web `production`
+and `preview` policies have `connect-src 'self' blob: https:`, because
+the Library reads sources from any `https:` host; `web.strict` is the
+web production policy with `connect-src 'self' blob:`.
+`HEW_WEB_SOURCES=off` (exactly that value) builds the web page with
+`web.strict`, and combined with `HEW_PREVIEW=1` it is a build error. The
+desktop shell ignores the flag and its policy does not change.
+`shells/web/inject-csp.mjs` picks the web policy by the flags;
+`tauri.conf.json` holds the desktop production policy, and
+`shells/csp/tauri-overlay.mjs` writes a `--config` overlay for any
+other.
+A Preview feature that needs a wider policy widens the preview one. The
+desktop shell's `dev`, `build` and `e2e:build` scripts run the Tauri CLI
+through `shells/tauri/scripts/tauri-policy.mjs`, which adds the
+`desktop.preview` overlay (written under `src-tauri/target/`) whenever
+the app it builds is a preview build (the rule above). The release
+workflow passes the same overlay for a `-pre.` tag and no other, and
+after the build `scripts/check-desktop-binary.mjs` checks that the
+shell binary allows the boot script for a `-pre.` tag and does not for
+any other; the check below holds the wiring to that. The
+production and strict policies and the desktop capability files are pinned to copies
+under `shells/csp/baseline/`, so changing one takes an edit in both
+places. Hew sets no cross-origin isolation header on any tier.
+
+Library sources are the one feature that makes outside requests from
+the page. The app never reads `HEW_WEB_SOURCES`: at run time
+`webSourcesOff` in `app/src/library/remoteFetcher.ts` reads the page's
+own CSP `<meta>` and turns Sources off when `connect-src` allows neither
+`https:` nor `*`. A page with no CSP `<meta>` (the dev server, the E2E
+servers) is not Off. On the web the fetch is the browser's; on the
+desktop it is the Tauri command `remote_fetch`
+(`shells/tauri/src-tauri/src/remote_fetch.rs`), and the webview itself
+still has no network. Neither writes a source address to the log. The
+catalog address is `DEFAULT_CATALOG_URL` in
+`app/src/library/catalogUrl.ts`; the build-time variable
+`VITE_HEW_CATALOG_URL` replaces it, and an empty value hides the catalog
+view. `crates/sources` is on the `CRATES` list of
+`crates/wasm-api/tests/no_wasm_panics.rs`. The `hew-cli` subcommands
+`library index`, `catalog check` and `catalog build` (production, not
+Preview) live in `crates/hew-cli/src/library_index.rs` and `catalog.rs`;
+their tests run against a loopback server, and the loopback allowance
+sits behind the `test-loopback` feature, which only the crate's own
+tests enable.
+
+A debug build of the desktop shell reads `HEW_EXTRA_CA_PEM`. Set it to
+the path of a PEM file and `remote_fetch` trusts the certificates in
+that file in addition to the platform's roots, so a test can read
+sources from a local `https` fixture without touching the system
+keychain. A file that cannot be read or parsed fails every fetch with
+`network`. The code is compiled out of release builds, which ignore the
+variable.
+
+The plugin realm's boot script is built from `sdk/plugin` (the
+`@hew3d/plugin` workspace package) and committed as
+`app/src/plugins/boot/boot-1.js` with its hash in `boot-1.hash`. The
+preview policies pin that hash in `script-src`, and the Plugins registry
+entry lists it as a marker. Both files are byte-exact (`.gitattributes`
+sets `-text` on them), so no checkout rewrites their line endings. After a change to `sdk/plugin/src/`, run
+`pnpm --dir sdk/plugin build` and paste the printed hash into
+`shells/csp/policies.json` (`web.preview`, `desktop.preview`) and the
+entry's `markers`; `app/src/plugins/boot/bootArtifacts.test.ts` fails
+until all of them agree with a fresh build.
+
+`scripts/check-production-artifacts.mjs` runs after the production app
+build in `scripts/verify.sh`, and in the release workflow for a production
+tag. It fails on a production policy or capability file that left its
+baseline, an isolation header, a `markers` string or a feature's state
+line anywhere in the app build, and a `kernelExports` name in the
+production kernel's types. The kernel `.wasm` and the native binaries
+embed the registry's text, so they are checked by export and command
+name, not by scanning for markers.
+
+**Adding a feature.** Add its entry to `preview-features.json` and build
+the feature as usual. The wall tests walk the registry, so the entry is
+covered without a test change: `crates/api/tests/preview_wall.rs`,
+`crates/hew-cli/tests/preview_wall.rs`, the live-API test in
+`crates/wasm-api`, the native menu test in the shell,
+`app/src/preview/wall.test.ts`, and `app/e2e/preview-wall.spec.ts`. A
+test of the feature itself runs in the preview build only: in Rust,
+`#[cfg(hew_preview)]` (in `crates/api`; other crates check
+`api::preview::PREVIEW_BUILD`); in a browser spec,
+`requiresPreview('<id>')`. Every name in an entry must be real, and the
+tests fail on one that is not.
+
+**Graduating a feature.** Delete its entry, then regenerate the API
+artifacts (`REGENERATE_API_ARTIFACTS=1 cargo test -p api --test
+generate_artifacts`): the reference and the TypeScript SDK mark each
+Preview command, so their diff shows what became public. Remove the
+feature's `GATED_PARAMS`, `GATED_VALUES` and `GATED_API_COPY` rows, if it
+has any, and its `cfg(hew_preview)` and
+`requiresPreview` marks. Removing a feature that will not ship is the same
+deletion, with its code. Every entry ends one of those two ways. The
+registry is read through at each release, and an entry nobody is
+working toward releasing is removed.
+
+**Commits and the changelog.** A commit whose work can only be reached
+in a preview build takes the type `preview` in place of `feat`, with the
+usual scope: `preview(kernel): …`, `preview(app): …`. `feat` is kept for
+what a production build gains, so the history never promises a feature
+users cannot find. Where such a commit also changes something in every
+build, its body says what. Graduating a feature is the `feat` commit.
+`CHANGELOG.md` and release notes do not mention a Preview feature until
+it graduates; `app/src/preview/guidePages.test.ts` checks the unreleased
+changelog, the README, the roadmap and the published guide for the
+names it knows.
+
+**The realm probe.** `/#plugin-probe` in a preview build with the Plugins
+switch on runs the sandbox measurements the plugin design rests on.
+`pnpm --dir app exec playwright test e2e/plugin-realm` runs them in a
+browser under the `web.probe` policy; `pnpm --dir shells/tauri
+e2e:build:probe` then `e2e:probe` runs them in the desktop webview under
+`desktop.probe`.
+
+**Running both builds.** `scripts/verify.sh` and `scripts/verify-full.sh`
+run both on their own; nothing in them skips the production half (the
+browser smoke set narrows which specs run, never which builds). By hand:
+
+```
+cargo test -p api                       # production
+HEW_PREVIEW=1 cargo test -p api         # preview
+scripts/wasm-flavors.sh build preview web --no-opt
+scripts/wasm-flavors.sh use preview     # app/src/wasm/pkg is the preview module
+HEW_PREVIEW=1 pnpm --dir app dev
+scripts/wasm-flavors.sh build production web --no-opt
+scripts/wasm-flavors.sh use production
+HEW_PREVIEW=0 pnpm --dir app exec playwright test --project=chromium
+```
+
+The WASM module carries the API's live half, so each build has its own
+module; `preview_build()` on the module says which one it is. The app's
+`dev` and `build` scripts ask the module in `app/src/wasm/pkg` and rebuild
+it when it is the other flavor, so `pnpm --dir app dev` and
+`HEW_PREVIEW=0 pnpm --dir app dev` each start on the right kernel without
+the `wasm-flavors.sh` lines. One slot holds one flavor, so each switch is
+a rebuild; `wasm-flavors.sh` keeps both built side by side, as the gate
+does, and `use` swaps between them in seconds. The dev server's own
+builds skip `wasm-opt`, as the gate's do, and `pnpm --dir app build`
+rebuilds over either rather than bundle an unoptimized kernel.
 
 **Determinism and replay.** The kernel is required to be bit-for-bit
 deterministic — the same input produces the same output on every machine,
@@ -448,6 +803,163 @@ recorded sessions replayable as regression tests: a reported bug's input
 stream, once captured, becomes a permanent, exact reproducer rather than a
 "works on my machine" anecdote. See `docs/dev/DIAGNOSTICS.md` for the full
 determinism, logging, and record/replay architecture.
+
+Two bans in `clippy.toml` hold the kernel crates (`kernel`, `inference`,
+`tessellate`, `mesh-heal`) to this, and the gate fails on either:
+
+- **No hash collections.** `HashMap` and `HashSet` iterate in an order that
+  changes from run to run. Use `BTreeMap` and `BTreeSet`.
+- **Transcendentals go through `kernel::trig`.** Kernel crates call the
+  math module, never std's transcendental methods (`sin`, `cos`, `tan`,
+  their inverses, `atan2`, `sin_cos`, `exp`, `ln`, `powf`, `hypot` and the
+  rest). IEEE 754 rounds `+ - * /` and `sqrt` exactly, but not these, and
+  std computes them with the platform's C math library on a native build
+  and with pure-Rust code in WASM, so the same call gives a different last
+  bit on Linux, macOS, Windows and the web. `kernel::trig` is one
+  implementation on every target: the `libm` crate, pinned to an exact
+  version. Its `hypot` is `sqrt(x² + y²)` as written, for model-scale
+  lengths. A function the module lacks is added there, with its pinned
+  bits in the module's tests.
+
+A crate outside the kernel whose use never reaches a document (a renderer,
+an exporter, a test of one) carries a crate-root `#![allow(...)]` with the
+reason written beside it. Code that builds or changes a document, in
+`api`, `wasm-api` or an importer, calls `kernel::trig` like the kernel.
+
+### The curves scoreboard
+
+The scoreboard says, case by case, what Fillet and Chamfer do on a set of
+test models. Every change to the blend engine is judged against it.
+
+```sh
+scripts/scoreboard.sh
+```
+
+rebuilds every model under `corpus/curves/` through the Hew API, runs every
+case at every size of its sweep, rewrites `corpus/curves/SCOREBOARD.tsv`,
+and prints what changed since the last run, cases that got worse first.
+`scripts/scoreboard.sh --check` runs the same cases and fails if the table
+would change, without writing it. Each run of a case at a size gets one
+class:
+
+| Class | Meaning |
+|---|---|
+| `correct` | A valid, watertight solid that passed the checks below |
+| `limit` | Refused, and the refusal names what is in the way |
+| `generic` | Refused without a cause a user could act on |
+| `wrong` | A result that failed a check, a panic, or an undo that did not restore the model |
+
+A built result is `correct` when the object validates, is watertight, lies
+inside the bounds it had before, and moved some volume, but no more than
+the size squared times the total length of the object's edges. A plain
+round or chamfer must also report the size that was asked for. That
+catches a broken or badly oversized result. It does not measure the
+surface: a round that is valid but slightly off its true shape still reads
+`correct` here. A refusal that says a larger size would fit than the one it
+refused is `wrong`, and so is one that names a largest size below a
+smaller size the same case's sweep built `correct`.
+
+Every edge of a `correct` result, and of every model as built, must also
+read the way its geometry says (`check_edge_classes`): a facet seam of one
+surface as a seam, a joint between two tangent surfaces (a fillet's rail,
+a corner patch's border) as a tangent joint, and everything else, a miter
+inside one blend included, as a hard edge. The structure lines of a curved
+part are exactly the tangent joints, so this keeps them honest. A swept
+strip's facets claim no surface, so its rail is judged against the strip's
+own turn across its section: a facet whose normal parts from the side
+face's by no more than it parts from the next strip facet in from the rail
+reads as a tangent joint, one 60° or more off reads as the strip's end, a
+hard edge, and anything in between fails. The next facet in is the one
+across an edge that touches neither end of the rail; a triangle on the
+rail has none, so its turn is read one facet further, through the strip
+facet beside it that has no rail of its own. Where there are several, the
+smallest turn counts, so a doubtful rail fails rather than passes. A rail
+with nothing to judge it by fails too: a soft rail, a facet with no strip
+facet in from it, or one that turns 60° or more to it. A rail more than
+60° off its tangent passes as an end.
+
+Which refusals name a cause is decided in one place, `class_of_refusal` in
+`crates/api/tests/curves_scoreboard.rs`. A refusal it does not list is
+`generic`, so a new one that names its cause is added there, in the same
+change as the refusal.
+
+The table is checked in. The gate runs the same cases in the preview build
+and fails when a fresh run differs from the table, so a change in any case
+shows up as a changed line of `SCOREBOARD.tsv` in the pull request. A case
+that got worse does not merge without the maintainer's decision.
+
+**Adding a row.** A model is one JSON file in `corpus/curves/`, named for
+what it is. `box.json` is the one to copy.
+
+- `title` and `from`: what the model is, and why it is in the set (what it
+  tests, or the tutorial, defect or part it came from).
+- `build`: the API calls that make the model, in order, each
+  `{"method", "params", "as"?}`. `as` labels a call's result, and a later
+  call names a value in it as `{"$ref": "<label>#<JSON pointer>"}`, the
+  form `hew.doc.transact` uses. A build call that is refused fails the
+  run: the model is wrong, not the engine.
+- Lengths. A string made of a number and a unit (`"3mm"`, `"2.5cm"`,
+  `"0.1m"`, `"1/8in"`, `"-2mm"`) is read as that length wherever it
+  appears in `params`. It starts with a digit or a minus sign. A bare
+  number is meters, as in the API.
+- `cases`: each has an `id`, the swept call (`method`, and `params` with
+  the edges named by locator), and `sizes`, a list of lengths with units.
+  The sweep sets `distance` for `hew.solid.chamfer` and `radius` for any
+  other call; `sweep` names another parameter. `note` says what the case
+  is for.
+- `before` lists calls made first, at fixed sizes, for a fillet that meets
+  an earlier one. If one of them is refused, the case reports that refusal
+  at every size, marked `before[n]`.
+- A locator that finds no edge, or more than one, and a name that does not
+  exist (an object, a profile) fail the whole run, in the swept call and
+  in `before`: the row is wrong.
+- Run a sweep from very small to past what fits, so the table shows where
+  the answer changes.
+- State what you know about the shape, and only what you have worked out.
+  All three are optional. `fits_to` is a length: every size up to it
+  should build, and a refusal at or below it is counted as open work in
+  the table's summary (it does not fail the gate). `never_above` is a
+  length past which nothing can exist on the shape: a named limit there
+  counts as the right answer, and a built result there is `wrong`.
+  `volume` is `"less"` or `"more"`, the way the volume has to move; give
+  it only when every edge of the case is an outside corner (less) or an
+  inside corner (more).
+- Better and worse are judged with these statements counted in, so
+  changing a `fits_to` or `never_above` can move a case in the comparison
+  with no change in the engine.
+
+Never shape a row to get a better class. A refusal or a wrong result on a
+real model is what the table is for. Run `scripts/scoreboard.sh`, read the
+comparison, and commit the row and the table together.
+
+### The determinism golden
+
+`corpus/determinism/golden.tsv` records, for every curves-corpus model as
+built, a few extra models (revolve, loft, sweep, shell, deform, booleans)
+and one representative size of each blend case
+(`corpus/determinism/cases.tsv`), the document's `state_hash` and a hash of
+the exact bits of every object's tessellation. The kernel must produce the
+same geometry on every platform and in WASM, so the native test
+`crates/api/tests/determinism_golden.rs` runs on each platform in the
+preview build and prints every row that differs from the table, expected and
+actual. `scripts/determinism.sh` rewrites the table (commit it with any
+change that moves geometry on purpose), `--check` fails on a difference, and
+`--out <file>` writes this machine's table and exits 0, to diff against the
+checked-in one. The table is generated on Linux x86_64. The gate checks it
+on Linux, and CI checks it and the curves scoreboard on macOS and Windows
+on every push to main.
+`node tools/replay-runner/determinism.mjs` runs the same rows through the
+WASM kernel (after `scripts/wasm-flavors.sh build preview nodejs` and
+`use-node preview`) and lists every row that differs; it exits 0 unless given
+`--strict`. A production module cannot run the rows that need a Preview
+command; it reports them as unavailable and checks the rest. With
+`--strict` it is a gate: `scripts/verify-full.sh` and CI's `replay` job run
+it after the replay gate on both modules, and it fails on any differing
+row, or on an unavailable one in the preview module. The native table and
+the WASM module agree because every transcendental goes through
+`kernel::trig` (above), so a row that differs only in WASM is a call that
+bypassed it, or another platform difference, and is a bug to find, not a
+row to regenerate.
 
 ## 8. Dependencies & toolchains
 
@@ -496,6 +1008,14 @@ upstream constraint rather than chosen:
 Each is pinned where it applies, with the reason and the condition for removing
 it written beside the pin. Nothing else should acquire a second version of a
 shared tool without the same treatment.
+
+**`libm` is held to an exact version** (`=0.2.16` in the root `Cargo.toml`,
+where every other crate takes a caret range and leaves the pin to
+`Cargo.lock`). It computes the kernel's transcendentals (`kernel::trig`), and
+a new release may round one of them differently in the last bit, which moves
+geometry. The pinned bits in `kernel::trig`'s tests, the determinism golden
+and the replay fixtures are there to catch such a change. Take a bump only
+on purpose, and regenerate whichever of them it moves in the same change.
 
 One dependency is deliberately held back rather than diverged: **`opentype.js`
 stays on the exact version `1.3.4`** — note the absent caret. Version 2 throws

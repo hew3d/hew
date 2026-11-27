@@ -54,6 +54,11 @@ export interface ScenesControllerDeps {
   viewportApi: RefObject<ViewportApi | null>
   /** Bumps on every document mutation — refreshes the entry list + drift. */
   docRev: number
+  /** The panel eyes' hidden sets (App's hiddenKeys / hiddenTagPaths). Hiding
+   *  or showing a node or tag is view state: it bumps neither `docRev` nor
+   *  anything else here, so a change of either set refreshes drift itself. */
+  hiddenKeys: ReadonlySet<string>
+  hiddenTagPaths: ReadonlySet<string>
   /** The editor's live display toggles (App's showGrid/showAxes/showGuides). */
   display: DisplayStateJson
   /** Apply a Scene's display toggles (App pushes them into the viewport). */
@@ -95,6 +100,10 @@ export interface ScenesController {
   /** Returns the inline error text, or null on success. */
   rename: (sid: number, name: string) => string | null
   setDescription: (sid: number, text: string) => void
+  /** Set the Scene's own transition time in seconds (`null` = the document's own). */
+  setTransition: (sid: number, seconds: number | null) => void
+  /** Set the Scene's own delay in seconds (`null` = the document's own). */
+  setDelay: (sid: number, seconds: number | null) => void
   /** Set the capture bitmask (`PROP_*`). */
   setProps: (sid: number, props: number) => void
   moveUp: (sid: number) => void
@@ -133,6 +142,8 @@ export function useScenesController(deps: ScenesControllerDeps): ScenesControlle
     scene,
     viewportApi,
     docRev,
+    hiddenKeys,
+    hiddenTagPaths,
     display,
     setDisplay,
     setViewStyle,
@@ -213,11 +224,12 @@ export function useScenesController(deps: ScenesControllerDeps): ScenesControlle
     }
   }, [viewportApi])
 
-  // Drift keys off document mutations and display toggles here; the camera
+  // Drift keys off document mutations, display toggles and node/tag
+  // visibility here; the camera
   // and section paths call `refreshDrift` from App's viewport callbacks.
   useEffect(() => {
     refreshDrift()
-  }, [refreshDrift, docRev, rev, activeSid, display.grid, display.axes, display.guides])
+  }, [refreshDrift, docRev, rev, activeSid, display.grid, display.axes, display.guides, hiddenKeys, hiddenTagPaths])
 
   const captureThumbnail = useCallback(
     (sid: number) => {
@@ -449,6 +461,33 @@ export function useScenesController(deps: ScenesControllerDeps): ScenesControlle
     [bump],
   )
 
+  // Like the description, the timings are plain Scene fields: not on the
+  // undo stack, saved with the document (`markDirty`).
+  const setTiming = useCallback(
+    (sid: number, field: 'transition' | 'delay', seconds: number | null) => {
+      const s = sceneRef.current
+      if (s === null) return
+      const entry = entriesRef.current.find((e) => e.sid === sid)
+      if (entry === undefined) return
+      const current = field === 'transition' ? entry.transitionS : entry.delayS
+      if ((current ?? null) === seconds) return
+      try {
+        const value = seconds === null ? undefined : seconds
+        if (field === 'transition') s.set_scene_transition(BigInt(sid), value)
+        else s.set_scene_delay(BigInt(sid), value)
+      } catch (err) {
+        const reason = friendlyErrorText(err)
+        onToastRef.current(t`Scene timing failed: ${reason}`)
+        return
+      }
+      markDirtyRef.current()
+      bump()
+    },
+    [bump],
+  )
+  const setTransition = useCallback((sid: number, seconds: number | null) => setTiming(sid, 'transition', seconds), [setTiming])
+  const setDelay = useCallback((sid: number, seconds: number | null) => setTiming(sid, 'delay', seconds), [setTiming])
+
   const setProps = useCallback(
     (sid: number, props: number) => {
       const s = sceneRef.current
@@ -553,6 +592,8 @@ export function useScenesController(deps: ScenesControllerDeps): ScenesControlle
       previous: () => step(-1),
       rename,
       setDescription,
+      setTransition,
+      setDelay,
       setProps,
       moveUp: (sid) => move(sid, -1),
       moveDown: (sid) => move(sid, 1),
@@ -574,6 +615,8 @@ export function useScenesController(deps: ScenesControllerDeps): ScenesControlle
       step,
       rename,
       setDescription,
+      setTransition,
+      setDelay,
       setProps,
       move,
       remove,

@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test'
+import { isMac } from './helpers/platform'
 
 /**
  * Library spec — the browser half of the Library feature, driven with real
@@ -116,7 +117,7 @@ test('web build: save to the library, survive a reload, download offered, delete
 })
 
 test('command palette: Library entry opens the dialog', async ({ page }) => {
-  await page.keyboard.press('ControlOrMeta+K')
+  await page.keyboard.press(isMac ? 'Meta+/' : 'Control+k')
   const palette = page.getByRole('dialog', { name: /command palette/i })
   await expect(palette).toBeVisible()
   await palette.getByPlaceholder(/search/i).fill('library')

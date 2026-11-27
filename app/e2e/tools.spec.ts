@@ -4,7 +4,7 @@ import { test, expect } from '@playwright/test'
  *  — pixel-free behavior spec per modeling tool.
  *
  * Every test drives the app through `window.__hew_test` (the semantic
- * harness). Assertions are logical — `getStateHash()`, `getObjectCount()`,
+ * harness). Assertions are logical — `getModelStateHash()`, `getObjectCount()`,
  * `getObjectIds()`, `getSelection()` — not pixels. A state-hash change proves
  * the document was mutated; stability proves idempotence; count/id assertions
  * prove object creation, deletion, or slice bookkeeping.
@@ -35,7 +35,7 @@ test.beforeEach(async ({ page }) => {
 test('Line tool: chain of segments forms a region that extrudes to a solid', async ({ page }) => {
   const result = await page.evaluate(() => {
     const h = window.__hew_test!
-    const hash0 = h.getStateHash()
+    const hash0 = h.getModelStateHash()
 
     // Draw a closed square (5 points, last == first) via the line tool.
     const chain = h.drawLineChain([
@@ -52,7 +52,7 @@ test('Line tool: chain of segments forms a region that extrudes to a solid', asy
 
     // Extrude the first region to create a solid.
     const objId = h.extrudeRegion(chain.sketch, chain.regions[0], 1.5)
-    const hash1 = h.getStateHash()
+    const hash1 = h.getModelStateHash()
     const count = h.getObjectCount()
 
     return { hash0, hash1, hasRegion, sketchHandle, objId, count }
@@ -94,7 +94,7 @@ test('Circle tool: drawCircle creates a region and extrudes to a watertight soli
 }) => {
   const result = await page.evaluate(() => {
     const h = window.__hew_test!
-    const hash0 = h.getStateHash()
+    const hash0 = h.getModelStateHash()
 
     // Draw a 24-gon circle, radius 1 m at the origin.
     const circle = h.drawCircle([0, 0, 0], 1.0)
@@ -103,7 +103,7 @@ test('Circle tool: drawCircle creates a region and extrudes to a watertight soli
 
     // Extrude it into a prism.
     const objId = h.extrudeRegion(sketchHandle, regionHandle, 2.0)
-    const hash1 = h.getStateHash()
+    const hash1 = h.getModelStateHash()
     const count = h.getObjectCount()
 
     return { hash0, hash1, sketchHandle, regionHandle, objId, count }
@@ -140,7 +140,7 @@ test('Polygon tool: a closed hexagon loop forms a region that extrudes to a wate
 }) => {
   const result = await page.evaluate(() => {
     const h = window.__hew_test!
-    const hash0 = h.getStateHash()
+    const hash0 = h.getModelStateHash()
 
     // A regular hexagon, circumradius 2 m at the origin, vertex 0 on +X —
     // the same vertex layout PolygonTool's ground commit produces.
@@ -156,7 +156,7 @@ test('Polygon tool: a closed hexagon loop forms a region that extrudes to a wate
     const hasRegion = chain.regions.length >= 1
     const objId = h.extrudeRegion(chain.sketch, chain.regions[0], 1.0)
     const solid = h.isObjectSolid(objId)
-    const hash1 = h.getStateHash()
+    const hash1 = h.getModelStateHash()
 
     return { hash0, hash1, hasRegion, objId, solid }
   })
@@ -176,7 +176,7 @@ test('Arc tool: arc chain + closing chord forms a region that extrudes to a soli
 }) => {
   const result = await page.evaluate(() => {
     const h = window.__hew_test!
-    const hash0 = h.getStateHash()
+    const hash0 = h.getModelStateHash()
 
     // Chord (0,0)→(2,0) bulging 0.5 m toward +Y, closed with the chord.
     const arc = h.drawArc([0, 0, 0], [2, 0, 0], 0.5, true)
@@ -188,7 +188,7 @@ test('Arc tool: arc chain + closing chord forms a region that extrudes to a soli
       hasRegion,
       count: h.getObjectCount(),
       hash0,
-      hash1: h.getStateHash(),
+      hash1: h.getModelStateHash(),
       objId,
     }
   })
@@ -251,14 +251,14 @@ test('Push/Pull: growing a face extends the solid (positive distance)', async ({
   const result = await page.evaluate(() => {
     const h = window.__hew_test!
     const box = h.drawBox([0, 0, 0], [2, 2, 0], 2) // 2×2×2 box, top at z=2
-    const hash0 = h.getStateHash()
+    const hash0 = h.getModelStateHash()
     const count0 = h.getObjectCount()
 
     // Pick the top face and grow it by 1 m (box becomes height=3).
     const pick = h.pickFace([1, 1, 10], [0, 0, -1])
     if (!pick) return { error: 'pickFace miss' }
     h.pushPull(pick.object, pick.face, 1)
-    const hash1 = h.getStateHash()
+    const hash1 = h.getModelStateHash()
     const count1 = h.getObjectCount()
 
     return { hash0, hash1, count0, count1 }
@@ -532,12 +532,12 @@ test('Offset: inward region offset closes a nested region that extrudes; undo re
   const result = await page.evaluate(() => {
     const h = window.__hew_test!
     const rect = h.drawRectangle([0, 0, 0], [2, 2, 0])
-    const hashBefore = h.getStateHash()
+    const hashBefore = h.getModelStateHash()
 
     // Inset the rectangle's boundary by 0.5 m — one new region (the inner
     // square), gesture-bracketed as one undo step.
     const created = h.offsetRegion(rect.sketch, rect.region, -0.5)
-    const hashAfter = h.getStateHash()
+    const hashAfter = h.getModelStateHash()
 
     // The inner region extrudes into a solid, proving it closed.
     h.extrudeRegion(rect.sketch, created[0], 1)
@@ -546,7 +546,7 @@ test('Offset: inward region offset closes a nested region that extrudes; undo re
     // Unwind both steps: the offset is exactly one undo entry.
     h.undo()
     h.undo()
-    const hashUnwound = h.getStateHash()
+    const hashUnwound = h.getModelStateHash()
 
     return { created: created.length, hashBefore, hashAfter, count, hashUnwound }
   })
@@ -563,23 +563,23 @@ test('Offset: face offset imprints an inset loop that push/pulls into a recess',
   const result = await page.evaluate(() => {
     const h = window.__hew_test!
     h.drawBox([0, 0, 0], [2, 2, 0], 1)
-    const hashBox = h.getStateHash()
+    const hashBox = h.getModelStateHash()
     // Pick the top face by ray from above.
     const top = h.pickFace([1, 1, 5], [0, 0, -1])
     if (top === null) throw new Error('no top face')
 
     const sub = h.offsetFace(top.object, top.face, -0.4)
-    const hashImprinted = h.getStateHash()
+    const hashImprinted = h.getModelStateHash()
 
     // The imprinted sub-face pushes inward — the boss/recess workflow.
     h.pushPull(top.object, sub, -0.5)
-    const hashRecessed = h.getStateHash()
+    const hashRecessed = h.getModelStateHash()
     const count = h.getObjectCount()
 
     // Each step is exactly one undo entry; two undos restore the plain box.
     h.undo()
     h.undo()
-    const hashUnwound = h.getStateHash()
+    const hashUnwound = h.getModelStateHash()
 
     return {
       count,
@@ -604,14 +604,14 @@ test('Offset: a collapsing distance is refused typed and mutates nothing', async
   const result = await page.evaluate(() => {
     const h = window.__hew_test!
     const rect = h.drawRectangle([0, 0, 0], [2, 2, 0])
-    const hashBefore = h.getStateHash()
+    const hashBefore = h.getModelStateHash()
     let code: string | null = null
     try {
       h.offsetRegion(rect.sketch, rect.region, -1.5) // past the inradius
     } catch (e) {
       code = e instanceof Error ? e.message : String(e)
     }
-    return { code, unchanged: h.getStateHash() === hashBefore }
+    return { code, unchanged: h.getModelStateHash() === hashBefore }
   })
 
   expect(result.code).toContain('OffsetCollapsed')
@@ -626,12 +626,12 @@ test('Move: translating an object changes state_hash but not object count', asyn
   const result = await page.evaluate(() => {
     const h = window.__hew_test!
     const objId = h.drawBox([0, 0, 0], [1, 1, 0], 1)
-    const hash0 = h.getStateHash()
+    const hash0 = h.getModelStateHash()
     const count0 = h.getObjectCount()
 
     // Move 5 m along X.
     h.moveObject(objId, 5, 0, 0)
-    const hash1 = h.getStateHash()
+    const hash1 = h.getModelStateHash()
     const count1 = h.getObjectCount()
 
     return { hash0, hash1, count0, count1, objId }
@@ -651,12 +651,12 @@ test('Copy: duplicating an object increases count by 1; both exist', async ({ pa
   const result = await page.evaluate(() => {
     const h = window.__hew_test!
     const src = h.drawBox([0, 0, 0], [1, 1, 0], 1)
-    const hash0 = h.getStateHash()
+    const hash0 = h.getModelStateHash()
     const count0 = h.getObjectCount()
 
     // Option-drag copy: offset 3 m on Y.
     const copy = h.copyObject(src, 0, 3, 0)
-    const hash1 = h.getStateHash()
+    const hash1 = h.getModelStateHash()
     const count1 = h.getObjectCount()
     const ids = h.getObjectIds()
 
@@ -681,11 +681,11 @@ test('Rotate: rotating a box changes state_hash, count stays the same', async ({
   const result = await page.evaluate(() => {
     const h = window.__hew_test!
     const box = h.drawBox([0, 0, 0], [2, 1, 0], 1)
-    const hash0 = h.getStateHash()
+    const hash0 = h.getModelStateHash()
 
     // Rotate 45° around Z axis.
     h.rotateObject(box, 45, [0, 0, 1])
-    const hash1 = h.getStateHash()
+    const hash1 = h.getModelStateHash()
     const count = h.getObjectCount()
 
     return { hash0, hash1, count }
@@ -699,11 +699,11 @@ test('Rotate: 360-degree rotation returns to the same hash', async ({ page }) =>
   const result = await page.evaluate(() => {
     const h = window.__hew_test!
     const box = h.drawBox([0, 0, 0], [1, 1, 0], 1)
-    const hash0 = h.getStateHash()
+    const hash0 = h.getModelStateHash()
 
     // 360° is identity — geometry unchanged.
     h.rotateObject(box, 360, [0, 0, 1])
-    const hash1 = h.getStateHash()
+    const hash1 = h.getModelStateHash()
 
     return { hash0, hash1 }
   })
@@ -773,18 +773,18 @@ test('Scale: stretching a box 2x in Z doubles its Z extent, stays watertight, an
   const result = await page.evaluate(() => {
     const h = window.__hew_test!
     const box = h.drawBox([0, 0, 0], [2, 2, 0], 1) // 2x2x1 box, base at z=0
-    const hash0 = h.getStateHash()
+    const hash0 = h.getModelStateHash()
     const bounds0 = h.getObjectBounds(box)
 
     // Stretch 2x in Z about the bottom face (z=0 stays put — the default
     // "anchor at the opposite grip" ScaleTool's gizmo uses for a face grip).
     h.scaleObject(box, 1, 1, 2, [0, 0, 0])
-    const hash1 = h.getStateHash()
+    const hash1 = h.getModelStateHash()
     const bounds1 = h.getObjectBounds(box)
     const solid1 = h.isObjectSolid(box)
 
     h.undo()
-    const hashAfterUndo = h.getStateHash()
+    const hashAfterUndo = h.getModelStateHash()
     const boundsAfterUndo = h.getObjectBounds(box)
 
     return { hash0, hash1, hashAfterUndo, bounds0, bounds1, boundsAfterUndo, solid1 }
@@ -1029,14 +1029,14 @@ test('Scale: dragging an edge grip along one axis scales that axis only', async 
 test('Guides (Tape Measure): addGuideLine creates a snappable guide', async ({ page }) => {
   const result = await page.evaluate(() => {
     const h = window.__hew_test!
-    const hash0 = h.getStateHash()
+    const hash0 = h.getModelStateHash()
     const guidesBefore = h.getGuideIds().length
 
     // A horizontal guide line through (0,1,0) along X — parallel to X axis.
     const id = h.addGuideLine(0, 1, 0, 1, 0, 0)
 
     const guidesAfter = h.getGuideIds().length
-    const hash1 = h.getStateHash()
+    const hash1 = h.getModelStateHash()
 
     return { hash0, hash1, guidesBefore, guidesAfter, id }
   })
@@ -1346,13 +1346,13 @@ test('Guides (Protractor): deleteGuide removes the guide and updates hash', asyn
     // Add two guides.
     const g1 = h.addGuideLine(0, 0, 0, 0, 1, 0)
     const g2 = h.addGuideLine(1, 0, 0, 1, 0, 0)
-    const hashWith2 = h.getStateHash()
+    const hashWith2 = h.getModelStateHash()
     const countWith2 = h.getGuideIds().length
 
     // Delete the first one.
     h.deleteGuide(g1)
     const remaining = h.getGuideIds()
-    const hashAfterDelete = h.getStateHash()
+    const hashAfterDelete = h.getModelStateHash()
 
     return { g1, g2, hashWith2, countWith2, remaining, hashAfterDelete }
   })
@@ -1371,11 +1371,11 @@ test('Guides: deleteAllGuides clears all in one step', async ({ page }) => {
     h.addGuideLine(0, 0, 0, 0, 1, 0)
     h.addGuidePoint(2, 2, 0)
     const before = h.getGuideIds().length
-    const hashBefore = h.getStateHash()
+    const hashBefore = h.getModelStateHash()
 
     h.deleteAllGuides()
     const after = h.getGuideIds().length
-    const hashAfter = h.getStateHash()
+    const hashAfter = h.getModelStateHash()
 
     return { before, after, hashBefore, hashAfter }
   })
@@ -1393,11 +1393,11 @@ test('Delete: deleting an object reduces count and changes hash', async ({ page 
   const result = await page.evaluate(() => {
     const h = window.__hew_test!
     const id = h.drawBox([0, 0, 0], [1, 1, 0], 1)
-    const hash0 = h.getStateHash()
+    const hash0 = h.getModelStateHash()
     const count0 = h.getObjectCount()
 
     h.deleteObject(id)
-    const hash1 = h.getStateHash()
+    const hash1 = h.getModelStateHash()
     const count1 = h.getObjectCount()
 
     return { hash0, hash1, count0, count1 }
@@ -1416,12 +1416,12 @@ test('Slice: slicing a box through its midplane yields two objects', async ({ pa
   const result = await page.evaluate(() => {
     const h = window.__hew_test!
     const box = h.drawBox([0, 0, 0], [2, 2, 0], 4)
-    const hash0 = h.getStateHash()
+    const hash0 = h.getModelStateHash()
     const count0 = h.getObjectCount()
 
     // Slice through z=2 (midplane), normal pointing up.
     const [posId, negId] = h.sliceObject(box, [0, 0, 2, 0, 0, 1])
-    const hash1 = h.getStateHash()
+    const hash1 = h.getModelStateHash()
     const count1 = h.getObjectCount()
     const ids = h.getObjectIds()
 
@@ -1477,19 +1477,19 @@ test('Undo/Redo: undo reverses a drawBox; redo re-applies it', async ({ page }) 
     const canUndoBefore = h.canUndo()
 
     h.drawBox([0, 0, 0], [1, 1, 0], 1)
-    const hashAfterDraw = h.getStateHash()
+    const hashAfterDraw = h.getModelStateHash()
     const countAfterDraw = h.getObjectCount()
 
     const canUndoAfter = h.canUndo()
 
     h.undo()
-    const hashAfterUndo = h.getStateHash()
+    const hashAfterUndo = h.getModelStateHash()
     const countAfterUndo = h.getObjectCount()
 
     const canRedoAfterUndo = h.canRedo()
 
     h.redo()
-    const hashAfterRedo = h.getStateHash()
+    const hashAfterRedo = h.getModelStateHash()
     const countAfterRedo = h.getObjectCount()
 
     return {
@@ -1525,14 +1525,14 @@ test('Undo/Redo: undo after slice restores original box', async ({ page }) => {
   const result = await page.evaluate(() => {
     const h = window.__hew_test!
     const box = h.drawBox([0, 0, 0], [2, 2, 0], 4)
-    const hashBeforeSlice = h.getStateHash()
+    const hashBeforeSlice = h.getModelStateHash()
     const countBeforeSlice = h.getObjectCount()
 
     h.sliceObject(box, [0, 0, 2, 0, 0, 1])
     const countAfterSlice = h.getObjectCount()
 
     h.undo()
-    const hashAfterUndo = h.getStateHash()
+    const hashAfterUndo = h.getModelStateHash()
     const countAfterUndo = h.getObjectCount()
 
     return { hashBeforeSlice, hashAfterUndo, countBeforeSlice, countAfterSlice, countAfterUndo }
@@ -1615,7 +1615,7 @@ test('Follow Me: profile swept along an L path becomes a solid; undo/redo round-
 }) => {
   const result = await page.evaluate(() => {
     const h = window.__hew_test!
-    const hash0 = h.getStateHash()
+    const hash0 = h.getModelStateHash()
 
     // Profile: a square drawn on the ground, then stood upright (rotate 90°
     // about the X axis through the origin) so it lies on the y = 0 plane —
@@ -1633,7 +1633,7 @@ test('Follow Me: profile swept along an L path becomes a solid; undo/redo round-
     const edges = h.getSketchEdgeIds(path.sketch)
 
     const objId = h.followMeAlongEdges(profile.sketch, profile.region, path.sketch, edges)
-    const hash1 = h.getStateHash()
+    const hash1 = h.getModelStateHash()
     const countAfter = h.getObjectCount()
 
     h.undo()
@@ -1704,7 +1704,7 @@ test('Follow Me: a profile parallel to its path is auto-oriented and sweeps, not
       [2, 0, 0],
     ])
     const edges = h.getSketchEdgeIds(path.sketch)
-    const hashBefore = h.getStateHash()
+    const hashBefore = h.getModelStateHash()
     let threw = false
     let solidId: string | null = null
     try {
@@ -1715,7 +1715,7 @@ test('Follow Me: a profile parallel to its path is auto-oriented and sweeps, not
     return {
       threw,
       lastError: h.getLastError(),
-      hashAfter: h.getStateHash(),
+      hashAfter: h.getModelStateHash(),
       hashBefore,
       count: h.getObjectCount(),
       solid: solidId ? h.isObjectSolid(solidId) : null,

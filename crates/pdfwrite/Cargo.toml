@@ -10,4 +10,4 @@ license.workspace = true
 # dependency is a pure-Rust DEFLATE (content streams and raw RGB images are
 # Flate-encoded); JPEG passes through as DCTDecode.
 [dependencies]
-miniz_oxide = "0.8"
+miniz_oxide = "0.9"

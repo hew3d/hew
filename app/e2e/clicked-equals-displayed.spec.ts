@@ -1,4 +1,5 @@
 import { test, expect, type Page, type TestInfo } from '@playwright/test'
+import { inferenceChip } from './helpers/inferenceChip'
 
 /**
  * A value you CLICK is exactly the value the measurement box shows, as if
@@ -56,14 +57,7 @@ async function click(page: Page, ctx: Ctx, w: [number, number, number], dx = 0, 
   await page.waitForTimeout(150)
 }
 
-async function chip(page: Page): Promise<string> {
-  return page.evaluate(() =>
-    Array.from(document.querySelectorAll('div'))
-      .filter((d) => d.style.zIndex === '20' && d.style.pointerEvents === 'none')
-      .map((e) => e.textContent ?? '')
-      .join(' | '),
-  )
-}
+const chip = inferenceChip
 
 async function vcb(page: Page, label: string): Promise<string> {
   return page.evaluate((label) => {

@@ -94,7 +94,9 @@ test('without a lock, the second point decides which face a shared-edge anchor m
     t.setAxesVisible(false)
     t.drawBox([0, 0, 0], [1, 1, 0], 0.5)
   })
-  await page.getByRole('button', { name: 'Iso', exact: true }).click()
+  await page.getByRole('button', { name: 'Camera' }).click()
+  await page.getByText('Standard Views', { exact: true }).hover()
+  await page.getByText('Iso', { exact: true }).first().click()
   await page.getByRole('button', { name: 'Camera' }).click()
   await page.getByText('Zoom Extents', { exact: true }).click()
   await page.evaluate(

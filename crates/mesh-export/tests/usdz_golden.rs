@@ -80,6 +80,7 @@ fn build_representative_doc() -> Document {
         section: None,
         view_style: None,
         extra: Default::default(),
+        geo: None,
     };
     doc.ingest(scene, Vec::new()).expect("ingest a plain box");
 
@@ -102,6 +103,7 @@ fn build_representative_doc() -> Document {
         section: None,
         view_style: None,
         extra: Default::default(),
+        geo: None,
     };
     doc.ingest(scene, Vec::new()).expect("ingest a painted box");
 
@@ -119,6 +121,7 @@ fn build_representative_doc() -> Document {
         section: None,
         view_style: None,
         extra: Default::default(),
+        geo: None,
     };
     doc.ingest(scene, Vec::new())
         .expect("ingest the component source box");
@@ -142,8 +145,8 @@ fn build_representative_doc() -> Document {
 #[test]
 fn usdz_export_matches_the_committed_golden_fixture() {
     let doc = build_representative_doc();
-    let bytes =
-        mesh_export::export_usdz(&doc, 0, true).expect("the representative doc exports to usdz");
+    let bytes = mesh_export::export_usdz(&doc, 0, true, false)
+        .expect("the representative doc exports to usdz");
 
     let path = golden_path();
     if std::env::var("REGENERATE_GOLDEN").is_ok() {

@@ -10,7 +10,7 @@ A Scene is a saved view of your model: where the camera sits, which objects and 
 
 ![The Scenes section of the tray with three Scenes; the active one shows a drift ring and an Update button, and its details are expanded](/docs/scenes-tray.webp)
 
-Scenes are saved in the `.hew` file, so they travel with the model — to another machine, to the Library, and to [Shop Mode on your phone](/learn/hew-on-your-phone/#scenes-on-the-phone). A SketchUp file's scenes come across as Hew Scenes when you open it, each also keeping the backdrop and axes of its saved style, and a save back to `.skp` writes them again; see [Import and export](/learn/import-export/#sketchup-skp).
+Scenes are saved in the `.hew` file, so they travel with the model — to another machine, to the Library, and to [Shop Mode on your phone](/learn/hew-on-your-phone/#scenes-on-the-phone). A SketchUp file's scenes come across as Hew Scenes when you open it, each also keeping the axes of its saved style (its background, sky, and ground colors are not used, so the model looks right in the dark theme), and a save back to `.skp` writes them again; see [Import and export](/learn/import-export/#sketchup-skp).
 
 ## Adding a Scene
 

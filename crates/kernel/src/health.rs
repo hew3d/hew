@@ -22,8 +22,9 @@
 use std::collections::BTreeMap;
 
 use crate::document::{AttrTarget, DocChange, Document, DocumentError, EntityRef};
-use crate::ids::{ComponentId, HalfEdgeId, ObjectId, VertexId};
+use crate::ids::{ComponentId, FaceId, HalfEdgeId, ObjectId, VertexId};
 use crate::math::{Plane, Point3, Vec3};
+use crate::tol;
 use crate::topo::{Object, WatertightState};
 
 /// How large a rim must be, relative to its object, to be the object's
@@ -82,6 +83,9 @@ pub enum Finding {
     BranchingBoundaryVertex { vertex: VertexId },
     /// The object is several unconnected islands of faces.
     DisconnectedIslands { count: usize },
+    /// `count` faces are degenerate ([`ring_is_degenerate`]); Remove
+    /// degenerate faces clears them.
+    DegenerateFaces { count: usize },
 }
 
 /// What an object is, judged by its boundary.
@@ -157,7 +161,7 @@ pub fn diagnose(obj: &Object) -> Diagnosis {
         return Diagnosis {
             verdict: Verdict::Solid,
             rims: Vec::new(),
-            findings: Vec::new(),
+            findings: degenerate_finding(obj).into_iter().collect(),
         };
     }
     boundary.sort_unstable();
@@ -260,6 +264,7 @@ pub fn diagnose(obj: &Object) -> Diagnosis {
             count: islands.count,
         });
     }
+    findings.extend(degenerate_finding(obj));
 
     let verdict = if branching || unclosed {
         Verdict::NonManifold
@@ -416,7 +421,7 @@ fn newell(points: &[Point3]) -> Vec3 {
 
 /// The face islands: each face's island index, and how many there are.
 /// Faces are joined through twinned half-edges.
-fn face_components(obj: &Object) -> (BTreeMap<crate::ids::FaceId, usize>, usize) {
+pub(crate) fn face_components(obj: &Object) -> (BTreeMap<crate::ids::FaceId, usize>, usize) {
     let faces: Vec<crate::ids::FaceId> = obj.faces().iter().map(|(id, _)| id).collect();
     let index: BTreeMap<crate::ids::FaceId, usize> =
         faces.iter().enumerate().map(|(i, &f)| (f, i)).collect();
@@ -451,37 +456,74 @@ fn face_components(obj: &Object) -> (BTreeMap<crate::ids::FaceId, usize>, usize)
     (out, label.len())
 }
 
-/// How far across the points are, the same however they are turned: the
-/// farthest point from the first, then the farthest from that one, and the
-/// distance between the two (two sweeps, linear time). Exact for a box or
-/// a rectangle, and never more than the true diameter; an axis-aligned
-/// bounding box would grow and shrink as the object turns.
+/// How far across the points are, the same however they are turned or
+/// listed: the farthest point from their centroid, then the farthest from
+/// that one, and the distance between the two (linear time). Exact for a
+/// box or a rectangle, and never more than the true diameter; an
+/// axis-aligned bounding box would grow and shrink as the object turns.
+/// (Starting from the centroid rather than the first point keeps the
+/// answer from depending on the order the points come in.)
 pub fn diameter(points: &[Point3]) -> f64 {
-    let Some(&first) = points.first() else {
+    if points.is_empty() {
         return 0.0;
+    }
+    // Each axis summed in sorted order, so the centroid is the same to the
+    // bit however the points are listed.
+    let axis = |f: fn(&Point3) -> f64| {
+        let mut c: Vec<f64> = points.iter().map(f).collect();
+        c.sort_by(f64::total_cmp);
+        c.iter().sum::<f64>() / c.len() as f64
     };
+    let center = Point3::new(axis(|p| p.x), axis(|p| p.y), axis(|p| p.z));
+    // Ties go to the lowest point, so the listing order never decides.
     let farthest = |from: Point3| {
         points
             .iter()
             .copied()
-            .max_by(|a, b| (*a - from).length().total_cmp(&(*b - from).length()))
+            .max_by(|a, b| {
+                (*a - from)
+                    .length()
+                    .total_cmp(&(*b - from).length())
+                    .then(b.x.total_cmp(&a.x))
+                    .then(b.y.total_cmp(&a.y))
+                    .then(b.z.total_cmp(&a.z))
+            })
             .unwrap_or(from)
     };
-    let a = farthest(first);
+    let a = farthest(center);
     let b = farthest(a);
     (b - a).length()
 }
 
+/// Whether an object held to planarity tolerance `tol` is imported
+/// geometry or built from it ([`Object::planarity_tol`]): native geometry
+/// is held to [`crate::tol::PLANE_DIST`], imports to the looser
+/// [`crate::tol::IMPORT_PLANE_DIST`].
+pub(crate) fn imported_tol(tol: f64) -> bool {
+    tol > crate::tol::PLANE_DIST
+}
+
 /// The points' Newell plane through their centroid, when every point lies
 /// within `tol` of it.
-fn planar_fit(points: &[Point3], tol: f64) -> Option<Plane> {
+///
+/// A ring too small in area for a normal of its own still has a plane by
+/// the kernel's face rule when it is wide enough ([`Plane::from_polygon`]'s
+/// width branch), so a rim a face could close gets one. Imported geometry
+/// (held to more than [`crate::tol::PLANE_DIST`], see [`imported_tol`]) keeps the
+/// area floor alone, the rule the importers heal with, so its health
+/// reads exactly as it always has.
+pub(crate) fn planar_fit(points: &[Point3], tol: f64) -> Option<Plane> {
     if points.len() < 3 {
         return None;
     }
     let n = newell(points);
     let c = points.iter().fold(Vec3::ZERO, |c, p| c + p.to_vec());
     let centroid = Point3::ORIGIN + c * (1.0 / points.len() as f64);
-    let plane = Plane::from_point_normal(centroid, n.normalized().ok()?).ok()?;
+    let plane = match n.normalized() {
+        Ok(unit) => Plane::from_point_normal(centroid, unit).ok()?,
+        Err(_) if !imported_tol(tol) => Plane::from_polygon(points).ok()?,
+        Err(_) => return None,
+    };
     points
         .iter()
         .all(|&p| plane.signed_distance(p).abs() <= tol)
@@ -568,15 +610,22 @@ impl HealthCounts {
 impl HealthReport {
     /// The report's counts, per object (a definition member once).
     pub fn counts(&self) -> HealthCounts {
+        // `solids` already counts every watertight object, including the
+        // ones listed only for their degenerate faces.
+        let listed_solids = self
+            .rows
+            .iter()
+            .filter(|r| matches!(r.diagnosis.verdict, Verdict::Solid))
+            .count();
         let mut c = HealthCounts {
-            objects: self.solids + self.rows.len(),
+            objects: self.solids + self.rows.len() - listed_solids,
             solids: self.solids,
             seam_families: self.families.len(),
             ..HealthCounts::default()
         };
         for r in &self.rows {
             match r.diagnosis.verdict {
-                Verdict::Solid => c.solids += 1,
+                Verdict::Solid => {}
                 Verdict::FlatSheet { .. } => c.flat_sheets += 1,
                 Verdict::BentSheet => c.bent_sheets += 1,
                 Verdict::Cappable => c.cappable += 1,
@@ -613,6 +662,28 @@ impl Document {
             // walk of its half-edges.
             if obj.watertight() == WatertightState::Watertight {
                 report.solids += 1;
+                // A solid is listed only when it has degenerate faces to
+                // remove.
+                if let Some(finding) = degenerate_finding(obj) {
+                    let definition = self.object_owner_component(id);
+                    report.rows.push(HealthRow {
+                        object: id,
+                        definition,
+                        placements: if definition.is_some() {
+                            placements.get(&id).copied().unwrap_or(0)
+                        } else {
+                            1
+                        },
+                        accepted_surface: self.is_accepted_surface(id),
+                        seam_family: None,
+                        shared_rims: Vec::new(),
+                        diagnosis: Diagnosis {
+                            verdict: Verdict::Solid,
+                            rims: Vec::new(),
+                            findings: vec![finding],
+                        },
+                    });
+                }
                 continue;
             }
             let diagnosis = diagnose(obj);
@@ -798,9 +869,64 @@ impl Document {
     }
 }
 
+// ==== true-curves: imports ====
+
+/// Whether a ring is degenerate: an edge shorter than `POINT_MERGE`, or a
+/// sliver whose every vertex lies within `POINT_MERGE` of the line through
+/// its longest edge (zero width, whatever its length). The kernel never
+/// builds a zero-area face (its plane could not be fitted); these are the
+/// sub-tolerance faces an import can still bring in.
+pub(crate) fn ring_is_degenerate(ring: &[Point3]) -> bool {
+    let n = ring.len();
+    if n < 3 {
+        return true;
+    }
+    let edge = |k: usize| (ring[k], ring[(k + 1) % n]);
+    if (0..n).any(|k| {
+        let (a, b) = edge(k);
+        a.approx_eq(b, tol::POINT_MERGE)
+    }) {
+        return true;
+    }
+    let longest = (0..n)
+        .max_by(|&i, &j| {
+            let (a, b) = edge(i);
+            let (c, d) = edge(j);
+            (b - a).length().total_cmp(&(d - c).length())
+        })
+        .expect("a ring of three or more");
+    let (a, b) = edge(longest);
+    let dir = b - a;
+    ring.iter().all(|&p| {
+        let t = (p - a).dot(dir) / dir.length_squared();
+        (p - (a + dir * t)).length() <= tol::POINT_MERGE
+    })
+}
+
+/// The faces of `obj` whose outer ring is degenerate.
+pub(crate) fn degenerate_faces(obj: &Object) -> Vec<FaceId> {
+    obj.faces()
+        .iter()
+        .filter(|(_, f)| {
+            let ring: Vec<Point3> = obj.loop_positions(f.outer_loop).collect();
+            ring_is_degenerate(&ring)
+        })
+        .map(|(id, _)| id)
+        .collect()
+}
+
+/// The degenerate-faces finding, when `obj` has any.
+fn degenerate_finding(obj: &Object) -> Option<Finding> {
+    let count = degenerate_faces(obj).len();
+    (count > 0).then_some(Finding::DegenerateFaces { count })
+}
+
+// ==== end true-curves: imports ====
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::trig;
 
     fn p(x: f64, y: f64, z: f64) -> Point3 {
         Point3::new(x, y, z)
@@ -898,7 +1024,7 @@ mod tests {
         // One quad tilted 30° about x: its axis-aligned box has height, but
         // it is a single plane.
         let t = 30f64.to_radians();
-        let tilt = |v: Vec3| Vec3::new(v.x, v.y * t.cos(), v.y * t.sin());
+        let tilt = |v: Vec3| Vec3::new(v.x, v.y * trig::cos(t), v.y * trig::sin(t));
         let q = [
             p(0.0, 0.0, 0.0),
             p(2.0, 0.0, 0.0),
@@ -911,6 +1037,52 @@ mod tests {
             .collect();
         let obj = Object::from_polygons(&positions, &[vec![0, 1, 2, 3]]).unwrap();
         assert_eq!(diagnose(&obj).verdict, Verdict::FlatSheet { holes: 0 });
+    }
+
+    /// A rim under the area floor but wide enough for the kernel's face
+    /// rule (1 µm by 30 nm: twice the area 6e-14 m², width about 58 nm)
+    /// is flat, as the face that closes it would be: an open box with
+    /// that opening caps, and a sheet that size is a flat sheet. Imported
+    /// geometry keeps the area floor, so the same box imported reads as
+    /// it always has.
+    #[test]
+    fn a_rim_in_the_width_band_has_a_plane() {
+        let size = [1e-6, 3e-8, 1e-6];
+        let pts = [
+            p(0.0, 0.0, 0.0),
+            p(size[0], 0.0, 0.0),
+            p(size[0], size[1], 0.0),
+            p(0.0, size[1], 0.0),
+        ];
+        assert!(newell(&pts).length() < crate::tol::NORMALIZE_MIN_LENGTH);
+        assert!(Plane::from_polygon(&pts).is_ok(), "the face rule keeps it");
+
+        let obj = open_box(size, 1, &|v| v, Point3::ORIGIN);
+        let d = diagnose(&obj);
+        assert_eq!(d.rims.len(), 1);
+        assert!(d.rims[0].plane.is_some(), "the opening is flat");
+        assert_eq!(d.verdict, Verdict::Cappable);
+        let mut capped = obj.clone();
+        capped.cap_rims(&[0]).expect("the opening caps");
+        assert_eq!(capped.watertight, WatertightState::Watertight);
+
+        let sheet = Object::from_polygons(&pts, &[vec![0, 1, 2, 3]]).unwrap();
+        let d = diagnose(&sheet);
+        assert!(d.rims[0].plane.is_some());
+        assert_eq!(d.verdict, Verdict::FlatSheet { holes: 0 });
+        assert_ne!(
+            sheet.clone().cap_rims(&[0]).unwrap_err(),
+            crate::repair::RepairError::RimNotPlanar
+        );
+
+        let mut imported = obj;
+        imported.planarity_tol = crate::tol::IMPORT_PLANE_DIST;
+        let d = diagnose(&imported);
+        assert!(d.rims[0].plane.is_none(), "imports keep the area floor");
+        assert_eq!(
+            imported.cap_rims(&[0]).unwrap_err(),
+            crate::repair::RepairError::RimNotPlanar
+        );
     }
 
     #[test]
@@ -1269,8 +1441,8 @@ mod tests {
             // Right at the threshold the rounding of a rotated box decides.
             proptest::prop_assume!((ratio - OUTER_RIM_FRACTION).abs() > 1e-6);
             let rot = move |v: Vec3| {
-                let (sy, cy) = yaw.sin_cos();
-                let (sp, cp) = pitch.sin_cos();
+                let (sy, cy) = trig::sin_cos(yaw);
+                let (sp, cp) = trig::sin_cos(pitch);
                 let v = Vec3::new(v.x * cy - v.y * sy, v.x * sy + v.y * cy, v.z);
                 Vec3::new(v.x, v.y * cp - v.z * sp, v.y * sp + v.z * cp)
             };

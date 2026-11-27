@@ -3,6 +3,7 @@
 //! save/load, and unrelated edits, and change only when the geometry they
 //! hash changes.
 
+use kernel::trig;
 use std::collections::{BTreeMap, BTreeSet};
 
 use kernel::unit_key::{curve_key, edge_key};
@@ -103,8 +104,11 @@ fn keys_survive_save_and_load() {
         for i in 0..24 {
             let a = |k: usize| std::f64::consts::TAU * (k as f64) / 24.0;
             s.add_segment(
-                pt(c.x + 0.5 * a(i).cos(), c.y + 0.5 * a(i).sin()),
-                pt(c.x + 0.5 * a(i + 1).cos(), c.y + 0.5 * a(i + 1).sin()),
+                pt(c.x + 0.5 * trig::cos(a(i)), c.y + 0.5 * trig::sin(a(i))),
+                pt(
+                    c.x + 0.5 * trig::cos(a(i + 1)),
+                    c.y + 0.5 * trig::sin(a(i + 1)),
+                ),
             )
             .unwrap();
         }

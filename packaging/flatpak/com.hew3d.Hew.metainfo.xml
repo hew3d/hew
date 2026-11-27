@@ -12,6 +12,10 @@
       discrete, watertight object, and combining objects is always an
       explicit choice, so a model is printable from the first click.
     </p>
+    <p>
+      Hew opens and saves SketchUp files of every version, from
+      SketchUp 3 through 2027.
+    </p>
   </description>
   <launchable type="desktop-id">com.hew3d.Hew.desktop</launchable>
   <url type="homepage">https://hew3d.com</url>

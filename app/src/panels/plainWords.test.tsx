@@ -18,6 +18,7 @@ import { ThickenDialog } from './ThickenDialog'
 import { BANNED_RE, readableText } from '../health/bannedWords'
 import type { Scene as WasmScene } from '../wasm/loader'
 import type { ImportReport } from '../io/fileHost'
+import { taggedDispatch } from '../test/taggedDispatch'
 
 const RIM = { role: 'outer', planar: true, closed: true, cappable: true, sheet_edge: false, shared: false, perimeter: 4, extent: 1, edges: 4 }
 const SEAM = { ...RIM, shared: true }
@@ -68,10 +69,16 @@ function makeScene(refuse = false) {
     last_import_object_ids: vi.fn(() => new BigUint64Array([1n])),
     group_members: () => [],
     instance_expanded_members: vi.fn(() => new BigUint64Array()),
+    mend_census_json: vi.fn(() =>
+      JSON.stringify({ weld: 0.000002, weld_vertices: 312, weld_max_gap: 0, folds: 4, branching_vertices: 2, islands: 1, hole_rims: 7, hole_rims_planar: 3, hole_rims_warped: 4, outer_rims: 0, fill_rims: [0, 1, 2, 3, 4, 5, 6], filled_rims: 7, fill_curved: 4, pieces: 0 }),
+    ),
+    mend_census_points: vi.fn(() => new Float32Array([0, 0, 0])),
+    weld_range: vi.fn(() => new Float64Array([1e-9, 1e-4])),
+    default_weld_distance: vi.fn(() => 0.0000019),
     api_connection_open: vi.fn(() => 3),
     api_connection_close: vi.fn(),
     object_public_ids: vi.fn((ids: BigUint64Array) => Array.from(ids, (id) => `obj_${id}`)),
-    api_dispatch: vi.fn((_c: number, raw: string) => {
+    api_dispatch: vi.fn(taggedDispatch((_c: number, raw: string) => {
       const req = JSON.parse(raw) as { id: number; method: string }
       if (req.method !== 'hew.doc.transact') return JSON.stringify({ jsonrpc: '2.0', id: req.id, result: {} })
       if (refuse && !applied) {
@@ -84,7 +91,7 @@ function makeScene(refuse = false) {
       }
       applied = true
       return JSON.stringify({ jsonrpc: '2.0', id: req.id, result: {} })
-    }),
+    })),
   } as unknown as WasmScene
 }
 
@@ -119,6 +126,16 @@ describe('plain words on screen', () => {
     fireEvent.click(document.querySelector('[data-health-row="6"]') as HTMLElement)
     noBanned(container)
     fireEvent.click(document.querySelector('[data-health-row="3"]') as HTMLElement)
+    noBanned(container)
+    // A row Mend can act on: the button, the preview line, the reason, and the choices.
+    fireEvent.click(document.querySelector('[data-health-row="5"]') as HTMLElement)
+    expect(screen.getByRole('button', { name: 'Mend' })).toBeInTheDocument()
+    expect(document.querySelector('[data-health-mend-preview]')).not.toBeNull()
+    noBanned(container)
+    fireEvent.click(document.querySelector('[data-health-mend-choose]') as HTMLElement)
+    expect(document.querySelector('[data-health-mend-options]')).not.toBeNull()
+    noBanned(container)
+    fireEvent.mouseEnter(screen.getByRole('button', { name: 'Mend' }))
     noBanned(container)
     // The scope menu.
     noBanned(screen.getByRole('combobox', { name: 'Scope' }))
@@ -171,7 +188,7 @@ describe('plain words on screen', () => {
   })
 
   it('the overview and Done page reached with Use recommended choices, per scope', async () => {
-    for (const scope of ['import', 'selection', 'model'] as const) {
+    for (const scope of ['import', 'selection', 'export', 'model'] as const) {
       const props = { onClose: vi.fn(), onIsolate: vi.fn(), onClearIsolation: vi.fn(), onHealthOverlay: vi.fn(), onGeometryChanged: vi.fn() }
       const { container, unmount } = render(<MakeSolidWizard scene={makeScene()} scope={scope} objectIds={[1n]} {...props} />)
       noBanned(container)

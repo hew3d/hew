@@ -14,7 +14,7 @@ use kernel::{EntityRef, NodeId, Transform};
 use serde_json::Value;
 
 /// This namespace's slice of the handler table.
-pub fn handler(name: &str) -> Option<Handler> {
+pub(crate) fn handler(name: &str) -> Option<Handler> {
     Some(match name {
         "hew.group.create" => group_create,
         "hew.group.explode" => group_explode,
@@ -22,7 +22,10 @@ pub fn handler(name: &str) -> Option<Handler> {
         "hew.component.create" => component_create,
         "hew.component.place" => component_place,
         "hew.component.make_unique" => component_make_unique,
+        "hew.component.promote" => component_promote,
         "hew.component.explode" => component_explode,
+        "hew.component.rebase" => component_rebase,
+        "hew.component.flip_instance" => component_flip_instance,
         "hew.context.enter" => context_enter,
         "hew.context.exit" => context_exit,
         _ => return None,
@@ -201,18 +204,146 @@ struct InstanceParams {
     instance: String,
 }
 
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MakeUniqueParams {
+    #[serde(default)]
+    instance: Option<String>,
+    #[serde(default)]
+    path: Option<Vec<String>>,
+    #[serde(default)]
+    cascade: Option<bool>,
+    #[serde(default)]
+    deep: Option<bool>,
+}
+
+/// `hew.component.make_unique { instance? | path?, cascade? = true,
+/// deep? = false }` (docs/agents/HEW_API.md §7): forks the definition of
+/// the placement at the end of the path (`instance` is a path of one) so
+/// only that placement changes from now on. Answers the forked
+/// definition, the placement at the end of the path after the call (the
+/// leaf itself for one element, its divergent twin for a deeper path), and
+/// `remap`, every id the call minted keyed by the id it copies, over every
+/// kind. One undo entry.
 fn component_make_unique(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
-    let p: InstanceParams =
+    let p: MakeUniqueParams =
         serde_json::from_value(params.clone()).map_err(|e| CmdError::Params(e.to_string()))?;
-    let Some(EntityRef::Instance(instance)) = ctx.resolver().resolve(&p.instance) else {
-        return Err(unknown_entity(&p.instance));
+    let ids: Vec<String> = match (p.instance, p.path) {
+        (Some(i), None) => vec![i],
+        (None, Some(path)) if !path.is_empty() => path,
+        (None, Some(_)) => {
+            return Err(CmdError::Params("path names at least one instance".into()));
+        }
+        _ => {
+            return Err(CmdError::Params(
+                "give exactly one of \"instance\" or \"path\"".into(),
+            ));
+        }
     };
-    let (component, _) = ctx.doc.make_unique(instance)?;
+    let single = ids.len() == 1;
+    let mut path = Vec::with_capacity(ids.len());
+    for id in &ids {
+        match ctx.resolver().resolve(id) {
+            Some(EntityRef::Instance(i)) => path.push(i),
+            _ if single => return Err(unknown_entity(id)),
+            _ => return Err(crate::locate::unknown_occurrence()),
+        }
+    }
+    if !single {
+        // Every link must lead on: the path names a real placement.
+        let (leaf, above) = path.split_last().expect("non-empty");
+        if ctx
+            .doc
+            .occurrence_at(above, NodeId::Instance(*leaf))
+            .is_none()
+        {
+            return Err(crate::locate::unknown_occurrence());
+        }
+    }
+    let (component, instance, remap, _) =
+        ctx.doc
+            .make_unique_by_path(&path, p.cascade.unwrap_or(true), p.deep.unwrap_or(false))?;
     let resolver = ctx.resolver();
-    let public = resolver
-        .public_of(ctx.doc, &EntityRef::Component(component))
-        .expect("just created");
-    Ok(serde_json::json!({ "component": public }))
+    let public = |e: EntityRef| -> Result<String, CmdError> {
+        resolver
+            .public_of(ctx.doc, &e)
+            .ok_or_else(|| CmdError::Internal("a made-unique entity has no public id".into()))
+    };
+    let mut map = serde_json::Map::new();
+    for (a, b) in &remap.objects {
+        map.insert(
+            public(EntityRef::Object(*a))?,
+            public(EntityRef::Object(*b))?.into(),
+        );
+    }
+    for (a, b) in &remap.groups {
+        map.insert(
+            public(EntityRef::Group(*a))?,
+            public(EntityRef::Group(*b))?.into(),
+        );
+    }
+    for (a, b) in &remap.instances {
+        map.insert(
+            public(EntityRef::Instance(*a))?,
+            public(EntityRef::Instance(*b))?.into(),
+        );
+    }
+    for (a, b) in &remap.components {
+        map.insert(
+            public(EntityRef::Component(*a))?,
+            public(EntityRef::Component(*b))?.into(),
+        );
+    }
+    Ok(serde_json::json!({
+        "component": public(EntityRef::Component(component))?,
+        "instance": public(EntityRef::Instance(instance))?,
+        "remap": map,
+    }))
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PromoteParams {
+    component: String,
+    name: String,
+}
+
+/// The longest definition name, in bytes (`hew.component.import_definition`
+/// keeps the same bound).
+const MAX_COMPONENT_NAME_BYTES: usize = 128;
+
+/// `hew.component.promote { component, name }`: a linked set becomes a
+/// named component ("Make component"): the `hew` / `linked` attribute is
+/// removed and the definition takes `name`. A definition that is not a
+/// linked set refuses `not_linked`. One undo entry.
+fn component_promote(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
+    let p: PromoteParams =
+        serde_json::from_value(params.clone()).map_err(|e| CmdError::Params(e.to_string()))?;
+    let Some(EntityRef::Component(component)) = ctx.resolver().resolve(&p.component) else {
+        return Err(unknown_entity(&p.component));
+    };
+    if ctx.doc.def_member_nodes(component).is_none() {
+        return Err(unknown_entity(&p.component));
+    }
+    let name = p.name.trim();
+    if name.is_empty()
+        || name.len() > MAX_COMPONENT_NAME_BYTES
+        || name.chars().any(char::is_control)
+    {
+        return Err(CmdError::Params(format!(
+            "name must be non-empty, at most {MAX_COMPONENT_NAME_BYTES} bytes, with no control characters"
+        )));
+    }
+    if !ctx.doc.is_linked_set(component) {
+        return Err(CmdError::Refusal(Refusal::api(
+            "not_linked",
+            "That definition is not a set of linked copies; it is already a component.",
+        )));
+    }
+    ctx.doc.promote_linked(component)?;
+    ctx.doc
+        .set_component_name(component, Some(name.to_string()))?;
+    Ok(serde_json::json!({ "component": p.component }))
 }
 
 fn component_explode(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
@@ -232,6 +363,86 @@ fn component_explode(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
         })
         .collect();
     Ok(serde_json::json!({ "objects": public }))
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RebaseParams {
+    id: String,
+    origin: [f64; 3],
+    x: [f64; 3],
+    y: [f64; 3],
+}
+
+/// `hew.component.rebase` (docs/agents/PLUGINS.md "Setting axes"):
+/// `Document::rebase_definition`, with an instance id meaning its
+/// definition. `instances_updated` counts every live instance placing the
+/// definition, world or nested in another definition.
+fn component_rebase(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
+    let p: RebaseParams =
+        serde_json::from_value(params.clone()).map_err(|e| CmdError::Params(e.to_string()))?;
+    let component = match ctx.resolver().resolve(&p.id) {
+        Some(EntityRef::Component(c)) => c,
+        Some(EntityRef::Instance(i)) => ctx
+            .doc
+            .instance_def(i)
+            .ok_or_else(|| unknown_entity(&p.id))?,
+        _ => return Err(unknown_entity(&p.id)),
+    };
+    let v = |c: [f64; 3]| kernel::Vec3::new(c[0], c[1], c[2]);
+    let origin = kernel::Point3::new(p.origin[0], p.origin[1], p.origin[2]);
+    ctx.doc
+        .rebase_definition(component, origin, v(p.x), v(p.y))?;
+    let instances_updated = ctx.doc.instances_of(component).len();
+    let resolver = ctx.resolver();
+    let public = resolver
+        .public_of(ctx.doc, &EntityRef::Component(component))
+        .ok_or_else(|| CmdError::Internal("a rebased definition has no public id".into()))?;
+    Ok(serde_json::json!({ "component": public, "instances_updated": instances_updated }))
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FlipParams {
+    instance: String,
+    axis: FlipAxis,
+}
+
+#[derive(Debug, Clone, Copy, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum FlipAxis {
+    X,
+    Y,
+    Z,
+}
+
+/// `hew.component.flip_instance`: `Document::flip_instance` on one world
+/// instance. A definition-owned (nested) instance refuses `unknown_entity`,
+/// as every world-only instance command does.
+fn component_flip_instance(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
+    let p: FlipParams =
+        serde_json::from_value(params.clone()).map_err(|e| CmdError::Params(e.to_string()))?;
+    let Some(EntityRef::Instance(instance)) = ctx.resolver().resolve(&p.instance) else {
+        return Err(unknown_entity(&p.instance));
+    };
+    if !ctx.doc.instance_is_world(instance) {
+        return Err(unknown_entity(&p.instance));
+    }
+    let axis = match p.axis {
+        FlipAxis::X => kernel::Axis::X,
+        FlipAxis::Y => kernel::Axis::Y,
+        FlipAxis::Z => kernel::Axis::Z,
+    };
+    ctx.doc.flip_instance(instance, axis)?;
+    let pose = ctx
+        .doc
+        .instance_pose(instance)
+        .ok_or_else(|| CmdError::Internal("a flipped instance has no pose".into()))?;
+    Ok(serde_json::json!({
+        "instance": p.instance,
+        "pose": pose.to_affine(),
+        "mirrored": pose.determinant() < 0.0,
+    }))
 }
 
 // --------------------------------------------------------------- context

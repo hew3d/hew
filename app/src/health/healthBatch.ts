@@ -10,20 +10,31 @@
  * repeating until the batch succeeds or is empty. Pure of React; the panel
  * and Object Info call `runBatch` and show the result.
  */
+import { behaviorEnabled } from '../preview'
 import { i18n } from '@lingui/core'
 import { msg, t } from '@lingui/core/macro'
 import type { Scene as WasmScene } from '../wasm/loader'
 import { canCloseRow, type HealthFamilyGroup, type HealthGroup, type HealthRow } from './healthReport'
 import { SPLIT_PIECE_LEFT, batchToast, rowWarning, UNDO_LABEL, type KindKey } from './healthCopy'
 import { describedErrorCodes, kernelErrorMessage } from '../kernelErrors'
+import { parseDispatch } from '../api/dispatchResult'
 
 /** One repair: an API command on one object. */
 export interface BatchOp {
   object: bigint
-  /** `hew.solid.cap` | `hew.solid.thicken` | `hew.solid.mark_surface` | `hew.solid.delete_faces`. */
+  /** `hew.solid.cap` | `hew.solid.thicken` | `hew.solid.mark_surface` | `hew.solid.delete_faces`
+   *  | `hew.solid.rejoin` | `hew.solid.remove_degenerate_faces` | `hew.solid.mend`. */
   method: string
   /** The command's params besides `object`. */
   params?: Record<string, unknown>
+  /**
+   * `hew.solid.rejoin` only: every Object of the split shape (pieces and
+   * inside walls). The command is addressed by family index (`params.family`)
+   * and carries no `object`, so `runBatch` uses these handles only to fail
+   * the op as stale when a member is gone; `object` is then just the family's
+   * first row, for failure reporting.
+   */
+  members?: bigint[]
 }
 
 export interface BatchFailure {
@@ -35,6 +46,9 @@ export interface BatchFailure {
 export interface BatchResult {
   done: BatchOp[]
   failed: BatchFailure[]
+  /** What each finished command returned (a Mend's report, or `{removed}` for
+   *  a degenerate-face removal). */
+  results?: Map<BatchOp, unknown>
 }
 
 export interface BatchOptions {
@@ -48,7 +62,7 @@ export const STALE_OBJECT_EXPLANATION = msg`This object is no longer in the mode
 let frameId = 0
 
 interface Reply {
-  result?: unknown
+  result?: { results?: unknown[] } & Record<string, unknown>
   error?: {
     code?: number
     message?: string
@@ -73,9 +87,11 @@ export function refusalReason(data: { explanation?: string; refusal?: string } |
 }
 
 function send(scene: WasmScene, conn: number, method: string, params: unknown): Reply {
-  const raw = scene.api_dispatch(conn, JSON.stringify({ jsonrpc: '2.0', id: ++frameId, method, params }))
-  if (raw === undefined) throw new Error(`${method} gave no reply`)
-  return JSON.parse(raw) as Reply
+  const result = parseDispatch(scene.api_dispatch(conn, JSON.stringify({ jsonrpc: '2.0', id: ++frameId, method, params })))
+  if (result.kind === 'none') throw new Error(`${method} gave no reply`)
+  // A health batch calls first-party commands only, which never forward.
+  if (result.kind === 'pending') throw new Error(`${method} was forwarded to a plugin`)
+  return JSON.parse(result.frame) as Reply
 }
 
 /**
@@ -91,6 +107,7 @@ export function runBatch(
 ): BatchResult {
   const done: BatchOp[] = []
   const failed: BatchFailure[] = []
+  const results = new Map<BatchOp, unknown>()
   if (ops.length === 0) return { done, failed }
   const conn = scene.api_connection_open()
   try {
@@ -108,7 +125,8 @@ export function runBatch(
       const idOf = new Map<BatchOp, string>()
       const live: BatchOp[] = []
       remaining.forEach((op, i) => {
-        if (ids[i]) {
+        const members = op.members === undefined ? null : Array.from(scene.object_public_ids(BigUint64Array.from(op.members)))
+        if (ids[i] && (members === null || members.every((m) => m))) {
           live.push(op)
           idOf.set(op, ids[i])
         } else {
@@ -121,10 +139,15 @@ export function runBatch(
         label: label(remaining.length),
         commands: remaining.map((op) => ({
           method: op.method,
-          params: { object: idOf.get(op), ...(op.params ?? {}) },
+          // A family-addressed op (rejoin) names no object.
+          params: op.members === undefined ? { object: idOf.get(op), ...(op.params ?? {}) } : { ...(op.params ?? {}) },
         })),
       })
       if (reply.error === undefined) {
+        const per = reply.result?.results
+        remaining.forEach((op, i) => {
+          if (Array.isArray(per)) results.set(op, per[i])
+        })
         done.push(...remaining)
         remaining = []
         break
@@ -151,14 +174,14 @@ export function runBatch(
   } finally {
     scene.api_connection_close(conn)
   }
-  return { done, failed }
+  return results.size > 0 ? { done, failed, results } : { done, failed }
 }
 
 // ---------------------------------------------------------------------------
 // Plans: which ops a header button runs
 // ---------------------------------------------------------------------------
 
-export type BatchKind = 'close' | 'mark' | 'thicken' | 'repair'
+export type BatchKind = 'close' | 'mark' | 'thicken' | 'repair' | 'rejoinSolid' | 'degenerate' | 'mend'
 
 /** Undo-entry label for each batch kind. */
 export function batchLabel(kind: BatchKind, n: number): string {
@@ -171,14 +194,23 @@ export function batchLabel(kind: BatchKind, n: number): string {
       return UNDO_LABEL.thicken(n)
     case 'repair':
       return UNDO_LABEL.rejoin(n)
+    case 'rejoinSolid':
+      return UNDO_LABEL.rejoinSolid
+    case 'degenerate':
+      return UNDO_LABEL.removeDegenerate(n)
+    case 'mend':
+      return UNDO_LABEL.mend(n)
   }
 }
 
-const ACTION_ROW: Record<BatchKind, 'close' | 'thicken' | 'keep'> = {
+const ACTION_ROW: Record<BatchKind, 'close' | 'thicken' | 'keep' | 'rejoin' | 'degenerate' | 'mend'> = {
   close: 'close',
   mark: 'keep',
   thicken: 'thicken',
   repair: 'close',
+  rejoinSolid: 'rejoin',
+  degenerate: 'degenerate',
+  mend: 'mend',
 }
 
 /** The warning line under a row a batch refused. */
@@ -203,7 +235,39 @@ export const thickenOp = (row: HealthRow, distance: number, centered: boolean): 
   method: 'hew.solid.thicken',
   params: centered ? { distance, centered: true } : { distance },
 })
+/**
+ * Rejoin a whole split shape as one solid: one command addressed by the
+ * family index the rows carry (`{ family, as: 'one_solid' }`, no object).
+ */
+export const rejoinSolidOp = (rows: readonly HealthRow[]): BatchOp => {
+  const family = rows[0].family
+  if (family === null) throw new Error('rejoinSolidOp needs rows of a split shape')
+  return {
+    object: rows[0].object,
+    method: 'hew.solid.rejoin',
+    params: { family, as: 'one_solid' },
+    members: rows.map((r) => r.object),
+  }
+}
 export const deleteFacesOp = (row: HealthRow): BatchOp => ({ object: row.object, method: 'hew.solid.delete_faces' })
+export const removeDegenerateOp = (row: HealthRow): BatchOp => ({
+  object: row.object,
+  method: 'hew.solid.remove_degenerate_faces',
+})
+
+/** Rows that carry zero-area faces to remove. */
+export const degenerateRows = (rows: readonly HealthRow[]): HealthRow[] =>
+  behaviorEnabled('health-remove-degenerate') ? rows.filter((r) => r.degenerateFaces > 0) : []
+
+/** How many faces a finished batch removed (the sum of each command's `removed`). */
+export function removedCount(result: BatchResult): number {
+  let n = 0
+  for (const op of result.done) {
+    const r = result.results?.get(op) as { removed?: unknown } | undefined
+    if (typeof r?.removed === 'number') n += r.removed
+  }
+  return n
+}
 
 /** Rows a group's **Close all** caps: those with a flat opening to fill. */
 export const closableRows = (rows: readonly HealthRow[]): HealthRow[] => rows.filter(canCloseRow)
@@ -242,6 +306,13 @@ export function familyRepairOps(rows: readonly HealthRow[], keepSheets: boolean)
     .map((r) => (keepSheets ? markOp(r) : deleteFacesOp(r)))
   return [...caps, ...sheets]
 }
+
+/**
+ * The Model Health "Rejoin as one solid" button: one rejoin op for the shape,
+ * offered only with at least two pieces (members that are not flat walls).
+ */
+export const familyRejoinSolidOps = (rows: readonly HealthRow[]): BatchOp[] =>
+  rows.filter((r) => r.verdict.kind !== 'flat_sheet').length < 2 ? [] : [rejoinSolidOp(rows)]
 
 /** An inside wall must not go when a piece it depends on couldn't be closed. */
 export const familyCascade: NonNullable<BatchOptions['cascade']> = (failed, remaining) => {

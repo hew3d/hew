@@ -27,6 +27,7 @@
 //! byte-identical saves, I6 the face group equals the ground's regions for
 //! the same lines, I7 the saved document reopens.
 
+use kernel::trig;
 use std::f64::consts::PI;
 
 use kernel::{
@@ -35,7 +36,7 @@ use kernel::{
 };
 use proptest::prelude::*;
 
-mod face_arrangement_support;
+use crate::face_arrangement_support;
 use face_arrangement_support::*;
 
 // --------------------------------------------------------------- helpers
@@ -346,11 +347,11 @@ fn strip_with_circle(aligned: bool) -> (Wall, Vec<Rings>, CurveGeom) {
 fn arc_path(w: &Wall, n: usize) -> (Vec<Point3>, Vec<Option<CurveGeom>>, CurveGeom) {
     let (cx, cy, r) = (10.0 * MM, -6.0 * MM, 10.0 * MM);
     let g = w.circle_geom(cx, cy, r);
-    let (a0, a1) = ((6.0f64).atan2(-8.0), (6.0f64).atan2(8.0));
+    let (a0, a1) = (trig::atan2(6.0f64, -8.0), trig::atan2(6.0f64, 8.0));
     let mut path: Vec<Point3> = (0..=n)
         .map(|i| {
             let a = a0 + (a1 - a0) * i as f64 / n as f64;
-            w.at(cx + r * a.cos(), cy + r * a.sin())
+            w.at(cx + r * trig::cos(a), cy + r * trig::sin(a))
         })
         .collect();
     // The ends exactly on the bottom edge (on the circle exactly, too).
@@ -890,7 +891,44 @@ proptest! {
         prop_assert!(report.kept_as_sketch.is_empty(), "nothing kept as drawing");
         prop_assert!(!ground_has_pinch(&sk), "the ground's rings are simple");
         assert_group_matches_ground(&w, &sk);
-        assert_invariants(&mut w, &before, &bytes0, depth0);
+        // A chain lying wholly on one boundary of the wall (every point on
+        // its bottom edge, or every point on its top edge) draws nothing
+        // new: the draw succeeds and changes nothing, so it adds no undo
+        // entry (`a_chain_wholly_on_a_boundary_changes_nothing`). Every
+        // other chain keeps I1–I7, one undo entry included.
+        let all_on = |y: u32| y0 == y && y1 == y && ys.iter().all(|&v| v == y);
+        if all_on(0) || all_on(20) {
+            prop_assert_eq!(w.doc.undo_depth(), depth0, "no undo entry");
+            prop_assert_eq!(w.doc.save(), bytes0, "the bytes are unchanged");
+        } else {
+            assert_invariants(&mut w, &before, &bytes0, depth0);
+        }
+    }
+}
+
+/// The shrunk `line_chains_match_the_ground` case (rx = ry = rw = rh = 2,
+/// every y = 0): a chain lying wholly on the wall's bottom edge, then the
+/// same along its top edge. The ground keeps the face as it was, so the
+/// draw is Ok and changes nothing: the bytes and the undo depth are as
+/// before, and no drawing is kept.
+#[test]
+fn a_chain_wholly_on_a_boundary_changes_nothing() {
+    for y in [0.0, 10.0] {
+        let mut w = front_wall();
+        let wall = w.face;
+        imprint_mm(&mut w, wall, 1.0, 1.0, 1.0, 1.0);
+        let path = vec![mm(&w, 0.0, y), mm(&w, 10.0, y), mm(&w, 20.0, y)];
+        let before = w.obj().clone();
+        let bytes0 = w.doc.save();
+        let depth0 = w.doc.undo_depth();
+        let sk = ground_edit(w.plane, &before, &path, &[]);
+        let (report, _) = draw_path(&mut w.doc, None, w.id, wall, &path, &[])
+            .expect("a chain on the boundary draws");
+        assert!(report.kept_as_sketch.is_empty(), "y = {y}: nothing kept");
+        assert_group_matches_ground(&w, &sk);
+        assert_eq!(w.doc.undo_depth(), depth0, "y = {y}: no undo entry");
+        assert_eq!(w.doc.save(), bytes0, "y = {y}: the bytes are unchanged");
+        assert!(objects_equivalent(w.obj(), &before), "y = {y}: unchanged");
     }
 }
 
@@ -919,6 +957,84 @@ fn a_chain_along_an_edge_then_across_matches_the_ground() {
     assert_invariants(&mut w, &before, &bytes0, depth0);
 }
 
+/// The shrunk `line_chains_match_the_ground` case (regression seed): a
+/// chain running along the top edge of an imprint and past it, then down to
+/// the wall's far corner. The ground sketch has a vertex where a chain point
+/// lands on the imprint's edge; the solid has none there, but keeps the
+/// imprint's two corners on the face above, which the oracle must not shed.
+#[test]
+fn a_chain_running_along_an_imprints_edge_matches_the_ground() {
+    let mut w = front_wall();
+    let wall = w.face;
+    imprint_mm(&mut w, wall, 1.5, 1.5, 5.5, 2.0);
+    let path = vec![
+        mm(&w, 0.0, 3.5),
+        mm(&w, 20.0 / 3.0, 3.5),
+        mm(&w, 40.0 / 3.0, 3.5),
+        mm(&w, 20.0, 0.0),
+    ];
+    let before = w.obj().clone();
+    let bytes0 = w.doc.save();
+    let depth0 = w.doc.undo_depth();
+    let sk = ground_edit(w.plane, &before, &path, &[]);
+    let seed = w.face;
+    let (report, _) = draw_path(&mut w.doc, None, w.id, seed, &path, &[]).expect("the chain draws");
+    assert!(report.kept_as_sketch.is_empty(), "nothing kept as drawing");
+    assert!(!ground_has_pinch(&sk), "the ground's rings are simple");
+    assert_group_matches_ground(&w, &sk);
+    assert_invariants(&mut w, &before, &bytes0, depth0);
+    assert_eq!(
+        group_faces(w.obj(), &w.plane).len(),
+        3,
+        "upper, imprint, lower"
+    );
+}
+
+/// The oracle still rejects a genuinely stray vertex on the solid: a
+/// collinear vertex added to one solid ring that the ground does not have.
+#[test]
+fn the_ground_oracle_rejects_a_stray_solid_vertex() {
+    let mut w = front_wall();
+    let wall = w.face;
+    imprint_mm(&mut w, wall, 1.5, 1.5, 5.5, 2.0);
+    let path = vec![
+        mm(&w, 0.0, 3.5),
+        mm(&w, 20.0 / 3.0, 3.5),
+        mm(&w, 40.0 / 3.0, 3.5),
+        mm(&w, 20.0, 0.0),
+    ];
+    let before = w.obj().clone();
+    let sk = ground_edit(w.plane, &before, &path, &[]);
+    draw_path(&mut w.doc, None, w.id, w.face, &path, &[]).expect("the chain draws");
+    let n = w.plane.normal();
+    let ground = ground_regions(&sk);
+    let obj = w.obj();
+    let mut faces: Vec<Rings> = group_faces(obj, &w.plane)
+        .into_iter()
+        .map(|f| face_rings(obj, f))
+        .collect();
+    assert!(
+        faces_match_ground(&faces, &ground, n),
+        "the real result matches"
+    );
+    // A stray midpoint on the wall's top edge (the ground has none there).
+    let ring = &mut faces
+        .iter_mut()
+        .find(|(o, _)| o.iter().any(|p| p.approx_eq(mm(&w, 20.0, 10.0), 1e-9)))
+        .expect("the upper face")
+        .0;
+    let i = ring
+        .iter()
+        .position(|p| p.approx_eq(mm(&w, 20.0, 10.0), 1e-9))
+        .expect("corner");
+    let mid = ring[i] + (ring[(i + 1) % ring.len()] - ring[i]) * 0.5;
+    ring.insert(i + 1, mid);
+    assert!(
+        !faces_match_ground(&faces, &ground, n),
+        "a stray vertex fails"
+    );
+}
+
 // ------------------------------------- runs whose facets lost every claim
 
 #[test]
@@ -940,7 +1056,7 @@ fn a_circle_whose_runs_lost_every_claim_is_still_one_whole_circle() {
     assert!(runs_close(&runs), "a whole circle");
     // Every chord lying on the circle's facets (each point and each
     // segment midpoint within one facet's sagitta of the rim) is on a run.
-    let sagitta = r * (1.0 - (PI / 24.0).cos());
+    let sagitta = r * (1.0 - trig::cos(PI / 24.0));
     let on_rim = |p: Point3| {
         let d = (p - g.center).length();
         d <= r + 1e-12 && d >= r - sagitta - 1e-12

@@ -16,11 +16,12 @@
  */
 
 import { Trans, useLingui } from '@lingui/react/macro'
-import { useMemo, useState, useEffect, useRef, useCallback, memo } from 'react'
+import { createContext, useContext, useMemo, useState, useEffect, useRef, useCallback, memo } from 'react'
 import type { Scene as WasmScene } from '../wasm/loader'
 import {
   entityLabel,
   resolveLabel,
+  placementLabel,
   makeLabelFor,
   breadcrumb,
   buildTreeIndexMap,
@@ -36,9 +37,11 @@ import {
   type NodeKind,
 } from './treeModel'
 import { draftRef, outlinerDrawing, resolveDraft, type OutlinerDrawing } from '../tools/planeUnits'
-import { isSketchScopedKind } from './treeModel'
+import { isSketchScopedKind, linkedSetKind } from './treeModel'
+import { topLevelCopies } from '../linkedCopies'
 import type { HealthClass } from '../health/healthReport'
 import { OUTLINER_TOOLTIP } from '../health/healthCopy'
+import { isComposingKey } from '../input/keyboard'
 import {
   getOutlinerSort,
   subscribeOutlinerSort,
@@ -47,6 +50,12 @@ import {
 } from '../settings/view'
 import { OutlinerSortToggle } from './OutlinerSortToggle'
 import { useViewSetting } from '../settings/useViewSetting'
+import lockSvg from '@material-symbols/svg-400/outlined/lock.svg?raw'
+import { InlineIcon } from './InlineIcon'
+import { frozenCause, isLockableKind, isLocked } from '../lock/lockModel'
+import type { LibraryLink } from '../library/libraryUpdates'
+import { LibraryMark } from './LibraryMark'
+import { linkedCountLabel, unlinkLabel, unlinkAllLabel, makeComponentLabel, selectAllCopiesLabel } from '../linkedCopyCopy'
 
 interface Props {
   scene: WasmScene
@@ -135,6 +144,54 @@ interface Props {
    *  member, a sketch row) is indistinguishable from a drag that never
    *  registered. */
   onDropRefused?: (reason: string) => void
+  /** The padlock on a locked row was clicked: unlock that node (a copy of a
+   *  shared shape unlocks every copy). A row inside something locked passes
+   *  the locked node above it. When omitted the padlock only shows. */
+  onUnlock?: (node: NodeRef) => void
+  /** Actions on a placement of a linked set (the row's "Copies" menu). When
+   *  omitted, linked rows still show their glyph and count but offer no menu. */
+  linkedActions?: LinkedCopyActions
+  /** Where each definition stands against its Library item (definition
+   *  handle → link): a placement of one that is newer in the Library, or
+   *  changed here, carries a small marker beside its "×N" badge. */
+  libraryLinks?: ReadonlyMap<string, LibraryLink>
+  /** The marker on a part with a newer Library version was clicked. */
+  onReviewLibraryUpdates?: () => void
+}
+
+/** What the Outliner row's "Copies" menu can do. Each takes the row's node. */
+export interface LinkedCopyActions {
+  onUnlink: (node: NodeRef) => void
+  onUnlinkAll: (node: NodeRef) => void
+  onMakeComponent: (node: NodeRef) => void
+  onSelectCopies: (node: NodeRef) => void
+  /** Rename from the row: the copy's own name when it has one, else all copies. */
+  onRename: (node: NodeRef, name: string) => void
+}
+
+interface LinkedRowContext {
+  libraryLinks: ReadonlyMap<string, LibraryLink> | undefined
+  onReviewLibraryUpdates: (() => void) | undefined
+  actions: LinkedCopyActions | undefined
+  /** The set whose "×N" badge is hovered; the other placements light up. */
+  highlightDef: bigint | null
+  setHighlightDef: (def: bigint | null) => void
+}
+
+const LinkedRowCtx = createContext<LinkedRowContext>({ libraryLinks: undefined, onReviewLibraryUpdates: undefined, actions: undefined, highlightDef: null, setHighlightDef: () => {} })
+
+/** The padlock on a row (OW-1): what clicking it does. */
+interface LockRowContext {
+  onUnlock: ((node: NodeRef) => void) | undefined
+}
+const LockRowCtx = createContext<LockRowContext>({ onUnlock: undefined })
+
+/** How a row shows the lock: its own padlock (click unlocks), or a dimmed
+ *  one when it is inside something locked (the way a row hidden by its
+ *  parent shows a dimmed eye). `target` is what clicking unlocks. */
+interface RowLock {
+  state: 'own' | 'inherited'
+  target: NodeRef
 }
 
 const EMPTY_KEYS: ReadonlySet<string> = new Set()
@@ -220,8 +277,20 @@ export function DocumentTree({
   onSetHiddenMany,
   onReparent,
   onDropRefused,
+  onUnlock,
+  linkedActions,
+  libraryLinks,
+  onReviewLibraryUpdates,
 }: Props) {
   const { t } = useLingui()
+  // Frozen rows (locked, or inside something locked) neither drag nor take drops.
+  const isFrozen = useCallback((n: NodeRef) => frozenCause(scene, n) !== null, [scene])
+  const lockCtx = useMemo<LockRowContext>(() => ({ onUnlock }), [onUnlock])
+  const [highlightDef, setHighlightDef] = useState<bigint | null>(null)
+  const linkedCtx = useMemo<LinkedRowContext>(
+    () => ({ actions: linkedActions, highlightDef, setHighlightDef, libraryLinks, onReviewLibraryUpdates }),
+    [linkedActions, highlightDef, libraryLinks, onReviewLibraryUpdates],
+  )
   // Re-query the entity lists whenever the document changes.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const topNodes = useMemo(
@@ -609,7 +678,7 @@ export function DocumentTree({
     const resolved = resolveDropTarget(e.clientX, e.clientY)
     const valid =
       resolved !== null &&
-      dropTargetFor(st.dragged, resolved.node, { getGroupMembers, sessionOpen }) !== null
+      dropTargetFor(st.dragged, resolved.node, { getGroupMembers, sessionOpen, isFrozen }) !== null
     const nextKey = valid ? (resolved as { key: string }).key : null
     if (st.lastHighlightKey !== nextKey) {
       st.lastHighlightKey = nextKey
@@ -624,12 +693,16 @@ export function DocumentTree({
       const resolved = resolveDropTarget(e.clientX, e.clientY)
       const result =
         resolved !== null
-          ? dropTargetFor(st.dragged, resolved.node, { getGroupMembers, sessionOpen })
+          ? dropTargetFor(st.dragged, resolved.node, { getGroupMembers, sessionOpen, isFrozen })
           : null
       if (result !== null) {
         onReparent(st.dragged, result.group)
       } else if (sessionOpen) {
         onDropRefused?.(t`Close the group you are editing before moving items between groups.`)
+      } else if (st.dragged.some(isFrozen)) {
+        onDropRefused?.(t`A locked item can't be moved. Unlock it first.`)
+      } else if (resolved !== null && resolved.node !== 'root' && isFrozen(resolved.node)) {
+        onDropRefused?.(t`A locked group can't take new items. Unlock it first.`)
       } else if (resolved !== null) {
         onDropRefused?.(
           resolved.node === 'root'
@@ -669,6 +742,8 @@ export function DocumentTree({
     // drag still runs so the not-allowed cursor and the drop toast say so,
     // instead of the row simply not moving.
     if (nodeKindToNumber(node.kind) < 0) return // sketch-scoped: no kernel NodeId
+    // A locked row cannot be dragged (the kernel refuses to move it).
+    if (isFrozen(node)) return
     // A text selection or the row's own image would start WebKit's native
     // drag on mouse movement and cancel the pointer stream mid-drag.
     e.preventDefault()
@@ -701,6 +776,8 @@ export function DocumentTree({
   const crumbs = breadcrumb(fullPath, labelFor)
 
   return (
+    <LinkedRowCtx.Provider value={linkedCtx}>
+    <LockRowCtx.Provider value={lockCtx}>
     <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
       {dragGhost !== null && (
         <div
@@ -976,6 +1053,20 @@ export function DocumentTree({
             />
           )
         })}
+        {/* Drawing outside the open session: shown for orientation, dimmed
+            and inert (the outside is never edited from inside a session). */}
+        {sessionStack.length > 0 && drawing.outside.map((u) => (
+          <Row
+            key={`outside:${nodeKey(u.ref)}`}
+            label={u.label ?? t({ context: 'drawn shape', message: 'Shape' })}
+            icon={<NodeIcon kind="draft-island" />}
+            selected={false}
+            active={false}
+            dimmed
+            indent={0}
+            onClick={() => {}}
+          />
+        ))}
         {filterEmpty && (
           <div
             style={{
@@ -991,6 +1082,8 @@ export function DocumentTree({
         )}
       </div>
     </div>
+    </LockRowCtx.Provider>
+    </LinkedRowCtx.Provider>
   )
 }
 
@@ -1157,6 +1250,7 @@ const NodeRow = memo(function NodeRowInner({
   onStartDrag: (node: NodeRef, e: React.PointerEvent<HTMLDivElement>) => void
 }) {
   const { t } = useLingui()
+  const copiesCtx = useContext(LinkedRowCtx)
   const key = nodeKey(node)
   // Auto-expand when this group is an ancestor of the primary selected node,
   // OR (filter active) an ancestor of a filter match — either reason forces
@@ -1203,6 +1297,17 @@ const NodeRow = memo(function NodeRowInner({
     [node.kind, node.id, scene, docRev, hiddenKeys, ownHidden],
   )
   const hidden = ownHidden || hiddenByParent
+  // The padlock: own when this node is locked, dimmed when it sits inside
+  // something locked (a locked group above it, or a member of a locked shape).
+  const lockCtx = useContext(LockRowCtx)
+  const rowLock = useMemo<RowLock | null>(() => {
+    if (!isLockableKind(node.kind)) return null
+    if (isLocked(scene, node)) return { state: 'own', target: node }
+    const cause = frozenCause(scene, node)
+    return cause === null ? null : { state: 'inherited', target: cause }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [node.kind, node.id, scene, docRev])
+  const lockProps = { lock: rowLock, onUnlock: lockCtx.onUnlock }
   // Imprints (drawn-but-not-yet-pushed shapes on this object's faces —
   // imprints.ts) render below as indented, always-visible child rows; a
   // circle or arc other shapes cut into runs is one row, the curve drawn.
@@ -1234,6 +1339,7 @@ const NodeRow = memo(function NodeRowInner({
         <Row
           label={resolveLabel(scene.object_name(node.id), undefined, 'object', index)}
           icon={<NodeIcon kind="object" health={health} />}
+          {...lockProps}
           selected={selected}
           isPrimary={isPrimary}
           active={active}
@@ -1277,7 +1383,17 @@ const NodeRow = memo(function NodeRowInner({
 
   if (node.kind === 'instance') {
     const def = scene.instance_def(node.id)
-    const defName = def !== undefined ? scene.component_name(def) : undefined
+    // Linked means more than one placement shares the set: a set of one reads
+    // as a plain object (no link icon, no badge, no copy menu).
+    // A placement of a linked wrapper reads as the Object or Group it wraps,
+    // whatever its count.
+    const wrapper = def !== undefined && scene.is_linked(node.id)
+    const copyCount = def !== undefined && wrapper ? scene.definition_usage(def) : 0
+    const linked = copyCount > 1
+    const wrapperKind = def !== undefined && wrapper ? linkedSetKind(scene, def) : null
+    // Unlink all and Select all copies act on the copies at the top level.
+    const topCount = def !== undefined && linked ? topLevelCopies(scene, def).length : 0
+    const label = placementLabel(scene, node.id, index)
     // No `onToggleAllHidden`/`anyChildHidden` here, unlike the group branch
     // below: an instance's members live in its SHARED definition, not in
     // this instance alone (every other instance of the same component
@@ -1289,8 +1405,9 @@ const NodeRow = memo(function NodeRowInner({
     // second control would even be toggling.
     return (
       <Row
-        label={resolveLabel(scene.instance_name(node.id), defName, 'instance', index)}
-        icon={<NodeIcon kind="instance" />}
+        label={label}
+        icon={<NodeIcon kind={linked || wrapperKind === null ? 'instance' : wrapperKind} linked={linked} />}
+        {...lockProps}
         selected={selected}
         isPrimary={isPrimary}
         active={active}
@@ -1306,6 +1423,29 @@ const NodeRow = memo(function NodeRowInner({
         isDragSource={dragSourceKeys.has(key)}
         isDropTarget={dropHighlightKey === key}
         onRowPointerDown={(e) => onStartDrag(node, e)}
+        libraryMark={
+          def !== undefined ? (
+            <LibraryMark link={copiesCtx.libraryLinks?.get(def.toString())} onReview={copiesCtx.onReviewLibraryUpdates} />
+          ) : undefined
+        }
+        copies={
+          linked && def !== undefined
+            ? {
+                count: copyCount,
+                highlighted: !selected && copiesCtx.highlightDef === def,
+                onHover: (on) => copiesCtx.setHighlightDef(on ? def : null),
+                actions: copiesCtx.actions === undefined
+                  ? undefined
+                  : {
+                      onUnlink: () => copiesCtx.actions?.onUnlink(node),
+                      onUnlinkAll: topCount > 1 ? () => copiesCtx.actions?.onUnlinkAll(node) : undefined,
+                      onMakeComponent: () => copiesCtx.actions?.onMakeComponent(node),
+                      onSelectCopies: topCount > 1 ? () => copiesCtx.actions?.onSelectCopies(node) : undefined,
+                      onRename: (name) => copiesCtx.actions?.onRename(node, name),
+                    },
+              }
+            : undefined
+        }
       />
     )
   }
@@ -1347,6 +1487,7 @@ const NodeRow = memo(function NodeRowInner({
       <Row
         label={resolveLabel(scene.group_name(node.id), undefined, 'group', index)}
         icon={<NodeIcon kind="group" />}
+        {...lockProps}
         selected={selected}
         isPrimary={isPrimary}
         active={active}
@@ -1434,7 +1575,20 @@ const ICON_SVG_PROPS = {
   style: { flexShrink: 0, display: 'block' } as React.CSSProperties,
 }
 
-export function NodeIcon({ kind, health = 'solid' }: { kind: NodeKind; health?: 'solid' | HealthClass }) {
+export function NodeIcon({ kind, health = 'solid', linked = false }: { kind: NodeKind; health?: 'solid' | HealthClass; linked?: boolean }) {
+  if (kind === 'instance' && linked) {
+    // Two interlocked rings: a copy that is linked to others.
+    return (
+      <svg
+        {...ICON_SVG_PROPS}
+        data-node-icon="linked"
+        style={{ ...ICON_SVG_PROPS.style, color: 'var(--glyph-instance)' }}
+      >
+        <rect x="1.4" y="4.2" width="6.6" height="5.6" rx="2.8" />
+        <rect x="6" y="4.2" width="6.6" height="5.6" rx="2.8" />
+      </svg>
+    )
+  }
   if (kind === 'object' && health === 'surface') {
     return (
       <svg
@@ -1501,6 +1655,107 @@ export function NodeIcon({ kind, health = 'solid' }: { kind: NodeKind; health?: 
   )
 }
 
+/** What a linked placement's row adds to a plain row. */
+interface RowCopies {
+  count: number
+  highlighted: boolean
+  onHover: (on: boolean) => void
+  actions?: {
+    onUnlink: () => void
+    onUnlinkAll?: () => void
+    onMakeComponent: () => void
+    onSelectCopies?: () => void
+    onRename: (name: string) => void
+  }
+}
+
+/** The row's small "Copies" menu: Hew has no right-click menu, so the copy
+ *  actions live here, in the Edit menu, in the dock, and in Object Info. */
+function CopiesMenu({
+  actions,
+  onRename,
+  onClose,
+}: {
+  actions: NonNullable<RowCopies['actions']>
+  onRename: () => void
+  onClose: () => void
+}) {
+  const { t } = useLingui()
+  const ref = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    const away = (e: PointerEvent) => {
+      const target = e.target as Element
+      // The Copies button toggles the menu itself; closing here first would
+      // make its click reopen what the press just closed.
+      if (target.closest?.('[data-testid="outliner-copies-button"]') != null) return
+      if (ref.current !== null && !ref.current.contains(target as Node)) onClose()
+    }
+    const esc = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose()
+    }
+    document.addEventListener('pointerdown', away, true)
+    document.addEventListener('keydown', esc)
+    return () => {
+      document.removeEventListener('pointerdown', away, true)
+      document.removeEventListener('keydown', esc)
+    }
+  }, [onClose])
+  const items: { label: string; run: () => void }[] = [
+    { label: unlinkLabel(), run: actions.onUnlink },
+    ...(actions.onUnlinkAll !== undefined ? [{ label: unlinkAllLabel(), run: actions.onUnlinkAll }] : []),
+    { label: makeComponentLabel(), run: actions.onMakeComponent },
+    ...(actions.onSelectCopies !== undefined ? [{ label: selectAllCopiesLabel(), run: actions.onSelectCopies }] : []),
+    { label: t`Rename`, run: onRename },
+  ]
+  return (
+    <div
+      ref={ref}
+      role="menu"
+      onClick={(e) => e.stopPropagation()}
+      onPointerDown={(e) => e.stopPropagation()}
+      style={{
+        position: 'absolute',
+        right: 0,
+        top: '100%',
+        zIndex: 20,
+        minWidth: '130px',
+        padding: '3px',
+        background: 'var(--surface-overlay, #2a2a2e)',
+        border: '1px solid var(--border-strong, #555)',
+        borderRadius: '5px',
+        boxShadow: 'var(--shadow-palette, 0 4px 12px rgba(0,0,0,0.4))',
+      }}
+    >
+      {items.map((item) => (
+        <button
+          key={item.label}
+          type="button"
+          role="menuitem"
+          onClick={() => {
+            onClose()
+            item.run()
+          }}
+          style={{
+            display: 'block',
+            width: '100%',
+            textAlign: 'left',
+            background: 'none',
+            border: 'none',
+            color: 'var(--text-primary, #eee)',
+            fontFamily: 'var(--font-family-ui)',
+            fontSize: '12px',
+            padding: '4px 8px',
+            borderRadius: '3px',
+            cursor: 'pointer',
+          }}
+        >
+          {item.label}
+        </button>
+      ))}
+    </div>
+  )
+}
+
 function Row({
   label,
   icon,
@@ -1524,6 +1779,10 @@ function Row({
   isDragSource,
   isDropTarget,
   onRowPointerDown,
+  copies,
+  libraryMark,
+  lock,
+  onUnlock,
 }: {
   label: string
   icon: React.ReactNode
@@ -1561,8 +1820,21 @@ function Row({
   /** Begins a row drag (DocumentTree's pointer-based DnD), when this row
    *  can be dragged. */
   onRowPointerDown?: (e: React.PointerEvent<HTMLDivElement>) => void
+  /** Set on a placement of a linked set: the "×N" count, the hover
+   *  highlight of the other placements, and the "Copies" menu. */
+  copies?: RowCopies
+  /** The Library marker beside the row's "×N" badge (a part that is newer
+   *  in the Library or changed here). */
+  libraryMark?: React.ReactNode
+  /** The row's padlock, when it is locked or inside something locked. */
+  lock?: RowLock | null
+  onUnlock?: (node: NodeRef) => void
 }) {
   const { t } = useLingui()
+  const copyCount = copies?.count ?? 0
+  const linkedCopiesTitle = linkedCountLabel(copyCount)
+  const [renaming, setRenaming] = useState(false)
+  const [menuOpen, setMenuOpen] = useState(false)
   // Selection highlight uses the theme accent tint (06_docked_panels.md: "the
   // selected node is highlighted with accent/tint background + accent text"),
   // not the old hardcoded blue bars that broke on the light theme. Three tiers:
@@ -1592,13 +1864,14 @@ function Row({
       onPointerDown={onRowPointerDown}
       onMouseEnter={() => setRowHovered(true)}
       onMouseLeave={() => setRowHovered(false)}
+      data-copies-highlighted={copies?.highlighted === true ? 'true' : undefined}
       style={{
         ...ROW_BASE,
         paddingLeft: `${8 + indent * 16}px`,
         paddingRight: '4px',
-        background: isDropTarget === true ? 'var(--accent-tint-15)' : background,
+        background: isDropTarget === true || copies?.highlighted === true ? 'var(--accent-tint-15)' : background,
         boxShadow: active ? 'inset 2px 0 0 var(--accent-base)' : 'none',
-        outline: isDropTarget === true ? '2px solid var(--accent-base)' : 'none',
+        outline: isDropTarget === true ? '2px solid var(--accent-base)' : copies?.highlighted === true ? '1px dashed var(--accent-base)' : 'none',
         outlineOffset: '-2px',
         color: anySelected ? 'var(--accent-text-on-tint)' : undefined,
         opacity: dimmed ? 0.5 : isDragSource === true ? 0.4 : 1,
@@ -1626,8 +1899,88 @@ function Row({
         </button>
       )}
       {icon}
-      <span data-testid="outliner-row-label" style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: hidden === true ? 'var(--text-faint, #666)' : undefined }}>{label}</span>
+      {renaming && copies?.actions !== undefined ? (
+        <input
+          autoFocus
+          defaultValue={label}
+          aria-label={t`Rename`}
+          data-testid="outliner-row-rename"
+          onClick={(e) => e.stopPropagation()}
+          onDoubleClick={(e) => e.stopPropagation()}
+          onPointerDown={(e) => e.stopPropagation()}
+          onFocus={(e) => e.currentTarget.select()}
+          onBlur={() => setRenaming(false)}
+          onKeyDown={(e) => {
+            e.stopPropagation()
+            if (isComposingKey(e)) return
+            if (e.key === 'Enter') {
+              e.preventDefault()
+              const next = e.currentTarget.value
+              setRenaming(false)
+              // Typing back what the row already shows (a fallback such as
+              // "Copies" or the part's name) is not a rename.
+              if (next.trim() !== label) copies.actions?.onRename(next)
+            } else if (e.key === 'Escape') {
+              e.preventDefault()
+              setRenaming(false)
+            }
+          }}
+          style={{ flex: 1, minWidth: 0, font: 'inherit', background: 'var(--surface-input)', color: 'var(--text-primary)', border: '1px solid var(--border-panel)', borderRadius: '3px', padding: '0 3px' }}
+        />
+      ) : (
+        <span data-testid="outliner-row-label" style={{ flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: hidden === true ? 'var(--text-faint, #666)' : undefined }}>{label}</span>
+      )}
+      {copies !== undefined && copies.count > 1 && (
+        <span
+          data-testid="outliner-copies-badge"
+          title={linkedCopiesTitle}
+          onMouseEnter={() => copies.onHover(true)}
+          onMouseLeave={() => copies.onHover(false)}
+          style={{ fontSize: '10px', color: 'var(--text-tertiary, #aaa)', flexShrink: 0, padding: '0 3px', borderRadius: '8px', border: '1px solid var(--border-panel, #555)' }}
+        >
+          {`×${copies.count}`}
+        </span>
+      )}
+      {libraryMark}
       {active && <span style={{ fontSize: '10px', color: 'var(--accent-text-on-tint)' }}><Trans>editing</Trans></span>}
+      {copies?.actions !== undefined && (
+        <div style={{ position: 'relative', flexShrink: 0 }}>
+          <button
+            type="button"
+            aria-haspopup="menu"
+            aria-expanded={menuOpen}
+            data-testid="outliner-copies-button"
+            onClick={(e) => {
+              e.stopPropagation()
+              setMenuOpen((v) => !v)
+            }}
+            onPointerDown={(e) => e.stopPropagation()}
+            style={{
+              background: 'none',
+              border: 'none',
+              color: 'var(--text-muted)',
+              cursor: 'pointer',
+              padding: '0 3px',
+              fontSize: '10px',
+              lineHeight: 1,
+              // Hover-only like the group rows' extra eye, but kept in the
+              // DOM so Tab still reaches it.
+              opacity: showAllHiddenControl || menuOpen ? 1 : 0,
+            }}
+            onFocus={() => setAllHiddenFocused(true)}
+            onBlur={() => setAllHiddenFocused(false)}
+          >
+            <Trans>Linked</Trans>
+          </button>
+          {menuOpen && (
+            <CopiesMenu
+              actions={copies.actions}
+              onRename={() => { setMenuOpen(false); setRenaming(true) }}
+              onClose={() => setMenuOpen(false)}
+            />
+          )}
+        </div>
+      )}
       {onToggleAllHidden !== undefined && (
         <button
           onClick={(e) => {
@@ -1652,6 +2005,35 @@ function Row({
           }}
         >
           {anyChildHidden === true ? '○○' : '●●'}
+        </button>
+      )}
+      {/* The padlock (OW-1): a locked row shows it, and clicking unlocks.
+          A row inside something locked shows it dimmed, the way a row
+          hidden by its parent shows a dimmed eye; clicking it unlocks the
+          locked node above. */}
+      {lock !== null && lock !== undefined && (
+        <button
+          data-testid="outliner-lock"
+          data-lock-state={lock.state}
+          onClick={(e) => {
+            e.stopPropagation()
+            onUnlock?.(lock.target)
+          }}
+          onPointerDown={(e) => e.stopPropagation()}
+          title={lock.state === 'own' ? t`Locked. Click to unlock.` : t`Inside something that is locked. Click to unlock it.`}
+          aria-label={lock.state === 'own' ? t`Unlock` : t`Unlock the locked item above`}
+          style={{
+            background: 'none',
+            border: 'none',
+            color: 'var(--text-muted)',
+            cursor: onUnlock !== undefined ? 'pointer' : 'default',
+            padding: '0 2px',
+            lineHeight: 1,
+            flexShrink: 0,
+            opacity: lock.state === 'inherited' ? 0.55 : 1,
+          }}
+        >
+          <InlineIcon svg={lockSvg} size={12} />
         </button>
       )}
       {/* Primary eye toggle — always visible (no hover-only class

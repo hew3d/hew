@@ -231,7 +231,7 @@ fn check_name(rel_path: &str) -> io::Result<()> {
 /// Write `bytes` to `path` atomically: temp file in the same directory,
 /// then rename — mirrors `write_atomic` in
 /// `shells/tauri/src-tauri/src/main.rs`.
-fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     // Unique per writer, not just per target path: two concurrent saves to
     // the SAME item name (two `hew-cli` processes, or a `--live` save
     // racing a Tauri-window save) previously shared one `<name>.tmp`
@@ -251,7 +251,11 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
         None => format!("{unique}.tmp"),
     });
     std::fs::write(&tmp, bytes)?;
-    std::fs::rename(&tmp, path)
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -315,6 +319,20 @@ mod tests {
         assert!(bad.error.is_some());
         assert!(bad.summary.is_none());
 
+        let _ = std::fs::remove_dir_all(dir.root());
+    }
+
+    #[test]
+    fn list_scans_profiles_and_derives_their_category() {
+        let dir = scratch_dir("profiles");
+        let (_, _, make) = kernel::bundled_profiles()[0];
+        let bytes = Document::profile_document_from_shape(&make(), 0.05)
+            .unwrap()
+            .save();
+        write(&dir, "Profiles/ogee-000000.hew", &bytes).unwrap();
+        let items = list(&dir);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].category, Some(meta::Category::Profile));
         let _ = std::fs::remove_dir_all(dir.root());
     }
 

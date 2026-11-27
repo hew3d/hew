@@ -46,6 +46,16 @@ pub enum TopologyError {
         /// The unused vertex's index in the input.
         index: usize,
     },
+    /// Two hole loops of face `face` overlap: one crosses the other, lies
+    /// inside it, or traces it (see [`TopologyError::HolesOverlap`]).
+    OverlappingHoles {
+        /// Index of the offending face in the input.
+        face: usize,
+        /// Index of the first hole in the face's hole list.
+        hole: usize,
+        /// Index of the hole it overlaps (greater than `hole`).
+        other: usize,
+    },
 
     // --- validation (handles into kernel storage) ---
     /// A stored handle points at a missing element.
@@ -73,6 +83,12 @@ pub enum TopologyError {
         /// The offending edge.
         edge: EdgeId,
     },
+    /// An edge is marked both soft and creased: a soft seam can never be a
+    /// crease (true-curves.md §6.1).
+    EdgeCreaseConflict {
+        /// The offending edge.
+        edge: EdgeId,
+    },
     /// A loop and its face disagree about each other.
     LoopFaceMismatch {
         /// The offending loop.
@@ -95,10 +111,20 @@ pub enum TopologyError {
         /// The offending face.
         face: FaceId,
     },
-    /// A face's outer loop encloses too little area for its plane to be
-    /// recomputed from its vertices, as the file loader does: the state
-    /// could be saved but never reopened, so it is never committed.
+    /// A face's outer loop is too small for its plane to be recomputed from
+    /// its vertices, as the file loader does (twice its area under 1e-12 m²
+    /// and narrower than [`crate::tol::MIN_FACE_WIDTH`]): the state could be
+    /// saved but never reopened, so it is never committed.
     FaceTooSmallToReopen {
+        /// The offending face.
+        face: FaceId,
+    },
+    /// A face's stored plane is not one a file stores for its outer loop:
+    /// not finite, its normal not a unit vector, or facing against the
+    /// winding of the loop (`serialize::stored_plane_fault`). The
+    /// writer leaves such a plane out and the reader refits one, so the
+    /// face would reopen on a different plane; no operation commits it.
+    FacePlaneInvalid {
         /// The offending face.
         face: FaceId,
     },
@@ -124,6 +150,22 @@ pub enum TopologyError {
         face: FaceId,
         /// The displaced hole loop.
         loop_id: LoopId,
+    },
+    /// Two hole loops of one face overlap: an edge of one properly crosses
+    /// an edge of the other, a point of one lies strictly inside the other,
+    /// or the two trace the same outline. The region between them is no
+    /// face (the tessellator could not bridge it), so holes are disjoint
+    /// but for isolated touching points and runs along each other. Held of
+    /// every native object; an imported object is held to it where it is
+    /// built ([`TopologyError::OverlappingHoles`]), not where it is loaded
+    /// or edited, so a document saved before the check still opens.
+    HolesOverlap {
+        /// The offending face.
+        face: FaceId,
+        /// One of the two holes.
+        loop_id: LoopId,
+        /// The hole it overlaps.
+        other: LoopId,
     },
     /// A face's analytic [`crate::topo::SurfaceRef`] disagrees with its
     /// geometry: non-unit axis, degenerate radius, a chord plane not
@@ -184,6 +226,9 @@ impl std::fmt::Display for TopologyError {
             UnreferencedVertex { index } => {
                 write!(f, "vertex {index} is not used by any face")
             }
+            OverlappingHoles { face, hole, other } => {
+                write!(f, "face {face} has holes {hole} and {other} that overlap")
+            }
             DanglingHandle { context } => write!(f, "dangling handle: {context}"),
             BrokenLink { half_edge } => {
                 write!(
@@ -200,6 +245,9 @@ impl std::fmt::Display for TopologyError {
             EdgeHalfEdgeMismatch { edge } => {
                 write!(f, "edge {edge:?} disagrees with its half-edges")
             }
+            EdgeCreaseConflict { edge } => {
+                write!(f, "edge {edge:?} is marked both soft and creased")
+            }
             LoopFaceMismatch { loop_id } => {
                 write!(f, "loop {loop_id:?} disagrees with its face")
             }
@@ -215,7 +263,14 @@ impl std::fmt::Display for TopologyError {
             FaceTooSmallToReopen { face } => {
                 write!(
                     f,
-                    "face {face:?} encloses too little area to recompute its plane on load"
+                    "face {face:?} is too small to recompute its plane on load"
+                )
+            }
+            FacePlaneInvalid { face } => {
+                write!(
+                    f,
+                    "face {face:?}: the face's plane is not one a file stores for its \
+                     outer loop: not unit, or facing against the loop's winding"
                 )
             }
             LoopNotSimple { loop_id } => {
@@ -228,6 +283,16 @@ impl std::fmt::Display for TopologyError {
                 write!(
                     f,
                     "face {face:?} owns hole loop {loop_id:?} that lies outside its outer boundary"
+                )
+            }
+            HolesOverlap {
+                face,
+                loop_id,
+                other,
+            } => {
+                write!(
+                    f,
+                    "face {face:?} has hole loops {loop_id:?} and {other:?} that overlap"
                 )
             }
             FaceSurfaceMismatch { face } => {

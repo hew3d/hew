@@ -13,3 +13,7 @@ declare module '*.po' {
   export const messages: Messages
 }
 
+
+// The Preview wall's build flag: a literal true/false defined at build time by
+// vite.config.ts (and vitest.config.ts). Read only in src/preview/build.ts.
+declare const __HEW_PREVIEW__: boolean

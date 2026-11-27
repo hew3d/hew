@@ -11,7 +11,7 @@
 
 Hew is publicly released: the core modeling experience — draw, push/pull,
 combine, organize, and save or export a model start to finish — ships as
-native desktop apps for macOS, Windows, and Linux (with automatic updates)
+native desktop apps for macOS, Windows, and Linux (with in-app update checks)
 and as a browser app at app.hew3d.com. The release is aimed squarely at the
 3D-printing and maker audience: model something in a familiar,
 SketchUp-like interaction style and export a file a slicer accepts as
@@ -31,8 +31,18 @@ below.
   hovered face's plane, a sketch's, or the ground) that holds the cursor
   to that plane wherever it goes until Shift or Escape releases it.
   Starting a shape on a solid's edge or corner draws on the face that
-  edge belongs to — the most camera-facing one when two share it — never
-  on the ground beneath; in face mode the shape's later points honour the
+  edge belongs to — the one the cursor is leaning toward within the snap
+  radius, the cursor's previous hover face at zero offset, else the most
+  camera-facing one — never on the ground beneath. Over empty space the
+  first click lands on the axis plane that faces the camera: the ground
+  unless a vertical plane of the drawing axes faces the view clearly more
+  (about 20 degrees above level, square-on to a wall), through the axes'
+  origin, shown by a plane-colored ring on the snap dot, the plane's name on
+  the inference chip, and a status-bar line (a small patch in empty space
+  or while a plane is held, a face outline when leaning onto a corner or
+  edge; the older 4 m grid patch is gone); Shift
+  pins the inferred plane and the arrow keys still override it (Place
+  Image takes the same inference). In face mode the shape's later points honour the
   snap the inference chip names (an endpoint IS the corner, not the ray's
   own plane hit a pixel off it). A Line chain on a face commits one cut per
   edge-to-edge stretch (a chain touching the boundary partway is not
@@ -82,15 +92,17 @@ below.
   ordinary `split_face` cuts and re-traces; a piece outside an imprint
   cuts the face around it from the imprint's hole back to it). A circle overshooting a rectangle drawn a
   few microns short leaves a sliver, as on the ground; a sliver too small
-  for a saved file to reopen (under about half a square micron) is
-  refused, and the validator holds every operation to the same limit. A
+  for a saved file to reopen (under about half a square micron and
+  narrower than 10 nm) is refused, and the validator holds every operation to the same limit. A
   shape whose pieces join two different boundaries of one face (a circle
   overlapping two separate imprints, a rectangle from the face's edge
   across an imprint, a rectangle flush between two imprints) cuts that
   face with all of its pieces at once through a local re-trace
   (`Object::retrace_face`: several paths inserted or removed in one step,
-  loops rebuilt by rotational order at each vertex, its own inverse with
-  the arguments swapped), so the boundaries it joins become one, as on
+  loops rebuilt by rotational order at each vertex; with the arguments
+  swapped it is its own inverse, except that a plain swapped call heals
+  away an inserted end that met the joint of a straight run already
+  there, which the history's undo keeps), so the boundaries it joins become one, as on
   the ground; bridges exist only inside the re-trace, never in a
   committed face, so the file format is unchanged. A circle crossing
   the face's own edge or corner splits the face the same way: the lens
@@ -142,7 +154,7 @@ below.
   facet a crossing cuts mid-way keeps no circle claim in the solid (the
   drafting engine still lists it with its circle), so pushing that
   region leaves one flat wall among the cylinder's; and a sliver under
-  about half a square micron is refused. The Arc tool's open arc, and the API's
+  about half a square micron and narrower than 10 nm is refused. The Arc tool's open arc, and the API's
   face-mode `draw_line` and open `draw_arc`, go through the same drafting
   engine, so they cross shapes on a face too; `hew.solid.imprints`
   lists cut-apart curves in `curve_units`
@@ -165,7 +177,7 @@ below.
   still welds watertight
 - Editable shapes on faces (imprints): a shape drawn on a solid's face and
   not yet pushed or pulled is selectable (click inside it; the object is
-  one click away anywhere else), fills blue like a ground sketch, lists in
+  one click away anywhere else), fills and outlines in the attached orange (part of the solid's face; a free sketch is blue), lists in
   the Outliner under its object as a named child row (Circle, Rectangle,
   Shape, Arc shape, Line, Arc, Edge shape), and moves, rotates, scales, and deletes ON its
   face — Move constrains the drop to the face's plane. (Superseded by
@@ -193,7 +205,7 @@ below.
   this (`face_features`, `transform_sub_face`, `transform_chord` /
   `dissolve_imprint`) is gone: the drafting engine (ARCHITECTURE.md 2.4)
   lists and edits the same drawing as plane units, and the
-  `hew.solid.imprints` / `*_imprint` API commands run over it. Instanced geometry gets the selection highlight but no blue
+  `hew.solid.imprints` / `*_imprint` API commands run over it. Instanced geometry gets the selection highlight but no orange
   fill overlay
 - Drawing-like sketch editing: lines are selectable and deletable
   (merging the regions they separated), a drawn arc or circle selects
@@ -242,6 +254,53 @@ below.
   the per-edge polygon mark (`docs/dev/HEW_FILE_FORMAT.md`); the wasm and
   Hew API surfaces address drawing by plane context and unit key
   (`plane_units`, `draft_*`)
+- Detached shapes: Ctrl/Cmd on a draw tool keeps the shape apart from the
+  plane's drawing (`Sketch::detached`, sketch-only draft scope,
+  `draft_begin_detached`, API `detached`); Push/Pull on it makes a new
+  Object; the Getting Started cutter is drawn this way. A detached shape
+  takes part in no arrangement with ordinary drawing, and never closes a
+  face against a solid's face edge, except that an Object edge in its
+  plane whose two ends are corners of the detached shape closes it; a
+  detached line closes a face with other detached lines and with such
+  Objects' edges only. Detached lines that share corners close a face;
+  lines that only cross do not, and a crossing line neither splits nor
+  blocks a face. Every region the connected detached lines bound becomes
+  a face, not only those the newest line bounds (a gable split by a post
+  fills both halves); a region a loop of the connected set already holds
+  is never made again, so a face is final to later detached gestures (a
+  line drawn across it stays loose), while a separate shape never blocks
+  one (nested shapes both fill). A detached loop on an Object's face is a
+  loose face there. A curve taken into a face keeps its curve chain
+- Faces from lines on any planes: a loop of straight edges on one plane
+  is a face whichever sketches hold its lines. Edges that lie in a plane
+  but belong to another sketch or to an Object are foreign edges to that
+  plane's lift (fixed, never moved), and a close pass after every draft
+  and sketch move/copy finds the planes the edit's edges close (the plane
+  through the edit and each edge meeting it), writes the face into that
+  plane's free sketch, and takes the edge out of the sketch it was drawn
+  in if it bounded no region there. Three lines up to a corner's apex
+  fill a triangle on an inclined plane; a wire cube fills as it
+  closes. Exact planarity: lines that miss a plane make no face, and
+  Line says so. Tag-hidden and closed-group sketches take no part. No
+  file format change
+- Automatic solids and growing a solid: when an edit leaves flat faces
+  that enclose a space with no gap, they become one Object in the same
+  undo step (`document/cells.rs`: refine, rims, prune, cell walk, build
+  through `from_polygons_impl`, Watertight and `validate()` or nothing).
+  A shape closed against one solid's faces (a roof on a box) grows that
+  solid: new id, name, tags, and parent carried over, imprints kept.
+  Detached faces give a separate Object (a detached gable closes against
+  a box's top edge when the edge's two ends are corners of the shape);
+  a cell inside a solid does nothing; two rooms sharing a wall are two
+  solids; a union that refuses leaves a separate Object and a toast.
+  API: `faces_closed` and `solid {object_id, grew}` on the nine drawing
+  and unit-edit commands. The wasm sketch moves and copies
+  (`transform_sketch_islands`, `copy_sketch_islands`) return the draw
+  calls' report JSON, so a Move, Rotate, Scale or Copy that closes a
+  face or a solid reports it (moving a whole sketch, as opposed to part
+  of one, reports nothing yet)
+- Push-through keeps the Object's name and tags on every result piece
+  (an inward push that severs the solid gives each piece both)
 - Push/pull to extrude a closed profile into a solid, with a live preview
   that borrows its depth only from references OFF the face's own plane (a
   face's own edges and the drawing axes are never a depth), and picks a
@@ -266,7 +325,30 @@ below.
   untouched, sharing a footprint with the new solid exactly like
   re-extruding occupied ground
 - Explicit boolean union, subtract, and intersect, with coplanar seams
-  dissolved on the result (a union of two flush boxes reads as one box)
+  dissolved on the result (a union of two flush boxes reads as one box).
+  A subtract whose cutter sits apart from, or only touches, the target
+  refuses with a typed `NothingRemoved` and leaves both solids in place.
+  Nothing narrower than 0.1 µm is a feature (`tol::FEATURE_MIN`): a face
+  the boolean's own cut leaves narrower than that (a cut through a dense
+  mesh passing nanometers from a vertex) is merged into its neighbors by
+  a bounded, deterministic weld of the cut's points (`boolean::tidy`;
+  nothing moves farther than `tol::TIDY_REACH`, 0.2 µm, operands are never
+  changed, faces the cut does not touch pass through bit for bit, and a
+  face the weld bends past the planarity tolerance is split into flat
+  triangles with soft diagonals). Every tidy is logged (`kernel::op`,
+  `boolean_tidy`), counted in a `BooleanTidy` (`Object::boolean_reported`,
+  `Document::take_boolean_tidy`) and returned to scripts as a `tidied`
+  block. A tidy that cannot give a valid solid falls back to the cut as
+  made; `ResultTooThin` is left only where both fail. The face-validity
+  floor stays 10 nm (`tol::MIN_FACE_WIDTH`): faces between 10 nm and
+  0.1 µm stay legal everywhere else. Known limits: faces of the two
+  operands parallel and closer than 0.1 µm but farther than 1 nm apart
+  are not yet treated as one plane; a sub-face a few nanometers across
+  right beside an apex can be misjudged by the arrangement's ray cast
+  (the intersection of a box and a tetrahedron whose apex is 5 nm past a
+  box edge refuses `DegenerateContact`); and the Follow Me merge,
+  push-through and the cell builder log their tidy but do not report it
+  to scripts
 - Non-destructive, nestable grouping (Group/Ungroup)
 - Group-level booleans: Union/Subtract/Intersect accept a whole group on
   either side (or mixed with a plain solid). The group's solids are fused
@@ -292,10 +374,56 @@ below.
   while editing another folds it in when you step out. The definition
   graph stays acyclic and bounded — a component cannot contain itself,
   and nesting past 64 levels or a million rendered parts is refused
-- Make Unique (detach an instance into its own copy, named "<definition>
-  Copy" — or after the instance's own name if it has one) and Explode
+- Make Unique (detach an instance into its own copy, keeping the
+  definition's name — or taking the instance's own name if it has one; the copied
+  members keep their names, tags, and attributes) and Explode
   (bake an instance back into ordinary geometry; a nested member
   surfaces as an ordinary instance, its geometry still shared)
+- Copy/Cut/Paste and Paste In Place of component instances stay linked
+  within a document: the clipboard bytes carry a `hew.clipboard` origin
+  stamp per definition (the copying window's document token plus the
+  source definition's stable id) and the paste links each stamped
+  definition back to the live original (`Document::extract_clipboard_item`
+  / `InsertOptions::origin`), so the pasted instance places the same
+  definition as Move+copy and Place Copy do — several copied instances of
+  one definition share it, nested definitions link per definition, a
+  mixed selection pastes its plain objects as independent copies, undo
+  removes only the pasted instances. A paste under another origin
+  (another window, or after File ▸ Open/New in this one) copies the
+  definition as before, with repeat pastes of the same copy reusing it by
+  clipboard provenance; Make Unique breaks a link on purpose
+- Linked copies in the app: Move, Rotate, array, and Paste copies are
+  linked by default (Settings ▸ Editing ▸ "Copies are linked"); tapping
+  the copy key cycles Move, Copy, the other kind of copy, Move, and the
+  cursor badge, hint, and readout follow (`+`, `+ independent`, `+ linked`).
+  An array repeats the kind of copy it follows. Paste into the same
+  document links to the copied nodes while they are still live (the
+  clipboard records the document and window it came from); Edit ▸ Paste
+  independent and Paste linked force either form. A placement of a linked
+  set reads in the Outliner by its own name, else the shared name, else its
+  part's name, else the plain "Object"/"Group" name, with a link glyph and a
+  ×N count (none for a set of one) and a row menu: Unlink, Unlink all, Make component
+  (promote: asks for a name), Select all copies, Rename. Unlink
+  (`Scene::unlink_copies`, `Document::unlink_copies`) turns the copy into
+  an ordinary world Object or Group, and a set left with one placement
+  becomes plain too; the selection moves to the new node. The same actions
+  sit in the Object menu, the contextual dock, and Object Info ("Linked
+  copies: N", "Name (all copies)", "This copy"). Subtract on a placement
+  cuts through the shared shape (a strip offers "Cut all N copies" or
+  "Only this one"); Union and Intersect unlink the placement first, as one
+  undo step labeled "(unlinked)", and say so. Slice and Push/Pull on a face
+  reached through a linked placement edit the shared shape with no context
+  to enter. Link identical copies (joining look-alike loose Objects into
+  one set) is not built yet: it waits on the query that fingerprints a
+  shape.
+- Copy/Cut/Paste and Paste In Place of drawing (KB-46, v1.5 decisions
+  D3): the copied shapes ride in the clipboard item as its world sketches
+  (`Document::extract_clipboard_item_with_drawing`, `DrawnSource`), and a
+  paste draws them at the destination through the drafting engine
+  (`InsertOptions::drawing` = `DrawingInsert::Draw`), so a shape pasted
+  on a face imprints it and one pasted over drawing arranges with it, as
+  Move+copy does; detached shapes stay detached; nodes and drawing are one
+  "Paste" undo step. Copy inside a component session stays refused
 - Slice: cut a solid along a plane into two independent watertight solids
 - Push/pull on any planar face of a solid, not just faces with
   perpendicular neighbors: it follows classic SketchUp translate-and-build —
@@ -329,8 +457,9 @@ below.
   group land in that group. Facet seams of drawn curves — along the path
   and around the profile — render soft (smoothed shading, no seam lines);
   a drawn circle swept along a straight run stays a true stamped
-  cylinder, while walls around a path's turns keep honest facets (no
-  toroidal surface identity yet — see Planned). Ineligible sweeps —
+  cylinder, and a sweep around a drawn circle or arc stamps its walls
+  with the sphere, torus or cone they lie on (see Curves and curved
+  surfaces). Ineligible sweeps —
   branching or disconnected selections, bends tighter than the profile,
   straddled corner starts, an on-axis profile on a non-circular path,
   self-intersecting results — refuse typed with the document untouched
@@ -338,7 +467,13 @@ below.
   durably toggles Move between moving and copying (so an exact copy
   distance can be typed), and a committed copy refines into an array:
   typing `3x` (or `x3`) places 3 copies at the same spacing along the
-  vector, `3/` (or `/3`) places 3 copies dividing the distance —
+  vector, `3/` (or `/3`) places 3 copies dividing the distance, and two
+  counts (`4x,3x`, `x4,x3`, `*4,*3`) lay a grid of (4+1) by (3+1) slots
+  with the original at a corner, one move length apart in both
+  directions (the second direction is the horizontal perpendicular, or
+  the arrow-key axis; an arrow key while the grid is hot re-lays it; the
+  grid follows the copy kind, and a product over 1,000 copies is refused;
+  guides copy along one direction only) —
   re-enter a different count while the gesture is hot, one undo removes
   the whole array. Sketch selections copy too, keeping curve identity (a
   copied circle is a true circle): an in-plane offset replays through the
@@ -351,12 +486,37 @@ below.
   8 corner grips scale uniformly, and 12 edge-midpoint grips scale two axes
   — about a chosen anchor (the grabbed grip's opposite by default, the box
   center with a durable Ctrl toggle), with typed exact factors or target
-  dimensions. Dragging a grip past its anchor clamps rather than reflects
-  (mirroring is a separate future tool). Move, Rotate, and Scale all extend
+  dimensions. Dragging a grip past its anchor mirrors the selection,
+  as SketchUp's does; a mirrored solid stays right side out. The grip under the cursor lights
+  together with the point it scales about (its opposite, or the center
+  with Ctrl), joined by a dashed line, and the pair stays through the drag.
+  Move (base point to destination) and Rotate (center to the first point)
+  draw the same dashed line, in the construction guides' gray or in the
+  color of the drawing axis it lies on. Move, Rotate, and Scale all extend
   to a whole mixed selection — one Object, a Group, a component instance,
   or any combination — as one shared transform and one undo step; a scaled
   component instance carries the (possibly non-uniform) scale in its own
   pose, leaving the shared definition and every sibling instance untouched
+- Flip: three colored axis planes through the selection's bounding-box center
+  (or any face under the cursor, the selection's own included, taken
+  from the pick ray in the current editing scope) mirror the selection in one click and one undo
+  step, with a hover ghost; objects and drawing bake the mirror, instances
+  take a mirrored pose. The copy toggle makes a mirrored copy, linked by
+  default (a placement with a reflected pose). Object ▸ Flip Along ▸ Red /
+  Green / Blue flips in place without a tool change. Kernel
+  `Transform::reflection`, `Document::world_bounds`, `flip_matrix`,
+  `flip_nodes`, `flip_copy`; wasm `flip_matrix`, `flip_selection`
+  (recorded). No shortcut, as in SketchUp
+- Part Axes (C12): View ▸ Part Axes draws the frame of the selected or edited
+  component (an origin mark and red/green/blue arms of constant screen
+  length) and, for a selected Object or group with a `hew.part.frame`
+  override, a triad at that frame; at most 20 at once, hidden from prints.
+  Off by default; an app-wide setting kept in localStorage as
+  `hew.settings.showPartAxes` and synced across windows; menu id
+  `view-part-axes`. A component nested in another draws only when its owner
+  has one placement; hidden nodes draw none. Limit: override frames of
+  Objects inside an entered component are not drawn. App-only
+  (`viewport/partAxes.ts`). No shortcut
 - Delete for objects, groups, instances, and guides
 - Drawing directly on a solid's face splits it and supports bosses/recesses,
   following the same "sticky geometry" rules SketchUp users already know
@@ -380,6 +540,16 @@ below.
   face translated far enough can pass through a disjoint shell of the
   same Object); the generalized-push/pull effort builds them for its
   stretch path, and translate mode follows at that integration
+- View die (view-die.md §2-§6): a corner-cut die in the editor viewport's
+  top right that turns with the camera (click a face or corner for a
+  standard view or corner view, drag to orbit), with four plane pips under
+  it (red, green, blue, custom). A pip shows the inferred plane when
+  filled and a locked or pinned plane with a padlock; a click is the mouse
+  form of the arrow-key lock, and the custom pip pins the tracked hover
+  plane like Shift. Each draw tool exposes a `DrawPlaneState` from
+  `drawPlane.ts` that the die reads. The Orbit/Top/Iso/Front chips
+  (`ViewportHUD`) are removed; the measurement box defaults to
+  bottom-right. A Home button left of the die (also Standard Views ▸ Home and a palette command, no shortcut) resets the camera: default 3/4 direction, perspective at the default field of view, whole model framed (default pose for an empty scene). Not shown in Shop mode.
 - Standard camera views (Top, Front, Iso, etc.), orbit/pan/zoom navigation,
   and a Parallel Projection toggle (true orthographic, not a narrowed
   field of view) that keeps every screen-constant widget (transform grips,
@@ -434,16 +604,17 @@ below.
   transient ungroup (nothing bakes; grouping, component/instance creation,
   import, and 3D text stay available inside one, their products folding
   into the group); a component session is a transient explode of the
-  instance's pose, always the innermost frame, with sibling instances
-  hidden for the session's duration instead of updating live. Frames nest
+  instance's pose, always the innermost frame, with every other placement
+  of the definition staying visible and showing the edit live through its
+  own pose (the live-sibling rule, ARCHITECTURE.md 2.11). Frames nest
   per container level and close LIFO (Escape, double-click outside),
   folding edits and mid-session creations back into the container; both
   entry paths — viewport drill-down and Outliner double-click — produce
   the same breadcrumb, with every level on it marked as editing. A
   component session requires the instance's pose to be a similarity
-  (uniform scale, no mirror); a group-nested placement now opens through
-  its group's session, and a non-uniformly-scaled, mirrored, or
-  elsewhere-grouped-sibling placement falls back to the previous
+  (uniform scale; a mirror is allowed); a group-nested placement now opens through
+  its group's session, and a non-uniformly-scaled placement, or one entered
+  directly inside a group, falls back to the previous
   in-context editing model (the component-edit-parity machinery, still
   fully supported for those cases). Session open/close are ordinary undo
   steps, and saving — autosave included — works transparently mid-session
@@ -495,7 +666,135 @@ below.
 - Push/pull's preview is tinted per mode through two theme tokens, orange
   for a plain pull, blue for extrude-as-new, red for a cut, in light and
   dark; toggling Ctrl mid-gesture changes the hue, and the bare arrow drawn
-  with no swept prism follows the mode
+  with no swept prism follows the mode. A free-sketch region always extrudes
+  into a new object, so its ghost is the new-object blue in both directions
+- Draw color language (`--draw-free`/`--draw-attached` and their fill tokens):
+  drawing that belongs to no solid is blue and pushes into a new object;
+  drawing that is part of a solid's face (an imprint, an object-owned sketch
+  edge) is orange and pushes the solid itself. The viewport colors each edge
+  by its store (`Scene::sketch_owner_object`); the rubber band is orange only
+  when the shape would join a face, and Offset's ghost takes its source's color
+
+### Curves and curved surfaces
+
+- Sphere, Torus and Cone join Cylinder as analytic claims on planar
+  facets: the face stays a planar polygon, and the claim gives snapping,
+  measuring and export re-faceting the true center, axis and radius. Each
+  claim follows the map-or-drop rule (kept under a similarity transform,
+  inherited by split and boolean pieces, dropped under a non-similarity or
+  when a face leaves its chord plane). A face also carries an optional blend
+  tag (which fillet, chamfer or profile made it) and an edge carries a
+  crease flag; all of it is geometry buffer v9 and manifest v27
+  (`docs/dev/HEW_FILE_FORMAT.md`), and v8 files open unchanged
+- Smoothness survives what it should. Booleans re-derive soft seams and
+  circle claims from where each result face and edge came from, so a
+  revolved bowl unioned with a pedestal still shades smooth; scaling a
+  curve non-uniformly (an oval from a circle) leaves soft seams instead of
+  hard facets; and the tessellator derives smoothness from the surfaces
+  themselves, so fillet rails and the joints of a rounded rectangle's walls
+  are hidden by default. **View ▸ Tangent Edges** draws them thin and
+  half-lit, and printing follows the same switch
+- Follow Me stamps the sphere, torus, cone or cylinder a sweep around a
+  drawn circle lies on, and **Revolve** (Tools ▸ Shape, and the dock's
+  sketch row, where a selected drawn shape skips to the axis step) turns a
+  drawn shape or a solid's face about an axis you click, for a full turn or
+  a typed angle: a goblet, a bowl, a wheel. A partial turn of a shape
+  that touches the axis refuses. Follow Me also takes a **twist** and an
+  **end scale** along an open path (typed `30°`, `40%`, `8s`)
+- **Fillet** (`⇧F`, tool rail and the dock's object row) and **Chamfer**
+  (Tools menu) round or bevel the edges of a solid: click an edge, a face
+  (its whole rim) or a tangent chain, Shift-click to collect several,
+  Ctrl/Cmd+A to take every sharp edge of the object under the pointer,
+  preselect objects to arm all their edges; size by moving or typing
+  (`6`, `6,3`, `3,45°`, `8s` facets). A fillet removes material from a
+  convex edge and adds it to a concave one. Where new edges meet an
+  existing fillet, the corner is solved again with both, larger first. A
+  size that does not fit clamps to the largest the commit takes, and the
+  status bar names what limits it. The options card chooses Round,
+  Chamfer, Cove, Bullnose, a built-in router profile or a Library
+  profile; its Corners row chooses rolled or mitered corners (rounds)
+  and mitered or flat ones (chamfers). Rims and hole mouths become tori
+  and cones, a cube with all twelve edges rounded gets sphere corners,
+  and mixed convex and concave corners solve in two passes. Stopped
+  blends and variable radius have end and radius grips. A round too
+  large for a Loft's or an imported mesh's facets rolls across them as a
+  swept blend, and a corner the facet planners cannot build at the size
+  asked names the largest size they build. Fillets on pipe
+  tees, oblique cuts and imported meshes (the swept blend) take Round,
+  Chamfer, Cove (outside edges, as everywhere) and any profile, around a
+  closed loop or along an open chain that ends on a face at both ends; a
+  bullnose or a stop there refuses `UnsupportedEdge`, and a chain end
+  that is not on one face (another picked edge meets it, or the sharp
+  edge goes on) or a corner the engine cannot solve refuses
+  `UnsupportedVertex`. The 2D version rounds or chamfers a corner of a
+  drawn line shape, on the ground or on a face
+- Blends stay editable: hover a fillet to resize it by pointer or typing,
+  Delete removes it (each blend records what it replaced when it is made
+  and replays the record, with a later fillet that ran into it taken off
+  and put back; a record that no longer fits, or a blend from a file older
+  than the records, falls back to deriving the sharp geometry and verifying
+  it, else it refuses), Alt switches Round and Chamfer, Push/Pull on a
+  fillet's face resizes it, and Push/Pull of the face beside a fillet
+  moves the face and re-applies the blend. A resize gives what deleting
+  the fillet and filleting its edges again at the new size gives: a
+  corner with another fillet is solved again (at the same size the two
+  become one fillet), and it clamps the same way. A fillet is painted and
+  picked as one face. A fillet that was cut or moved away from its
+  original shape is ordinary geometry and refuses edits; that is checked
+  for the one blend a click or Delete acts on, never on hover (checking
+  restores the blend), and once found the hover over it says so. A swept
+  blend (a tee's junction, an oblique cut's rim, an imported mesh, a lofted
+  deck) is editable the same way: its record keeps every facet it cut whole with
+  the pieces the cut left (in the v28 record), and its chains start and run by
+  their geometry alone, so a resize builds what a fresh blend at that size
+  builds (D-228).
+- **Profiles** are a Library category: draw an open chain of lines and arcs
+  on a plane, **Save profile…** under More shapes, and use it on any
+  edge; a Profiles filter, Use, Open for editing and Replace complete the
+  loop, and seven router profiles ship built in (Ogee, Roman ogee, Bead,
+  Thumbnail, Cove and bead, Chamfer and bead, Cavetto)
+- **Smooth**: Object Info or Object ▸ Smooth sets an object's level
+  (Off, 1, 2, 3; Object ▸ Soften Edges… reaches the soften field) and the
+  object draws as a subdivision surface over its faces, which stay the cage
+  that tools edit and that snaps and measures. A thin cage wire shows while
+  a tool other than Select is active. The **Eraser** (`E`) erases drawn
+  lines, and Ctrl/Cmd-click on a solid's edge creases it (keeps it sharp
+  under Smooth). Booleans use the cages and the result keeps the level;
+  **Bake** turns the Smooth surface into real faces. Export writes the
+  smooth mesh, with **Export cages instead** for the editable cage
+- **Deform** (Tools ▸ Deform: Twist, Bend, Taper, Bend to Path) reshapes a
+  whole solid through a bounding-box gizmo and stops at the largest
+  workable amount where the result would pass through itself; **Loft** joins
+  closed shapes (and an apex point) with up to two rails and start
+  markers; shapes with the same number of corners loft corner to corner
+  whatever their sizes, starts are chosen for the least twist (a circle
+  meets a square's corners square-on), and a column that is a corner of
+  both shapes it runs between creases, while one that is a corner of only
+  one creases only where it stands out from the surface beside it
+  (D-126); between two shapes the hull stays inside the box the pair
+  spans (for circles on one axis, between their radii), circles on one
+  axis join angle to angle so their rims round as exact tori, and a
+  corner of one shape creases the hull where it leaves that shape, is
+  smooth between shapes with no corner there, and elsewhere fades where it
+  folds by a degree or less;
+  **Shell** hollows a solid to a typed wall with chosen faces
+  left open (a pocket's floor opens into the hollow, with its rim on the
+  floor, or as a hole straight through the top's wall when the pocket is
+  as deep as the wall or shallower; walls that would run into each other
+  refuse as too thick); **Project** draws a closed shape onto a curved or flat
+  solid and engraves or embosses it, straight (which can cut through a wall) or
+  following the surface; **Array along Path** places copies along a line,
+  curve or face edge with a scale ramp
+- Imported meshes: booleans against very large imports no longer refuse
+  with a wrong reason (a 500,000-face import combines), Model Health
+  gains Remove degenerate faces, and Object Info's **Soften edges under N°**
+  shades an import smooth by dihedral angle
+- All of it is in the Hew API and the recorded history: `hew.solid.fillet`,
+  `chamfer`, `resize_blend`, `remove_blend`, `revolve`, `deform`, `loft`,
+  `shell`, `project`, `bake`, `soften`, `remove_degenerate_faces`,
+  `hew.object.smooth` and `crease`, `hew.array.path`, and `profile` in
+  `hew.library` (HEW_API.md §7 and §8); every in-place operation is one
+  undo step that restores the exact earlier object
 
 ### Inference & precision
 
@@ -510,23 +809,93 @@ below.
   nothing else puts a point there. Only the edges through the pick cone
   are paired, at most 2,000 pairs a query (past that the query offers no
   crossing and counts the skip), and screen-space crossings of edges that
-  only overlap on screen are not offered. Candidates within a pixel of each other on screen rank by
-  depth, nearest first, so a stack of corners seen from a nearly-vertical
-  Top view — top plate, sole plate, slab — resolves to the one in front
-  rather than to whichever the camera's slight tilt happens to lean toward.
+  only overlap on screen are not offered. Where an edge of one owner passes
+  through a face of another (a panel's edge entering the wall it is set
+  into, with nothing imprinted on the wall), the piercing snaps as the same
+  intersection, carrying the edge and the pierced face: the edge must cross
+  the face's plane strictly (an edge ending on the face is its own
+  endpoint; an edge lying in the plane has no single point) inside the
+  face's outer loop and outside its holes, curved surfaces counting as
+  their facets. Edges through the pick cone are paired with the faces the
+  cone reaches, nearest pairs first, at most 2,000 pairs a query; the
+  pairs a capped query leaves untested are counted and traced, like the
+  edge pairs. Where a face of one owner meets a face of another (a slab
+  passing through a wall draws four such lines on the wall's face), the
+  stretch of the two planes' intersection line inside both faces — outer
+  loops, outside their holes — is a virtual edge: the cursor slides along
+  it as On Intersection Line (the same pick reach and rank as a real edge),
+  its middle is a Midpoint, and its ends are the piercings and crossings
+  the intersection snaps already name. The line runs through both faces'
+  interiors: a face that only touches the other's plane along its own edge
+  (a box flush against a wall) makes no line, only that real edge, decided
+  with a named tolerance so a rotated pair behaves like an axis-aligned
+  one. On a chord facet of a curved surface (a slab through a cylinder)
+  each facet's piece is the line but offers no middle. Parallel and
+  coplanar faces make no line, one owner's own faces never pair, and a
+  selection pick is never offered one (two faces at once are nothing to
+  select). Both faces travel with the snap — reported as a meeting line,
+  never as a pick of either face, so no tool adopts one face's plane or
+  part from it — and the cue draws the stretch itself, since nothing in
+  the model does. The faces the cone reaches are paired across owners
+  front to back along the ray, so faces hidden behind the one in view
+  cannot crowd out the line in view; at most 2,000 pairs a query, each
+  rejected cheaply when its line clipped to both faces' boxes misses the
+  pick cone, counted and traced past the cap like the other two walks;
+  the piercing and meeting walks share one cone-face pool, built only
+  when faces of two owners have boxes in the cone (drawn regions carry
+  boxes of their own). Candidates
+  within a pixel of each other on screen rank by depth, nearest first, so
+  a stack of corners seen from a nearly-vertical Top view — top plate,
+  sole plate, slab — resolves to the one in front rather than to
+  whichever the camera's slight tilt happens to lean toward.
   Named points (endpoints, midpoints, centers, quadrants) capture from
   1.75 times as far as lines, so a corner on an edge or axis wins near it,
   and the soft axis is capped on screen to an edge's pick radius rather
   than reaching by angle alone; Select's clicks and hover get no extra
   point reach, so a small face's middle still selects the face
+- A snap to a point is that point: Line no longer drops a snapped
+  corner, midpoint, or guide point onto the ground, and the first click of
+  any draw tool on a point in the air starts there, on the camera-facing
+  axis plane through the point (when it is nearer the eye than the ray's
+  hit on the chosen plane; a hidden point still drops with "projected").
+  Later clicks of Line honor a named point off the chain's plane and
+  re-home; Rectangle, Circle, Polygon, and Arc drop it onto their frozen
+  plane and say "projected". An arrow lock holds the plane for all of
+  them; a Shift pin holds the plane's orientation, and the first click
+  through a named point off it starts the shape at that point's height
+  (later clicks are the "projected" ones). The up arrow forces the ground
+- From Point reference lines on the drawing plane
+  (`app/src/tools/referenceLines.ts`, shared by the five draw tools): a
+  reference point offers two lines through its foot on the plane, along
+  the two directions a Rectangle's sides take there, and the crossing of
+  two such lines snaps. Reference points are the gesture's own points,
+  the corners of the shape the gesture started on (up to the 64 nearest
+  the anchor, read with the wasm call `snap_owner_points`), and up to
+  four points the cursor rested on for 300 ms (cleared on a tool change
+  and on Esc from idle). A reference line replaces only a weak engine
+  answer (plane, ground, on-face, on-axis); a real point or edge wins.
+  The cue is a dashed line from the foot, a dot at the foot, and a tie
+  from an off-plane point to its foot; the chip reads "From Point"
 - Analytic curve snaps: the exact center, quadrant points, and
   tangent-from-anchor points of drawn circles and arcs, honoring each
   arc's actual angular range
+- Tray sections: a long section can be given more or less height by a drag
+  handle or the Up/Down arrow keys; sections keep their automatic height
+  until one is resized
 - Construction guides — guide lines and points that participate in
-  snapping and are saved with the model
+  snapping and are saved with the model. Move and Rotate transform a
+  guide like any selection (axis locks, typed and retyped values), and
+  their copy toggle copies it, ×N / /N arrays (rows, fans) included,
+  each transform or copy one undo step. With nothing else selected, a
+  click on a guide starts transforming that guide; a guide taken that
+  way is selected only for the gesture. A guide, dimension or leader is
+  picked only where it is drawn: a solid in front of it takes the click
+  instead, while glass, dimmed or faded context, X-ray, Wireframe and
+  cut-away section parts hide nothing
 - Tape Measure (point-to-point distance, or drop a parallel guide at an
   offset — sourced from an edge (a plain object's, a group member's, or a
-  component instance's), a sketch line, a world axis, or another guide
+  component instance's), a sketch line, the line where two Objects' faces
+  meet (On Intersection Line), a world axis, or another guide
   line) and Protractor (measure an angle, or drop an angular guide). A
   guide or measurement isn't confined to the ground plane: it follows a
   hovered sketch's plane, an idle arrow-key plane lock, or — for a
@@ -612,7 +981,8 @@ below.
 - A crossing outranks a midpoint and reaches as far as other named points;
   Tape Measure treats a crossing as a point (the first click measures from
   it, and the hover hint says so) while edges, sketch edges, axes, and
-  guides still start parallel guides, and a crossing never anchors a resize
+  guides, and the line where two Objects' faces meet (not its middle or
+  ends, which are points) still start parallel guides, and a crossing never anchors a resize
   scoped to an open group or component, since the snap names only one of its
   two edges
 - X-ray and Wireframe render modes (View menu on the web and native menus,
@@ -622,9 +992,27 @@ below.
   faces occlude, only visible geometry snaps or picks. X-ray (faces at 0.4
   opacity, depth writes off): every edge, endpoint, midpoint, crossing,
   center, and quadrant is snappable and selectable, faces stay targets with
-  the nearest along the ray winning off an edge or point. Wireframe (no
-  faces, every edge): no On Face snaps, face hover, selection, push/pull, or
-  paint; drawing lands on the ground, a locked plane, or an edge or point.
+  the nearest along the ray winning off an edge or point. With an editing
+  scope open (a component or group session, an object context, or a legacy
+  in-context instance), Shaded and X-ray picks land on the nearest face,
+  sketch region, sketch edge, sketch vertex or sketch inside the scope and
+  skip what lies outside it (the editing view draws the outside
+  translucent, so what is in scope can be seen and so picked); the scope is
+  the renderer's lit set plus, for a session's own scope, the frame's own
+  drawing (`Document::session_frame_sketches`: a component frame's
+  definition drawing and lines drawn since the open, a group frame's held
+  drawing and lines drawn since the open), pushed to the kernel by
+  `Scene::set_pick_scope(objects, instances, frame_sketches)` /
+  `clear_pick_scope` (`PickScope` in the inference crate); empty lists are
+  still a scope (a component with only drawing left), only
+  `clear_pick_scope` clears; an object context on top of a session passes
+  `frame_sketches = false`. With nothing in scope under the cursor the pick
+  is the nearest of any owner, so the tools' refusal hints still run;
+  Wireframe, the top level, snapping and the geometry-only camera picks
+  ignore the scope.
+  Wireframe (no faces, every edge): no On Face snaps, face hover, selection,
+  push/pull, or paint; drawing lands on the ground, a locked plane, or an edge
+  or point.
   The orbit pivot and in-session sketch selection use geometry-only picks
   (`pick_face_geometry`, `pick_sketch_region_geometry`). The five draw tools
   that drop an off-plane snap onto their plane opt in to hidden points
@@ -685,7 +1073,10 @@ below.
   API) with every object and nested tag path following the new name
 - An Object Info panel for renaming, tagging, and checking an object's
   solid status; with several objects selected it tags them all at once,
-  showing the tags they share
+  showing the tags they share. It also reads Volume, Surface area, and
+  Size in the display units (summed over a selection, a group, or an
+  instance; a dash with "Not closed" when any leaf is open), from the
+  wasm `measure_json`, which shares `hew.query.measure`'s builder
 - A Components panel listing every component definition with its live
   instance count; rename and delete (deleting a definition removes every
   instance that places it, confirmed when it has any); Purge Unused
@@ -719,6 +1110,10 @@ below.
 - An object-level default material so newly extruded or grown faces inherit
   a sensible color automatically
 - Materials survive splitting, imprinting, and boolean operations
+- Physically based materials: metallic and roughness factors (Metallic and
+  Roughness sliders, `hew.material.set_pbr`) and metallic, roughness, normal
+  and occlusion maps carried from a `.skp`, approximated in the viewport with
+  Phong shading and written back on a save to the 2021-and-later container
 - Per-material opacity (glass, scrim, etc.), adjustable from the Materials
   panel and applying uniformly to flat colors and textures alike
 - Alt-click to sample a face's material into the current swatch, and
@@ -797,6 +1192,71 @@ below.
   pre-resolves every library command on the CLI's own side (HEW_API.md
   §12.1), since the desktop app's live host has no filesystem of its own
 
+- Edit in place: a Library item's **Edit** (detail pane and menu; components
+  and models) opens the item's own file for editing and Save writes it back
+  through the Library (`extract_document_item`: sessions closed, prints
+  restamped, no document id, thumbnail redrawn), so every other window sees
+  it as newer. Desktop routes the real path through the ordinary open (focus
+  the window that has it, else this one when pristine, else a new window);
+  any file opened from inside the Library folder is edited the same way
+  (`library_name_for_path`). Web opens it in place when the tab is pristine,
+  else in a new tab (`?libraryEdit=`), with a Web Lock so a second tab cannot
+  edit the same item. The title reads `<item> (Library item)`; Save As ends
+  the binding. Materials, profiles and built-ins have no Edit
+- Live Library status: a part open for editing is reported as it would be
+  saved (`Document::library_links_as_if_closed`, used by `hew.library.status`
+  and the app), so the marks follow an edit while you are inside the part. The
+  Library panel shows the same state per item (a mark on the tile, a line and
+  **Review…** in the detail pane). An edit-triggered check is one kernel pass
+  and does not list the folder
+- Sources: shared Library items read from a git host (GitHub, GitLab,
+  Forgejo/Codeberg/Gitea) or any `https` web host. A source is a folder
+  of `.hew` items with an index, `hew.json`, that names every file with
+  its SHA-256 and size. No git client and no login: every read is one
+  file over HTTPS, a git source resolved to a commit first. The Hew
+  project hosts no items; the curated list is the `hew3d/catalog`
+  repository, whose generated `catalog.json` feeds the catalog view only
+- Sources UI, all in the Library dialog (one sidebar block, so the
+  desktop window and the web modal share it): Browse the catalog, Add a
+  source by address, a per-source view with search, **Add to my
+  Library**, **Insert** (adds, then places), **Add all**, and **Follow**
+  (adds everything once, then offers new and changed items after each
+  check). An added item keeps its `hew.library.id`, lands in a collection
+  named for the source, and carries a `remote` note (HEW_API.md §8.1)
+- Source updates never apply without a click: a bar in the Library
+  dialog with Update all / Review… / Later, **Update from source** per
+  item, and **Unlink**. An update takes the source's file and keeps the
+  local collection. An item whose contents were changed locally is never
+  replaced in bulk; Review asks **Keep mine** or **Replace your
+  changes**, and a kept version is not offered again until the source
+  changes it. A source the catalog removed stops adding and updating and
+  shows the reason; its items stay
+- Source state lives in the Library folder: `.sources.json` (the added
+  sources, per-source follow, skip and kept records) and the `.sources/`
+  cache (last good listings and source thumbnails), in `crates/library`
+  and both web stores, so a moved or synced Library keeps its sources
+  (HEW_API.md §8.1). A check runs when the Library opens, at most
+  every 6 hours per source, and only while **Settings ▸ Folders ▸ Check
+  sources for new and changed items** is on; Refresh always checks
+- Source network path: the desktop reads through one Rust command,
+  `remote_fetch` (https only on every hop, no credentials, at most 5
+  redirects, size caps), and its CSP is unchanged. The web build's
+  `connect-src` gains `https:`; a `HEW_WEB_SOURCES=off` build keeps
+  `'self' blob:` and the app turns Sources off when it sees that policy.
+  Source addresses never reach the app log
+- `crates/sources` holds the index and catalog formats, source
+  references, request URLs and the public-host check, pure, used by
+  `hew-cli` natively and by the app through four wasm exports.
+  `hew-cli library index <folder> [--check]` writes or verifies a
+  source's `hew.json` and thumbnails; `hew-cli catalog check <reference>`
+  runs the listing checks on one source; `hew-cli catalog build
+  <checkout> --out <dir>` generates the catalog files
+- Not built: no API, CLI or MCP command adds a source or takes an item
+  from one (`hew.library.list` and `describe` report the `remote` note,
+  read-only); private repositories and logins; search across sources;
+  item signing. Plugins published through a source's `plugins` array are
+  designed and parsed for shape only
+
 ### Annotations
 
 - Linear and radial dimensions and leader text, anchored to the geometry
@@ -828,8 +1288,8 @@ below.
 - COLLADA (`.dae`) import from SketchUp's own export path, with a healing
   pass that repairs common non-manifold export artifacts
 - Direct SketchUp (`.skp`) import — the 2026 container every current
-  SketchUp saves, and the 2017 format of older files — built on
-  [OpenSKP](https://github.com/hew3d/openskp), a clean-room reader with no
+  SketchUp saves, and every older release, 3 to 8 and 2013 to 2020 — built on
+  [Skpwright](https://github.com/hew3d/skpwright), a clean-room reader with no
   Trimble SDK code anywhere in its lineage — names, materials, components,
   tags, guides, scenes, and the saved view all come across natively, and
   identically from either container (every corpus file's 2026 save is
@@ -868,9 +1328,9 @@ below.
   Each was checked against SketchUp itself on a production house model
   with 32 scenes
 - SketchUp (`.skp`) as a working format (`crates/skp-export`, on
-  OpenSKP's writers): File ▸ Open makes a `.skp` the document's own file,
+  Skpwright's writers): File ▸ Open makes a `.skp` the document's own file,
   Save writes it back in its own container, and Save As and Export write
-  `.hew`, the 2026 container, or the 2017 format SketchUp Make 2017 opens.
+  `.hew`, the 2021-and-later container (optionally at revision 17 for older apps), or any release from 3 to 8 and 2013 to 2020.
   Every Object becomes a SketchUp group of its own (solids stay
   discrete), merge groups and components keep their structure, sketches
   become loose geometry, curved walls are soft and smooth, circles are
@@ -878,8 +1338,9 @@ below.
   guides, the section plane, camera, axes, attributes, dimensions and
   leader text come along. A `hew` attribute dictionary carries what the
   format has no field for (tag paths, sketches, curved-surface claims,
-  scene display toggles), so a file Hew wrote reopens in Hew with
-  nothing lost — the round-trip suite holds every corpus file and a
+  scene display toggles, which solids and sketches are still a foreign
+  file's so they keep drawing as the file's own), so a file Hew wrote
+  reopens in Hew with nothing lost — the round-trip suite holds every corpus file and a
   native document to that. Saving back over an opened `.skp` builds on
   the file: everything unchanged (a group's or component's geometry with
   every soft edge, curve, texture placement and per-face layer, whole
@@ -908,16 +1369,65 @@ below.
   Make Solid. **Object ▸ Model Health…** opens a floating window (closed
   at launch, moved and sized by the person, remembered) listing every
   object that isn't solid for one-at-a-time repairs; framing from it fits
-  the object beside the window. Object Info has the same buttons, and
+  the object beside the window. A repair beside Close and Thicken,
+  **Remove degenerate faces**, drops the zero-width and sub-tolerance
+  faces an import can carry (reported, explicit, never automatic) and
+  lists a closed object that has some. Object Info has the same buttons, and
   Push/Pull on a flat panel makes it a slab. The same is in the API
   (`hew.doc.health` with per-rim `cappable` / `shared` / `sheet_edge`,
-  `hew.solid.cap` / `thicken` / `delete_faces` / `mark_surface`, `health`
-  in `hew.query`), so a script can repair a file
+  `hew.solid.cap` / `thicken` / `delete_faces` / `mark_surface` /
+  `remove_degenerate_faces`, `health` in `hew.query`), so a script can repair a file. **Mend**
+  (`kernel::repair::mend`, `hew.solid.mend`) is the repair for imported
+  and scanned meshes Close can't finish: it merges points closer than a
+  merge distance, removes paper-thin overlaps, separates parts that touch
+  at a single point (each piece keeps the name and tags), stitches narrow
+  seams and fills small gaps, as one undo step, behind a busy card. It
+  does what it can and lists each gap that stayed open with the reason;
+  it refuses, changing nothing, when the result would be worse than the
+  start. The Model Health row and group (**Mend**, **Mend all**, "Choose
+  what to mend" with an editable merge distance) and the Make Solid wizard
+  ("Needs mending") preview it exactly, counts and "N gaps will stay open"
+  included, by running the Mend on a copy; hovering shows the points
+  merged (red) and split (blue) and the gaps filled (green). A row whose
+  every opening is warped offers Mend, not Close.
+- Rejoin as one solid (`Document::rejoin_as_one_solid`; wasm
+  `rejoin_as_one_solid`, recorded): one split shape's pieces are capped at
+  their shared rims, its inside walls deleted, and the pieces unioned
+  largest first into one watertight Object that keeps the largest piece's
+  name, tags, attributes, and group, as one undo step labeled "Rejoin as
+  one solid". It takes one whole family, every piece and wall; a part of
+  a family, a shape drawn with an opening, pieces or walls under
+  different parents, pieces that meet only through a wall, or a seam that
+  cannot take a cap refuses typed (`RejoinNotPossible`, or the cap's own
+  refusal) and leaves the model as it was. Pieces in a group inside a
+  component refuse for now. The `hew.solid.rejoin` bus command
+  (`{family, as: "one_solid"}`, family resolved from the current
+  whole-model health report) exists; Model Health carries a "Rejoin as
+  one solid" button beside "Rejoin", and the Make Solid wizard's split
+  page a fourth radio. Both send one `hew.solid.rejoin` command (a
+  `BatchOp` addressed by family index), inside the same transaction as
+  the other repairs
+- Make Solid also takes
+  selected **sketches**: it runs the close pass over every line of the
+  selection, then the closed-faces search (see Drawing) seeded by every
+  face of the selection and every face the pass made, which covers files
+  drawn before automatic solids and faces an older build never formed. It
+  makes a solid or nothing at all: when none forms, the pass's faces are
+  not kept and no undo step is recorded; when one forms, every face the
+  pass made is kept, those on shapes that stayed open included. When the faces do not close, the viewport marks the
+  open edges in red, edges of faces that lie over each other in red too,
+  and loops of lines that do not lie on one plane in the warning color
+  (`faces_open_edge_segments`, read-only), and the page says how many
+  edges are open. `faces_not_solid` carries `detail.segments`. API: `hew.solid.from_faces {sketches}`
+  returns `{object_id, grew}` or refuses `faces_not_closed`,
+  `loop_not_planar`, `faces_not_solid`, or `unknown_entity`
 - Binary STL export, scaled for 3D printing; export is gated on every
   object being a solid, so an exported file is guaranteed manifold
-- STL curve resolution: cylinder walls re-facet from their analytic
-  definitions at a chosen smoothness (the stored facets are the floor,
-  not the ceiling), staying manifold at any setting
+- STL curve resolution: cylinder walls, and the cone and torus bands of
+  fillets and revolved shapes, re-facet from their analytic definitions at
+  a chosen smoothness (the stored facets are the floor, not the ceiling),
+  staying manifold at any setting. Sphere fans export at their stored
+  facets
 - 3MF export — a modern print format alongside STL: explicit millimeter
   units, one mesh per object carrying its name and per-face colors,
   better suited to multi-part prints; gated on solids the same way STL is
@@ -946,7 +1456,7 @@ below.
 | `.hew` (native) | yes | yes |
 | glTF / GLB | yes | yes |
 | COLLADA (`.dae`) | yes | — |
-| SketchUp (`.skp`, 2026 and 2017 formats) | yes | yes |
+| SketchUp (`.skp`, 2026 format and releases 3 to 8 and 2013 to 2020) | yes | yes |
 | STL | yes | yes |
 | 3MF | — | yes |
 | USDZ | — | yes |
@@ -980,11 +1490,17 @@ below.
   changes or the window is hidden, and the periodic app timers (save-state
   label, autosave) arm only when they have work — an idle Hew costs the
   machine nothing
-- A labeled tool rail, a command palette (Ctrl/Cmd-/) for finding any tool
-  or action by name, a contextual action dock that follows the current
-  selection (including Group for a multi-selection and Make Component for
-  objects and groups, shown only when the selection qualifies), and a
-  docked properties/outliner/materials tray
+- A labeled tool rail (Draw, Modify, Inspect; Modify is Push/Pull, Offset,
+  Follow Me, Fillet, Loft, Move, Rotate, Scale, Eraser), a Tools menu in
+  SketchUp's order with Shape (Revolve, Loft, Shell, Project, Array along
+  Path) and Deform (Twist, Bend, Taper, Bend to Path) submenus, an Object
+  menu that also holds Smooth and Soften Edges…, a command palette
+  (Ctrl/Cmd-/) for finding any tool or action by name, a contextual action
+  dock that follows the current selection (Fillet and Shell for a solid;
+  Revolve, Loft, and Follow Me for a drawn shape; Union, Subtract, and
+  Intersect for a multi-selection of solids; Group and Make Component
+  shown only when the selection qualifies), and a docked
+  properties/outliner/materials tray
 - Room to model on demand: the tool rail compacts to icons (View ▸ Compact
   Tool Rail, or its chevron), the tray hides entirely (View ▸ Tray, or its
   chevron), and the contextual dock can be turned off (View ▸ Contextual
@@ -994,7 +1510,18 @@ below.
   that section open, and a field mid-edit inside a closing section or tray
   commits first
 - One-gesture object interaction: with an empty selection, Move / Rotate /
-  Scale act on whatever the first click lands on; the Select tool drags
+  Scale act on whatever the first click lands on, and hovering highlights
+  it beforehand (SketchUp's pre-selection highlight — the object, group,
+  instance, or drawn shape the click would take, and for Move and Rotate a
+  guide, in the selection color, through the same resolver the click
+  runs). A selection Move or
+  Rotate took this way lasts only for the gesture: once the move or
+  rotation lands — copies and ×N / /N arrays included — or is cancelled or
+  refused, nothing is selected again; a selection made beforehand is kept.
+  Scale's first click only selects and shows the grips; after that a click
+  off the grips re-targets (better than SketchUp, whose Scale stays on its
+  selection): on another object it selects that one, on nothing it clears
+  the selection. The Select tool drags
   objects directly (a threshold-gated one-shot Move — full snapping, axis
   locks, Alt-copy, typed distances — that springs back to Select on
   release); and every draw tool imprints a plain object's face at the top
@@ -1082,7 +1609,11 @@ below.
   Scene's own camera, hidden set, and section plane, with page numbers
   running across the whole job; a Cut list page appends every part once
   with its quantity and L × W × H, every placement of a component folded
-  onto its definition
+  onto its definition. Each part is measured along its own axes (its
+  largest face for an object or group, its definition's axes for an
+  instance), so a board turned at an angle lists its true size rather
+  than its world-aligned box; Shop Mode's parts sheet reads the same
+  numbers
 - Shop Mode gets its own Print Layout sheet from the document menu, with
   Save PDF… as the primary action (the iOS share sheet, or a download
   elsewhere) since AirPrint on iOS ignores the paper size Hew composed for
@@ -1152,6 +1683,20 @@ below.
   pseudo-locale Playwright smoke. `SHIPPED_LOCALES`
   (`app/src/i18n/locales.ts`) is English only; the Japanese catalog is not
   offered until complete (`docs/LOCALIZATION.md`)
+- User-configurable keyboard shortcuts (Settings ▸ Controls): every command
+  in the `menuActionRef` id space (tools, File/Edit/Window commands, views,
+  toggles, scenes) can take any number of keys, listed in the command
+  palette's own look with search, key recording, a confirm before moving a
+  key another command uses, and per-command and global reset. The defaults
+  (`app/src/keymap/defaults.ts`) are SketchUp's bare letters plus, on
+  the macOS desktop only, SketchUp for Mac's Cmd-combinations; only the person's changes are stored, so a new default
+  reaches everyone who never touched that command. One keydown dispatcher
+  (`keymap/dispatch.ts`) serves the editor and Shop Mode, and the tool
+  rail, both menu bars, and the palette all show the effective keys. Esc,
+  Enter, Tab, and the arrows stay with the tools. On macOS the native menu's
+  accelerators follow the keymap through `set_menu_accelerators`; Cut, Copy,
+  Paste, and Select All keep their standard keys there, because text fields
+  rely on those items. Mouse bindings will join the same tab
 
 ### Reliability & diagnostics
 
@@ -1173,6 +1718,12 @@ below.
   logging and extra internal validation
 - Session recording and replay, so a captured session becomes both a bug
   reproducer and a permanent regression test
+- Help ▸ Sent Reports: a reporter who ticks "Let me know what happens with
+  this report" can read the thread, reply, attach a file, and see status
+  changes, through a per-report secret held only by the sending Hew (no
+  account, no email); the desktop shell and the web build both check for
+  replies after launch and badge the Help item with the unread count
+  (`workers/bug-intake`'s ReportThread, shell `follow.rs`)
 - Help ▸ Report Bug: a dialog that previews what a report contains (system
   details, recorded steps, imported files, a file that failed to open, the
   model, and a log tail, each one untickable) and sends it privately to Hew's bug-report intake service
@@ -1210,6 +1761,31 @@ below.
   count: sides remain hard edges when extruded, unlike a circle's smooth
   wall
 
+- **Swept rounds on drawn faceted seams.** A round of the seam where
+  softened drawn facets meet a plate (the curves scoreboard's faceted
+  plinth) builds at every size the wall takes with every rail reading as
+  its geometry says, and one too large for the wall is refused naming the
+  wall and a largest size that itself builds and reads correct. Where the
+  ball rides a convex seam of the wall, the rail is a crease and reads as
+  a hard edge. A largest size is named only when size is what stops the
+  next size up; otherwise the refusal gives the other cause. On an upright
+  boss with a notch or a valley beside a corner, the ball rests on wall
+  and plate along every straight wall and every edge reads as its geometry
+  says at 0.5, 1 and 1.5 mm. Still open:
+  - a round at an inward-leaning corner is refused, because the ball's
+    contact slides along the corner edge and the cut cannot yet build the
+    crease that leaves; a boss whose walls lean more than about 0.28°
+    refuses its whole base loop at 0.5 mm
+  - where the ball pivots in place across a valley it cannot reach, the
+    strip covers the turn in one flat band (0.08 mm inside the ball on the
+    plinth at 1.5 mm, 0.18 mm on the valley boss)
+  - the surface-solve fallback accepts a strip without checking it against
+    the solid; on a leaning boss with a notch, two isolated sizes within
+    1 nm of 4.6035 mm and 6.3571 mm build a round that lies inside the solid
+  - one straight base edge of a boss is refused with a limit of zero, so
+    the corner refusal's advice to try the edges one at a time does not
+    work
+
 ### Longer-term
 
 - **More Model Health repairs** for what Close and Thicken… leave open:
@@ -1221,13 +1797,6 @@ below.
   real models (the rest have real open ends), so it waits for a model where
   inside faces are the main cause
 
-- **True toroidal surfaces** (`SurfaceRef::Torus`): sweep walls around a
-  turning path currently carry no analytic surface claim — a cylinder
-  claim there would be false, so the verifier refuses it and push/pull
-  and refacet on such walls stay facet-level (rendering is already
-  smooth via soft seams). A torus surface class through the validator,
-  tessellation, and serialization (a geometry-buffer bump) restores
-  analytic behavior for pipes and lathe rings
 - **STEP/IGES import and export**, for precise CAD interchange with
   engineering tools (via OpenCASCADE)
 - **Section fill** (capping the cut) and multi-plane management, on top
@@ -1244,7 +1813,166 @@ below.
   AI agents over MCP — including the Library (`hew.library.*`, §8.1),
   which round-trips a saved item's geometry through the same kernel
   entry points the UI's own Library browser uses; the plugin system adds
-  sandboxed transports and scoped profiles on top of the same bus
+  sandboxed transports on top of the same bus. In place today: every
+  connection carries a grant (a ceiling plus permissions) instead of a
+  profile, every command declares the permission it needs, and the
+  dispatcher enforces restricted grants (document binding, path
+  parameters, attribute namespaces) at its existing check sites, inside
+  transactions too (HEW_API.md §10); the manifest parser lives in
+  `crates/plugin-manifest` (docs/agents/PLUGINS.md). A plugin's manifest
+  commands register on the one shared registry as `<plugin-id>.<local>`;
+  the dispatcher checks their params against a small JSON Schema subset
+  and hands them back as forwards instead of executing them, then
+  validates and shapes the plugin's reply (HEW_API.md §10.2). Until the
+  realm lands the app answers every forward "unavailable", and MCP labels
+  plugin results with their `provider`. A mutating plugin command runs in
+  a kernel compound (one undo entry, the UI and every other client held
+  off meanwhile, abort restoring the whole document, a busy notice with
+  Cancel), recorded and replayed as one `plugin_compound` call; envelopes
+  can coalesce into one undo step (`coalesce`) and refuse a stale model
+  (`expect_generation`), and reads carry the history generation and the
+  document epoch (HEW_API.md §6.1, §6.5, §7). A connection subscribes to
+  events (`hew.event.subscribe`) and receives them as notification frames
+  between its replies: `document_changed` with a change set by public id
+  after every entry, undo, redo, abort, and replacement, plus context,
+  Scene, units, and document lifecycle events; `hew.query.changes_since`
+  catches a reader up, the desktop socket and the Windows named pipe
+  write events between replies, `hew-cli events --live` prints them,
+  and MCP follows `plugin_state`
+  (HEW_API.md §4.5). A connection holding `view` reads and sets the
+  app's selection (replace, add, subtract, toggle), hides and shows
+  nodes, isolates, and frames entities, all view state that rides a
+  transaction without an undo entry, and hears `selection_changed` and
+  `tool_changed`; the desktop app mirrors its selection, isolation, and
+  active tool into the kernel so the bus answers from there
+  (HEW_API.md §7.3). A reader lists every placement with its path and
+  world pose (`hew.query.occurrences`, nested components expanded, from
+  roots such as the selection), measures a part along its own axes
+  (`hew.query.part_frame`, honoring a `hew.part` frame override), reads
+  a placement's mesh and an object's topology, and exports or draws only
+  a selection (HEW_API.md §7.4). A ray reports the placed part it hit
+  through any depth of nesting, with its occurrence path, leaf, and a
+  face locator, and can list every crossing (`hew.query.raycast`'s `all`,
+  `max_distance`, `exclude`, `include_hidden`); `hew.query.measure` by
+  id or path gives a part's volume, area, and bounding box, summing the
+  members of groups and instances (HEW_API.md §7.4). A file's bytes
+  become one unplaced component definition
+  (`hew.component.import_definition`: `.hew`, `.skp`, glTF/GLB, STL,
+  COLLADA), and importing the same bytes again returns that definition
+  instead of making another, so a hardware or cabinet-module library is
+  one definition per model (HEW_API.md §7, document commands). The app itself
+  renders `hew.view.snapshot` (of a selection, or a definition's `cmp_` id,
+  on a transparent background) and `hew.view.line_drawing` through the
+  shared `crates/headless-render`, byte for byte what `hew-cli` produces
+  (HEW_API.md §7.2). A writer gives a definition new axes
+  while every placement stays put (`hew.component.rebase`), mirrors one
+  placement (`hew.component.flip_instance`), sets or clears a part's
+  frame override (`hew.entity.set_frame`), and copies a selection into a
+  grid of up to three axes in one undo step (`hew.entity.move`'s
+  `copy.grid`). The kernel forks one placement at any depth by its
+  occurrence path and reports every id the fork created
+  (`Document::make_unique_by_path`: with the cascade, only that placement
+  diverges; `deep` forks the nested definitions too; one undo entry),
+  exported to the app as `make_unique_by_path_json` and on the bus as
+  `hew.component.make_unique { instance | path, cascade, deep }` with a
+  flat old-to-new `remap`. The kernel's
+  copies link when the caller asks for it (`LinkPolicy::Linked` on
+  `duplicate_node`, `duplicate_nodes_array`, and
+  `duplicate_nodes_placements`): each Object or Group copied is wrapped
+  as a linked set (`Document::wrap_linked`, a definition carrying `hew` /
+  `linked`) and every copy is a placement of it, in one undo entry; a set
+  goes with its last placement, `promote_linked` turns one into a named
+  component, change sets carry `linked` and `copied_from`, and the wasm
+  surface exports `wrap_linked`, `is_linked`, `set_linked`,
+  `owner_definition`, `duplicate_selection_array_linked`, and
+  `duplicate_selection_placements` (with a `_linked` sibling that reports
+  the wraps; the Move grid, recorded as one call). "Link identical
+  copies" has its kernel op: `Document::join_linked` replaces a loose
+  Object with a new placement of a linked set at a given pose (mirrored
+  when the pose reflects), in one undo entry. The pose is checked: the
+  set's solid at the pose must match the Object's vertices at the
+  signature's 1 µm quantum (`NotIdentical` otherwise; a non-finite pose
+  refuses `Transform`). The placement takes the Object's name, tags,
+  user-hidden flag, attributes (not its `hew.part` / `frame`; the
+  member's serves every placement), and object material as its instance
+  material; face paint on the Object is dropped, and the op reports that
+  and a differing frame. Color lives on the placements: a wrap moves the
+  Object's base material onto its placement, a join moves any base the
+  shared member still has onto every placement the set already has (a
+  red keeper and a blue joiner stay red and blue), and Unlink
+  (`unlink_copies`) and Explode put a placement's
+  material back as the copied Object's base, so the round trip is
+  lossless. Painting one copy whose shared member still has a base
+  (Ctrl-click inside the open set, an older file) first makes the
+  join's move onto the other copies, in the same undo entry, so the
+  paint shows; a model-wide Shift-click replace of unpainted faces
+  paints the unpainted copies (the one entered in an open set too)
+  rather than the member's base, and leaves a set whose member has a
+  base alone. A linked paste copies what the source looks like
+  (`instance_appearance_material`). The wasm surface exports
+  `join_linked` and `join_linked_report` (the same call with the two
+  flags as JSON); the app's Edit > Link identical copies runs over
+  `hew.query.signature`.
+  On the bus
+  a copy links by default (`copy.linked`, `true` whatever the app's
+  preference; the result lists the wraps in `linked`), a linked set
+  becomes a named component with `hew.component.promote`, face and edge
+  locators take an occurrence `path` in place of `object` so an edit
+  through any copy edits them all, `hew.solid.union` and `intersect` with
+  a placement operand refuse `would_unlink` unless `unlink: true`, and
+  `document_changed` and `hew.query.changes_since` change sets carry
+  `linked` and `copied_from` (HEW_API.md §4.5, §7). Occurrence rows carry
+  the facts a part rule needs: `members` on every row, `solid`, `family`,
+  and `family_closed` on objects, `linked` on instances; `scope: "own"`
+  on `part_frame`, `measure`, `snapshot`, and `line_drawing` takes a
+  container's own objects, never a nested instance's; a snapshot renders
+  one part in its own frame with `orient: "part"`; and
+  `hew.query.signature` hashes an object's shape and its mirror image so
+  identical parts and left-right twins can be found (HEW_API.md §7.4).
+  A part's frame through a placement honors its definition member's
+  frame override. `hew.entity.flip` mirrors a selection across a plane
+  on the bus, with an optional linked mirrored copy. `hew.solid.rejoin`
+  (Model Health's "Rejoin as one solid" in one undo entry) rejoins a seam
+  family. `hew-cli --version` and `hew-relay --version` report the release
+  tag's version on a tag build; the `core` ceiling grants `hew.view.hide`,
+  `show`, `show_all`, and `hidden` without a window; `hew_query` admits every
+  command that does not change the document; `hew.entity.rotate`'s angle is
+  documented in radians; headless PNGs are deflate-compressed; and `hew-cli
+  --live` writes a snapshot or line drawing client-side from one render. A boolean's
+  result keeps its first operand's name, tags, and attributes. A plugin
+  checks before it commits: `hew.doc.transact` with `dry_run: true`
+  rehearses a whole envelope on a copy of the document and answers what
+  the commit would, needing only read permissions (HEW_API.md §6.6), and
+  `hew.compute.boolean`, `slice`, `shells`, `measure`, `outline`, and
+  `offset` answer geometry questions on transient solids (an object, a
+  re-posed object, or a prism or box described inline) without touching
+  the document, one at a time per connection and capped at 2,000,000
+  triangles (HEW_API.md §7.6). `hew.solid.subtract` cuts a part through
+  its path with such a prism or box, no cutter object created.
+  `hew.compute.project` and `hew.compute.stretch` are declared and wait
+  for the flat-drawing projection and section stretch in core. The snap
+  service can lock to any direction through an
+  anchor, for plugin tools to use. A component placement carries its own
+  material (manifest v27), shown on member faces nobody painted, the
+  nearest painted placement winning; `hew.material.paint` sets it or a
+  whole definition's, occurrence rows and path-located faces report
+  `material_effective`, and the Paint tool paints the placement under
+  the pointer at the top level (HEW_API.md §7.5). A solid's faces and
+  edges carry attribute dictionaries of their own (geometry buffer v9),
+  addressed by locator through `hew.attr.*`, reported by
+  `hew.query.faces` and `hew.query.topology`, and carried through edits
+  by per-site rules; edge dictionaries do not yet survive booleans,
+  slices, thickening, or splitting a solid into pieces (HEW_API.md §8).
+  A saved document carries a persistent id (manifest v29 `document_id`),
+  minted on its first save and kept through Save As and copies, which
+  `hew.meta.documents` and the open and save events report for
+  per-document plugin state to key on (docs/agents/PLUGINS.md). The SketchUp
+  writers do not yet write instance materials or face and edge
+  dictionaries. Still to come: these effects in the browser and
+  Shop Mode, the sandboxed realm, install and consent, and the workbench
+  contribution points.
+  Stage P0 (realm probe): in progress; the engine record is in
+  docs/agents/PLUGINS.md and its macOS and Windows cells are still unfilled.
 - **SketchUp (`.skp`) writing — the remaining gaps.** Dimensions and
   leader text are written with point anchors, so in SketchUp they do not
   follow the geometry they measure (a radius dimension hangs on an edge of
@@ -1263,9 +1991,7 @@ below.
   of a group the document deleted (unplaced, as a purge would remove);
   SketchUp-native loose geometry opens as a healed mesh Object rather
   than as sketches; the `.skp` file association is macOS-only (the
-  Windows installer would take the default from SketchUp); files from
-  SketchUp 2016 and earlier do not open (OpenSKP reads their headers, not
-  their geometry, so Hew asks for a re-save from a current SketchUp)
+  Windows installer would take the default from SketchUp)
 - **Signed Windows installers** — macOS builds are signed and notarized,
   auto-update and the hosted web build are shipped; Windows executables
   ship unsigned (SmartScreen warns, documented as accepted) until the
@@ -1329,3 +2055,7 @@ below.
   still not a general face or edge editor — a boss's wall or a solid's
   own corner cannot be dragged. Model Health's face removal is the other
   exception, and it works only on open imported objects, never a solid.
+  Fillet, Deform, and Crease are direct-pick or whole-object tools, not
+  sub-element editors: Fillet picks an edge or a face and replaces the
+  edge by a validated blend, Deform moves a whole object, and Crease flags
+  an edge without moving anything.

@@ -1,0 +1,360 @@
+{
+  "title": "A 40 mm x 25 mm revolved knob with twelve 6 mm grooves cut around its side",
+  "from": "Twelve separate groove rims and twelve vertical groove edges on one revolved solid: many loops at one size, with the rim breaking at every groove. The grooves sit at 3.75, 33.75, ... degrees: a groove at 0 or 30 degrees is refused by the boolean as degenerate_contact.",
+  "build": [
+    {
+      "method": "hew.sketch.draw_line",
+      "as": "prof",
+      "params": {
+        "plane": {"origin": [0, 0, 0], "normal": [0, -1, 0]},
+        "points": [[0, 0, 0], ["20mm", 0, 0], ["20mm", 0, "25mm"], [0, 0, "25mm"], [0, 0, 0]]
+      }
+    },
+    {
+      "method": "hew.solid.revolve",
+      "as": "knob",
+      "params": {"profile": {"$ref": "prof#/region_id"}, "axis": {"from": [0, 0, 0], "to": [0, 0, 1]}}
+    },
+    {
+      "method": "hew.sketch.draw_circle",
+      "as": "gc0",
+      "params": {
+        "plane": {"origin": [0, 0, -0.002], "normal": [0, 0, 1]},
+        "center": [0.019957178, 0.001308063, -0.002],
+        "radius": "3mm"
+      }
+    },
+    {
+      "method": "hew.solid.extrude",
+      "as": "g0",
+      "params": {"region": {"$ref": "gc0#/region_id"}, "distance": "29mm"}
+    },
+    {
+      "method": "hew.sketch.draw_circle",
+      "as": "gc1",
+      "params": {
+        "plane": {"origin": [0, 0, -0.002], "normal": [0, 0, 1]},
+        "center": [0.016629392, 0.011111405, -0.002],
+        "radius": "3mm"
+      }
+    },
+    {
+      "method": "hew.solid.extrude",
+      "as": "g1",
+      "params": {"region": {"$ref": "gc1#/region_id"}, "distance": "29mm"}
+    },
+    {
+      "method": "hew.sketch.draw_circle",
+      "as": "gc2",
+      "params": {
+        "plane": {"origin": [0, 0, -0.002], "normal": [0, 0, 1]},
+        "center": [0.008845774, 0.017937455, -0.002],
+        "radius": "3mm"
+      }
+    },
+    {
+      "method": "hew.solid.extrude",
+      "as": "g2",
+      "params": {"region": {"$ref": "gc2#/region_id"}, "distance": "29mm"}
+    },
+    {
+      "method": "hew.sketch.draw_circle",
+      "as": "gc3",
+      "params": {
+        "plane": {"origin": [0, 0, -0.002], "normal": [0, 0, 1]},
+        "center": [-0.001308063, 0.019957178, -0.002],
+        "radius": "3mm"
+      }
+    },
+    {
+      "method": "hew.solid.extrude",
+      "as": "g3",
+      "params": {"region": {"$ref": "gc3#/region_id"}, "distance": "29mm"}
+    },
+    {
+      "method": "hew.sketch.draw_circle",
+      "as": "gc4",
+      "params": {
+        "plane": {"origin": [0, 0, -0.002], "normal": [0, 0, 1]},
+        "center": [-0.011111405, 0.016629392, -0.002],
+        "radius": "3mm"
+      }
+    },
+    {
+      "method": "hew.solid.extrude",
+      "as": "g4",
+      "params": {"region": {"$ref": "gc4#/region_id"}, "distance": "29mm"}
+    },
+    {
+      "method": "hew.sketch.draw_circle",
+      "as": "gc5",
+      "params": {
+        "plane": {"origin": [0, 0, -0.002], "normal": [0, 0, 1]},
+        "center": [-0.017937455, 0.008845774, -0.002],
+        "radius": "3mm"
+      }
+    },
+    {
+      "method": "hew.solid.extrude",
+      "as": "g5",
+      "params": {"region": {"$ref": "gc5#/region_id"}, "distance": "29mm"}
+    },
+    {
+      "method": "hew.sketch.draw_circle",
+      "as": "gc6",
+      "params": {
+        "plane": {"origin": [0, 0, -0.002], "normal": [0, 0, 1]},
+        "center": [-0.019957178, -0.001308063, -0.002],
+        "radius": "3mm"
+      }
+    },
+    {
+      "method": "hew.solid.extrude",
+      "as": "g6",
+      "params": {"region": {"$ref": "gc6#/region_id"}, "distance": "29mm"}
+    },
+    {
+      "method": "hew.sketch.draw_circle",
+      "as": "gc7",
+      "params": {
+        "plane": {"origin": [0, 0, -0.002], "normal": [0, 0, 1]},
+        "center": [-0.016629392, -0.011111405, -0.002],
+        "radius": "3mm"
+      }
+    },
+    {
+      "method": "hew.solid.extrude",
+      "as": "g7",
+      "params": {"region": {"$ref": "gc7#/region_id"}, "distance": "29mm"}
+    },
+    {
+      "method": "hew.sketch.draw_circle",
+      "as": "gc8",
+      "params": {
+        "plane": {"origin": [0, 0, -0.002], "normal": [0, 0, 1]},
+        "center": [-0.008845774, -0.017937455, -0.002],
+        "radius": "3mm"
+      }
+    },
+    {
+      "method": "hew.solid.extrude",
+      "as": "g8",
+      "params": {"region": {"$ref": "gc8#/region_id"}, "distance": "29mm"}
+    },
+    {
+      "method": "hew.sketch.draw_circle",
+      "as": "gc9",
+      "params": {
+        "plane": {"origin": [0, 0, -0.002], "normal": [0, 0, 1]},
+        "center": [0.001308063, -0.019957178, -0.002],
+        "radius": "3mm"
+      }
+    },
+    {
+      "method": "hew.solid.extrude",
+      "as": "g9",
+      "params": {"region": {"$ref": "gc9#/region_id"}, "distance": "29mm"}
+    },
+    {
+      "method": "hew.sketch.draw_circle",
+      "as": "gc10",
+      "params": {
+        "plane": {"origin": [0, 0, -0.002], "normal": [0, 0, 1]},
+        "center": [0.011111405, -0.016629392, -0.002],
+        "radius": "3mm"
+      }
+    },
+    {
+      "method": "hew.solid.extrude",
+      "as": "g10",
+      "params": {"region": {"$ref": "gc10#/region_id"}, "distance": "29mm"}
+    },
+    {
+      "method": "hew.sketch.draw_circle",
+      "as": "gc11",
+      "params": {
+        "plane": {"origin": [0, 0, -0.002], "normal": [0, 0, 1]},
+        "center": [0.017937455, -0.008845774, -0.002],
+        "radius": "3mm"
+      }
+    },
+    {
+      "method": "hew.solid.extrude",
+      "as": "g11",
+      "params": {"region": {"$ref": "gc11#/region_id"}, "distance": "29mm"}
+    },
+    {
+      "method": "hew.solid.subtract",
+      "as": "grooved",
+      "params": {
+        "operands": [
+          {"$ref": "knob#/object_id"},
+          {"$ref": "g0#/object_id"},
+          {"$ref": "g1#/object_id"},
+          {"$ref": "g2#/object_id"},
+          {"$ref": "g3#/object_id"},
+          {"$ref": "g4#/object_id"},
+          {"$ref": "g5#/object_id"},
+          {"$ref": "g6#/object_id"},
+          {"$ref": "g7#/object_id"},
+          {"$ref": "g8#/object_id"},
+          {"$ref": "g9#/object_id"},
+          {"$ref": "g10#/object_id"},
+          {"$ref": "g11#/object_id"}
+        ]
+      }
+    }
+  ],
+  "cases": [
+    {
+      "id": "one-groove-top-rim-round",
+      "note": "Groove 0 only, the cut's rim on the flat top. Neighboring grooves are 10.35 mm apart center to center with 6 mm cuts, leaving a 4.35 mm web, so a blend on one groove reaches the next groove's rim at 4.35 mm; 4 mm fits. Nothing past the 25 mm wall height can exist.",
+      "method": "hew.solid.fillet",
+      "params": {"edges": [{"object": {"$ref": "grooved#/result"}, "at": ["16.97mm", "1.504mm", "25mm"]}]},
+      "sizes": ["0.1mm", "1mm", "2mm", "3mm", "4mm", "6mm", "10mm", "26mm"],
+      "fits_to": "4mm",
+      "never_above": "25mm",
+      "volume": "less"
+    },
+    {
+      "id": "one-groove-top-rim-chamfer",
+      "note": "Groove 0 only. Neighboring grooves are 10.35 mm apart center to center with 6 mm cuts, leaving a 4.35 mm web, so a blend on one groove reaches the next groove's rim at 4.35 mm; 4 mm fits. Nothing past the 25 mm wall height can exist.",
+      "method": "hew.solid.chamfer",
+      "params": {"edges": [{"object": {"$ref": "grooved#/result"}, "at": ["16.97mm", "1.504mm", "25mm"]}]},
+      "sizes": ["0.1mm", "1mm", "2mm", "3mm", "4mm", "6mm", "10mm", "26mm"],
+      "fits_to": "4mm",
+      "never_above": "25mm",
+      "volume": "less"
+    },
+    {
+      "id": "every-groove-top-rim-round",
+      "note": "All twelve groove rims in one operation at one size. Two blends on neighboring grooves meet across the 4.35 mm web, so past about 2.17 mm they overlap; 2 mm fits. Nothing past the 25 mm wall height can exist.",
+      "method": "hew.solid.fillet",
+      "params": {
+        "edges": [
+          {"object": {"$ref": "grooved#/result"}, "at": ["16.97mm", "1.504mm", "25mm"]},
+          {"object": {"$ref": "grooved#/result"}, "at": ["13.9445mm", "9.7875mm", "25mm"]},
+          {"object": {"$ref": "grooved#/result"}, "at": ["7.1825mm", "15.4485mm", "25mm"]},
+          {"object": {"$ref": "grooved#/result"}, "at": [-0.001504, "16.97mm", "25mm"]},
+          {"object": {"$ref": "grooved#/result"}, "at": [-0.0097875, "13.9445mm", "25mm"]},
+          {"object": {"$ref": "grooved#/result"}, "at": [-0.0154485, "7.1825mm", "25mm"]},
+          {"object": {"$ref": "grooved#/result"}, "at": [-0.01697, -0.001504, "25mm"]},
+          {"object": {"$ref": "grooved#/result"}, "at": [-0.0139445, -0.0097875, "25mm"]},
+          {"object": {"$ref": "grooved#/result"}, "at": [-0.0071825, -0.0154485, "25mm"]},
+          {"object": {"$ref": "grooved#/result"}, "at": ["1.504mm", -0.01697, "25mm"]},
+          {"object": {"$ref": "grooved#/result"}, "at": ["9.7875mm", -0.0139445, "25mm"]},
+          {"object": {"$ref": "grooved#/result"}, "at": ["15.4485mm", -0.0071825, "25mm"]}
+        ]
+      },
+      "sizes": ["0.1mm", "1mm", "2mm", "3mm", "4mm", "6mm", "10mm", "26mm"],
+      "fits_to": "2mm",
+      "never_above": "25mm",
+      "volume": "less"
+    },
+    {
+      "id": "every-groove-top-rim-chamfer",
+      "note": "All twelve groove rims in one operation at one size. Neighboring blends meet across the 4.35 mm web past about 2.17 mm; 2 mm fits. Nothing past the 25 mm wall height can exist.",
+      "method": "hew.solid.chamfer",
+      "params": {
+        "edges": [
+          {"object": {"$ref": "grooved#/result"}, "at": ["16.97mm", "1.504mm", "25mm"]},
+          {"object": {"$ref": "grooved#/result"}, "at": ["13.9445mm", "9.7875mm", "25mm"]},
+          {"object": {"$ref": "grooved#/result"}, "at": ["7.1825mm", "15.4485mm", "25mm"]},
+          {"object": {"$ref": "grooved#/result"}, "at": [-0.001504, "16.97mm", "25mm"]},
+          {"object": {"$ref": "grooved#/result"}, "at": [-0.0097875, "13.9445mm", "25mm"]},
+          {"object": {"$ref": "grooved#/result"}, "at": [-0.0154485, "7.1825mm", "25mm"]},
+          {"object": {"$ref": "grooved#/result"}, "at": [-0.01697, -0.001504, "25mm"]},
+          {"object": {"$ref": "grooved#/result"}, "at": [-0.0139445, -0.0097875, "25mm"]},
+          {"object": {"$ref": "grooved#/result"}, "at": [-0.0071825, -0.0154485, "25mm"]},
+          {"object": {"$ref": "grooved#/result"}, "at": ["1.504mm", -0.01697, "25mm"]},
+          {"object": {"$ref": "grooved#/result"}, "at": ["9.7875mm", -0.0139445, "25mm"]},
+          {"object": {"$ref": "grooved#/result"}, "at": ["15.4485mm", -0.0071825, "25mm"]}
+        ]
+      },
+      "sizes": ["0.1mm", "1mm", "2mm", "3mm", "4mm", "6mm", "10mm", "26mm"],
+      "fits_to": "2mm",
+      "never_above": "25mm",
+      "volume": "less"
+    },
+    {
+      "id": "one-groove-vertical-edge-round",
+      "note": "One of the two vertical edges where groove 0 meets the outer wall, 25 mm long; the web beside it is 4.35 mm, so 4 mm fits.",
+      "method": "hew.solid.fillet",
+      "params": {"edges": [{"object": {"$ref": "grooved#/result"}, "at": ["19.779mm", -0.00168, "12mm"]}]},
+      "sizes": ["0.1mm", "1mm", "2mm", "3mm", "4mm", "6mm", "10mm", "26mm"],
+      "volume": "less"
+    },
+    {
+      "id": "outer-top-rim-round",
+      "note": "The twelve outer-wall arcs of the top rim, broken by the grooves, in one operation. Nothing past the 25 mm wall height can exist.",
+      "method": "hew.solid.fillet",
+      "params": {
+        "edges": [
+          {"object": {"$ref": "grooved#/result"}, "at": [0.019379008, 0.004716326, "25mm"]},
+          {"object": {"$ref": "grooved#/result"}, "at": [0.018644087, 0.006804643, "25mm"]},
+          {"object": {"$ref": "grooved#/result"}, "at": [0.014424551, 0.013773962, "25mm"]},
+          {"object": {"$ref": "grooved#/result"}, "at": [0.012743931, 0.015215038, "25mm"]},
+          {"object": {"$ref": "grooved#/result"}, "at": [0.005605046, 0.019140876, "25mm"]},
+          {"object": {"$ref": "grooved#/result"}, "at": [0.00342905, 0.019548575, "25mm"]},
+          {"object": {"$ref": "grooved#/result"}, "at": [-0.004716326, 0.019379008, "25mm"]},
+          {"object": {"$ref": "grooved#/result"}, "at": [-0.006804643, 0.018644087, "25mm"]},
+          {"object": {"$ref": "grooved#/result"}, "at": [-0.013773962, 0.014424551, "25mm"]},
+          {"object": {"$ref": "grooved#/result"}, "at": [-0.015215038, 0.012743931, "25mm"]},
+          {"object": {"$ref": "grooved#/result"}, "at": [-0.019140876, 0.005605046, "25mm"]},
+          {"object": {"$ref": "grooved#/result"}, "at": [-0.019548575, 0.00342905, "25mm"]},
+          {"object": {"$ref": "grooved#/result"}, "at": [-0.019379008, -0.004716326, "25mm"]},
+          {"object": {"$ref": "grooved#/result"}, "at": [-0.018644087, -0.006804643, "25mm"]},
+          {"object": {"$ref": "grooved#/result"}, "at": [-0.014424551, -0.013773962, "25mm"]},
+          {"object": {"$ref": "grooved#/result"}, "at": [-0.012743931, -0.015215038, "25mm"]},
+          {"object": {"$ref": "grooved#/result"}, "at": [-0.005605046, -0.019140876, "25mm"]},
+          {"object": {"$ref": "grooved#/result"}, "at": [-0.00342905, -0.019548575, "25mm"]},
+          {"object": {"$ref": "grooved#/result"}, "at": [0.004716326, -0.019379008, "25mm"]},
+          {"object": {"$ref": "grooved#/result"}, "at": [0.006804643, -0.018644087, "25mm"]},
+          {"object": {"$ref": "grooved#/result"}, "at": [0.013773962, -0.014424551, "25mm"]},
+          {"object": {"$ref": "grooved#/result"}, "at": [0.015215038, -0.012743931, "25mm"]},
+          {"object": {"$ref": "grooved#/result"}, "at": [0.019140876, -0.005605046, "25mm"]},
+          {"object": {"$ref": "grooved#/result"}, "at": [0.019548575, -0.00342905, "25mm"]}
+        ]
+      },
+      "sizes": ["0.1mm", "1mm", "2mm", "3mm", "4mm", "6mm", "10mm", "26mm"],
+      "never_above": "25mm",
+      "volume": "less"
+    },
+    {
+      "id": "outer-top-rim-chamfer",
+      "note": "The twelve outer-wall arcs of the top rim, broken by the grooves. Nothing past the 25 mm wall height can exist.",
+      "method": "hew.solid.chamfer",
+      "params": {
+        "edges": [
+          {"object": {"$ref": "grooved#/result"}, "at": [0.019379008, 0.004716326, "25mm"]},
+          {"object": {"$ref": "grooved#/result"}, "at": [0.018644087, 0.006804643, "25mm"]},
+          {"object": {"$ref": "grooved#/result"}, "at": [0.014424551, 0.013773962, "25mm"]},
+          {"object": {"$ref": "grooved#/result"}, "at": [0.012743931, 0.015215038, "25mm"]},
+          {"object": {"$ref": "grooved#/result"}, "at": [0.005605046, 0.019140876, "25mm"]},
+          {"object": {"$ref": "grooved#/result"}, "at": [0.00342905, 0.019548575, "25mm"]},
+          {"object": {"$ref": "grooved#/result"}, "at": [-0.004716326, 0.019379008, "25mm"]},
+          {"object": {"$ref": "grooved#/result"}, "at": [-0.006804643, 0.018644087, "25mm"]},
+          {"object": {"$ref": "grooved#/result"}, "at": [-0.013773962, 0.014424551, "25mm"]},
+          {"object": {"$ref": "grooved#/result"}, "at": [-0.015215038, 0.012743931, "25mm"]},
+          {"object": {"$ref": "grooved#/result"}, "at": [-0.019140876, 0.005605046, "25mm"]},
+          {"object": {"$ref": "grooved#/result"}, "at": [-0.019548575, 0.00342905, "25mm"]},
+          {"object": {"$ref": "grooved#/result"}, "at": [-0.019379008, -0.004716326, "25mm"]},
+          {"object": {"$ref": "grooved#/result"}, "at": [-0.018644087, -0.006804643, "25mm"]},
+          {"object": {"$ref": "grooved#/result"}, "at": [-0.014424551, -0.013773962, "25mm"]},
+          {"object": {"$ref": "grooved#/result"}, "at": [-0.012743931, -0.015215038, "25mm"]},
+          {"object": {"$ref": "grooved#/result"}, "at": [-0.005605046, -0.019140876, "25mm"]},
+          {"object": {"$ref": "grooved#/result"}, "at": [-0.00342905, -0.019548575, "25mm"]},
+          {"object": {"$ref": "grooved#/result"}, "at": [0.004716326, -0.019379008, "25mm"]},
+          {"object": {"$ref": "grooved#/result"}, "at": [0.006804643, -0.018644087, "25mm"]},
+          {"object": {"$ref": "grooved#/result"}, "at": [0.013773962, -0.014424551, "25mm"]},
+          {"object": {"$ref": "grooved#/result"}, "at": [0.015215038, -0.012743931, "25mm"]},
+          {"object": {"$ref": "grooved#/result"}, "at": [0.019140876, -0.005605046, "25mm"]},
+          {"object": {"$ref": "grooved#/result"}, "at": [0.019548575, -0.00342905, "25mm"]}
+        ]
+      },
+      "sizes": ["0.1mm", "1mm", "2mm", "3mm", "4mm", "6mm", "10mm", "26mm"],
+      "never_above": "25mm",
+      "volume": "less"
+    }
+  ]
+}

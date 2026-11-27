@@ -1,0 +1,1297 @@
+{
+  "manifest": 1,
+  "id": "com.example.minimal",
+  "name": "Minimal",
+  "version": "1.0.0",
+  "api": 1,
+  "main": "main.js",
+  "contributes": {
+    "commands": [
+      {
+        "id": "cmd_0",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_1",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_2",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_3",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_4",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_5",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_6",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_7",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_8",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_9",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_10",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_11",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_12",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_13",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_14",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_15",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_16",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_17",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_18",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_19",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_20",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_21",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_22",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_23",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_24",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_25",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_26",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_27",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_28",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_29",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_30",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_31",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_32",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_33",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_34",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_35",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_36",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_37",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_38",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_39",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_40",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_41",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_42",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_43",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_44",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_45",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_46",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_47",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_48",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_49",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_50",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_51",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_52",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_53",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_54",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_55",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_56",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_57",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_58",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_59",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_60",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_61",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_62",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_63",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_64",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_65",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_66",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_67",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_68",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_69",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_70",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_71",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_72",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_73",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_74",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_75",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_76",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_77",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_78",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_79",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_80",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_81",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_82",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_83",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_84",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_85",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_86",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_87",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_88",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_89",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_90",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_91",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_92",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_93",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_94",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_95",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_96",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_97",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_98",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_99",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_100",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_101",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_102",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_103",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_104",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_105",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_106",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_107",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_108",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_109",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_110",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_111",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_112",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_113",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_114",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_115",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_116",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_117",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_118",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_119",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_120",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_121",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_122",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_123",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_124",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_125",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_126",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_127",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_128",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_129",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_130",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_131",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_132",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_133",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_134",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_135",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_136",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_137",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_138",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_139",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_140",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_141",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_142",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_143",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_144",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_145",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_146",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_147",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_148",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_149",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_150",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_151",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_152",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_153",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_154",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_155",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_156",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_157",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_158",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_159",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_160",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_161",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_162",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_163",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_164",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_165",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_166",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_167",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_168",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_169",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_170",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_171",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_172",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_173",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_174",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_175",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_176",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_177",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_178",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_179",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_180",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_181",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_182",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_183",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_184",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_185",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_186",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_187",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_188",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_189",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_190",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_191",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_192",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_193",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_194",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_195",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_196",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_197",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_198",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_199",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_200",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_201",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_202",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_203",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_204",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_205",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_206",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_207",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_208",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_209",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_210",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_211",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_212",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_213",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_214",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_215",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_216",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_217",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_218",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_219",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_220",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_221",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_222",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_223",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_224",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_225",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_226",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_227",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_228",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_229",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_230",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_231",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_232",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_233",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_234",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_235",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_236",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_237",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_238",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_239",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_240",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_241",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_242",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_243",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_244",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_245",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_246",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_247",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_248",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_249",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_250",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_251",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_252",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_253",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_254",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_255",
+        "class": "read_only",
+        "summary": "Generated."
+      },
+      {
+        "id": "cmd_256",
+        "class": "read_only",
+        "summary": "Generated."
+      }
+    ]
+  }
+}

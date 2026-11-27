@@ -22,6 +22,14 @@
 //! - `save()` is deterministic, `load(save())` reproduces the same
 //!   `state_hash`, after every op and at the post-sequence and maximal
 //!   states;
+//! - every detached sketch (`Sketch::detached`) an op does not itself edit
+//!   is `==` before and after it (detached shapes §3.8): no plane draft,
+//!   imprint, move, or extrusion ever arranges with one; after a detached
+//!   draw or edit, the other detached sketches obey wireframe faces §16
+//!   R34 instead: one the gesture's connected set does not reach is `==`,
+//!   and one it reaches only loses loose line parts that went into a face
+//!   the step made (take), its faces and curves kept (see
+//!   `check_detached_untouched`);
 //! - fully unwinding the document log and replaying it twice reproduces the
 //!   same states up to tolerance-aware equivalence (canonical fingerprints).
 //!   The canonical geometry writer makes save bytes independent of slot
@@ -29,7 +37,14 @@
 //!   by fingerprint, not bytes, because baked translations round-trip with
 //!   ulp noise (`fl(fl(x + d) - d) != x` — the DEVELOPMENT.md fp trap), and
 //!   that noise is exactly what tolerance-aware equivalence exists for.
+//! - locks (OW-1): Lock and Unlock any live node (definition members
+//!   included), Unlock All, linked copies and joins over locked operands,
+//!   and face drafts on frozen Objects (opened detached) run among the rest; beside the kernel's own commit audit,
+//!   a node frozen before a forward step is still there after it, still
+//!   frozen unless the step unlocked, and keeps its geometry where it
+//!   stands, its name and its tags (`lock_oracle`).
 
+use kernel::trig;
 use kernel::{
     Anchor, Annotation, BooleanOp, CapturedCurve, Document, DocumentError, FaceId, KernelOp,
     KernelOpError, Material, MaterialId, MaterialScope, NodeId, ObjectId, PendingActionKind, Plane,
@@ -38,7 +53,8 @@ use kernel::{
 };
 use proptest::prelude::*;
 
-mod face_arrangement_support;
+use crate::face_arrangement_support;
+use crate::lock_oracle;
 use face_arrangement_support::{draw_loop, face_plane, group_faces, no_pinch};
 
 /// Abstract document op; selectors resolve against live ids at apply time.
@@ -163,7 +179,12 @@ enum DocOp {
         edge_sel: usize,
         from_features: bool,
     },
-    /// Boolean between two distinct visible objects.
+    /// Boolean between two distinct visible objects. A typed refusal is an
+    /// accepted no-op: `DegenerateContact` for a measure-zero contact,
+    /// `ArrangementFailed` for a meeting the arrangement cannot resolve,
+    /// `ResultTooThin` for one that would leave a face under 10 nm wide,
+    /// `EmptyResult` for an empty intersect or a total subtract, and
+    /// `NothingRemoved` for a subtract whose operands do not overlap.
     Boolean {
         kind: u8,
         a_sel: usize,
@@ -179,6 +200,12 @@ enum DocOp {
         obj_sel: usize,
         offset: (f64, f64, f64),
     },
+    /// A linked copy of a visible object: the object is wrapped as a linked
+    /// set and the copy is a second placement of it.
+    DuplicateLinked {
+        obj_sel: usize,
+        offset: (f64, f64, f64),
+    },
     /// A NON-SIMILARITY transform (non-uniform scale) baked into a visible
     /// object — the class of transform `Annotation::reanchor` cannot carry
     /// a `RadialDimension`'s captured circle through (it would turn the
@@ -189,6 +216,45 @@ enum DocOp {
     NonUniformScale {
         obj_sel: usize,
         factors: (f64, f64, f64),
+    },
+    /// An in-place reshape (`DocAction::Reshaped`, the snapshot undo the
+    /// true-curves operations share), driven by its test spec: a uniform
+    /// scale about the origin. The fingerprint cycle covers its undo/redo.
+    Reshape {
+        obj_sel: usize,
+        scale: f64,
+    },
+    /// Fillet the `pick`-th sharp edge of the `obj_sel`-th visible object
+    /// (`Document::blend_edges`, a `Reshaped` step); the radius is
+    /// `radius_frac × 0.3 ×` the shortest edge at either end of it. With
+    /// `logical`, the pick expands to its logical edge (a whole rim, a
+    /// line–arc chain), as the Fillet tool picks.
+    Blend {
+        obj_sel: usize,
+        pick: usize,
+        radius_frac: f64,
+        logical: bool,
+    },
+    /// Remove the `pick`-th blend of the `obj_sel`-th visible object.
+    RemoveBlend {
+        obj_sel: usize,
+        pick: usize,
+    },
+    /// Resize the `pick`-th blend by `factor`.
+    ResizeBlend {
+        obj_sel: usize,
+        pick: usize,
+        factor: f64,
+    },
+    /// Deform the `obj_sel`-th visible object about its bounding box along
+    /// world z (`Document::deform`, a `Reshaped` step): mode 0 twists by
+    /// `amount_frac × 90°`, 1 bends by `amount_frac × 60°`, 2 tapers to
+    /// `1 − amount_frac / 2`. A refusal (self-intersection, an open
+    /// object) leaves the document as it was.
+    Deform {
+        obj_sel: usize,
+        mode: u8,
+        amount_frac: f64,
     },
     /// Draw a small triangle on the plane of the `face_sel`-th face of the
     /// `obj_sel`-th visible object — a loose drawing strictly inside the
@@ -303,12 +369,30 @@ enum DocOp {
         origin: (f64, f64, f64),
         direction: (f64, f64, f64),
     },
+    /// Moves the `guide_sel`-th live guide through a rigid pose
+    /// (`Document::transform_guide`): the undo/redo of its exact geometry
+    /// and the save/load round trip of a rotated direction.
+    MoveGuide {
+        guide_sel: usize,
+        axis: (f64, f64, f64),
+        angle: f64,
+        offset: (f64, f64, f64),
+    },
+    /// Copies the `guide_sel`-th live guide `count` times along a
+    /// translation (`Document::duplicate_guide_array`, Move's copy and
+    /// array on a guide).
+    CopyGuide {
+        guide_sel: usize,
+        offset: (f64, f64, f64),
+        count: u32,
+    },
     /// Boolean between the `a_sel`-th and `b_sel`-th LIVE members of the
     /// `comp_sel`-th component (`boolean_in_component`, component-edit-
     /// parity.md phase K2) — the shared-geometry combine, replacing both
     /// operands with a new member. `a_sel == b_sel` (same live member) is an
     /// accepted typed no-op (`DegenerateContact`), like the world `Boolean`
-    /// op's own `a_sel == b_sel` case.
+    /// op's own `a_sel == b_sel` case; so is a subtract between members
+    /// that do not overlap (`NothingRemoved`).
     BooleanInComponent {
         comp_sel: usize,
         kind: u8,
@@ -381,6 +465,22 @@ enum DocOp {
         origin: (f64, f64, f64),
         axis: (f64, f64, f64),
         angle: f64,
+    },
+    /// Re-express the `comp_sel`-th component in a rotated, moved frame
+    /// (`rebase_definition`): world geometry stays put, every placement is
+    /// compensated. A rotated identity basis is always valid, so only an
+    /// open session or a stale definition refuses.
+    RebaseDefinition {
+        comp_sel: usize,
+        origin: (f64, f64, f64),
+        axis: (f64, f64, f64),
+        angle: f64,
+    },
+    /// Mirror the `inst_sel`-th instance across its local axis `axis % 3`
+    /// (`flip_instance`).
+    FlipInstance {
+        inst_sel: usize,
+        axis: u8,
     },
     /// Add a linear dimension anchored on two of the `obj_sel`-th visible
     /// object's own vertices (exercises re-anchoring: later transforms/
@@ -456,6 +556,19 @@ enum DocOp {
         face_sel: usize,
         frame_sel: usize,
     },
+    /// A face or edge attribute dictionary write (docs/agents/HEW_API.md
+    /// §8): on the `elem_sel`-th face (`edge: false`) or edge of the
+    /// `obj_sel`-th visible object, `op_sel` picks a key write (small int,
+    /// or a nested value), a key delete, or a whole-namespace delete
+    /// (the deletes refuse typed when there is nothing to delete). Later
+    /// structural ops carry the dictionaries by the per-site rules, and
+    /// every committed state must reopen with them.
+    ElementAttr {
+        obj_sel: usize,
+        elem_sel: usize,
+        edge: bool,
+        op_sel: usize,
+    },
     /// `set_material_name` on the `mat_sel`-th seeded material (same
     /// `mat_sel` convention; the sentinel slot is a no-op). A deleted
     /// material refuses typed — exercised because `DeleteMaterial` below
@@ -479,6 +592,21 @@ enum DocOp {
     },
     /// `purge_unused` — one labeled entry (or nothing when idle).
     PurgeUnused,
+    /// Lock (or unlock) the `node_sel`-th live node, a definition member
+    /// included (OW-1).
+    Lock {
+        node_sel: usize,
+        locked: bool,
+    },
+    /// Edit ▸ Unlock ▸ All.
+    UnlockAll,
+    /// "Link identical copies": the `obj_sel`-th visible object joined to
+    /// the `set_sel`-th linked placement, at the pose that lands the set's
+    /// solid on it when both are the same unrotated box.
+    JoinLinked {
+        set_sel: usize,
+        obj_sel: usize,
+    },
     /// `reparent_nodes`: move the `node_sel`-th top-level node into the
     /// `group_sel`-th live group (or out to the top level when `to_top`),
     /// exercising the tree bookkeeping and its verbatim member-order
@@ -575,12 +703,77 @@ enum DocOp {
         sel: usize,
         segments: usize,
     },
+    /// Draw a NEW detached shape (detached shapes §3.8) through
+    /// `Document::draft_detached_new` on the plane [`DocOp::Draft`] would
+    /// pick — the `face_sel`-th face of the `obj_sel`-th visible object, or
+    /// the ground — on the same lattice: a rectangle `a` + `b`, or a circle
+    /// about `a` of radius `b.0` steps. A refusal fails the case.
+    DrawDetached {
+        obj_sel: usize,
+        face_sel: usize,
+        ground: bool,
+        circle: bool,
+        a: (i32, i32),
+        b: (i32, i32),
+        segments: usize,
+    },
+    /// A face draft on a frozen Object (OW-1, v1.5 owner's items D1): the
+    /// `face_sel`-th face of the `obj_sel`-th visible FROZEN Object, which
+    /// a face draw opens detached (`Document::face_draw_detaches`), drawn
+    /// there as [`DocOp::DrawDetached`] draws; the lock oracle checks the
+    /// Object is untouched. While nothing visible is frozen, the
+    /// `obj_sel`-th visible Object is locked first (its own undo step).
+    FrozenFaceDraft {
+        obj_sel: usize,
+        face_sel: usize,
+        circle: bool,
+        a: (i32, i32),
+        b: (i32, i32),
+        segments: usize,
+    },
+    /// Edit the `sk_sel`-th detached sketch in its own context
+    /// (`Document::draft_detached`): `mode` 0 moves its `sel`-th unit by
+    /// `d` lattice steps in its plane, 1 erases its `sel`-th edge, 2
+    /// continues drawing — a segment from its `sel`-th vertex by `d`.
+    /// A refusal fails the case.
+    EditDetached {
+        sk_sel: usize,
+        mode: u8,
+        sel: usize,
+        d: (i32, i32),
+    },
+    /// Extrude the `reg_sel`-th region of the `sk_sel`-th detached sketch
+    /// (as listed by `Document::detached_sketch_units`) by `distance`.
+    ExtrudeDetached {
+        sk_sel: usize,
+        reg_sel: usize,
+        distance: f64,
+    },
     Undo,
     Redo,
+    /// Open a compound (a held bracket around a forwarded plugin command).
+    BeginCompound,
+    /// End the innermost open compound, if any.
+    EndCompound,
+    /// Abort the innermost open compound, if any.
+    AbortCompound,
+    /// A one-attribute transaction committed with coalesce key `key % 3`
+    /// (2 is no key), under origin `origin % 2`.
+    CoalescedAttr {
+        key: u8,
+        origin: u8,
+        value: i64,
+    },
 }
 
 fn arb_offset() -> impl Strategy<Value = (f64, f64, f64)> {
     (-8.0..8.0f64, -8.0..8.0f64, -4.0..4.0f64)
+}
+
+/// A move of a few microns at most: two objects that met before now meet
+/// a fraction of a micron off, which leaves sub-micron slivers to cut.
+fn arb_micro_offset() -> impl Strategy<Value = (f64, f64, f64)> {
+    (-3e-6..3e-6f64, -3e-6..3e-6f64, -3e-6..3e-6f64)
 }
 
 /// A non-degenerate rotation axis for `Transform::rotation` — it normalizes
@@ -598,9 +791,13 @@ fn arb_axis() -> impl Strategy<Value = (f64, f64, f64)> {
 /// `CannotExplodeNonUniformScale`), so both paths are fuzz-reachable.
 fn arb_scale() -> impl Strategy<Value = Vec3> {
     let comp = || 0.3..3.0f64;
+    // A signed component: a negative one mirrors the pose (poses may
+    // reflect; sessions and explodes bake the mirror).
+    let signed = || prop_oneof![4 => comp(), 1 => comp().prop_map(|s| -s)];
     prop_oneof![
         2 => comp().prop_map(|s| Vec3::new(s, s, s)),
         3 => (comp(), comp(), comp()).prop_map(|(x, y, z)| Vec3::new(x, y, z)),
+        1 => signed().prop_map(|s| Vec3::new(s, s.abs(), s.abs())),
     ]
 }
 
@@ -621,6 +818,16 @@ fn free_drawing_on(doc: &Document, plane: Plane) -> bool {
     })
 }
 
+/// The visible objects no lock freezes: the ops that assert an edit
+/// succeeds pick from these (OW-1); the rest pick from every visible
+/// object, so locked operands meet their refusals.
+fn editable_objects(doc: &Document) -> Vec<ObjectId> {
+    doc.visible_object_ids()
+        .into_iter()
+        .filter(|&o| doc.node_frozen(NodeId::Object(o)).is_none())
+        .collect()
+}
+
 /// A hole-free rectangular face of the `obj_sel`-th visible object (the
 /// `face_sel`-th face), given two side-by-side imprints at x ∈ [0.15, 0.4]
 /// and [0.6, 0.85], y ∈ [0.25, 0.75] of its frame — returned as
@@ -633,7 +840,7 @@ fn two_imprints(
     face_sel: usize,
     step: usize,
 ) -> Option<(ObjectId, (Point3, Vec3, Vec3))> {
-    let oid = nth(&doc.visible_object_ids(), obj_sel)?;
+    let oid = nth(&editable_objects(doc), obj_sel)?;
     let obj = doc.object(oid).expect("visible id resolves");
     let face = obj.faces().keys().nth(face_sel % obj.faces().len())?;
     if !obj.faces()[face].inner_loops.is_empty() {
@@ -665,6 +872,7 @@ fn two_imprints(
                 loop_path: vec![at(x0, 0.25), at(x1, 0.25), at(x1, 0.75), at(x0, 0.75)],
                 restore: None,
                 curves: Vec::new(),
+                edge_attrs: Vec::new(),
             },
         );
         assert!(
@@ -714,6 +922,39 @@ fn arb_sketch_edit() -> impl Strategy<Value = DocOp> {
         )
             .prop_map(|(obj_sel, face_sel, ground, shape, a, b, sel, segments)| {
                 DocOp::Draft { obj_sel, face_sel, ground, shape, a, b, sel, segments }
+            }),
+        2 => (
+            any::<usize>(),
+            any::<usize>(),
+            proptest::bool::weighted(0.25),
+            any::<bool>(),
+            (-2..14i32, -2..14i32),
+            (1..9i32, 1..9i32),
+            24..40usize,
+        )
+            .prop_map(|(obj_sel, face_sel, ground, circle, a, b, segments)| {
+                DocOp::DrawDetached { obj_sel, face_sel, ground, circle, a, b, segments }
+            }),
+        1 => (
+            any::<usize>(),
+            any::<usize>(),
+            any::<bool>(),
+            (-2..14i32, -2..14i32),
+            (1..9i32, 1..9i32),
+            24..40usize,
+        )
+            .prop_map(|(obj_sel, face_sel, circle, a, b, segments)| {
+                DocOp::FrozenFaceDraft { obj_sel, face_sel, circle, a, b, segments }
+            }),
+        2 => (any::<usize>(), 0..3u8, any::<usize>(), (-6..=6i32, -6..=6i32))
+            .prop_map(|(sk_sel, mode, sel, d)| DocOp::EditDetached { sk_sel, mode, sel, d }),
+        1 => (
+            any::<usize>(),
+            any::<usize>(),
+            (-3.0..3.0f64).prop_filter("degenerate distance", |d| d.abs() >= 0.05),
+        )
+            .prop_map(|(sk_sel, reg_sel, distance)| DocOp::ExtrudeDetached {
+                sk_sel, reg_sel, distance,
             }),
     ]
 }
@@ -815,8 +1056,39 @@ fn arb_doc_op() -> impl Strategy<Value = DocOp> {
         2 => (any::<usize>(), arb_offset()).prop_map(|(obj_sel, offset)| {
             DocOp::Duplicate { obj_sel, offset }
         }),
+        1 => (any::<usize>(), arb_offset()).prop_map(|(obj_sel, offset)| {
+            DocOp::DuplicateLinked { obj_sel, offset }
+        }),
         2 => (any::<usize>(), (0.2..3.0f64, 0.2..3.0f64, 0.2..3.0f64)).prop_map(
             |(obj_sel, factors)| DocOp::NonUniformScale { obj_sel, factors }
+        ),
+        // KB-25: micron-scale moves and deep shrinks, so booleans, structure
+        // ops and undo meet faces under the old 1e-12 m² area floor (kept
+        // now when at least 10 nm wide), with the reopen check every step.
+        1 => (any::<usize>(), arb_micro_offset()).prop_map(|(obj_sel, offset)| {
+            DocOp::Translate { obj_sel, offset }
+        }),
+        1 => (any::<usize>(), (1e-7..1e-5f64, 1e-7..1e-5f64, 1e-7..1e-5f64)).prop_map(
+            |(obj_sel, factors)| DocOp::NonUniformScale { obj_sel, factors }
+        ),
+        // A reflection baked into a visible object (negative x factor).
+        1 => (any::<usize>(), (0.2..3.0f64, 0.2..3.0f64, 0.2..3.0f64)).prop_map(
+            |(obj_sel, f)| DocOp::NonUniformScale { obj_sel, factors: (-f.0, f.1, f.2) }
+        ),
+        2 => (any::<usize>(), 0.5..2.0f64).prop_map(
+            |(obj_sel, scale)| DocOp::Reshape { obj_sel, scale }
+        ),
+        2 => (any::<usize>(), any::<usize>(), 0.05..1.0f64, any::<bool>()).prop_map(
+            |(obj_sel, pick, radius_frac, logical)| DocOp::Blend { obj_sel, pick, radius_frac, logical }
+        ),
+        1 => (any::<usize>(), any::<usize>()).prop_map(
+            |(obj_sel, pick)| DocOp::RemoveBlend { obj_sel, pick }
+        ),
+        1 => (any::<usize>(), any::<usize>(), 0.3..1.5f64).prop_map(
+            |(obj_sel, pick, factor)| DocOp::ResizeBlend { obj_sel, pick, factor }
+        ),
+        2 => (any::<usize>(), 0u8..3, 0.05..1.0f64).prop_map(
+            |(obj_sel, mode, amount_frac)| DocOp::Deform { obj_sel, mode, amount_frac }
         ),
         4 => (any::<usize>(), any::<usize>(), 0.0..std::f64::consts::TAU).prop_map(
             |(obj_sel, face_sel, turn)| DocOp::OwnSketch { obj_sel, face_sel, turn }
@@ -847,6 +1119,14 @@ fn arb_doc_op() -> impl Strategy<Value = DocOp> {
         1 => (arb_offset(), arb_axis()).prop_map(|(origin, direction)| {
             DocOp::AddGuideLine { origin, direction }
         }),
+        1 => (any::<usize>(), arb_axis(), -3.0..3.0f64, arb_offset()).prop_map(
+            |(guide_sel, axis, angle, offset)| DocOp::MoveGuide {
+                guide_sel, axis, angle, offset,
+            }
+        ),
+        1 => (any::<usize>(), arb_offset(), 1u32..4).prop_map(|(guide_sel, offset, count)| {
+            DocOp::CopyGuide { guide_sel, offset, count }
+        }),
         1 => (0u8..3, any::<usize>(), any::<usize>(), any::<usize>()).prop_map(
             |(kind, comp_sel, a_sel, b_sel)| DocOp::BooleanInComponent {
                 comp_sel, kind, a_sel, b_sel,
@@ -869,6 +1149,10 @@ fn arb_doc_op() -> impl Strategy<Value = DocOp> {
             DocOp::PlaceText { x, y, depth: depth.abs() }
         }),
         1 => (0.2..5.0f64).prop_map(|factor| DocOp::Rescale { factor }),
+        1 => (any::<usize>(), arb_offset(), arb_axis(), 0.0..std::f64::consts::TAU).prop_map(
+            |(comp_sel, origin, axis, angle)| DocOp::RebaseDefinition { comp_sel, origin, axis, angle }
+        ),
+        1 => (any::<usize>(), 0u8..3).prop_map(|(inst_sel, axis)| DocOp::FlipInstance { inst_sel, axis }),
         1 => (arb_offset(), arb_offset(), 0.0..std::f64::consts::TAU).prop_map(
             |(origin, axis, angle)| DocOp::SetAxes { origin, axis, angle }
         ),
@@ -899,19 +1183,115 @@ fn arb_doc_op() -> impl Strategy<Value = DocOp> {
         1 => (any::<usize>(), any::<usize>(), any::<usize>()).prop_map(
             |(obj_sel, face_sel, frame_sel)| DocOp::SetFaceUvFrame { obj_sel, face_sel, frame_sel }
         ),
+        2 => (any::<usize>(), any::<usize>(), proptest::bool::ANY, any::<usize>()).prop_map(
+            |(obj_sel, elem_sel, edge, op_sel)| DocOp::ElementAttr { obj_sel, elem_sel, edge, op_sel }
+        ),
         1 => (any::<usize>(), "[A-Za-z]{1,8}").prop_map(|(mat_sel, name)| {
             DocOp::RenameMaterial { mat_sel, name }
         }),
         1 => any::<usize>().prop_map(|mat_sel| DocOp::DeleteMaterial { mat_sel }),
         1 => any::<usize>().prop_map(|comp_sel| DocOp::DeleteDefinition { comp_sel }),
         1 => Just(DocOp::PurgeUnused),
+        3 => (any::<usize>(), proptest::bool::ANY)
+            .prop_map(|(node_sel, locked)| DocOp::Lock { node_sel, locked }),
+        1 => Just(DocOp::UnlockAll),
+        1 => (any::<usize>(), any::<usize>())
+            .prop_map(|(set_sel, obj_sel)| DocOp::JoinLinked { set_sel, obj_sel }),
         1 => (any::<usize>(), any::<usize>(), proptest::bool::ANY).prop_map(
             |(node_sel, group_sel, to_top)| DocOp::Reparent { node_sel, group_sel, to_top }
         ),
         14 => arb_sketch_edit(),
         2 => Just(DocOp::Undo),
         1 => Just(DocOp::Redo),
+        1 => Just(DocOp::BeginCompound),
+        1 => Just(DocOp::EndCompound),
+        1 => Just(DocOp::AbortCompound),
+        2 => (0..3u8, 0..2u8, -50..50i64)
+            .prop_map(|(key, origin, value)| DocOp::CoalescedAttr { key, origin, value }),
     ]
+}
+
+/// The compound and coalescing ops, applied in `run_doc_case` (they need
+/// the stack of open compounds). `Ok(true)` when `op` was one of them.
+fn apply_compound_op(
+    doc: &mut Document,
+    step: usize,
+    op: &DocOp,
+    open: &mut Vec<(kernel::CompoundToken, usize, bool)>,
+) -> Result<bool, TestCaseError> {
+    let meta = |label: &str, origin: u8, coalesce: Option<String>| kernel::CompoundMeta {
+        label: label.to_string(),
+        origin: kernel::HistoryOrigin::Connection(format!("plugin:fuzz.p{origin}")),
+        coalesce,
+    };
+    match op {
+        DocOp::BeginCompound => {
+            let depth = doc.undo_depth();
+            open.push((doc.begin_compound(meta("compound", 0, None)), depth, false));
+        }
+        DocOp::EndCompound => {
+            if let Some((token, depth, wrote)) = open.pop() {
+                match doc.end_compound(token) {
+                    // Everything the compound held is one entry on top of
+                    // the history it began on: nothing leaked below it
+                    // (a coalesced commit, say).
+                    Ok(outcome) => {
+                        prop_assert_eq!(
+                            doc.undo_depth(),
+                            depth + usize::from(outcome.committed),
+                            "step {}: a compound's work is one entry above its start",
+                            step
+                        );
+                        prop_assert!(
+                            !wrote || outcome.committed,
+                            "step {}: a coalesced commit inside escaped the compound",
+                            step
+                        );
+                        if outcome.committed
+                            && let Some(outer) = open.last_mut()
+                        {
+                            outer.2 = true;
+                        }
+                    }
+                    // An undo inside disturbs the compound: refused and
+                    // restored, which is the contract.
+                    Err(kernel::DocumentError::TransactionHistoryDisturbed) => {}
+                    Err(e) => {
+                        return Err(TestCaseError::fail(format!(
+                            "step {step}: end_compound failed: {e}"
+                        )));
+                    }
+                }
+            }
+        }
+        DocOp::AbortCompound => {
+            if let Some((token, _, _)) = open.pop() {
+                let before = doc.document_epoch();
+                doc.abort_compound(token).map_err(|e| {
+                    TestCaseError::fail(format!("step {step}: abort_compound failed: {e}"))
+                })?;
+                prop_assert!(doc.document_epoch() > before, "abort moves the epoch");
+            }
+        }
+        DocOp::CoalescedAttr { key, origin, value } => {
+            let txn = doc.begin_transaction();
+            doc.attr_set(
+                kernel::AttrTarget::Document,
+                "org.fuzz",
+                "k",
+                kernel::AttrValue::Int(*value),
+            )
+            .map_err(|e| TestCaseError::fail(format!("step {step}: attr_set failed: {e}")))?;
+            let coalesce = (*key < 2).then(|| format!("k{key}"));
+            doc.commit_transaction(txn, meta("edit", *origin, coalesce))
+                .map_err(|e| TestCaseError::fail(format!("step {step}: commit failed: {e}")))?;
+            if let Some(top) = open.last_mut() {
+                top.2 = true;
+            }
+        }
+        _ => return Ok(false),
+    }
+    Ok(true)
 }
 
 /// Fixed 3-material palette, seeded once. `add_material` is deliberately
@@ -1176,6 +1556,16 @@ fn check_doc(doc: &Document, step: usize, what: &str) -> Result<(), TestCaseErro
             obj.watertight(),
             kernel::WatertightState::Watertight,
             "step {} ({}): object {:?} opened up",
+            step,
+            what,
+            oid
+        );
+        // The validator ignores shell orientation, so a baked reflection
+        // that failed to turn its faces over would pass every check above;
+        // a right-side-out closed shell has positive signed volume.
+        prop_assert!(
+            obj.signed_volume() > 0.0,
+            "step {} ({}): object {:?} is inside out",
             step,
             what,
             oid
@@ -1543,15 +1933,554 @@ fn free_sketch_ids(doc: &Document) -> Vec<kernel::SketchId> {
 /// sketch lying on the z = 0 plane facing +z, or a fresh one.
 fn ground_sketch(doc: &mut Document) -> kernel::SketchId {
     let found = free_sketch_ids(doc).into_iter().find(|&sid| {
-        let plane = doc.sketch(sid).expect("live id").plane();
+        let sk = doc.sketch(sid).expect("live id");
+        let plane = sk.plane();
         let n = plane.normal();
-        n.x == 0.0 && n.y == 0.0 && n.z == 1.0 && plane.point().z == 0.0
+        // A detached shape is no ground drawing: it joins nothing.
+        !sk.detached() && n.x == 0.0 && n.y == 0.0 && n.z == 1.0 && plane.point().z == 0.0
     });
     found.unwrap_or_else(|| {
         let plane = Plane::from_point_normal(Point3::new(0.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 1.0))
             .expect("unit normal");
         doc.add_sketch(plane)
     })
+}
+
+/// The live world detached sketches ([`DocOp::EditDetached`] and
+/// [`DocOp::ExtrudeDetached`] pick from these), in id order.
+fn detached_sketch_ids(doc: &Document) -> Vec<kernel::SketchId> {
+    let mut ids: Vec<kernel::SketchId> = doc
+        .sketch_ids()
+        .into_iter()
+        .filter(|&s| doc.sketch(s).expect("live id").detached())
+        .collect();
+    ids.sort_unstable();
+    ids
+}
+
+/// Every live world detached sketch as it stands.
+fn detached_snapshot(doc: &Document) -> Vec<(kernel::SketchId, kernel::Sketch)> {
+    detached_sketch_ids(doc)
+        .into_iter()
+        .map(|s| (s, doc.sketch(s).expect("live id").clone()))
+        .collect()
+}
+
+/// The sketch `op` itself edits, resolved against `doc` BEFORE it applies:
+/// the free-sketch ops' and the detached ops' picks. Any other detached
+/// sketch must come through the op unchanged.
+fn op_target_sketch(doc: &Document, op: &DocOp) -> Option<kernel::SketchId> {
+    match *op {
+        DocOp::MoveIsland { sk_sel, .. }
+        | DocOp::MoveIslands { sk_sel, .. }
+        | DocOp::RemoveSketchEdge { sk_sel, .. }
+        | DocOp::MoveSketchVertex { sk_sel, .. }
+        | DocOp::OffsetRegion { sk_sel, .. }
+        | DocOp::RefacetCurve { sk_sel, .. } => nth(&free_sketch_ids(doc), sk_sel),
+        DocOp::EditDetached { sk_sel, .. } | DocOp::ExtrudeDetached { sk_sel, .. } => {
+            nth(&detached_sketch_ids(doc), sk_sel)
+        }
+        _ => None,
+    }
+}
+
+/// A detached draw's or edit's own gesture, recorded by the op as it
+/// applies, from the state before the step (wireframe faces §16 R34): the
+/// plane and the gesture's own vertices (never read back from the sketch
+/// after the op, or a wrongly taken line would prove its own linkage).
+#[derive(Debug, Clone)]
+struct Gesture {
+    plane: Plane,
+    verts: Vec<Point3>,
+    /// The segments the gesture drew (or moved to).
+    segs: Vec<Seg>,
+    /// The sketches the step's report names: those it wrote on its plane
+    /// and those the close pass closed a face in.
+    made: Vec<kernel::SketchId>,
+}
+
+thread_local! {
+    static GESTURE: std::cell::RefCell<Option<Gesture>> = const { std::cell::RefCell::new(None) };
+}
+
+fn record_gesture(plane: Plane, verts: Vec<Point3>, segs: Vec<Seg>, report: &kernel::DraftReport) {
+    let mut made = report.sketches.clone();
+    made.extend(report.faces_closed.iter().copied());
+    GESTURE.with(|g| {
+        *g.borrow_mut() = Some(Gesture {
+            plane,
+            verts,
+            segs,
+            made,
+        })
+    });
+}
+
+fn take_gesture() -> Option<Gesture> {
+    GESTURE.with(|g| g.borrow_mut().take())
+}
+
+/// Detached shapes §3.8 and wireframe faces §16 R34: no live detached
+/// sketch is object-owned (I9), and every detached sketch of `before` other
+/// than the one `op` itself edits (`target`) comes through the op as the
+/// rules allow. After a detached draw or edit whose gesture was recorded
+/// (`gesture`), [`check_detached_take`] (R34); after any other op, a live
+/// one is `==` (plane, flag, drawing, handles): no plane arrangement ever
+/// reached it. Undo, redo, and a whole-document rescale legitimately change
+/// every sketch and are not checked.
+fn check_detached_untouched(
+    doc: &Document,
+    step: usize,
+    op: &DocOp,
+    before: &[(kernel::SketchId, kernel::Sketch)],
+    target: Option<kernel::SketchId>,
+    gesture: Option<&Gesture>,
+) -> Result<(), TestCaseError> {
+    for s in detached_sketch_ids(doc) {
+        prop_assert!(
+            doc.sketch_owner_object(s).is_none(),
+            "step {}: detached sketch {:?} is object-owned (I9)",
+            step,
+            s
+        );
+    }
+    if matches!(op, DocOp::Undo | DocOp::Redo | DocOp::Rescale { .. }) {
+        return Ok(());
+    }
+    if let Some(g) = gesture
+        && matches!(
+            op,
+            DocOp::DrawDetached { .. } | DocOp::FrozenFaceDraft { .. } | DocOp::EditDetached { .. }
+        )
+    {
+        return check_detached_take(doc, step, op, before, target, g);
+    }
+    for (s, sk) in before {
+        if Some(*s) == target {
+            continue;
+        }
+        if let Some(now) = doc.sketch(*s) {
+            prop_assert!(
+                now == sk,
+                "step {} ({:?}): detached sketch {:?} changed",
+                step,
+                op,
+                s
+            );
+        }
+    }
+    Ok(())
+}
+
+type Seg = (Point3, Point3);
+
+/// Whether `c–d` lies along `a–b` (both ends within `POINT_MERGE` of it), as
+/// `draft.rs`'s `along`.
+fn seg_along(c: Point3, d: Point3, a: Point3, b: Point3) -> bool {
+    let near = |p: Point3| {
+        let ab = b - a;
+        let len2 = ab.length_squared();
+        if len2 <= 0.0 {
+            return p.approx_eq(a, kernel::tol::POINT_MERGE);
+        }
+        let t = ((p - a).dot(ab) / len2).clamp(0.0, 1.0);
+        (a + ab * t - p).length() <= kernel::tol::POINT_MERGE
+    };
+    near(c) && near(d)
+}
+
+/// The parts of `a–b` that no segment of `cover` lying along its line
+/// covers, as parameter intervals mapped back to points; parts no longer
+/// than `POINT_MERGE` are none.
+fn gaps(a: Point3, b: Point3, cover: &[Seg]) -> Vec<Seg> {
+    let ab = b - a;
+    let len2 = ab.length_squared();
+    if len2 <= 0.0 {
+        return Vec::new();
+    }
+    let len = len2.sqrt();
+    let m = kernel::tol::POINT_MERGE;
+    let on_line = |p: Point3| ab.cross(p - a).length() / len <= m;
+    let mut spans: Vec<(f64, f64)> = cover
+        .iter()
+        .filter(|&&(c, d)| on_line(c) && on_line(d))
+        .map(|&(c, d)| {
+            let (tc, td) = ((c - a).dot(ab) / len2, (d - a).dot(ab) / len2);
+            (tc.min(td), tc.max(td))
+        })
+        .collect();
+    spans.sort_by(|x, y| x.0.total_cmp(&y.0));
+    let eps = m / len;
+    let mut out = Vec::new();
+    let mut at = 0.0f64;
+    for (lo, hi) in spans {
+        if lo > at + eps && at < 1.0 {
+            out.push((at, lo.min(1.0)));
+        }
+        at = at.max(hi);
+    }
+    if at < 1.0 - eps {
+        out.push((at, 1.0));
+    }
+    out.into_iter()
+        .filter(|&(t0, t1)| (t1 - t0) * len > m)
+        .map(|(t0, t1)| (a + ab * t0, a + ab * t1))
+        .collect()
+}
+
+/// `sk`'s edges as position pairs, with the analytic circle of the chain
+/// each lies on.
+fn edges_of(sk: &kernel::Sketch) -> Vec<(Seg, Option<kernel::CurveAnalytic>)> {
+    let pos = |v| sk.vertices()[v].position;
+    sk.edges()
+        .values()
+        .map(|e| {
+            (
+                (pos(e.from), pos(e.to)),
+                e.curve.and_then(|c| sk.curve_analytic(c)),
+            )
+        })
+        .collect()
+}
+
+/// Every region's ring segments (outer and holes) of `sk`.
+fn ring_segments(sk: &kernel::Sketch) -> Vec<Seg> {
+    let pos = |v| sk.vertices()[v].position;
+    let mut out = Vec::new();
+    for r in sk.regions().values() {
+        for ring in std::iter::once(&r.outer).chain(r.holes.iter()) {
+            for i in 0..ring.len() {
+                out.push((pos(ring[i]), pos(ring[(i + 1) % ring.len()])));
+            }
+        }
+    }
+    out
+}
+
+/// Region `r` of `sk` by ring geometry: each ring's points sorted, the
+/// outer ring first, then the holes sorted.
+fn region_key(sk: &kernel::Sketch, r: &kernel::SketchRegion) -> Vec<Vec<Point3>> {
+    let pos = |v| sk.vertices()[v].position;
+    let key = |ring: &[kernel::SketchVertexId]| {
+        let mut pts: Vec<Point3> = ring.iter().map(|&v| pos(v)).collect();
+        pts.sort_by(|p, q| {
+            p.x.total_cmp(&q.x)
+                .then(p.y.total_cmp(&q.y))
+                .then(p.z.total_cmp(&q.z))
+        });
+        pts
+    };
+    let mut holes: Vec<Vec<Point3>> = r.holes.iter().map(|h| key(h)).collect();
+    holes.sort_by(|p, q| {
+        p.first()
+            .map(|a| (a.x, a.y, a.z))
+            .partial_cmp(&q.first().map(|a| (a.x, a.y, a.z)))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    std::iter::once(key(&r.outer)).chain(holes).collect()
+}
+
+/// `sk`'s faced regions by ring geometry ([`region_key`]).
+fn faced_rings(sk: &kernel::Sketch) -> Vec<Vec<Vec<Point3>>> {
+    sk.regions()
+        .values()
+        .filter(|r| !r.faceless)
+        .map(|r| region_key(sk, r))
+        .collect()
+}
+
+fn same_region(a: &[Vec<Point3>], b: &[Vec<Point3>]) -> bool {
+    a.len() == b.len()
+        && a.iter().zip(b).all(|(x, y)| {
+            x.len() == y.len()
+                && x.iter()
+                    .zip(y)
+                    .all(|(p, q)| p.approx_eq(*q, kernel::tol::POINT_MERGE))
+        })
+}
+
+/// Wireframe faces §16 R34, after a detached draw or edit: with G the
+/// step's sketches (the target, and the sketches the step's report names:
+/// the drawn one, and those the close pass closed a face in),
+/// P the gesture's plane and V its own vertices (`gesture`, from the state
+/// before the step), S the detached sketches of `before` whose edges lying
+/// in P the closure from V through shared ends reaches, and F the faced
+/// regions G holds after the step that it did not hold before (by ring
+/// geometry), every other detached sketch D of `before`:
+/// 1. not in S: live and `==`;
+/// 2. in S, live: same plane and flag, the same faced regions (by ring
+///    geometry), every edge lying along one edge it held before with that
+///    edge's curve kind and circle, and no new edge;
+/// 3. every part it lost lay on an old edge of D bounding no region of D,
+///    lies along edges of regions in F, and lay in P;
+/// 4. every part of an edge of a region in F that the gesture did not draw
+///    itself, lying along a loose old edge of a sketch in S, is no longer
+///    held there (a take that copied and left the line is no take; a side
+///    the gesture drew over another sketch's line is a deliberate copy,
+///    R24, R32);
+/// 5. missing: in S, held no faced region, and every old edge was lost as
+///    (3) allows;
+///
+/// and every segment the gesture drew lies along an edge of G, of a face in
+/// F, or of a sketch of S: its drawing is never silently lost.
+fn check_detached_take(
+    doc: &Document,
+    step: usize,
+    op: &DocOp,
+    before: &[(kernel::SketchId, kernel::Sketch)],
+    target: Option<kernel::SketchId>,
+    g: &Gesture,
+) -> Result<(), TestCaseError> {
+    let m = kernel::tol::POINT_MERGE;
+    let in_p = |q: Point3| g.plane.signed_distance(q).abs() <= kernel::tol::PLANE_DIST;
+    // ---- S: the connected set over the before snapshot ----
+    let in_plane: Vec<(kernel::SketchId, Seg)> = before
+        .iter()
+        .flat_map(|(s, sk)| {
+            edges_of(sk)
+                .into_iter()
+                .map(move |(e, _)| (*s, e))
+                .filter(|&(_, (a, b))| in_p(a) && in_p(b))
+        })
+        .collect();
+    let mut shape: Vec<Point3> = g.verts.clone();
+    let at = |shape: &[Point3], p: Point3| shape.iter().any(|&q| q.approx_eq(p, m));
+    let mut reached = vec![false; in_plane.len()];
+    loop {
+        let mut grew = false;
+        for (k, &(_, (a, b))) in in_plane.iter().enumerate() {
+            if reached[k] || !(at(&shape, a) || at(&shape, b)) {
+                continue;
+            }
+            reached[k] = true;
+            grew = true;
+            for p in [a, b] {
+                if !at(&shape, p) {
+                    shape.push(p);
+                }
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+    let in_s: std::collections::BTreeSet<kernel::SketchId> = in_plane
+        .iter()
+        .zip(&reached)
+        .filter(|&(_, &r)| r)
+        .map(|(&(s, _), _)| s)
+        .collect();
+    // ---- G and F ----
+    let mut g_ids: Vec<kernel::SketchId> = g.made.clone();
+    g_ids.extend(target);
+    g_ids.sort_unstable();
+    g_ids.dedup();
+    let target_before: Vec<Vec<Vec<Point3>>> = target
+        .and_then(|t| before.iter().find(|(s, _)| *s == t))
+        .map(|(_, sk)| faced_rings(sk))
+        .unwrap_or_default();
+    let mut f_segs: Vec<Seg> = Vec::new();
+    for &s in &g_ids {
+        let Some(sk) = doc.sketch(s) else { continue };
+        let pos = |v| sk.vertices()[v].position;
+        for r in sk.regions().values().filter(|r| !r.faceless) {
+            let key = region_key(sk, r);
+            if Some(s) == target && target_before.iter().any(|t| same_region(t, &key)) {
+                continue;
+            }
+            for ring in std::iter::once(&r.outer).chain(r.holes.iter()) {
+                for i in 0..ring.len() {
+                    f_segs.push((pos(ring[i]), pos(ring[(i + 1) % ring.len()])));
+                }
+            }
+        }
+    }
+    let by_f = |(a, b): Seg| in_p(a) && in_p(b) && gaps(a, b, &f_segs).is_empty();
+    // ---- each other detached sketch of before ----
+    for (d, old) in before {
+        if Some(*d) == target {
+            continue;
+        }
+        let now = doc.sketch(*d);
+        if !in_s.contains(d) {
+            prop_assert!(
+                now == Some(old),
+                "step {} ({:?}): detached sketch {:?} the gesture does not reach changed (R34 1)",
+                step,
+                op,
+                d
+            );
+            continue;
+        }
+        let old_edges = edges_of(old);
+        let old_rings = ring_segments(old);
+        let loose = |(a, b): Seg| {
+            !old_rings.iter().any(|&(c, e)| {
+                (a.approx_eq(c, m) && b.approx_eq(e, m)) || (a.approx_eq(e, m) && b.approx_eq(c, m))
+            })
+        };
+        let Some(now) = now else {
+            prop_assert!(
+                faced_rings(old).is_empty(),
+                "step {} ({:?}): faced detached sketch {:?} disappeared (R34 5)",
+                step,
+                op,
+                d
+            );
+            for &((a, b), _) in &old_edges {
+                prop_assert!(
+                    loose((a, b)) && by_f((a, b)),
+                    "step {} ({:?}): sketch {:?} lost {:?} not into a new face (R34 5)",
+                    step,
+                    op,
+                    d,
+                    (a, b)
+                );
+            }
+            continue;
+        };
+        prop_assert!(
+            now.plane() == old.plane() && now.detached() == old.detached(),
+            "step {}: sketch {:?} changed plane or kind (R34 2)",
+            step,
+            d
+        );
+        let (fo, fn_) = (faced_rings(old), faced_rings(now));
+        prop_assert!(
+            fo.len() == fn_.len() && fo.iter().all(|r| fn_.iter().any(|x| same_region(r, x))),
+            "step {} ({:?}): sketch {:?} faced regions changed (R34 2)",
+            step,
+            op,
+            d
+        );
+        let new_edges = edges_of(now);
+        for &((a, b), curve) in &new_edges {
+            let home = old_edges.iter().find(|&&((c, e), _)| seg_along(a, b, c, e));
+            prop_assert!(
+                home.is_some(),
+                "step {} ({:?}): sketch {:?} holds a new edge {:?} (R34 2)",
+                step,
+                op,
+                d,
+                (a, b)
+            );
+            if let Some(&(_, Some(was))) = home {
+                prop_assert!(
+                    curve.is_some_and(|c| c.kind == was.kind
+                        && c.geom.center.approx_eq(was.geom.center, m)
+                        && (c.geom.radius - was.geom.radius).abs() <= m),
+                    "step {} ({:?}): sketch {:?} edge {:?} lost its curve (R34 2, R30)",
+                    step,
+                    op,
+                    d,
+                    (a, b)
+                );
+            }
+        }
+        let now_segs: Vec<Seg> = new_edges.iter().map(|&(e, _)| e).collect();
+        for &((a, b), _) in &old_edges {
+            for part in gaps(a, b, &now_segs) {
+                prop_assert!(
+                    loose((a, b)) && by_f(part),
+                    "step {} ({:?}): sketch {:?} lost {:?} of {:?} not as a take into a new face (R34 3)",
+                    step,
+                    op,
+                    d,
+                    part,
+                    (a, b)
+                );
+            }
+        }
+    }
+    // ---- the gesture's own drawing is kept ----
+    // Every segment the gesture drew lies along an edge of the step's
+    // sketches, of a face it made, or of a sketch of the connected set it
+    // reached (drawing over a reached line adds nothing): a drawn edge is
+    // never silently lost.
+    let mut kept: Vec<Seg> = f_segs.clone();
+    for &s in &g_ids {
+        if let Some(sk) = doc.sketch(s) {
+            kept.extend(edges_of(sk).into_iter().map(|(e, _)| e));
+        }
+    }
+    for (d, _) in before {
+        if in_s.contains(d)
+            && let Some(sk) = doc.sketch(*d)
+        {
+            kept.extend(edges_of(sk).into_iter().map(|(e, _)| e));
+        }
+    }
+    for &(a, b) in &g.segs {
+        if a.approx_eq(b, m) {
+            continue;
+        }
+        let lost = gaps(a, b, &kept);
+        prop_assert!(
+            lost.is_empty(),
+            "step {} ({:?}): the gesture's segment {:?} lost {:?} (R34)",
+            step,
+            op,
+            (a, b),
+            lost
+        );
+    }
+    // ---- (4) the converse: a taken face edge along a loose linked line left home ----
+    for (d, old) in before {
+        if Some(*d) == target || !in_s.contains(d) {
+            continue;
+        }
+        let Some(now) = doc.sketch(*d) else { continue };
+        let old_rings = ring_segments(old);
+        let now_segs: Vec<Seg> = edges_of(now).into_iter().map(|(e, _)| e).collect();
+        for &((c, e), _) in &edges_of(old) {
+            let is_loose = !old_rings.iter().any(|&(x, y)| {
+                (c.approx_eq(x, m) && e.approx_eq(y, m)) || (c.approx_eq(y, m) && e.approx_eq(x, m))
+            });
+            if !is_loose {
+                continue;
+            }
+            // Only the parts of a face edge the gesture did not draw itself:
+            // a drawn side laid over another sketch's line is a deliberate
+            // copy (detached sketches on one plane never arrange together,
+            // §16 R6; side-sharing shapes each keep their side, R24, R32),
+            // while a take moves the lines the draft gathered.
+            let materialized: Vec<Seg> = f_segs
+                .iter()
+                .filter(|&&(a, b)| seg_along(a, b, c, e))
+                .flat_map(|&(a, b)| gaps(a, b, &g.segs))
+                .collect();
+            for (a, b) in materialized {
+                // No positive-length part of a–b is still held by D.
+                let still: Vec<Seg> = now_segs
+                    .iter()
+                    .copied()
+                    .filter(|&(p, q)| seg_along(p, q, c, e))
+                    .collect();
+                let uncovered = gaps(a, b, &still);
+                let left: f64 = uncovered.iter().map(|&(p, q)| (q - p).length()).sum();
+                prop_assert!(
+                    ((b - a).length() - left).abs() <= 2.0 * m,
+                    "step {} ({:?}): face edge {:?} along loose line of {:?} was copied, not taken (R34 4)",
+                    step,
+                    op,
+                    (a, b),
+                    d
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// An in-plane basis of `n`.
+fn plane_basis_of(n: Vec3) -> (Vec3, Vec3) {
+    let helper = if n.x.abs() < 0.9 {
+        Vec3::new(1.0, 0.0, 0.0)
+    } else {
+        Vec3::new(0.0, 1.0, 0.0)
+    };
+    let u = n.cross(helper).normalized().expect("non-parallel helper");
+    (u, n.cross(u))
 }
 
 fn lattice_translation(dx: i32, dy: i32) -> Transform {
@@ -1686,7 +2615,7 @@ fn interior_triangle(
     if r.is_nan() || r <= 0.02 {
         return None;
     }
-    let corner = |ang: f64| c + u * (r * ang.cos()) + v * (r * ang.sin());
+    let corner = |ang: f64| c + u * (r * trig::cos(ang)) + v * (r * trig::sin(ang));
     let tri = [
         corner(turn),
         corner(turn + 2.094_395_1),
@@ -1701,6 +2630,49 @@ fn nth<T: Copy>(items: &[T], sel: usize) -> Option<T> {
     } else {
         Some(items[sel % items.len()])
     }
+}
+
+/// Whether a member anywhere in `def`'s own subtree (through member
+/// groups) is frozen: a rebase re-expresses each one (OW-1).
+fn def_subtree_frozen(doc: &Document, def: kernel::ComponentId) -> bool {
+    let mut stack = doc.def_member_nodes(def).unwrap_or_default();
+    while let Some(n) = stack.pop() {
+        if let NodeId::Group(g) = n {
+            stack.extend(doc.group_members(g).unwrap_or_default());
+        } else if doc.node_frozen(n).is_some() {
+            return true;
+        }
+    }
+    false
+}
+
+/// Whether a whole-document rescale must refuse for a lock (OW-1): a live
+/// Object or group (definition members included) carries one, or a
+/// definition with something to edit (a placement or a member) does.
+fn anything_locked(doc: &Document) -> bool {
+    if doc
+        .live_object_ids()
+        .into_iter()
+        .any(|o| doc.node_locked(NodeId::Object(o)))
+    {
+        return true;
+    }
+    let mut groups: Vec<NodeId> = doc.group_ids().into_iter().map(NodeId::Group).collect();
+    for c in doc.component_ids() {
+        if doc.component_locked(c) && doc.def_frozen(c).is_some() {
+            return true;
+        }
+        groups.extend(doc.def_member_nodes(c).unwrap_or_default());
+    }
+    while let Some(n) = groups.pop() {
+        if let NodeId::Group(g) = n {
+            if doc.node_locked(n) {
+                return true;
+            }
+            groups.extend(doc.group_members(g).unwrap_or_default());
+        }
+    }
+    false
 }
 
 /// Builds a glyph-like ring+counter sketch (an outer square with a smaller
@@ -1790,6 +2762,248 @@ fn fixed_segments(doc: &Document, objs: &[ObjectId], plane: &Plane) -> Vec<(Poin
     out
 }
 
+/// The plane a [`DocOp::Draft`] (or [`DocOp::DrawDetached`]) draws on and
+/// its lattice frame (origin, first axis): the `face_sel`-th face of the
+/// `obj_sel`-th visible object, anchored at its first outer vertex along
+/// its first edge; or the ground, when `ground` or nothing is visible.
+/// `None` when the face's first edge has no direction.
+fn draft_lattice(
+    doc: &Document,
+    obj_sel: usize,
+    face_sel: usize,
+    ground: bool,
+) -> Option<(Plane, Point3, Vec3)> {
+    let visible = doc.visible_object_ids();
+    match nth(&visible, obj_sel).filter(|_| !ground) {
+        None => Some((
+            Plane::from_point_normal(Point3::new(0.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 1.0))
+                .expect("unit normal"),
+            Point3::new(0.0, 0.0, 0.0),
+            Vec3::new(1.0, 0.0, 0.0),
+        )),
+        Some(oid) => {
+            let obj = doc.object(oid).expect("visible");
+            let f = obj.faces().keys().nth(face_sel % obj.faces().len())?;
+            let ring: Vec<Point3> = obj.loop_positions(obj.faces()[f].outer_loop).collect();
+            let plane = obj.faces()[f].plane;
+            let u = (ring[1] - ring[0]).normalized().ok()?;
+            Some((plane, ring[0], u))
+        }
+    }
+}
+
+/// One [`DocOp::DrawDetached`]: a new detached shape, one undo step.
+#[allow(clippy::too_many_arguments)]
+fn apply_draw_detached(
+    doc: &mut Document,
+    step: usize,
+    obj_sel: usize,
+    face_sel: usize,
+    ground: bool,
+    circle: bool,
+    a: (i32, i32),
+    b: (i32, i32),
+    segments: usize,
+) -> Result<(), TestCaseError> {
+    let Some((plane, origin, u)) = draft_lattice(doc, obj_sel, face_sel, ground) else {
+        return Ok(());
+    };
+    let v = plane.normal().cross(u);
+    let at = |x: i32, y: i32| origin + u * (f64::from(x) * 0.5) + v * (f64::from(y) * 0.5);
+    let depth0 = doc.undo_depth();
+    let mut drawn: Vec<Point3> = Vec::new();
+    let mut segs: Vec<Seg> = Vec::new();
+    let result = doc.draft_detached_new(plane, None, "Fuzz detached", |sk| {
+        if circle {
+            let center = at(a.0, a.1);
+            let radius = f64::from(b.0) * 0.5;
+            let ring: Vec<Point3> = (0..segments)
+                .map(|i| {
+                    let t = std::f64::consts::TAU * i as f64 / segments as f64;
+                    center + u * (radius * trig::cos(t)) + v * (radius * trig::sin(t))
+                })
+                .collect();
+            drawn.extend(ring.iter().copied());
+            segs.extend((0..segments).map(|i| (ring[i], ring[(i + 1) % segments])));
+            sk.begin_curve_with(kernel::CurveGeom { center, radius })?;
+            for i in 0..segments {
+                sk.add_segment(ring[i], ring[(i + 1) % segments])?;
+            }
+            sk.end_curve();
+        } else {
+            let (x1, y1) = (a.0 + b.0, a.1 + b.1);
+            let c = [at(a.0, a.1), at(x1, a.1), at(x1, y1), at(a.0, y1)];
+            drawn.extend(c);
+            segs.extend((0..4).map(|k| (c[k], c[(k + 1) % 4])));
+            for k in 0..4 {
+                sk.add_segment(c[k], c[(k + 1) % 4])?;
+            }
+        }
+        Ok(())
+    });
+    match result {
+        Ok((report, _)) => {
+            prop_assert_eq!(doc.undo_depth(), depth0 + 1, "step {}: one undo step", step);
+            prop_assert!(
+                report.objects.is_empty(),
+                "step {}: an object changed",
+                step
+            );
+            prop_assert_eq!(report.sketches.len(), 1, "step {}: one new sketch", step);
+            let s = report.sketches[0];
+            record_gesture(plane, drawn, segs, &report);
+            prop_assert!(
+                doc.sketch(s).is_some_and(|sk| sk.detached()),
+                "step {}: the new sketch is not detached",
+                step
+            );
+            Ok(())
+        }
+        Err(e) => Err(TestCaseError::fail(format!(
+            "step {step}: a detached shape was refused: {e:?} (plane {plane:?})"
+        ))),
+    }
+}
+
+/// One [`DocOp::EditDetached`]: an edit in the sketch's own context.
+fn apply_edit_detached(
+    doc: &mut Document,
+    step: usize,
+    sk_sel: usize,
+    mode: u8,
+    sel: usize,
+    d: (i32, i32),
+) -> Result<(), TestCaseError> {
+    let Some(s) = nth(&detached_sketch_ids(doc), sk_sel) else {
+        return Ok(());
+    };
+    let sk = doc.sketch(s).expect("live").clone();
+    let (u, v) = plane_basis_of(sk.plane().normal());
+    let by = u * (f64::from(d.0) * 0.5) + v * (f64::from(d.1) * 0.5);
+    let units = match doc.detached_sketch_units(s) {
+        Ok(units) => units,
+        Err(e) => {
+            return Err(TestCaseError::fail(format!(
+                "step {step}: a detached sketch has no listing: {e:?}"
+            )));
+        }
+    };
+    let depth0 = doc.undo_depth();
+    // The gesture's own vertices, from the state before the step (§16 R34):
+    // the sketch's vertices, and what the edit adds or moves them to.
+    let mut drawn: Vec<Point3> = sk.vertices().values().map(|x| x.position).collect();
+    let mut segs: Vec<Seg> = Vec::new();
+    let result = doc.draft_detached(s, "Fuzz detached edit", |w| {
+        match mode {
+            0 => {
+                if units.units.is_empty() || by.length() == 0.0 {
+                    return Ok(());
+                }
+                let unit = &units.units[sel % units.units.len()];
+                // A listed edge that another detached sketch's line from
+                // another plane crosses in the lift is there as the pieces
+                // that cover it end to end (`Document::draft_edges_for_keys`,
+                // how a draft names it): the listing gathers no such line,
+                // the draft's lift does.
+                let es: Vec<_> = unit
+                    .edges
+                    .iter()
+                    .flat_map(|e| {
+                        w.edge_at_positions(e.a, e.b).map_or_else(
+                            || pieces_covering(w, e.a, e.b).expect("a listed edge is in the lift"),
+                            |id| vec![id],
+                        )
+                    })
+                    .collect();
+                for e in &unit.edges {
+                    drawn.extend([e.a + by, e.b + by]);
+                    segs.push((e.a + by, e.b + by));
+                }
+                w.apply_transform_edges(&es, &Transform::translation(by))?;
+            }
+            1 => {
+                let es: Vec<_> = w.edges().keys().collect();
+                if let Some(e) = nth(&es, sel) {
+                    w.remove_edge(e)?;
+                }
+            }
+            _ => {
+                let vs: Vec<Point3> = w.vertices().values().map(|x| x.position).collect();
+                if let Some(p) = nth(&vs, sel)
+                    && by.length() > 0.0
+                {
+                    drawn.extend([p, p + by]);
+                    segs.push((p, p + by));
+                    w.add_segment(p, p + by)?;
+                }
+            }
+        }
+        Ok(())
+    });
+    match result {
+        Ok((report, _)) => {
+            let committed = doc.undo_depth();
+            prop_assert!(
+                committed == depth0 || committed == depth0 + 1,
+                "step {}: a detached edit recorded {} steps",
+                step,
+                committed.saturating_sub(depth0)
+            );
+            prop_assert!(
+                report.objects.is_empty(),
+                "step {}: an object changed",
+                step
+            );
+            prop_assert!(
+                report.sketches.iter().all(|&x| x == s),
+                "step {}: a detached edit wrote another sketch: {:?}",
+                step,
+                report.sketches
+            );
+            if let Some(now) = doc.sketch(s) {
+                prop_assert!(now.detached(), "step {}: the sketch lost its flag", step);
+            }
+            record_gesture(sk.plane(), drawn, segs, &report);
+            Ok(())
+        }
+        Err(e) => Err(TestCaseError::fail(format!(
+            "step {step}: a detached edit (mode {mode}) was refused: {e:?}"
+        ))),
+    }
+}
+
+/// The edges of `sk` lying along `a–b` (both ends within
+/// [`kernel::tol::POINT_MERGE`] of it), when they cover it end to end;
+/// `None` otherwise.
+fn pieces_covering(sk: &kernel::Sketch, a: Point3, b: Point3) -> Option<Vec<kernel::SketchEdgeId>> {
+    let m = kernel::tol::POINT_MERGE;
+    let ab = b - a;
+    let len = ab.length();
+    let near = |p: Point3| {
+        let t = ((p - a).dot(ab) / (len * len)).clamp(0.0, 1.0);
+        (a + ab * t - p).length() <= m
+    };
+    let mut spans: Vec<(f64, f64)> = Vec::new();
+    let mut ids = Vec::new();
+    for (id, e) in sk.edges().iter() {
+        let (p, q) = (sk.vertices()[e.from].position, sk.vertices()[e.to].position);
+        if near(p) && near(q) {
+            let (tp, tq) = ((p - a).dot(ab) / len, (q - a).dot(ab) / len);
+            spans.push((tp.min(tq), tp.max(tq)));
+            ids.push(id);
+        }
+    }
+    spans.sort_by(|x, y| x.0.total_cmp(&y.0));
+    let mut reach = 0.0;
+    for (lo, hi) in spans {
+        if lo > reach + m {
+            return None;
+        }
+        reach = f64::max(reach, hi);
+    }
+    (!ids.is_empty() && reach >= len - m).then_some(ids)
+}
+
 /// One [`DocOp::Draft`].
 #[allow(clippy::too_many_arguments)]
 fn apply_draft(
@@ -1805,30 +3019,14 @@ fn apply_draft(
     segments: usize,
 ) -> Result<(), TestCaseError> {
     let visible = doc.visible_object_ids();
-    // The plane and a lattice frame on it.
-    let (plane, origin, u) = match nth(&visible, obj_sel).filter(|_| !ground) {
-        None => (
-            Plane::from_point_normal(Point3::new(0.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 1.0))
-                .expect("unit normal"),
-            Point3::new(0.0, 0.0, 0.0),
-            Vec3::new(1.0, 0.0, 0.0),
-        ),
-        Some(oid) => {
-            let obj = doc.object(oid).expect("visible");
-            let Some(f) = obj.faces().keys().nth(face_sel % obj.faces().len()) else {
-                return Ok(());
-            };
-            let ring: Vec<Point3> = obj.loop_positions(obj.faces()[f].outer_loop).collect();
-            let plane = obj.faces()[f].plane;
-            let Ok(u) = (ring[1] - ring[0]).normalized() else {
-                return Ok(());
-            };
-            (plane, ring[0], u)
-        }
+    let Some((plane, origin, u)) = draft_lattice(doc, obj_sel, face_sel, ground) else {
+        return Ok(());
     };
     let n = plane.normal();
     let v = n.cross(u);
     let at = |x: i32, y: i32| origin + u * (f64::from(x) * 0.5) + v * (f64::from(y) * 0.5);
+    // A frozen object takes no part (OW-1, as `draft_participants` has
+    // it): drawing on its face is free drawing that does not cut it.
     let objs: Vec<ObjectId> = visible
         .iter()
         .copied()
@@ -1837,6 +3035,7 @@ fn apply_draft(
             obj.faces()
                 .keys()
                 .any(|f| fuzz_face_on_plane(obj, f, &plane))
+                && doc.node_frozen(NodeId::Object(o)).is_none()
         })
         .collect();
     let fixed = fixed_segments(doc, &objs, &plane);
@@ -1872,7 +3071,7 @@ fn apply_draft(
                 let ring: Vec<Point3> = (0..segments)
                     .map(|i| {
                         let t = std::f64::consts::TAU * i as f64 / segments as f64;
-                        center + u * (radius * t.cos()) + v * (radius * t.sin())
+                        center + u * (radius * trig::cos(t)) + v * (radius * trig::sin(t))
                     })
                     .collect();
                 sk.begin_curve_with(kernel::CurveGeom { center, radius })?;
@@ -1889,12 +3088,17 @@ fn apply_draft(
             }
             4 | 5 => {
                 let unit = unit.as_ref().expect("a unit was picked");
+                // A listed edge that another plane's line crosses in the
+                // lift is there as the pieces that cover it end to end
+                // (`Document::draft_edges_for_keys`, how a draft names it).
                 let es: Vec<_> = unit
                     .edges
                     .iter()
-                    .map(|e| {
-                        sk.edge_at_positions(e.a, e.b)
-                            .expect("a unit edge in the lift")
+                    .flat_map(|e| {
+                        sk.edge_at_positions(e.a, e.b).map_or_else(
+                            || pieces_covering(sk, e.a, e.b).expect("a unit edge in the lift"),
+                            |id| vec![id],
+                        )
                     })
                     .collect();
                 if shape == 4 {
@@ -2086,6 +3290,7 @@ fn apply_doc_op(
                     loop_path,
                     restore: None,
                     curves: Vec::new(),
+                    edge_attrs: Vec::new(),
                 },
             );
         }
@@ -2096,7 +3301,7 @@ fn apply_doc_op(
             ts,
             pull_in,
         } => {
-            let Some(oid) = nth(&doc.visible_object_ids(), *obj_sel) else {
+            let Some(oid) = nth(&editable_objects(doc), *obj_sel) else {
                 return Ok(true);
             };
             let obj = doc.object(oid).expect("visible id resolves");
@@ -2182,7 +3387,7 @@ fn apply_doc_op(
             frac,
             twin,
         } => {
-            let Some(oid) = nth(&doc.visible_object_ids(), *obj_sel) else {
+            let Some(oid) = nth(&editable_objects(doc), *obj_sel) else {
                 return Ok(true);
             };
             let obj = doc.object(oid).expect("visible id resolves");
@@ -2228,7 +3433,7 @@ fn apply_doc_op(
                 (0..24)
                     .map(|k| {
                         let ang = std::f64::consts::TAU * k as f64 / 24.0;
-                        c + start * (rad * ang.cos()) + side_dir * (rad * ang.sin())
+                        c + start * (rad * trig::cos(ang)) + side_dir * (rad * trig::sin(ang))
                     })
                     .collect()
             };
@@ -2311,7 +3516,7 @@ fn apply_doc_op(
             frac,
             merge_back,
         } => {
-            let Some(oid) = nth(&doc.visible_object_ids(), *obj_sel) else {
+            let Some(oid) = nth(&editable_objects(doc), *obj_sel) else {
                 return Ok(true);
             };
             let obj = doc.object(oid).expect("visible id resolves");
@@ -2345,6 +3550,7 @@ fn apply_doc_op(
                         loop_path,
                         restore: None,
                         curves: Vec::new(),
+                        edge_attrs: Vec::new(),
                     },
                 );
                 assert!(
@@ -2394,6 +3600,7 @@ fn apply_doc_op(
                     oid,
                     KernelOp::MergeFaces {
                         edge: r.new_edges[0],
+                        keep_vertices: Vec::new(),
                     },
                 );
                 assert!(
@@ -2433,7 +3640,7 @@ fn apply_doc_op(
                     .map(|i| {
                         let t = std::f64::consts::PI / 24.0
                             + std::f64::consts::TAU * f64::from(i) / 24.0;
-                        m + eu * (r * t.cos()) + ev * (r * t.sin())
+                        m + eu * (r * trig::cos(t)) + ev * (r * trig::sin(t))
                     })
                     .collect();
                 (
@@ -2543,7 +3750,13 @@ fn apply_doc_op(
                     })
                 })
                 .expect("the strip's line");
-            let merged = doc.apply_object_op(oid, KernelOp::MergeFaces { edge });
+            let merged = doc.apply_object_op(
+                oid,
+                KernelOp::MergeFaces {
+                    edge,
+                    keep_vertices: Vec::new(),
+                },
+            );
             assert!(
                 merged.is_ok(),
                 "step {step}: deleting the strip's line (two runs) was refused: {:?}",
@@ -2570,7 +3783,7 @@ fn apply_doc_op(
             circle,
             from_inside,
         } => {
-            let Some(oid) = nth(&doc.visible_object_ids(), *obj_sel) else {
+            let Some(oid) = nth(&editable_objects(doc), *obj_sel) else {
                 return Ok(true);
             };
             let obj = doc.object(oid).expect("visible id resolves");
@@ -2605,6 +3818,7 @@ fn apply_doc_op(
                         loop_path,
                         restore: None,
                         curves: Vec::new(),
+                        edge_attrs: Vec::new(),
                     },
                 );
                 assert!(
@@ -2642,7 +3856,7 @@ fn apply_doc_op(
                     .map(|i| {
                         let t = std::f64::consts::PI / 24.0
                             + std::f64::consts::TAU * f64::from(i) / 24.0;
-                        m + along * (r * t.cos()) + out * (r * t.sin())
+                        m + along * (r * trig::cos(t)) + out * (r * trig::sin(t))
                     })
                     .collect();
                 (
@@ -2703,7 +3917,9 @@ fn apply_doc_op(
             edge_sel,
             from_features,
         } => {
-            let Some(oid) = nth(&doc.visible_object_ids(), *obj_sel) else {
+            // The erase must succeed: an object no lock freezes, with the
+            // frozen ones on its plane left out of the draft (OW-1).
+            let Some(oid) = nth(&editable_objects(doc), *obj_sel) else {
                 return Ok(true);
             };
             if *from_features {
@@ -2713,6 +3929,7 @@ fn apply_doc_op(
                 for plane in doc.object_drawing_planes(oid) {
                     let objs = {
                         let mut v = doc.drawable_objects_on_plane(plane, None);
+                        v.retain(|&o| doc.node_frozen(NodeId::Object(o)).is_none());
                         if !v.contains(&oid) {
                             v.push(oid);
                         }
@@ -2776,7 +3993,13 @@ fn apply_doc_op(
             let Some(edge) = nth(&candidates, *edge_sel) else {
                 return Ok(true);
             };
-            let result = doc.apply_object_op(oid, KernelOp::MergeFaces { edge });
+            let result = doc.apply_object_op(
+                oid,
+                KernelOp::MergeFaces {
+                    edge,
+                    keep_vertices: Vec::new(),
+                },
+            );
             // Refusals (an imprint's whole outline, faces that would pinch)
             // are typed answers. A committed merge never pinches its face.
             if let Ok((kernel::KernelOpReport::FaceMerge(r), _)) = &result {
@@ -2822,7 +4045,14 @@ fn apply_doc_op(
                 return Ok(true);
             };
             let t = Transform::translation(Vec3::new(offset.0, offset.1, offset.2));
-            let _ = doc.duplicate_node(NodeId::Object(oid), &t);
+            let _ = doc.duplicate_node(NodeId::Object(oid), &t, kernel::LinkPolicy::Independent);
+        }
+        DocOp::DuplicateLinked { obj_sel, offset } => {
+            let Some(oid) = nth(&doc.visible_object_ids(), *obj_sel) else {
+                return Ok(true);
+            };
+            let t = Transform::translation(Vec3::new(offset.0, offset.1, offset.2));
+            let _ = doc.duplicate_node(NodeId::Object(oid), &t, kernel::LinkPolicy::Linked);
         }
         DocOp::OwnSketch {
             obj_sel,
@@ -2867,11 +4097,213 @@ fn apply_doc_op(
             let t = Transform::scale(Vec3::new(factors.0, factors.1, factors.2));
             let _ = doc.transform_object(oid, &t);
         }
+        DocOp::Reshape { obj_sel, scale } => {
+            let Some(oid) = nth(&doc.visible_object_ids(), *obj_sel) else {
+                return Ok(true);
+            };
+            let _ = doc.reshape_scale_for_test(oid, *scale);
+        }
+        DocOp::Blend {
+            obj_sel,
+            pick,
+            radius_frac,
+            logical,
+        } => {
+            let Some(oid) = nth(&doc.visible_object_ids(), *obj_sel) else {
+                return Ok(true);
+            };
+            let obj = doc.object(oid).expect("visible object");
+            let Some(edge) = nth(&obj.sharp_edges(), *pick) else {
+                return Ok(true);
+            };
+            let (a, b) = obj.edge_endpoints(edge).expect("live edge");
+            let shortest = obj
+                .edges()
+                .keys()
+                .filter_map(|e| obj.edge_endpoints(e))
+                .filter(|(p, q)| {
+                    [*p, *q]
+                        .iter()
+                        .any(|x| x.approx_eq(a, 1e-12) || x.approx_eq(b, 1e-12))
+                })
+                .map(|(p, q)| (q - p).length())
+                .fold(f64::INFINITY, f64::min);
+            let edges = if *logical {
+                obj.logical_edge(edge, true)
+            } else {
+                vec![edge]
+            };
+            let spec = kernel::BlendSpec {
+                edges,
+                profile: kernel::BlendProfile::Round {
+                    radius: radius_frac * 0.3 * shortest,
+                    segments: 4,
+                },
+                primary: None,
+                corners: kernel::CornerStyle::Default,
+                stops: None,
+                handles: Vec::new(),
+            };
+            // A typed refusal is fine; `BlendDegenerate` is the engine
+            // building a patch that did not stitch, and is a defect.
+            if let Err(e) = doc.blend_edges(oid, &spec) {
+                assert!(
+                    !matches!(e, DocumentError::Blend(kernel::BlendError::BlendDegenerate)),
+                    "step {step}: the blend built invalid topology: {e:?}"
+                );
+            }
+        }
+        DocOp::RemoveBlend { obj_sel, pick } => {
+            let Some(oid) = nth(&doc.visible_object_ids(), *obj_sel) else {
+                return Ok(true);
+            };
+            let Ok(feats) = doc.blend_features(oid) else {
+                return Ok(true);
+            };
+            let Some(f) = (!feats.is_empty()).then(|| feats[*pick % feats.len()].clone()) else {
+                return Ok(true);
+            };
+            let _ = doc.remove_blend(oid, f.id);
+        }
+        DocOp::ResizeBlend {
+            obj_sel,
+            pick,
+            factor,
+        } => {
+            let Some(oid) = nth(&doc.visible_object_ids(), *obj_sel) else {
+                return Ok(true);
+            };
+            let Ok(feats) = doc.blend_features(oid) else {
+                return Ok(true);
+            };
+            let Some(f) = (!feats.is_empty()).then(|| feats[*pick % feats.len()].clone()) else {
+                return Ok(true);
+            };
+            if let (Some(size), true) = (f.size, f.intact) {
+                let profile = match f.kind {
+                    kernel::BlendKind::Chamfer => kernel::BlendProfile::Chamfer {
+                        setback_a: size * factor,
+                        setback_b: size * factor,
+                    },
+                    _ => kernel::BlendProfile::Round {
+                        radius: size * factor,
+                        segments: 4,
+                    },
+                };
+                let _ = doc.resize_blend(oid, f.id, &profile);
+            }
+        }
+        DocOp::Deform {
+            obj_sel,
+            mode,
+            amount_frac,
+        } => {
+            let Some(oid) = nth(&doc.visible_object_ids(), *obj_sel) else {
+                return Ok(true);
+            };
+            let obj = doc.object(oid).expect("visible object");
+            let (mut lo, mut hi) = (
+                Vec3::new(f64::MAX, f64::MAX, f64::MAX),
+                Vec3::new(f64::MIN, f64::MIN, f64::MIN),
+            );
+            for v in obj.vertices().values() {
+                let p = v.position.to_vec();
+                lo = Vec3::new(lo.x.min(p.x), lo.y.min(p.y), lo.z.min(p.z));
+                hi = Vec3::new(hi.x.max(p.x), hi.y.max(p.y), hi.z.max(p.z));
+            }
+            let length = hi.z - lo.z;
+            if length <= 1e-6 {
+                return Ok(true);
+            }
+            let frame = kernel::deform::DeformFrame {
+                origin: Point3::new(0.5 * (lo.x + hi.x), 0.5 * (lo.y + hi.y), lo.z),
+                axis: Vec3::new(0.0, 0.0, 1.0),
+                u: Vec3::new(1.0, 0.0, 0.0),
+                length,
+            };
+            let spec = match mode {
+                0 => kernel::deform::DeformSpec::Twist {
+                    frame,
+                    angle: amount_frac * std::f64::consts::FRAC_PI_2,
+                    stations: None,
+                },
+                1 => kernel::deform::DeformSpec::Bend {
+                    frame,
+                    angle: amount_frac * std::f64::consts::FRAC_PI_3,
+                    stations: None,
+                },
+                _ => kernel::deform::DeformSpec::Taper {
+                    frame,
+                    ratio: 1.0 - amount_frac / 2.0,
+                    stations: None,
+                },
+            };
+            let _ = doc.deform(oid, &spec);
+        }
         DocOp::Delete { node_sel } => {
             let Some(node) = nth(&doc.top_level_nodes(), *node_sel) else {
                 return Ok(true);
             };
             let _ = doc.delete_node(node);
+        }
+        DocOp::Lock { node_sel, locked } => {
+            let Some(node) = nth(&lock_oracle::all_live_nodes(doc), *node_sel) else {
+                return Ok(true);
+            };
+            let before = doc.state_hash();
+            if doc.set_nodes_locked(&[node], *locked).is_err() {
+                prop_assert_eq!(
+                    doc.state_hash(),
+                    before,
+                    "a refused lock changed the document"
+                );
+            }
+        }
+        DocOp::UnlockAll => {
+            let _ = doc.unlock_all();
+        }
+        DocOp::JoinLinked { set_sel, obj_sel } => {
+            let sets: Vec<kernel::InstanceId> = doc
+                .instance_ids()
+                .into_iter()
+                .filter(|&i| doc.instance_def(i).is_some_and(|d| doc.is_linked_set(d)))
+                .collect();
+            let (Some(set), Some(joiner)) = (
+                nth(&sets, *set_sel),
+                nth(&doc.visible_object_ids(), *obj_sel),
+            ) else {
+                return Ok(true);
+            };
+            let min = |o: ObjectId| {
+                doc.object(o).map(|obj| {
+                    obj.vertices().values().fold(
+                        Point3::new(f64::MAX, f64::MAX, f64::MAX),
+                        |m, v| {
+                            Point3::new(
+                                m.x.min(v.position.x),
+                                m.y.min(v.position.y),
+                                m.z.min(v.position.z),
+                            )
+                        },
+                    )
+                })
+            };
+            let def = doc.instance_def(set).expect("live");
+            let member = doc.def_members(def).unwrap_or_default().first().copied();
+            let (Some(m), Some(w)) = (member.and_then(min), min(joiner)) else {
+                return Ok(true);
+            };
+            let before = doc.state_hash();
+            if doc
+                .join_linked(set, joiner, Transform::translation(w - m))
+                .is_err()
+            {
+                prop_assert_eq!(
+                    doc.state_hash(),
+                    before,
+                    "a refused join changed the document"
+                );
+            }
         }
         DocOp::Group { count } => {
             let nodes = doc.top_level_nodes();
@@ -3061,6 +4493,35 @@ fn apply_doc_op(
             let direction = Vec3::new(direction.0, direction.1, direction.2);
             let _ = doc.add_guide_line(origin, direction);
         }
+        DocOp::MoveGuide {
+            guide_sel,
+            axis,
+            angle,
+            offset,
+        } => {
+            let Some(gid) = nth(&doc.guide_ids(), *guide_sel) else {
+                return Ok(true);
+            };
+            let Ok(rot) = Transform::rotation(Vec3::new(axis.0, axis.1, axis.2), *angle) else {
+                return Ok(true);
+            };
+            let pose = rot.then(&Transform::translation(Vec3::new(
+                offset.0, offset.1, offset.2,
+            )));
+            let _ = doc.transform_guide(gid, &pose);
+        }
+        DocOp::CopyGuide {
+            guide_sel,
+            offset,
+            count,
+        } => {
+            let Some(gid) = nth(&doc.guide_ids(), *guide_sel) else {
+                return Ok(true);
+            };
+            let step = Transform::translation(Vec3::new(offset.0, offset.1, offset.2));
+            let count = std::num::NonZeroU32::new(*count).expect("strategy draws 1..4");
+            let _ = doc.duplicate_guide_array(gid, &step, count);
+        }
         DocOp::BooleanInComponent {
             comp_sel,
             kind,
@@ -3212,9 +4673,73 @@ fn apply_doc_op(
         }
         DocOp::Rescale { factor } => {
             // Always a valid (finite, positive) factor by construction
-            // (`arb_doc_op`'s `0.2..5.0` range), so this cannot refuse.
-            doc.rescale_document(*factor)
-                .expect("rescale never refuses a valid factor");
+            // (`arb_doc_op`'s `0.2..5.0` range), so the only refusal is the
+            // lock's: a whole-document rescale is refused exactly while
+            // something is locked (OW-1, D1 decision 7), with the document
+            // untouched.
+            let before = doc.state_hash();
+            let locked = anything_locked(doc);
+            match doc.rescale_document(*factor) {
+                Ok(_) => prop_assert!(!locked, "a rescale ran while something is locked"),
+                Err(DocumentError::LockedNode { .. }) => {
+                    prop_assert!(locked, "a rescale refused LockedNode with nothing locked");
+                    prop_assert_eq!(
+                        doc.state_hash(),
+                        before,
+                        "a refused rescale changed the document"
+                    );
+                }
+                Err(e) => panic!("rescale refused a valid factor: {e:?}"),
+            }
+        }
+        DocOp::RebaseDefinition {
+            comp_sel,
+            origin,
+            axis,
+            angle,
+        } => {
+            let Some(cid) = nth(&doc.component_ids(), *comp_sel) else {
+                return Ok(true);
+            };
+            let unit_axis = Vec3::new(axis.0, axis.1, axis.2)
+                .normalized()
+                .unwrap_or(Vec3::new(0.0, 0.0, 1.0));
+            let rot = Transform::rotation(unit_axis, *angle)
+                .expect("a unit axis rotation is never singular");
+            let x = rot.apply_vector(Vec3::new(1.0, 0.0, 0.0));
+            let y = rot.apply_vector(Vec3::new(0.0, 1.0, 0.0));
+            let o = Point3::new(origin.0, origin.1, origin.2);
+            let before = doc.state_hash();
+            let frozen = doc.def_frozen(cid).is_some() || def_subtree_frozen(doc, cid);
+            match doc.rebase_definition(cid, o, x, y) {
+                Ok(_)
+                | Err(DocumentError::RebaseDuringSession)
+                | Err(DocumentError::UnknownComponent) => {}
+                // A rebase rewrites every member's definition-local
+                // geometry: an edit to the shape, refused while its
+                // contents or any member in them is frozen (OW-1), with
+                // the document untouched.
+                Err(DocumentError::LockedNode { .. }) => {
+                    prop_assert!(frozen, "a rebase refused LockedNode on a free shape");
+                    prop_assert_eq!(
+                        doc.state_hash(),
+                        before,
+                        "a refused rebase changed the document"
+                    );
+                }
+                Err(e) => panic!("a rotated frame refused: {e:?}"),
+            }
+        }
+        DocOp::FlipInstance { inst_sel, axis } => {
+            let Some(iid) = nth(&doc.instance_ids(), *inst_sel) else {
+                return Ok(true);
+            };
+            let axis = match axis % 3 {
+                0 => kernel::Axis::X,
+                1 => kernel::Axis::Y,
+                _ => kernel::Axis::Z,
+            };
+            let _ = doc.flip_instance(iid, axis);
         }
         DocOp::SetAxes {
             origin,
@@ -3450,6 +4975,49 @@ fn apply_doc_op(
             };
             let _ = doc.set_face_uv_frame(oid, face, pick_uv_frame(*frame_sel));
         }
+        DocOp::ElementAttr {
+            obj_sel,
+            elem_sel,
+            edge,
+            op_sel,
+        } => {
+            let Some(oid) = nth(&doc.visible_object_ids(), *obj_sel) else {
+                return Ok(true);
+            };
+            let obj = doc.object(oid).expect("visible id resolves");
+            const NS: &str = "com.example.fuzz";
+            let key = ["a", "b"][op_sel % 2];
+            let value = if op_sel % 7 == 0 {
+                kernel::AttrValue::List(vec![
+                    kernel::AttrValue::Float(0.5),
+                    kernel::AttrValue::Text("x".into()),
+                ])
+            } else {
+                kernel::AttrValue::Int((op_sel % 3) as i64)
+            };
+            let (nf, ne) = (obj.faces().len(), obj.edges().len());
+            let face = obj.faces().keys().nth(elem_sel % nf.max(1));
+            let e = obj.edges().keys().nth(elem_sel % ne.max(1));
+            let result = match (*edge, op_sel % 4) {
+                (false, 0 | 1) => face.map(|f| doc.face_attr_set(oid, f, NS, key, value)),
+                (false, 2) => face.map(|f| doc.face_attr_delete(oid, f, NS, Some(key))),
+                (false, _) => face.map(|f| doc.face_attr_delete(oid, f, NS, None)),
+                (true, 0 | 1) => e.map(|x| doc.edge_attr_set(oid, x, NS, key, value)),
+                (true, 2) => e.map(|x| doc.edge_attr_delete(oid, x, NS, Some(key))),
+                (true, _) => e.map(|x| doc.edge_attr_delete(oid, x, NS, None)),
+            };
+            let frozen = doc.node_frozen(NodeId::Object(oid)).is_some();
+            match result {
+                None | Some(Ok(_)) | Some(Err(DocumentError::UnknownAttr)) => {}
+                // A frozen object's dictionaries are part of it (OW-1).
+                Some(Err(DocumentError::LockedNode { .. })) if frozen => {}
+                Some(Err(e)) => {
+                    return Err(TestCaseError::fail(format!(
+                        "step {step}: an attribute write on a live element refused: {e}"
+                    )));
+                }
+            }
+        }
         DocOp::RenameMaterial { mat_sel, name } => {
             if let Some(mid) = pick_material(materials, *mat_sel) {
                 let _ = doc.set_material_name(mid, name.clone());
@@ -3532,8 +5100,8 @@ fn apply_doc_op(
             let at = |i: usize| {
                 let a = std::f64::consts::TAU * (i as f64) / (*segments as f64);
                 Point3::new(
-                    center.x + radius * a.cos(),
-                    center.y + radius * a.sin(),
+                    center.x + radius * trig::cos(a),
+                    center.y + radius * trig::sin(a),
                     0.0,
                 )
             };
@@ -3581,6 +5149,101 @@ fn apply_doc_op(
                 doc, step, *obj_sel, *face_sel, *ground, *shape, *a, *b, *sel, *segments,
             )
             .map(|()| true);
+        }
+        DocOp::DrawDetached {
+            obj_sel,
+            face_sel,
+            ground,
+            circle,
+            a,
+            b,
+            segments,
+        } => {
+            apply_draw_detached(
+                doc, step, *obj_sel, *face_sel, *ground, *circle, *a, *b, *segments,
+            )?;
+        }
+        DocOp::FrozenFaceDraft {
+            obj_sel,
+            face_sel,
+            circle,
+            a,
+            b,
+            segments,
+        } => {
+            // The frozen Object's index among the visible ones, which is
+            // what `draft_lattice` selects by.
+            let visible = doc.visible_object_ids();
+            let frozen_of = |doc: &Document| -> Vec<usize> {
+                (0..visible.len())
+                    .filter(|&i| doc.node_frozen(NodeId::Object(visible[i])).is_some())
+                    .collect()
+            };
+            let mut frozen = frozen_of(doc);
+            // Nothing frozen yet: lock one first (its own undo step), so
+            // the draw runs whether or not an earlier Lock picked an Object.
+            if frozen.is_empty()
+                && let Some(o) = nth(&visible, *obj_sel)
+                && doc.set_nodes_locked(&[NodeId::Object(o)], true).is_ok()
+            {
+                frozen = frozen_of(doc);
+            }
+            if let Some(idx) = nth(&frozen, *obj_sel) {
+                prop_assert!(
+                    doc.face_draw_detaches(visible[idx]),
+                    "step {}: a frozen Object's face draw does not detach",
+                    step
+                );
+                // The step's own oracle, from after the lock above.
+                let kept = lock_oracle::frozen_snapshot(doc);
+                apply_draw_detached(doc, step, idx, *face_sel, false, *circle, *a, *b, *segments)?;
+                lock_oracle::check_frozen_kept(doc, &kept, lock_oracle::StepKind::Edit)
+                    .map_err(|e| TestCaseError::fail(format!("step {step}: {e}")))?;
+            }
+        }
+        DocOp::EditDetached {
+            sk_sel,
+            mode,
+            sel,
+            d,
+        } => {
+            apply_edit_detached(doc, step, *sk_sel, *mode, *sel, *d)?;
+        }
+        DocOp::ExtrudeDetached {
+            sk_sel,
+            reg_sel,
+            distance,
+        } => {
+            let Some(s) = nth(&detached_sketch_ids(doc), *sk_sel) else {
+                return Ok(true);
+            };
+            let Ok(units) = doc.detached_sketch_units(s) else {
+                return Err(TestCaseError::fail(format!(
+                    "step {step}: a detached sketch has no listing"
+                )));
+            };
+            let regions: Vec<_> = units.regions.iter().filter_map(|r| r.extrude).collect();
+            let Some((sk, rid)) = nth(&regions, *reg_sel) else {
+                return Ok(true);
+            };
+            prop_assert_eq!(
+                sk,
+                s,
+                "step {}: a detached region extrudes as its own",
+                step
+            );
+            let objects0 = doc.visible_object_ids().len();
+            if doc.extrude_region(sk, rid, *distance).is_ok() {
+                prop_assert_eq!(
+                    doc.visible_object_ids().len(),
+                    objects0 + 1,
+                    "step {}: extruding a detached region makes one new object",
+                    step
+                );
+                if let Some(now) = doc.sketch(s) {
+                    prop_assert!(now.detached(), "step {}: the sketch lost its flag", step);
+                }
+            }
         }
         DocOp::MoveIsland {
             sk_sel,
@@ -3753,6 +5416,12 @@ fn apply_doc_op(
                 doc.cancel_sketch_gesture();
             }
         }
+        DocOp::BeginCompound
+        | DocOp::EndCompound
+        | DocOp::AbortCompound
+        | DocOp::CoalescedAttr { .. } => {
+            unreachable!("applied by apply_compound_op")
+        }
         DocOp::Undo => {
             if doc.can_undo()
                 && let Err(e) = doc.undo()
@@ -3802,17 +5471,47 @@ fn run_doc_case(seeds: Vec<BoxSeed>, ops: Vec<DocOp>) -> Result<(), TestCaseErro
         eprintln!("DOC CASE ops={ops:?}");
     }
 
+    let mut open = Vec::new();
     for (step, op) in ops.iter().enumerate() {
-        if !apply_doc_op(&mut doc, step, op, &materials)? {
+        let detached_before = detached_snapshot(&doc);
+        let target = op_target_sketch(&doc, op);
+        let frozen = lock_oracle::frozen_snapshot(&doc);
+        take_gesture();
+        if !apply_compound_op(&mut doc, step, op, &mut open)?
+            && !apply_doc_op(&mut doc, step, op, &materials)?
+        {
             return Ok(());
         }
+        // The lock oracle, for forward steps: undo, redo and an aborted
+        // compound move between accepted states.
+        if !matches!(op, DocOp::Undo | DocOp::Redo | DocOp::AbortCompound) {
+            let kind = match op {
+                DocOp::MakeUnique { .. } => lock_oracle::StepKind::MakeUnique,
+                DocOp::Lock { locked: false, .. } | DocOp::UnlockAll => {
+                    lock_oracle::StepKind::Unlock
+                }
+                _ => lock_oracle::StepKind::Edit,
+            };
+            lock_oracle::check_frozen_kept(&doc, &frozen, kind)
+                .map_err(|e| TestCaseError::fail(format!("step {step} ({op:?}): {e}")))?;
+        }
+        let gesture = take_gesture();
         check_doc(&doc, step, "apply")?;
+        check_detached_untouched(&doc, step, op, &detached_before, target, gesture.as_ref())?;
         check_save_and_sketch_owners(&doc, &format!("step {step}"))?;
         // Every committed state reopens: an op that left a face the
         // loader rejects would lose the user's file on the next save.
         check_persistence(&doc, &format!("step {step}"))?;
     }
 
+    // Close what the ops left open, innermost first, so the round-trip
+    // below unwinds a history no compound is holding.
+    while let Some((token, _, _)) = open.pop() {
+        match doc.end_compound(token) {
+            Ok(_) | Err(kernel::DocumentError::TransactionHistoryDisturbed) => {}
+            Err(e) => return Err(TestCaseError::fail(format!("closing compounds: {e}"))),
+        }
+    }
     check_persistence(&doc, "post-sequence")?;
 
     // Unwind the whole document log, replay it, and do both again; the
@@ -3904,6 +5603,92 @@ fn run_doc_case(seeds: Vec<BoxSeed>, ops: Vec<DocOp>) -> Result<(), TestCaseErro
         "second full redo did not reproduce the maximal state"
     );
     Ok(())
+}
+
+/// Wireframe faces §16 R34: the harness check keeps a detached gesture's
+/// own drawing. A detached post on the plane x = 1, lying on the ground from
+/// (1, -1) to (1, 3); then a ground detached Rectangle (1, 0)-(2, 1) whose
+/// side x = 1 runs along the post, sharing no end with it. The post is no
+/// part of the Rectangle's connected set, and the Rectangle keeps all four
+/// sides (one face), so `check_detached_untouched` holds; a build that lost
+/// the side along the post fails it.
+#[test]
+fn a_side_drawn_along_a_stray_post_is_kept_under_the_harness() {
+    let mut doc = Document::new();
+    doc.set_torture_mode(true);
+    let (lo, hi) = (Point3::new(1.0, -1.0, 0.0), Point3::new(1.0, 3.0, 0.0));
+    let wall = Plane::from_point_normal(lo, Vec3::new(1.0, 0.0, 0.0)).expect("unit normal");
+    doc.draft_detached_new(wall, None, "Post", |w| w.add_segment(lo, hi).map(|_| ()))
+        .expect("the post lowers");
+    let op = DocOp::DrawDetached {
+        obj_sel: 0,
+        face_sel: 0,
+        ground: true,
+        circle: false,
+        a: (2, 0),
+        b: (2, 2),
+        segments: 24,
+    };
+    let before = detached_snapshot(&doc);
+    take_gesture();
+    apply_draw_detached(&mut doc, 0, 0, 0, true, false, (2, 0), (2, 2), 24)
+        .expect("the Rectangle lowers");
+    let gesture = take_gesture().expect("the draw recorded its gesture");
+    check_detached_untouched(&doc, 0, &op, &before, None, Some(&gesture))
+        .expect("the side along the post is kept and the post untouched");
+}
+
+/// Seed `0452ee2a`, replayed under every harness invariant: a ground
+/// circle lent, curve and all (§16 R30), to an ordinary draft on a box's
+/// underside, where a Line starts on the exact circle inside a facet. The
+/// lifted facet bent to that point and the draft was refused as touching a
+/// boundary edge. The minimized spec is
+/// `a_line_from_a_lent_circles_point_leaves_the_circle_whole` in
+/// `cell_solid_specs.rs`.
+#[test]
+fn seed_0452ee2a_a_line_from_a_lent_circles_point() {
+    let rect = |a: (i32, i32), b: (i32, i32)| DocOp::DrawDetached {
+        obj_sel: 0,
+        face_sel: 0,
+        ground: false,
+        circle: false,
+        a,
+        b,
+        segments: 24,
+    };
+    let ops = vec![
+        rect((1, 2), (5, 5)),
+        rect((0, 0), (1, 1)),
+        rect((0, 0), (1, 1)),
+        DocOp::EditDetached {
+            sk_sel: 9_248_708_117_396_948_472,
+            mode: 0,
+            sel: 0,
+            d: (-5, -5),
+        },
+        DocOp::ExtrudeDetached {
+            sk_sel: 12_972_457_934_127_434_838,
+            reg_sel: 0,
+            distance: 1.248_144_368_094_599,
+        },
+        DocOp::DrawCircleOnGround {
+            cx: 15,
+            cy: 0,
+            r: 3,
+            segments: 25,
+        },
+        DocOp::Draft {
+            obj_sel: 0,
+            face_sel: 9_161_544_369_431_051_388,
+            ground: false,
+            shape: 2,
+            a: (9, -1),
+            b: (1, 1),
+            sel: 0,
+            segments: 24,
+        },
+    ];
+    run_doc_case(vec![], ops).expect("the seed's case holds");
 }
 
 /// KB-22, the fuzzer's original seed: a sketch drawn into a definition
@@ -4066,6 +5851,147 @@ fn kb34_redo_split_after_tangent_circle() {
     run_doc_case(seeds, ops).expect("KB-34 replay holds every invariant");
 }
 
+/// A tangent circle on a box, the box made a component, its definition
+/// member deformed (its face triangulated with soft edges, some ending on
+/// the circle's vertices), then the circle moved off the face in a draft.
+/// Moving it away leaves those soft edges hanging, and the face re-trace
+/// refused (`SharedChainDisconnected`). A soft seam left hanging carries
+/// no geometry on the planar face, so the draft removes it with the
+/// drawing and commits.
+#[test]
+fn draft_after_deform_of_a_tangent_circle_component() {
+    let seeds: Vec<BoxSeed> = vec![
+        ((0.0, 0.0), (1.0, 1.0), 0.5),
+        ((0.0, 0.0), (1.0, 4.799387276188647), 0.5),
+    ];
+    let ops = vec![
+        DocOp::TangentCircle {
+            obj_sel: 5051262289570015841,
+            face_sel: 4700139125940671488,
+            side: 1705099914020460835,
+            t: 0.2,
+            frac: 0.2,
+            twin: false,
+        },
+        DocOp::MakeComponent {
+            node_sel: 9706830679354215332,
+        },
+        DocOp::Deform {
+            obj_sel: 0,
+            mode: 1,
+            amount_frac: 0.05,
+        },
+        DocOp::Draft {
+            obj_sel: 0,
+            face_sel: 7364512011690746,
+            ground: false,
+            shape: 4,
+            a: (0, 0),
+            b: (1, 1),
+            sel: 0,
+            segments: 24,
+        },
+    ];
+    run_doc_case(seeds, ops).expect("the draft replay holds every invariant");
+}
+
+/// A tangent circle drawn over two imprints and a loop bridging them,
+/// clipped by them, then merged into the face around it across its arc:
+/// the arc runs through the rim vertex where the hole touches the face's
+/// outline. Undoing the merge replayed one cut through that boundary vertex
+/// and refused ("path point is not on the face"). The minimized spec lives
+/// in `tangent_loop_specs.rs`; this replays the exact case under every
+/// harness invariant.
+#[test]
+fn merge_of_a_clipped_tangent_disc_unwinds() {
+    let seeds: Vec<BoxSeed> = vec![
+        ((0.0, 0.0), (2.2346752169091917, 1.0), 3.276568943736587),
+        ((0.0, 0.0), (1.0, 1.0), 0.5),
+        ((0.0, -3.507174267747308), (1.0, 1.0), 0.5),
+    ];
+    let ops = vec![
+        DocOp::SliceDefMember {
+            inst_sel: 66360466712461141,
+            member_sel: 6596232982742202595,
+            origin: (0.25223245092388275, -6.952412369336496, -0.7718551660407071),
+            direction: (
+                -0.07185658133522942,
+                -0.6647107021629067,
+                -0.45456653437751626,
+            ),
+        },
+        DocOp::BridgeLoop {
+            obj_sel: 1354774533126141447,
+            face_sel: 4288230138990121280,
+            ts: (0.15190935456390073, 0.8690961128556175),
+            frac: 0.963971482904148,
+            circle: false,
+        },
+        DocOp::Duplicate {
+            obj_sel: 4165769603963804333,
+            offset: (4.536789387423562, 6.760316351437082, -1.1763973855480325),
+        },
+        DocOp::Undo,
+        DocOp::TangentCircle {
+            obj_sel: 14941672070845138833,
+            face_sel: 3591855991437777439,
+            side: 9786374422185185391,
+            t: 0.5028176080342001,
+            frac: 0.3829567238869083,
+            twin: false,
+        },
+        DocOp::MergeCoplanar {
+            obj_sel: 3269655902696552490,
+            edge_sel: 5049629487782488163,
+            from_features: false,
+        },
+    ];
+    run_doc_case(seeds, ops).expect("the clipped-disc merge unwinds and replays");
+}
+
+/// Two imprints, a strip flush between them, and its line deleted (a merge
+/// across two runs), then a blend of any edge at any of several sizes: the
+/// sweep never gets `BlendDegenerate` (the harness's Blend arm fails on it)
+/// and every result is a valid solid. Where a size would carry the blend
+/// past the merged face's holes the engine names the imprint as the limit.
+#[test]
+fn a_blend_after_a_merge_across_two_runs_builds_or_names_its_limit() {
+    for top in [false, true] {
+        for ts in [(0.0, 0.0), (0.5, 0.5), (1.0, 1.0)] {
+            for pick in 0..24usize {
+                for radius_frac in [0.05, 0.4, 0.8, 1.0] {
+                    let seeds: Vec<BoxSeed> = vec![
+                        ((0.0, 0.0), (1.0, 1.0), 0.5),
+                        ((0.0, 0.0), (1.0, 1.0), 0.5),
+                        (
+                            (2.867415909918617, 0.0),
+                            (2.57007613472689, 1.6372791093210675),
+                            0.5,
+                        ),
+                    ];
+                    let ops = vec![
+                        DocOp::MultiRunMerge {
+                            obj_sel: 1681045913922865655,
+                            face_sel: 9004898613229186253,
+                            ts,
+                            top,
+                        },
+                        DocOp::Blend {
+                            obj_sel: 6724422547958988620,
+                            pick,
+                            radius_frac,
+                            logical: pick % 2 == 0,
+                        },
+                    ];
+                    run_doc_case(seeds, ops).unwrap_or_else(|e| {
+                        panic!("top={top} ts={ts:?} pick={pick} frac={radius_frac}: {e:?}")
+                    });
+                }
+            }
+        }
+    }
+}
+
 proptest! {
     /// Random document-op sequences keep every visible object valid, survive
     /// save/load, and the document log unwinds and replays reproducibly.
@@ -4096,4 +6022,39 @@ proptest! {
     ) {
         run_doc_case(seeds, ops)?;
     }
+}
+
+/// The same root cause through an erase: a tangent circle on a box, the
+/// box deformed (its face triangulated with soft edges, some ending on the
+/// circle's vertices), then the circle erased whole as a topology drawing
+/// unit. The erase leaves those soft edges hanging and the face re-trace
+/// refused; the harness requires a topology unit to erase whole, and it
+/// does: the hanging soft seams go with it.
+#[test]
+fn erase_of_a_tangent_circle_on_a_deformed_face() {
+    let seeds: Vec<BoxSeed> = vec![
+        ((0.0, 0.0), (1.0, 1.0), 0.5),
+        ((0.0, 0.0), (1.0, 2.4132880624594963), 0.5),
+    ];
+    let ops = vec![
+        DocOp::TangentCircle {
+            obj_sel: 2059041234277821091,
+            face_sel: 709351749800146806,
+            side: 802807580596839867,
+            t: 0.6010879176008542,
+            frac: 0.2,
+            twin: false,
+        },
+        DocOp::Deform {
+            obj_sel: 2531821312719452809,
+            mode: 0,
+            amount_frac: 0.05,
+        },
+        DocOp::MergeCoplanar {
+            obj_sel: 1021169033968718305,
+            edge_sel: 0,
+            from_features: true,
+        },
+    ];
+    run_doc_case(seeds, ops).expect("the circle erases whole");
 }

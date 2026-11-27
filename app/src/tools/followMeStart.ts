@@ -36,15 +36,21 @@
  *   Closed path, plain segment. The plane's normal must be parallel to the
  *   segment (|n·dir| ≥ 1 − NORMAL_DIRECTION) AND the plane must either cross
  *   the segment's STRICT INTERIOR, or pass through one of its two endpoints —
- *   a CORNER SEAM (design §2b). A corner seam is legal exactly when every
- *   point of the hovered profile sits BEYOND the corner along the OTHER
- *   (non-perpendicular) flank's own direction — `(point − corner) · d ≥
+ *   a CORNER SEAM (design §2b). A corner seam is legal when every point of
+ *   the hovered profile sits BEYOND the corner along the OTHER (non-
+ *   perpendicular) flank's own direction — `(point − corner) · d ≥
  *   −POINT_MERGE`, `d` being that flank's unit direction pointing INTO the
- *   corner. A profile hanging back over that flank folds into its own swept
- *   material and refuses `PathTooTight`, never nudged. This is only decidable
- *   with the actual profile geometry in hand, which is why `evaluateStart`
- *   takes an optional `profileRing` — without one, a corner placement can
- *   only ever read `'unknown'`.
+ *   corner — or when every point sits BEHIND it, inside the loop (a rebate
+ *   drawn at a corner of the face it runs around): the kernel then sweeps it
+ *   like the same profile slid along the edge to mid-run, refusing
+ *   `ProfileTooWideForCorner` only when it is too wide for the loop (mirrored
+ *   by transporting the ring around the loop exactly as the sweep does). A
+ *   profile on BOTH sides straddles the corner, folds into its own swept
+ *   material and refuses `PathTooTight`, never nudged. A vertex where the
+ *   path runs straight on (an imprint ending on a face's rim) is no corner.
+ *   This is only decidable with the actual profile geometry in hand, which is
+ *   why `evaluateStart` takes an optional `profileRing` — without one, a
+ *   corner placement can only ever read `'unknown'`.
  *
  *   Closed path, facet joint of ONE drawn curve. A vertex shared by two
  *   segments of the SAME curve chain IS a legal start (the joint's miter plane
@@ -180,10 +186,11 @@ export interface PlaneDef {
  * — see the module docs.
  */
 export type RefusalReason =
-  /** Closed path, sitting on a CORNER, decisively hanging back over the
-   *  corner's non-perpendicular flank — the fold `PathTooTight` refuses (see
-   *  the module docs' corner-seam paragraph). A corner is NOT refused merely
-   *  for being a corner anymore (design §2b) — only this overhang is. */
+  /** Closed path, sitting on a CORNER and straddling it — decisively on both
+   *  sides of the corner along its non-perpendicular flank — the fold
+   *  `PathTooTight` refuses (see the module docs' corner-seam paragraph). A
+   *  corner is NOT refused merely for being a corner anymore (design §2b),
+   *  nor for a profile hanging wholly inside the loop — only this straddle. */
   | 'corner-overhang'
   /** Closed path only: square to a segment, but not touching it anywhere (no
    *  strict-interior crossing, no corner touch). An OPEN path never reaches
@@ -326,32 +333,153 @@ export function chainPath(
 
 // ----------------------------------------------------------------- verdict
 
+/** A closed loop's vertices with the curve of the segment LEAVING each. */
+interface LoopVertex {
+  p: Vec3
+  curve: CurveGeom | null
+}
+
 /**
- * The kernel's per-ring-vertex advance check across a corner-seam wedge
- * (design §2b), reduced to the profile plane: legal exactly when every point
- * of the profile sits BEYOND the corner along `d` — the OTHER (non-
- * perpendicular) flank's own direction, pointing INTO the corner (i.e. from
- * that flank's far endpoint toward the corner). `(point − corner) · d ≥
- * −POINT_MERGE` is legal; decisively less is the fold `PathTooTight`.
+ * The kernel's `drop_straight_path_vertices` (ops.rs) on a closed loop: a
+ * vertex lying on the segment between its two neighbors, both of its segments
+ * plain, is no corner — a face's rim gets one wherever an imprint ends on it.
+ * The kernel sweeps through it when keeping it as a station would fold the
+ * sweep, so the advance mirror below reads the loop through its real corners
+ * only. `tol` is the kernel's POINT_MERGE on an f64 path; an f32 face loop
+ * needs a looser one to see the same vertex as straight.
+ */
+function dropStraight(loop: LoopVertex[], tol: number): LoopVertex[] {
+  const out = loop.slice()
+  for (;;) {
+    const n = out.length
+    if (n <= 3) return out
+    let hit = -1
+    // Vertex 0 is the seam corner the caller walks from: it stays.
+    for (let i = 1; i < n && hit < 0; i++) {
+      const prev = out[(i + n - 1) % n]
+      if (prev.curve !== null || out[i].curve !== null) continue
+      const a = prev.p
+      const v = out[i].p
+      const b = out[(i + 1) % n].p
+      const ab = sub(b, a)
+      const len2 = dot(ab, ab)
+      if (len2 <= tol * tol || length(sub(v, a)) <= tol || length(sub(v, b)) <= tol) continue
+      const t = dot(sub(v, a), ab) / len2
+      if (t > 0 && t < 1 && length(sub(add(a, scale(ab, t)), v)) <= tol) hit = i
+    }
+    if (hit < 0) return out
+    out.splice(hit, 1)
+  }
+}
+
+/**
+ * The kernel's advance check for an INWARD corner seam (ops.rs, "a corner
+ * profile hanging inside the loop"): the ring is carried along the leaving
+ * flank onto the corner's miter plane, then transported station by station
+ * around the loop exactly as the sweep does. Returns the smallest advance any
+ * ring point makes along any segment — the kernel refuses
+ * `ProfileTooWideForCorner` at `<= POINT_MERGE` — or null when the transport
+ * itself degenerates (a reversal the kernel refuses for its own reasons).
+ * `walk` starts at the corner and leaves along the perpendicular flank.
+ */
+function inwardSeamAdvance(walk: readonly Vec3[], ring: readonly Vec3[]): number | null {
+  const m = walk.length
+  if (m < 3) return null
+  const dirs: Vec3[] = []
+  for (let i = 0; i < m; i++) {
+    const d = unit(sub(walk[(i + 1) % m], walk[i]))
+    if (d === null) return null
+    dirs.push(d)
+  }
+  const station = (s: number): PlaneDef | null => {
+    const nrm = unit(add(dirs[(s + m - 1) % m], dirs[s]))
+    return nrm === null ? null : { point: walk[s], normal: nrm }
+  }
+  const carry = (pts: readonly Vec3[], dir: Vec3, onto: PlaneDef): Vec3[] | null => {
+    const denom = dot(dir, onto.normal)
+    if (Math.abs(denom) < 1e-12) return null
+    return pts.map((v) => add(v, scale(dir, -signedDistance(onto, v) / denom)))
+  }
+  const seam = station(0)
+  if (seam === null) return null
+  const base = carry(ring, dirs[0], seam)
+  if (base === null) return null
+  let cur = base
+  let minAdv = Infinity
+  for (let s = 0; s < m; s++) {
+    const target = station((s + 1) % m)
+    if (target === null) return null
+    const next = carry(cur, dirs[s], target)
+    if (next === null) return null
+    for (let j = 0; j < cur.length; j++) {
+      const adv = dot(sub(next[j], cur[j]), dirs[s])
+      if (adv < minAdv) minAdv = adv
+    }
+    cur = next
+  }
+  return minAdv
+}
+
+/** How a corner seam reads for the hovered profile (design §2b). */
+interface CornerReading {
+  /** The kernel accepts this corner as the seam, at its own tolerances. */
+  exactOk: boolean
+  /** Decisively refused at this corner, and why: the profile straddles the
+   *  corner (`PathTooTight`), or hangs inside the loop but is too wide for it
+   *  (`ProfileTooWideForCorner`). Null when it is not decisive. */
+  refuse: 'overhang' | 'too-wide' | null
+}
+
+/**
+ * The kernel's corner-seam rule (design §2b), reduced to the profile plane.
+ * `d` is the OTHER (non-perpendicular) flank's direction, pointing INTO the
+ * corner, and `(point − corner) · d` says which side of the corner each
+ * profile point is on:
  *
+ *   - every point at or BEYOND the corner (`≥ −POINT_MERGE`): the outward
+ *     seam, the wedge closes it — legal;
+ *   - every point at or BEFORE it (`≤ POINT_MERGE`), some decisively before:
+ *     the profile hangs INSIDE the loop (a rebate drawn at a corner of the
+ *     face it runs around). The kernel carries it onto the corner's miter
+ *     plane and sweeps it like the mid-edge placement — legal unless it is
+ *     too wide for the loop (`ProfileTooWideForCorner`), which the transport
+ *     mirror `inwardSeamAdvance` decides;
+ *   - points on BOTH sides: the profile straddles the corner and folds into
+ *     its own material — `PathTooTight`.
+ *
+ * `walk` is the loop from the corner, leaving along the perpendicular flank.
  * `ring` is the hovered profile's boundary points — without it (no geometry
  * in hand yet) neither an `ok` nor a `refused` can be earned, only silence.
  */
 function cornerFold(
   corner: Vec3,
   farOfOtherFlank: Vec3,
+  walk: readonly Vec3[],
   ring: readonly Vec3[] | undefined,
-): { exactOk: boolean; decisiveRefuse: boolean } {
+): CornerReading {
   const d = unit(sub(corner, farOfOtherFlank))
   if (d === null || ring === undefined || ring.length === 0) {
-    return { exactOk: false, decisiveRefuse: false }
+    return { exactOk: false, refuse: null }
   }
   let minVal = Infinity
+  let maxVal = -Infinity
   for (const p of ring) {
     const v = dot(sub(p, corner), d)
     if (v < minVal) minVal = v
+    if (v > maxVal) maxVal = v
   }
-  return { exactOk: minVal >= -POINT_MERGE, decisiveRefuse: minVal < -SLOP_DIST }
+  if (minVal >= -POINT_MERGE) return { exactOk: true, refuse: null }
+  if (maxVal > SLOP_DIST) {
+    // Points beyond the corner, and some behind it: straddling.
+    return { exactOk: false, refuse: minVal < -SLOP_DIST ? 'overhang' : null }
+  }
+  // Inside the loop (or within the slop band of it): the transport decides.
+  const adv = inwardSeamAdvance(walk, ring)
+  if (adv === null) return { exactOk: false, refuse: null }
+  return {
+    exactOk: maxVal <= POINT_MERGE && adv > POINT_MERGE,
+    refuse: minVal < -SLOP_DIST && adv < -SLOP_DIST ? 'too-wide' : null,
+  }
 }
 
 /**
@@ -390,7 +518,33 @@ function evaluateClosed(
   let maybeSquare = false // some segment is square within the slop band
   let maybeCandidate = false // ...and might cross that segment's interior
   let maybeCornerAmbiguous = false // ...sits near an endpoint, fold undecided
-  let decisiveCornerOverhang = false // ...sits on a corner and folds back over it
+  // Corners decisively refused, with how far each is from the profile: the
+  // kernel ranks its seam candidates nearest the profile first and reports
+  // the NEAREST one's refusal when every candidate refuses.
+  const cornerRefusals: { reason: 'overhang' | 'too-wide'; dist: number }[] = []
+  const centroid: Vec3 | null =
+    profileRing === undefined || profileRing.length === 0
+      ? null
+      : scale(
+          profileRing.reduce<Vec3>((acc, p) => add(acc, p), [0, 0, 0]),
+          1 / profileRing.length,
+        )
+  // The loop from vertex `start`, leaving along segment `start` (forward) or
+  // against segment `start - 1` (reversed), straight vertices dropped.
+  const straightTol = path.exact ? POINT_MERGE : 1e-5
+  const walkFrom = (start: number, forward: boolean): Vec3[] => {
+    const loop: LoopVertex[] = []
+    for (let i = 0; i < m; i++) {
+      if (forward) {
+        const s = path.segments[(start + i) % m]
+        loop.push({ p: s.a, curve: s.curve })
+      } else {
+        const j = (start - i + m) % m
+        loop.push({ p: path.segments[j].a, curve: path.segments[(j + m - 1) % m].curve })
+      }
+    }
+    return dropStraight(loop, straightTol).map((v) => v.p)
+  }
 
   for (let k = 0; k < path.segments.length; k++) {
     const seg = path.segments[k]
@@ -468,11 +622,13 @@ function evaluateClosed(
         ? path.segments[(k + m - 1) % m].a
         : path.segments[(k + 1) % m].b
       const exactTouch = atA ? Math.abs(sdA) <= POINT_MERGE : Math.abs(sdB) <= POINT_MERGE
-      const fold = cornerFold(corner, farOther, profileRing)
+      // Leaving along this segment: forward from `a`, or backward from `b`.
+      const walk = atA ? walkFrom(k, true) : walkFrom((k + 1) % m, false)
+      const fold = cornerFold(corner, farOther, walk, profileRing)
       if (square && exactTouch && path.exact && fold.exactOk) {
         exactCandidate = true
-      } else if (fold.decisiveRefuse) {
-        decisiveCornerOverhang = true
+      } else if (fold.refuse !== null && centroid !== null) {
+        cornerRefusals.push({ reason: fold.refuse, dist: length(sub(corner, centroid)) })
       } else {
         maybeCornerAmbiguous = true
       }
@@ -498,11 +654,21 @@ function evaluateClosed(
     // for `orient_profile_to_path`). Informational, not a warning.
     return { kind: 'orient' }
   }
-  // Square, sitting on a corner, and decisively folded back over the
-  // non-perpendicular flank — the refusal the kernel's advance check makes
-  // (`PathTooTight`), predictable here because it only needs the profile's
-  // own extent, not the whole transport.
-  if (decisiveCornerOverhang) return { kind: 'refused', reason: 'corner-overhang' }
+  // Square, sitting on a corner, and every corner decisively refused. The
+  // kernel reports the refusal of the corner NEAREST the profile: straddling
+  // it is the fold `PathTooTight` (predictable from the profile's own extent);
+  // hanging inside the loop but too wide for it is `ProfileTooWideForCorner`,
+  // which has no hover copy — say nothing rather than the wrong thing.
+  if (cornerRefusals.length > 0) {
+    const nearest = Math.min(...cornerRefusals.map((r) => r.dist))
+    const reasons = new Set(
+      cornerRefusals.filter((r) => r.dist <= nearest + SLOP_DIST).map((r) => r.reason),
+    )
+    if (reasons.size === 1 && reasons.has('overhang')) {
+      return { kind: 'refused', reason: 'corner-overhang' }
+    }
+    return { kind: 'unknown' }
+  }
   // Only claim "detached" when the exact scan agrees a segment really is
   // perpendicular; otherwise the slop band alone is too weak a basis.
   if (path.exact && exactAnyPerp) return { kind: 'refused', reason: 'detached' }

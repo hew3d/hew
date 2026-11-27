@@ -163,11 +163,35 @@
   --axis-red: #e85a60;
   --axis-green: #5fce80;
   --axis-blue: #5f96eb;
+  /* View die pip for any plane that is not one of the three axis planes. */
+  --plane-custom: #c77dff;
+  /* View die: axis wash strength on its faces, and the padlock glyph on a filled pip. */
+  --die-wash-alpha: 0.07;
+  --die-pip-glyph: #10141a;
 
   /* ---- Push/Pull preview tints (orange vs blue: safe for red-green color
      blindness, and the blue is darker so they differ in lightness too) -- */
   --preview-pushpull: #f29a1f;
   --preview-extrude-new: #3d7fe6;
+  /* Draw-tool preview while Detach is on: the same "new, apart" blue. */
+  --preview-detached: #3d7fe6;
+  /* Draw-tool preview while the shape joins the drawing under it (default):
+     the plain-pull orange. Set to #4d90ff to restore the old blue. */
+  --preview-draw-joined: #f29a1f;
+
+  /* ---- Draw color language: drawing that belongs to no solid is blue
+     (free), drawing that is part of a solid's face is orange (attached).
+     The attached line is a deeper, redder orange than the amber selection
+     color so a selected imprint still pops. ----------------------------- */
+  --draw-free: #2266cc;
+  --draw-free-fill: #88aadd;
+  --draw-attached: #d9591a;
+  --draw-attached-fill: #e8a66a;
+
+  /* ---- Locked selection: a selected locked (or frozen) thing draws its
+     edges in this red instead of the amber selection color (SketchUp's cue
+     for a locked entity). Unselected, a locked thing looks like any other. */
+  --selection-locked: #e5392e;
 
   /* ---- Borders / dividers ---------------------------------------------*/
   --border-hairline: rgba(255, 255, 255, 0.06);
@@ -297,10 +321,20 @@
   --axis-red: #d6454b;
   --axis-green: #28a055;
   --axis-blue: #2d78e1;
+  --plane-custom: #9d4edd;
+  --die-wash-alpha: 0.12;
+  --die-pip-glyph: #ffffff;
 
   /* Push/Pull preview tints, deepened for the light viewport. */
   --preview-pushpull: #d97800;
   --preview-extrude-new: #1f5fc9;
+  --preview-detached: #1f5fc9;
+  --preview-draw-joined: #d97800;
+  --draw-free: #1f5fc9;
+  --draw-free-fill: #7f9fd6;
+  --draw-attached: #b85a0e;
+  --draw-attached-fill: #d9975a;
+  --selection-locked: #c4281d;
 
   /* ---- Borders -----------------------------------------------------*/
   --border-hairline: rgba(20, 40, 70, 0.08);

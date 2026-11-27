@@ -96,11 +96,15 @@ impl XNode for Asset {
         let mut it = element.children().peekable();
         let res = Box::new(Asset {
             contributor: Contributor::parse_list(&mut it)?,
-            created: parse_one("created", &mut it, parse_elem)?,
+            // HEW PATCH: `created`/`modified` are required by the 1.4 schema but
+            // real exporters omit them; they are metadata only, so tolerate it.
+            created: parse_opt("created", &mut it, parse_elem)?
+                .unwrap_or_else(|| MaybeDateTime::Error(String::new())),
             keywords: parse_opt("keywords", &mut it, parse_text)?.map_or_else(Vec::new, |s| {
                 s.split_ascii_whitespace().map(|s| s.to_owned()).collect()
             }),
-            modified: parse_one("modified", &mut it, parse_elem)?,
+            modified: parse_opt("modified", &mut it, parse_elem)?
+                .unwrap_or_else(|| MaybeDateTime::Error(String::new())),
             revision: parse_opt("revision", &mut it, parse_text)?,
             subject: parse_opt("subject", &mut it, parse_text)?,
             title: parse_opt("title", &mut it, parse_text)?,

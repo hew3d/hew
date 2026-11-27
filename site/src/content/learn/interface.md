@@ -14,14 +14,16 @@ Hew's window has the same layout on the web, macOS, Windows, and Linux. The only
 
 The center of the window is the 3D viewport. A ground grid sits at height zero, and the three world axes cross at the origin: **X is red, Y is green, Z is blue**. Each axis is drawn solid on its positive side and dashed on its negative side. You can hide the axes with **View ▸ Axes** and the grid with **View ▸ Grid**.
 
-The small chip row in the viewport's top-left corner offers an **Orbit** button and one-click **Top / Iso / Front** standard views. A floating readout in the top-right corner shows live measurements — distance, angle, scale factor — while a tool is **mid-gesture**: partway through an operation, after the first click but before the commit. You'll meet that term throughout this manual. Anything you type also appears in this readout.
+A small **view die** sits in the top-right corner of the viewport. It's a cube with its corners cut flat, and it turns with the camera, so it always shows which way you're looking. Click a face (Top, Front, Left, and so on) to look straight at it, click a corner to look at the model from that corner, or drag the die to orbit. Under the die are four small squares called **pips**: red, green, blue, and violet. They show which drawing plane your next click lands on and let you lock it. The Drawing chapter covers them in full. The die appears in the editor only; Shop mode keeps its own Views sheet.
+
+A floating readout in the bottom-right corner shows live measurements — distance, angle, scale factor — while a tool is **mid-gesture**: partway through an operation, after the first click but before the commit. You'll meet that term throughout this manual. Anything you type also appears in this readout.
 
 ## The tool rail
 
 The left rail lists the everyday tools in three groups, each with its keyboard shortcut:
 
 - **Draw** — Select `Space`, Line `L`, Rectangle `R`, Circle `C`, Polygon, Arc `A`
-- **Modify** — Push/Pull `P`, Follow Me, Offset `F`, Move `M`, Rotate `Q`, Scale `S`
+- **Modify** — Push/Pull `P`, Follow Me, Offset `F`, Move `M`, Rotate `Q`, Scale `S`, Eraser `E`
 - **Inspect** — Tape Measure `T`, Dimension, Paint `B`, Section Plane
 
 More tools don't have rail slots: **Protractor**, **Slice**, **Edit Vertex**, **Text**, **Drawing Axes**, and **Position Texture**, plus the camera tools **Orbit** `O`, **Pan** `H`, **Zoom** `Z`, **Zoom Window**, **Position Camera**, **Look Around**, and **Walk**. Reach them from the **Tools** and **Camera** menus, or from the command palette.
@@ -45,19 +47,19 @@ The floating bar at the bottom-center of the viewport follows your selection and
 | Selection | Dock shows |
 |---|---|
 | Nothing | Rectangle, Line, Circle, Arc |
-| An Object | Push/Pull, Move, Paint, Make Component, Erase |
+| An Object | Push/Pull, Move, Paint, Make Component, Save to Library, Erase |
 | A group | Edit, Move, Scale, Make Component, Ungroup, Erase |
 | A component instance | Edit, Move, Scale, Make Unique, Explode |
-| Several things | Move, Group, Erase |
-| A sketch | Push/Pull, Move, Rotate, Scale, Erase |
+| Several things | Move, Union, Subtract, Intersect, Group, Erase |
+| A sketch | Push/Pull, Follow Me, Move, Rotate, Erase |
 
-Group and Make Component appear only when the selection qualifies (Group needs two or more siblings; Make Component takes objects and groups, not instances). Everything on the dock also lives in the menus (Edit is a double-click on the group or component); nothing is reachable only from it.
+Group, Make Component, and the three boolean chips appear only when the selection qualifies (Group needs two or more siblings; Make Component takes objects and groups, not instances; Union, Subtract, and Intersect need solids that can be combined). Hover a drawn shape with nothing selected and the sketch row previews, with Push/Pull ready to click. Everything on the dock also lives in the menus (Edit is a double-click on the group or component); nothing is reachable only from it.
 
 If you'd rather not have it, turn it off with **View ▸ Contextual Dock**. It stays off, across restarts too, until you turn it back on there.
 
 ## The panels tray
 
-The right-hand tray holds a set of collapsible panels. Click a panel's header to expand or collapse it; drag the tray's left edge to resize it.
+The right-hand tray holds a set of collapsible panels. Click a panel's header to expand or collapse it; drag the tray's left edge to resize it. A long panel can also be given more or less height: drag the handle at the bottom of its section, or focus the handle and press the Up or Down arrow key. A section keeps its automatic height until you resize it.
 
 When you want the whole window for the model, hide the tray: click the chevron at its top-left, or choose **View ▸ Tray**. A small tab on the viewport's right edge brings it back at the width you left it. Asking for any one panel while the tray is hidden (from the View menu, or with that panel's shortcut) brings the tray back with that panel open. Hew remembers both the compact rail and the hidden tray: each open window keeps its own layout, and a new window, or the next launch, starts the way you last left them.
 
@@ -77,7 +79,7 @@ These panels are covered in depth in [Organizing your model](/learn/organizing/)
 
 ## The status bar
 
-The strip along the bottom always shows the active tool's name and a one-line hint about what it expects next. If you're ever unsure what a tool wants, look here. On the right, the badge summarizes the whole model: "N objects ✓ solid", or "N objects · 3 not solid" when some aren't (click it to open the Model Health window, which lists them; see [Making imported shapes solid](/learn/import-export/#making-imported-shapes-solid)).
+The strip along the bottom always shows the active tool's name and a one-line hint about what it expects next. While a draw tool has Detached on (a tap of `Ctrl`, or `⌘` on a Mac; see [Detaching a shape](/learn/drawing/#detaching-a-shape)), the hint says so. If you're ever unsure what a tool wants, look here. On the right, the badge summarizes the whole model: "N objects ✓ solid", or "N objects · 3 not solid" when some aren't (click it to open the Model Health window, which lists them; see [Making imported shapes solid](/learn/import-export/#making-imported-shapes-solid)).
 
 ## Menus and title bar
 
