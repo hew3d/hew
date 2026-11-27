@@ -1803,6 +1803,21 @@ Semantics notes, normative:
   the live desktop app calls the equivalent (`Scene::mark_saved`) itself
   once its own write (through Tauri, or a confirmed browser download)
   actually lands.
+  A live `hew.doc.save` can refuse `save_failed` **after it has written
+  the file**. The app serializes the document and then writes it. If the
+  document changes before the call returns, the file holds the older
+  bytes and the call refuses. The refusal's message begins `the file was
+  written, but it is already out of date` and names one of two causes.
+  The document changed, through an undoable edit or one outside the undo
+  history such as a Scene edit: the window is bound to the written file
+  and stays unsaved, and calling `hew.doc.save` again writes the current
+  document. Or another document replaced this one in the window (new,
+  open, revert): the window is not bound to the written file, and saving
+  again would write the replacement, so check what the window holds
+  first. If the replacement lands before the write finishes, no `saved`
+  event follows that save's `will_save`; a subscriber must not wait for
+  one. `copy: true` makes no such check, because a copy never touches
+  the saved mark.
 - `hew.doc.export` returns the exported bytes base64 by default; a
   client may instead pass `path`, honored by hosts with filesystem
   access (`hew-cli`, the desktop shell) and refused typed elsewhere.

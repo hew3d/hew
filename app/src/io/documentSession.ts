@@ -92,6 +92,12 @@ export const NON_UNDOABLE_REASON = {
   get recovered() {
     return t`Recovered document`
   },
+  // A save's file landed after the document had moved on. The kernel's saved
+  // mark is still the older one, so undo could otherwise read clean while
+  // the file holds something else.
+  get changedDuringSave() {
+    return t`Changed while saving`
+  },
 }
 
 /** `"Imported 'Kitchen.dae'"` — the reason stamped by `afterImport`. */
@@ -234,6 +240,7 @@ export function applyWriteThroughSave(
  * document's current generation (no edit raced ahead). A skipped mark
  * passes `false`; the prior session supplies any non-undoable reasons and
  * edit time so the later edit remains visibly dirty and eligible for recovery.
+ * The caller then adds `NON_UNDOABLE_REASON.changedDuringSave`.
  */
 export function afterSave(ref: FileRef, now: number, atSavedMark: boolean, previous?: DocSessionState): DocSessionState {
   return {

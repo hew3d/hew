@@ -519,16 +519,32 @@ async function writeExport(
   }
   return host.exportBinary(bytes, name, fileType)
 }
-/** Calls `scene.mark_saved()` ONLY when the document generation hasn't
- * moved since the bytes were captured — every save flow here grabs the bytes
- * to write, then awaits a host write that can take a while (Tauri fs,
- * a browser download, a Library write-through). An edit landing during
- * that await must never be silently marked clean: the written bytes
- * predate it. Always returns the CURRENT `scene.at_saved_mark()` reading —
- * a skipped mark correctly reports the document as still dirty, which
- * `afterSave`/`applyWriteThroughSave`'s `atSavedMark` parameter honors. */
-function markSavedIfUnmoved(scene: Scene, generationAtCapture: number, currentGeneration: number): boolean {
-  if (currentGeneration !== generationAtCapture) return false
+/** Where the document stood when a save serialized it. */
+interface SavePoint {
+  /** The app's change generation: moves on every reported change,
+   * including those that push no undo entry, and never goes back. */
+  generation: number
+  /** The kernel's undo depth: moves even if a change path forgot to
+   * report itself to the app. */
+  undoDepth: number
+}
+function savePointOf(scene: Scene, generation: number): SavePoint {
+  return { generation, undoDepth: scene.undo_depth() }
+}
+function movedSince(scene: Scene, point: SavePoint, currentGeneration: number): boolean {
+  return currentGeneration !== point.generation || scene.undo_depth() !== point.undoDepth
+}
+/** Calls `scene.mark_saved()` ONLY when neither the change generation nor
+ * the undo depth has moved since the bytes were serialized — every save flow
+ * here grabs the bytes to write, then awaits a host write that can take a
+ * while (Tauri fs, a browser download, a Library write-through). An edit
+ * landing during that await must never be silently marked clean: the written
+ * bytes predate it. A skipped mark returns `false`, whatever the kernel's
+ * own mark says (it cannot see changes outside the undo stack); otherwise
+ * this returns `scene.at_saved_mark()`. `afterSave`/`applyWriteThroughSave`
+ * honor the answer through their `atSavedMark` parameter. */
+function markSavedIfUnmoved(scene: Scene, atCapture: SavePoint, currentGeneration: number): boolean {
+  if (movedSince(scene, atCapture, currentGeneration)) return false
   scene.mark_saved()
   return scene.at_saved_mark()
 }
@@ -1346,8 +1362,8 @@ export default function App() {
   // (or since the last explicit Save, which also resets it). Avoids redundant
   // writes when the document hasn't changed between ticks.
   const dirtySinceAutosaveRef = useRef(false)
-  // Every dirty/undo reconciliation and non-undoable edit arms autosave.
-  // Unlike undo depth, this never returns to an earlier value after undo.
+  // Moves on every document change (`armAutosaveTick`) and load. Unlike undo
+  // depth, this never returns to an earlier value after undo.
   const documentGenerationRef = useRef(0)
   const documentIdentityRef = useRef(0)
   // The autosave write currently in flight (never rejects), or null before
@@ -1370,8 +1386,9 @@ export default function App() {
   // callable from callbacks declared earlier in the component than that
   // effect.
   const runAutosaveTickRef = useRef<() => void>(() => {})
-  const armAutosaveTick = useCallback((): void => {
-    documentGenerationRef.current += 1
+  /** Schedules the next autosave tick without reporting a change: what a
+   *  tick that could not write uses to try again. */
+  const scheduleAutosaveTick = useCallback((): void => {
     dirtySinceAutosaveRef.current = true
     if (autosaveTimerRef.current === null) {
       autosaveTimerRef.current = setTimeout(() => {
@@ -1380,6 +1397,12 @@ export default function App() {
       }, AUTOSAVE_INTERVAL_MS)
     }
   }, [])
+  /** The document changed: moves the change generation (a save in flight no
+   *  longer matches the document) and schedules an autosave. */
+  const armAutosaveTick = useCallback((): void => {
+    documentGenerationRef.current += 1
+    scheduleAutosaveTick()
+  }, [scheduleAutosaveTick])
   // Resolved once this window's menu-open-path listener is registered (or
   // registration failed) — the startup-handoff effect awaits it before
   // telling the shell this webview is ready for live open delivery. Created
@@ -1515,7 +1538,7 @@ export default function App() {
     // A plugin command holds the document: snapshot it once the command
     // has ended (or been cancelled), not halfway through.
     if (scene.busy()) {
-      armAutosaveTick()
+      scheduleAutosaveTick()
       return
     }
     // `Scene.save()` is transparent to an open explode session (it
@@ -1562,16 +1585,22 @@ export default function App() {
       // Only mark clean while this write is still the latest — a stale
       // disarm could suppress the re-write that follows a superseding
       // edit-plus-clear interleave.
-      if (autosaveWriteRef.current === write && documentGenerationRef.current === generationAtWrite) dirtySinceAutosaveRef.current = false
+      // Nor may a write whose snapshot predates a save's new file binding
+      // (which moves the source generation).
+      if (
+        autosaveWriteRef.current === write &&
+        documentGenerationRef.current === generationAtWrite &&
+        skpSourceGenRef.current === sourceGen
+      ) dirtySinceAutosaveRef.current = false
     }).catch(() => {
       // Best effort — re-arm so the next tick retries instead of going
       // permanently silent (the old setInterval retried every 12s
       // regardless; a one-shot timer needs to re-schedule itself here to
       // match).
-      armAutosaveTick()
+      scheduleAutosaveTick()
     })
     autosaveWriteRef.current = write
-  }, [pushCameraStateToScene, armAutosaveTick])
+  }, [pushCameraStateToScene, scheduleAutosaveTick])
   useEffect(() => {
     runAutosaveTickRef.current = runAutosaveTick
   }, [runAutosaveTick])
@@ -3637,6 +3666,15 @@ export default function App() {
     return decision !== 'cancel'
   }, [requestUnsavedChangesDecision])
 
+  /** The session with every update already queued applied to it, which
+   *  `docSessionRef` (a render behind) may not have yet. */
+  const readLatestSession = useCallback((): Promise<DocSessionState> => new Promise((resolve) => {
+    setDocSession((session) => {
+      resolve(session)
+      return session
+    })
+  }), [])
+
   // Drop this window's autosave snapshot once its document has actually been
   // discarded (replaced in place, or the window is closing) — a discarded
   // document must not resurface in the next launch's recovery prompt. Called
@@ -3654,7 +3692,7 @@ export default function App() {
   // it) on disk. Also used after Save/Save As: the same ordering guarantee
   // applies to clearing the snapshot of a just-saved document.
   const clearRecoverySnapshot = useCallback(async (): Promise<void> => {
-    const generationAtClear = documentGenerationRef.current
+    let generationAtClear = documentGenerationRef.current
     dirtySinceAutosaveRef.current = false
     // Cancel any pending timer outright — a discard/Save has nothing left
     // for it to do, and letting it fire anyway (to find `dirtySinceAutosave
@@ -3669,13 +3707,20 @@ export default function App() {
     // A newer write while we awaited means the document changed under us
     // (e.g. a first edit to the replacement document re-armed the tick) —
     // the slot no longer holds the discarded document, so leave it alone.
-    if (autosaveWriteRef.current !== inFlight || documentGenerationRef.current !== generationAtClear) return
+    if (autosaveWriteRef.current !== inFlight) return
+    // So does a change that left the document unsaved. One that left it
+    // clean has nothing to keep, and the snapshot must still go.
+    while (documentGenerationRef.current !== generationAtClear) {
+      generationAtClear = documentGenerationRef.current
+      const latest = await readLatestSession()
+      if (latest.dirty || autosaveWriteRef.current !== inFlight) return
+    }
     await recoveryStoreRef.current.clear().catch(() => { /* best effort */ })
     // The slot's `.skp` source went with the snapshot: the next autosave of
     // a `.skp` document must write it again.
     persistedSourceGenRef.current = -1
     sourceOnDiskRef.current = false
-  }, [])
+  }, [readLatestSession])
 
   // Drop this window's autosave/recovery snapshot the moment the session
   // state transitions dirty → clean, wherever that happens. The common
@@ -4333,15 +4378,62 @@ export default function App() {
   const lastSaveErrorRef = useRef('the document could not be saved')
   // oxlint-disable-next-line lingui/no-unlocalized-strings -- live-API refusal text, English
   const DOC_CHANGED_BEFORE_SAVE = 'the document changed before it could be saved'
+  // The write landed, but the window has moved on: the caller must not take
+  // the file for the document as it is now (docs/agents/HEW_API.md §7).
+  // oxlint-disable-next-line lingui/no-unlocalized-strings -- live-API refusal text, English
+  const SAVE_WRITTEN_BUT_STALE = 'the file was written, but it is already out of date: the document changed during the save; save again'
+  // oxlint-disable-next-line lingui/no-unlocalized-strings -- live-API refusal text, English
+  const SAVE_WRITTEN_BUT_REPLACED = 'the file was written, but it is already out of date: another document replaced this one in the window during the save'
   // Serialize document writes in capture order. Without this, a slow Save A
   // can finish after a newer Save B and overwrite B's current bytes on disk.
   // A failed/cancelled write still releases the queue for the next attempt.
   const documentWriteTailRef = useRef<Promise<void>>(Promise.resolve())
+  // Writes not yet finished, and how many were ever queued: what a reader of
+  // a document file checks.
+  const documentWritesPendingRef = useRef(0)
+  const documentWriteCountRef = useRef(0)
   const queueDocumentWrite = useCallback((write: () => Promise<FileRef | null>): Promise<FileRef | null> => {
+    documentWritesPendingRef.current += 1
+    documentWriteCountRef.current += 1
     const result = documentWriteTailRef.current.then(write)
-    documentWriteTailRef.current = result.then(() => {}, () => {})
+    const done = (): void => { documentWritesPendingRef.current -= 1 }
+    documentWriteTailRef.current = result.then(done, done)
     return result
   }, [])
+  /** Resolves once no document write is pending. Callers check
+   *  `documentWritesPendingRef` first, so that an idle queue costs no await
+   *  (a web permission prompt must follow its click closely). By the time it
+   *  resolves, each save has run up to its first await after its write. */
+  const documentWritesSettled = useCallback(async (): Promise<void> => {
+    while (documentWritesPendingRef.current > 0) await documentWriteTailRef.current
+  }, [])
+
+  /** The session half of a write that landed on the document it came from. */
+  const commitSave = useCallback((ref: FileRef, atSavedMark: boolean): void => {
+    const now = Date.now()
+    setDocSession((prev) => {
+      const saved = afterSave(ref, now, atSavedMark, prev)
+      return atSavedMark ? saved : markNonUndoableDirty(saved, NON_UNDOABLE_REASON.changedDuringSave, now)
+    })
+    // The work is now safely on disk — drop the autosave snapshot. Called
+    // before any further await: the clear must not take a later edit's.
+    if (atSavedMark) void clearRecoverySnapshot()
+    // Still unsaved: the snapshot must follow the new file binding.
+    else scheduleAutosaveTick()
+  }, [clearRecoverySnapshot, scheduleAutosaveTick])
+  /** A save's answer, read after its last await: true only if the file still
+   *  holds the document in this window. Otherwise says why for the live API. */
+  const stillSaved = useCallback((scene: Scene, identity: number, point: SavePoint, atSavedMark: boolean): boolean => {
+    if (sceneRef.current !== scene || documentIdentityRef.current !== identity) {
+      lastSaveErrorRef.current = SAVE_WRITTEN_BUT_REPLACED
+      return false
+    }
+    if (!atSavedMark || movedSince(scene, point, documentGenerationRef.current)) {
+      lastSaveErrorRef.current = SAVE_WRITTEN_BUT_STALE
+      return false
+    }
+    return true
+  }, [SAVE_WRITTEN_BUT_STALE, SAVE_WRITTEN_BUT_REPLACED])
 
   /** Writes the document to `ref`, in `ref.format`, and commits the post-save
    * session state. The one save path: Save is this with the document's own
@@ -4424,14 +4516,14 @@ export default function App() {
         // Recorded in `skpCompatRef` only once the write lands.
         let savedCompat: boolean | null = null
         const skp = isSkpFormat(ref.format)
-        // The change generation is read right before the document is
-        // serialized, and nothing awaits between the two: an edit made
-        // during any later step is not in these bytes.
-        let generationAtSave: number
+        // The save point is read right before the document is serialized,
+        // and nothing awaits between the two: an edit made during any later
+        // step is not in these bytes.
+        let savePoint: SavePoint
         // An ordinary file still has a step to wait for once serialized.
         let stripping: Promise<Uint8Array> | null = null
         if (skp) {
-          generationAtSave = documentGenerationRef.current
+          savePoint = savePointOf(scene, documentGenerationRef.current)
           const compat = takesCompat(ref.format) && (compatArg ?? skpCompatRef.current)
           const out = scene.save_skp(skpTarget(ref.format), units ?? getLengthUnit(), units !== undefined, compat) as SkpWrite
           savedCompat = compat
@@ -4456,11 +4548,11 @@ export default function App() {
             handleToast(t`Save was canceled because the document changed. Try saving again.`)
             return false
           }
-          generationAtSave = documentGenerationRef.current
+          savePoint = savePointOf(scene, documentGenerationRef.current)
           bytes = new Uint8Array(scene.extract_document_item(JSON.stringify(metaForEditSave(current, new Date().toISOString()))))
         } else {
           // An ordinary document file never carries a Library item's remote note.
-          generationAtSave = documentGenerationRef.current
+          savePoint = savePointOf(scene, documentGenerationRef.current)
           stripping = withoutRemoteNoteIfAny(new Uint8Array(scene.save()))
           // Reported by the queued write, which may not have started yet.
           stripping.catch(() => {})
@@ -4484,8 +4576,7 @@ export default function App() {
           renderAndWriteThumbnailRef.current(pushStickyToast(t`Rendering thumbnail for "${itemName}"…`), itemName, bytes, true)
         }
         if (sceneRef.current !== scene || documentIdentityRef.current !== identityAtSave) {
-          // oxlint-disable-next-line lingui/no-unlocalized-strings -- live API refusal text, English
-          lastSaveErrorRef.current = 'the document changed during save; save again'
+          lastSaveErrorRef.current = SAVE_WRITTEN_BUT_REPLACED
           await refreshItemThumbnail()
           return false
         }
@@ -4498,18 +4589,12 @@ export default function App() {
         // See `markSavedIfUnmoved`'s doc comment: only claim the kernel's own
         // saved mark when nothing has edited the document since the bytes
         // above were grabbed.
-        const atSavedMark = markSavedIfUnmoved(scene, generationAtSave, documentGenerationRef.current)
-        if (!atSavedMark) {
-          // oxlint-disable-next-line lingui/no-unlocalized-strings -- live API refusal text, English
-          lastSaveErrorRef.current = 'the document changed during save; save again'
-        }
-        setDocSession((prev) => afterSave(newRef, Date.now(), atSavedMark, prev))
+        const atSavedMark = markSavedIfUnmoved(scene, savePoint, documentGenerationRef.current)
+        commitSave(newRef, atSavedMark)
         await reportDocumentId()
         noteDocumentEvent('saved', newRef.name, newRef, newRef.format)
         pumpEvents(scene)
         LogStore.log.info('app', `Saved: ${newRef.name}`)
-        // The work is now safely on disk — drop the autosave snapshot.
-        if (atSavedMark) void clearRecoverySnapshot()
         if (libEdit === null && isTauri && typeof newRef.handle === 'string') {
           import('@tauri-apps/api/core').then(({ invoke }) =>
             invoke('push_recent', { path: newRef.handle as string })
@@ -4518,14 +4603,14 @@ export default function App() {
         if (newRef.format === 'hew') persistSceneThumbnails(bytes)
         noteSkpSimplified(simplified, writerNotes)
         await refreshItemThumbnail()
-        return atSavedMark
+        return stillSaved(scene, identityAtSave, savePoint, atSavedMark)
       } catch (err: unknown) {
         lastSaveErrorRef.current = friendlyErrorText(err)
         handleToast(t`Save failed: ${ph({ reason: friendlyErrorText(err) })}`)
         return false
       }
     },
-    [handleToast, toastOpenFailure, clearRecoverySnapshot, pushCameraStateToScene, noteSkpSimplified, noteDocumentEvent, reportDocumentId, setLibraryEdit, pushStickyToast, DOC_CHANGED_BEFORE_SAVE, currentLibraryItemName, queueDocumentWrite],
+    [handleToast, toastOpenFailure, pushCameraStateToScene, noteSkpSimplified, noteDocumentEvent, reportDocumentId, setLibraryEdit, pushStickyToast, DOC_CHANGED_BEFORE_SAVE, SAVE_WRITTEN_BUT_REPLACED, currentLibraryItemName, queueDocumentWrite, commitSave, stillSaved],
   )
 
   const saveDocument = useCallback(
@@ -4590,7 +4675,7 @@ export default function App() {
     pumpEvents(scene)
     try {
       // Read right before serialization (see `saveToRef`).
-      const generationAtSave = documentGenerationRef.current
+      const savePoint = savePointOf(scene, documentGenerationRef.current)
       let stripping: Promise<Uint8Array> | null = null
       // `save_skp` builds on the document's source (if any) and stages the
       // written file as the next source; a canceled picker or failed write
@@ -4617,23 +4702,24 @@ export default function App() {
           : host.saveAs(bytes, suggestedName, format)
       })
       if (newRef === null) return false // user cancelled
-      if (sceneRef.current !== scene || documentIdentityRef.current !== identityAtSave) return false
+      if (sceneRef.current !== scene || documentIdentityRef.current !== identityAtSave) {
+        lastSaveErrorRef.current = SAVE_WRITTEN_BUT_REPLACED
+        return false
+      }
       // The document is now bound to `newRef`: a `.skp` takes the written
       // file as the source of its next save; a `.hew` has none.
       if (isSkpFormat(format)) scene.commit_skp_save()
       else scene.set_skp_source(undefined)
       skpCompatRef.current = compat
       skpSourceGenRef.current += 1
-      const atSavedMark = markSavedIfUnmoved(scene, generationAtSave, documentGenerationRef.current)
-      setDocSession((prev) => afterSave(newRef, Date.now(), atSavedMark, prev))
+      const atSavedMark = markSavedIfUnmoved(scene, savePoint, documentGenerationRef.current)
+      commitSave(newRef, atSavedMark)
       // A copy saved elsewhere is an ordinary document, not the Library item.
       setLibraryEdit(null)
       await reportDocumentId()
       noteDocumentEvent('saved', newRef.name, newRef, newRef.format)
       pumpEvents(scene)
       LogStore.log.info('app', `Saved as: ${newRef.name}`)
-      // The work is now safely on disk — drop the autosave snapshot.
-      if (atSavedMark) void clearRecoverySnapshot()
       if (isTauri && typeof newRef.handle === 'string') {
         import('@tauri-apps/api/core').then(({ invoke }) =>
           invoke('push_recent', { path: newRef.handle as string })
@@ -4642,12 +4728,12 @@ export default function App() {
       if (format === 'hew') persistSceneThumbnails(bytes)
       // A deliberate choice of format: what it drops is listed every time.
       noteSkpSimplified(simplified, writerNotes, true)
-      return atSavedMark
+      return stillSaved(scene, identityAtSave, savePoint, atSavedMark)
     } catch (err: unknown) {
       handleToast(t`Save As failed: ${ph({ reason: friendlyErrorText(err) })}`)
       return false
     }
-  }, [docSession.currentRef, handleToast, clearRecoverySnapshot, pushCameraStateToScene, promptSaveFormat, noteSkpSimplified, noteDocumentEvent, reportDocumentId, queueDocumentWrite])
+  }, [docSession.currentRef, handleToast, pushCameraStateToScene, promptSaveFormat, noteSkpSimplified, noteDocumentEvent, reportDocumentId, queueDocumentWrite, commitSave, stillSaved, SAVE_WRITTEN_BUT_REPLACED])
 
   // The loss notice's "Save a .hew copy": write the document as `.hew`
   // through the Save As picker WITHOUT rebinding — `currentRef` (and the
@@ -4736,6 +4822,11 @@ export default function App() {
     const scene = sceneRef.current
     if (scene === null) return false
     const { invoke } = await import('@tauri-apps/api/core')
+    // A pending save may be writing this very file: read what it leaves.
+    const readFile = async (): Promise<ArrayBuffer> => {
+      if (documentWritesPendingRef.current > 0) await documentWritesSettled()
+      return invoke<ArrayBuffer>('read_file', { path })
+    }
     if (/\.hew$/i.test(path)) {
       // Claim the path in the shell BEFORE the read/apply, so a second open
       // of the same file racing this one focuses this window instead of
@@ -4746,7 +4837,7 @@ export default function App() {
       lastReportedPathRef.current = path
       let landed = false
       try {
-        const buf = await invoke<ArrayBuffer>('read_file', { path })
+        const buf = await readFile()
         const bytes = new Uint8Array(buf)
         const discardsUnsaved = docSessionRef.current.dirty
         // A Library item opened as a document gives up its remote note (design 7.2).
@@ -4776,7 +4867,7 @@ export default function App() {
       lastReportedPathRef.current = path
       let landed = false
       try {
-        const buf = await invoke<ArrayBuffer>('read_file', { path })
+        const buf = await readFile()
         landed = await runOpenSkp(scene, { name: basenameOf(path), bytes: new Uint8Array(buf), handle: path })
       } finally {
         if (!landed) {
@@ -4786,7 +4877,7 @@ export default function App() {
       }
       return landed
     }
-    const buf = await invoke<ArrayBuffer>('read_file', { path })
+    const buf = await readFile()
     const bytes = new Uint8Array(buf)
     const { resolveImportPickFromPath } = await import('./io/tauriFileHost')
     let pick: ImportPick
@@ -4801,7 +4892,7 @@ export default function App() {
     }
     await runImportPick(scene, pick)
     return true
-  }, [applyLoadedBytes, clearRecoverySnapshot, runImportPick, runOpenSkp, toastOpenFailure, bindLibraryItemForPath, withoutNoteOrReport])
+  }, [applyLoadedBytes, clearRecoverySnapshot, runImportPick, runOpenSkp, toastOpenFailure, bindLibraryItemForPath, withoutNoteOrReport, documentWritesSettled])
 
   // File ▸ Revert to Saved, after its confirmation (and the live API's
   // `hew.doc.revert`, which asks none): read the saved file again, load it
@@ -4816,7 +4907,15 @@ export default function App() {
   const revertToSaved = useCallback(async (): Promise<
     { ok: true } | { ok: false; message: string; shown?: true }
   > => {
-    const session = docSessionRef.current
+    // A save still writing changes both the file to read and what the checks
+    // below see. With no write pending there is no wait here, so a web
+    // permission prompt still follows its click.
+    let session = docSessionRef.current
+    // (A loop: another save can start while the session is being read.)
+    while (documentWritesPendingRef.current > 0) {
+      await documentWritesSettled()
+      session = await readLatestSession()
+    }
     const ref = session.currentRef
     const scene = sceneRef.current
     if (!canRevertToSaved(session) || ref === null || scene === null) {
@@ -4826,6 +4925,7 @@ export default function App() {
     // read or a permission prompt is pending changes it, though neither the
     // file nor the dirty flag does.
     const depthAtStart = scene.undo_depth()
+    const writesAtStart = documentWriteCountRef.current
     let bytes: Uint8Array
     try {
       if (typeof ref.handle === 'string') {
@@ -4853,13 +4953,25 @@ export default function App() {
     // elsewhere, closed, or opened another file meanwhile, this revert is
     // for a document that is gone; and if the document was saved or undone
     // back to clean, there is nothing left to throw away.
-    if (docSessionRef.current.currentRef !== ref || sceneRef.current !== scene || scene.undo_depth() !== depthAtStart) {
+    let latest = docSessionRef.current
+    const savedDuringRead = documentWriteCountRef.current !== writesAtStart
+    if (savedDuringRead) {
+      await documentWritesSettled()
+      latest = await readLatestSession()
+    }
+    if (latest.currentRef !== ref || sceneRef.current !== scene || scene.undo_depth() !== depthAtStart) {
       const message = t`Revert canceled: the document changed while the file was being read.`
       handleToast(message)
       return { ok: false, message, shown: true }
     }
-    if (!docSessionRef.current.dirty) {
+    if (!latest.dirty) {
       const message = t`Nothing to revert: the document is already at its saved state.`
+      handleToast(message)
+      return { ok: false, message, shown: true }
+    }
+    // The bytes in hand may predate a save made during the read.
+    if (savedDuringRead) {
+      const message = t`Revert canceled: the document changed while the file was being read.`
       handleToast(message)
       return { ok: false, message, shown: true }
     }
@@ -4895,7 +5007,7 @@ export default function App() {
     }
     handleToast(t`Reverted to the saved file.`)
     return { ok: true }
-  }, [applyLoadedBytes, runOpenSkp, clearRecoverySnapshot, handleToast, setLibraryEdit, t])
+  }, [applyLoadedBytes, runOpenSkp, clearRecoverySnapshot, handleToast, setLibraryEdit, documentWritesSettled, readLatestSession, t])
 
   // Tauri-only. The entry point for every "open this path" gesture that can
   // land on a window the user may already be working in: native/in-app "Open
@@ -5088,7 +5200,7 @@ export default function App() {
     // claim() re-homed it to this window's own slot (the next autosave tick
     // refreshes it in place); arm the tick so it will actually fire if
     // nothing else changes.
-    armAutosaveTick()
+    scheduleAutosaveTick()
     if (snapshot.pathWithheld === true) {
       handleToastRef.current(
         t`Hew can’t save over the original file after this recovery. Save will ask you where to put it.`,
@@ -5097,7 +5209,7 @@ export default function App() {
       )
     }
     return true
-  }, [applyLoadedBytes, armAutosaveTick, bindLibraryItemForPath])
+  }, [applyLoadedBytes, scheduleAutosaveTick, bindLibraryItemForPath])
   const adoptSnapshotRef = useRef(adoptSnapshot)
   useEffect(() => { adoptSnapshotRef.current = adoptSnapshot }, [adoptSnapshot])
 
@@ -5984,8 +6096,9 @@ export default function App() {
             const ref = docSessionRef.current.currentRef
             const hash = await sha256Hex(bytes)
             const summary = await readItemSummary(bytes)
-            // `stamp_library_source` pushes no undo entry. The write-through
-            // captures the document generation after serializing the stamp.
+            // `stamp_library_source` pushes no undo entry: only the change
+            // generation sees it. The write-through takes its save point
+            // when it serializes, so the stamp is part of what it saves.
             scene.stamp_library_source(
               target.nodeKinds,
               target.nodeIds,
@@ -6022,7 +6135,8 @@ export default function App() {
               pushCameraStateToScene(scene)
               scene.ensure_document_id()
               const docBytes = new Uint8Array(scene.save())
-              const generationAtWrite = documentGenerationRef.current
+              const savePoint = savePointOf(scene, documentGenerationRef.current)
+              const identityAtSave = documentIdentityRef.current
               const newRef = await queueDocumentWrite(() => fileHostRef.current.save(docBytes, ref))
               if (newRef !== null) {
                 // An edit may have landed DURING the save — its dirty
@@ -6031,8 +6145,16 @@ export default function App() {
                 // bytes predate the edit). Apply afterSave only when the
                 // session is still exactly the one this flow captured, AND
                 // only claim the kernel's saved mark when no later edit ran.
-                const atSavedMark = markSavedIfUnmoved(scene, generationAtWrite, documentGenerationRef.current)
-                setDocSession((prev) => applyWriteThroughSave(prev, sessionAtSave, newRef, Date.now(), atSavedMark))
+                const atSavedMark = markSavedIfUnmoved(scene, savePoint, documentGenerationRef.current)
+                // A write that is stale for the same document leaves the
+                // older saved mark behind, as a stale Save does.
+                const stale = !atSavedMark && sceneRef.current === scene && documentIdentityRef.current === identityAtSave
+                const now = Date.now()
+                setDocSession((prev) => {
+                  const next = applyWriteThroughSave(prev, sessionAtSave, newRef, now, atSavedMark)
+                  return stale ? markNonUndoableDirty(next, NON_UNDOABLE_REASON.changedDuringSave, now) : next
+                })
+                if (stale) scheduleAutosaveTick()
                 setDocRev((r) => r + 1)
               } else {
                 // The write-through didn't land (host declined/cancelled) —
@@ -6068,7 +6190,7 @@ export default function App() {
         renderAndWriteThumbnail(toastId, name, bytes, updating !== undefined)
       })()
     },
-    [saveToLibraryTarget, handleToast, pushStickyToast, renderAndWriteThumbnail, pushCameraStateToScene, armAutosaveTick, queueDocumentWrite],
+    [saveToLibraryTarget, handleToast, pushStickyToast, renderAndWriteThumbnail, pushCameraStateToScene, armAutosaveTick, scheduleAutosaveTick, queueDocumentWrite],
   )
 
   /** Update in Library: write the selected part over the item it came from,
