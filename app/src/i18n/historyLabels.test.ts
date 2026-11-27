@@ -10,6 +10,10 @@ describe('historyLabel (English must match the kernel renderer)', () => {
     expect(historyLabel(k('push-pull'), 'x')).toBe('Push/Pull')
     expect(historyLabel(k('follow-me'), 'x')).toBe('Follow Me')
     expect(historyLabel(k('edit'), 'x')).toBe('Edit')
+    expect(historyLabel(k('link-identical-copies'), 'x')).toBe('Link identical copies')
+    expect(historyLabel(k('lock'), 'x')).toBe('Lock')
+    expect(historyLabel(k('unlock'), 'x')).toBe('Unlock')
+    expect(historyLabel(k('update-from-library'), 'x')).toBe('Update from Library')
   })
 
   it('labeled, repeat and bundle', () => {
@@ -37,6 +41,9 @@ describe('historyLabel (English must match the kernel renderer)', () => {
     expect(historyLabel(k('delete-node', { node: 'object' }), 'x')).toBe('Delete object')
     expect(historyLabel(k('make-component', { name: 'Leg' }), 'x')).toBe("Make component 'Leg'")
     expect(historyLabel(k('make-component'), 'x')).toBe('Make component')
+    expect(historyLabel(k('change-component-axes', { name: 'Leg' }), 'x')).toBe(
+      "Change component axes 'Leg'",
+    )
     expect(historyLabel(k('rename', { from: 'Box', to: 'Base' }), 'x')).toBe("Rename 'Box' → 'Base'")
     expect(historyLabel(k('rename', { to: 'Base' }), 'x')).toBe("Rename to 'Base'")
     expect(historyLabel(k('rename'), 'x')).toBe('Rename')

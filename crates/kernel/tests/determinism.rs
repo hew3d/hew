@@ -190,6 +190,7 @@ fn apply(doc: &mut Document, op: &Op) {
                 let _ = doc.duplicate_node(
                     NodeId::Object(id),
                     &Transform::translation(Vec3::new(dx, dy, dz)),
+                    kernel::LinkPolicy::Independent,
                 );
             }
         }

@@ -19,6 +19,7 @@ export const KIND_CSS_COLOR: Record<string, string> = {
   midpoint: '#00cccc',
   intersection: '#ffaa00',
   'on-edge': '#cc2200',
+  'on-intersection-line': '#e05a00',
   'on-face': '#0055cc',
   'on-guide': '#9933cc',
   ground: '#888888',
@@ -51,4 +52,12 @@ export function inferenceCssColor(info: InferenceInfo): string {
     return `var(--axis-${axisName})`
   }
   return KIND_CSS_COLOR[info.kind] ?? 'var(--text-faint)'
+}
+
+/** The CSS color of a drawing-plane pip (view-die design §3.1, §4): the
+ *  `--axis-*` token for red, green and blue, the `--plane-custom` violet
+ *  otherwise. */
+export function planePipCssColor(pip: 'red' | 'green' | 'blue' | 'custom'): string {
+  // oxlint-disable-next-line lingui/no-unlocalized-strings -- CSS values
+  return pip === 'custom' ? 'var(--plane-custom, #c77dff)' : `var(--axis-${pip})`
 }

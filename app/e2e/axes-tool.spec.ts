@@ -121,7 +121,7 @@ test('Drawing Axes tool: three real clicks move the drawing axes, and a locked d
   // doc comment).
   await page.evaluate(() => window.__hew_test!.drawBox([0, 0, 0], [2, 2, 0], 1))
 
-  const hash0 = await page.evaluate(() => window.__hew_test!.getStateHash())
+  const hash0 = await page.evaluate(() => window.__hew_test!.getModelStateHash())
   await activateFromToolsMenu(page, 'Drawing Axes')
 
   await clickWorld(page, ctx, 0, 0, 1) // origin
@@ -131,7 +131,7 @@ test('Drawing Axes tool: three real clicks move the drawing axes, and a locked d
   // The frame actually moved (real `set_axes` call, one undo step).
   const afterMove = await page.evaluate(() => ({
     axes: window.__hew_test!.getDrawingAxes(),
-    hash: window.__hew_test!.getStateHash(),
+    hash: window.__hew_test!.getModelStateHash(),
     canUndo: window.__hew_test!.canUndo(),
     err: window.__hew_test!.getLastError(),
   }))
@@ -188,7 +188,7 @@ test('Drawing Axes tool: Escape steps back one stage instead of fully cancelling
   // Captured AFTER drawBox (itself an undoable commit) — this test's own
   // claim is narrower: the Axes GESTURE below commits nothing, not that the
   // document has no history at all.
-  const hash0 = await page.evaluate(() => window.__hew_test!.getStateHash())
+  const hash0 = await page.evaluate(() => window.__hew_test!.getModelStateHash())
 
   await activateFromToolsMenu(page, 'Drawing Axes')
   await clickWorld(page, ctx, 0, 0, 1) // origin picked
@@ -201,5 +201,5 @@ test('Drawing Axes tool: Escape steps back one stage instead of fully cancelling
   // are both untouched.
   const axes = await page.evaluate(() => window.__hew_test!.getDrawingAxes())
   expect(axes).toEqual(WORLD_IDENTITY)
-  expect(await page.evaluate(() => window.__hew_test!.getStateHash())).toBe(hash0)
+  expect(await page.evaluate(() => window.__hew_test!.getModelStateHash())).toBe(hash0)
 })

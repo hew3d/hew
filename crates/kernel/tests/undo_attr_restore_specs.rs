@@ -7,6 +7,7 @@
 //! Both merge/split pairs are covered: the inner (imprint) pair and the
 //! outer (boundary-split) pair.
 
+use kernel::trig;
 use kernel::{
     CurveGeom, Document, FaceId, History, KernelOp, KernelOpReport, Object, Plane, Point3, Sketch,
     Vec3,
@@ -31,7 +32,7 @@ fn analytic_cylinder(radius: f64, n: usize, height: f64) -> Object {
     .unwrap();
     let p = |i: usize| {
         let a = 2.0 * std::f64::consts::PI * (i as f64) / (n as f64);
-        Point3::new(radius * a.cos(), radius * a.sin(), 0.0)
+        Point3::new(radius * trig::cos(a), radius * trig::sin(a), 0.0)
     };
     for i in 0..n {
         s.add_segment(p(i), p(i + 1)).unwrap();
@@ -88,6 +89,7 @@ fn undo_of_merge_inner_face_does_not_resurrect_a_dropped_surface() {
                 loop_path,
                 restore: None,
                 curves: Vec::new(),
+                edge_attrs: Vec::new(),
             },
         )
         .unwrap();
@@ -170,6 +172,7 @@ fn undo_of_merge_inner_face_restores_the_sub_faces_own_paint() {
         name: "Red".to_string(),
         color: kernel::Rgba8::rgb(220, 40, 40),
         texture: None,
+        pbr: None,
     });
 
     // A plain box to imprint on.
@@ -216,6 +219,7 @@ fn undo_of_merge_inner_face_restores_the_sub_faces_own_paint() {
                 loop_path,
                 restore: None,
                 curves: Vec::new(),
+                edge_attrs: Vec::new(),
             },
         )
         .unwrap();
@@ -250,11 +254,13 @@ fn undo_of_merge_faces_restores_each_sides_own_paint() {
         name: "Red".to_string(),
         color: kernel::Rgba8::rgb(220, 40, 40),
         texture: None,
+        pbr: None,
     });
     let blue = doc.add_material(kernel::Material {
         name: "Blue".to_string(),
         color: kernel::Rgba8::rgb(40, 40, 220),
         texture: None,
+        pbr: None,
     });
 
     let s = doc.add_sketch(ground());
@@ -329,8 +335,14 @@ fn undo_of_merge_faces_restores_each_sides_own_paint() {
 
     // Merge them back (the raw primitive has no material gate), then undo.
     let cut_edge = r.new_edges[0];
-    doc.apply_object_op(oid, KernelOp::MergeFaces { edge: cut_edge })
-        .unwrap();
+    doc.apply_object_op(
+        oid,
+        KernelOp::MergeFaces {
+            edge: cut_edge,
+            keep_vertices: Vec::new(),
+        },
+    )
+    .unwrap();
     doc.undo().unwrap();
 
     // Each half must carry ITS OWN paint, on the correct side.
@@ -408,6 +420,7 @@ fn undo_of_merge_faces_round_trips_wall_attribution() {
             &mut obj,
             KernelOp::MergeFaces {
                 edge: r.new_edges[0],
+                keep_vertices: Vec::new(),
             },
         )
         .unwrap();
@@ -464,7 +477,13 @@ fn sliver_faces_merge_with_best_effort_snapshots() {
 
     // Forward behavior preserved: the merge succeeds at 1e-12 width.
     let report = history
-        .apply(&mut obj, KernelOp::MergeFaces { edge: shared_edge })
+        .apply(
+            &mut obj,
+            KernelOp::MergeFaces {
+                edge: shared_edge,
+                keep_vertices: Vec::new(),
+            },
+        )
         .unwrap();
     assert_eq!(obj.faces().len(), 1, "sliver merges exactly as before");
 
@@ -518,7 +537,13 @@ fn healthy_widths_pin_both_snapshot_anchors() {
             .map(|(id, _)| id)
             .unwrap();
         let report = history
-            .apply(&mut obj, KernelOp::MergeFaces { edge: shared_edge })
+            .apply(
+                &mut obj,
+                KernelOp::MergeFaces {
+                    edge: shared_edge,
+                    keep_vertices: Vec::new(),
+                },
+            )
             .unwrap();
         let KernelOpReport::FaceMerge(r) = report else {
             panic!("wrong report kind")
@@ -531,4 +556,128 @@ fn healthy_widths_pin_both_snapshot_anchors() {
         assert_eq!(obj.faces().len(), 2, "width {w:e} round-trips");
         obj.validate().unwrap();
     }
+}
+
+/// Inner pair, face and edge dictionaries (docs/agents/PLUGINS.md
+/// "Attributes"): the dissolve's report carries the sub-face's dictionary
+/// (its attribute snapshot) and each loop edge's, and undo through the
+/// Object's own history gives both back — not the parent's dictionary,
+/// and not edges without one.
+#[test]
+fn undo_of_merge_inner_face_restores_face_and_loop_edge_dictionaries() {
+    let ns = "com.example.t";
+    let dict = |k: &str, v: i64| -> kernel::AttrDict {
+        std::collections::BTreeMap::from([(
+            ns.to_string(),
+            std::collections::BTreeMap::from([(k.to_string(), kernel::AttrValue::Int(v))]),
+        )])
+    };
+    let mut doc = Document::new();
+    let s = doc.add_sketch(ground());
+    {
+        let sk = doc.sketch_mut(s).unwrap();
+        for (a, b) in [
+            ((0.0, 0.0), (2.0, 0.0)),
+            ((2.0, 0.0), (2.0, 2.0)),
+            ((2.0, 2.0), (0.0, 2.0)),
+            ((0.0, 2.0), (0.0, 0.0)),
+        ] {
+            sk.add_segment(Point3::new(a.0, a.1, 0.0), Point3::new(b.0, b.1, 0.0))
+                .unwrap();
+        }
+    }
+    let region = doc.sketch(s).unwrap().regions().keys().next().unwrap();
+    let (oid, _) = doc.extrude_region(s, region, 1.0).unwrap();
+    let top = doc
+        .object(oid)
+        .unwrap()
+        .faces()
+        .iter()
+        .find(|(_, f)| {
+            f.plane
+                .normal()
+                .approx_eq(Vec3::new(0.0, 0.0, 1.0), kernel::tol::NORMAL_DIRECTION)
+        })
+        .map(|(id, _)| id)
+        .unwrap();
+    doc.face_attr_set(oid, top, ns, "k", kernel::AttrValue::Int(1))
+        .unwrap();
+    let loop_path = vec![
+        Point3::new(0.5, 0.5, 1.0),
+        Point3::new(1.5, 0.5, 1.0),
+        Point3::new(1.5, 1.5, 1.0),
+        Point3::new(0.5, 1.5, 1.0),
+    ];
+    let (report, _) = doc
+        .apply_object_op(
+            oid,
+            KernelOp::SplitFaceInner {
+                face: top,
+                loop_path: loop_path.clone(),
+                restore: None,
+                curves: Vec::new(),
+                edge_attrs: Vec::new(),
+            },
+        )
+        .unwrap();
+    let KernelOpReport::FaceSplitInner(r) = report else {
+        panic!("wrong report kind")
+    };
+    doc.face_attr_set(oid, r.sub_face, ns, "k", kernel::AttrValue::Int(2))
+        .unwrap();
+    doc.edge_attr_set(oid, r.new_edges[1], ns, "e", kernel::AttrValue::Int(7))
+        .unwrap();
+
+    // The Object alone, through its own history.
+    let mut obj = doc.object(oid).unwrap().clone();
+    let mut history = History::new();
+    let report = history
+        .apply(
+            &mut obj,
+            KernelOp::MergeInnerFace {
+                sub_face: r.sub_face,
+            },
+        )
+        .unwrap();
+    let KernelOpReport::FaceMergeInner(m) = report else {
+        panic!("wrong report kind")
+    };
+    assert_eq!(
+        m.sub_face_attrs.attrs,
+        doc.object(oid).unwrap().faces()[r.sub_face].attrs
+    );
+    assert_eq!(
+        m.edge_attrs.iter().filter(|d| **d == dict("e", 7)).count(),
+        1,
+        "one loop edge's dictionary rides the report"
+    );
+    assert_eq!(m.edge_attrs.iter().filter(|d| d.is_empty()).count(), 3);
+    assert!(obj.edges().keys().all(|e| obj.edge_attrs(e).is_none()));
+
+    history.undo(&mut obj).unwrap();
+    let sub = obj
+        .faces()
+        .keys()
+        .find(|&f| {
+            obj.faces()[f].inner_loops.is_empty() && obj.face_attrs(f) == Some(&dict("k", 2))
+        })
+        .expect("the sub-face comes back with its own dictionary");
+    let ring: Vec<Point3> = obj.loop_positions(obj.faces()[sub].outer_loop).collect();
+    assert_eq!(ring.len(), 4);
+    let carried: Vec<_> = obj
+        .edges()
+        .keys()
+        .filter(|&e| obj.edge_attrs(e).is_some())
+        .collect();
+    assert_eq!(carried.len(), 1);
+    assert_eq!(obj.edge_attrs(carried[0]), Some(&dict("e", 7)));
+    let (a, b) = obj.edge_endpoints(carried[0]).unwrap();
+    let (x, y) = (loop_path[1], loop_path[2]);
+    assert!(
+        (a.approx_eq(x, 1e-9) && b.approx_eq(y, 1e-9))
+            || (a.approx_eq(y, 1e-9) && b.approx_eq(x, 1e-9)),
+        "the dictionary is back on the same loop edge"
+    );
+    history.redo(&mut obj).unwrap();
+    assert!(obj.edges().keys().all(|e| obj.edge_attrs(e).is_none()));
 }

@@ -98,6 +98,9 @@ interface SceneOpts {
   facePlane?: { anchor: readonly [number, number, number]; normal: readonly [number, number, number] }
   historyGeneration?: () => bigint
   instancePose?: number[]
+  /** `instance_expanded_members`/`instance_expanded_inherited` of the
+   *  picked placement; omitted, nothing inherited. */
+  expanded?: { members: bigint[]; inherited: bigint[] }
 }
 
 const FACE_NORMAL: [number, number, number] = [0, 0, 1]
@@ -134,6 +137,8 @@ function makeWasmScene(opts: SceneOpts = {}): WasmScene {
     face_boundary: vi.fn(() => new Float32Array([])),
     history_generation: vi.fn(opts.historyGeneration ?? (() => 0n)),
     instance_pose: vi.fn(() => (opts.instancePose === undefined ? undefined : new Float64Array(opts.instancePose))),
+    instance_expanded_members: vi.fn(() => BigUint64Array.from(opts.expanded?.members ?? [])),
+    instance_expanded_inherited: vi.fn(() => BigUint64Array.from(opts.expanded?.inherited ?? [])),
   } as unknown as WasmScene
 }
 
@@ -534,6 +539,19 @@ describe('PositionTextureTool — green corner drag (scale/rotate about the red 
     const green = gizmoMeshes(gizmoGroup)[1]
     expect(green.position.x).toBeCloseTo(0.9)
     expect(green.position.y).toBeCloseTo(-1.3)
+  })
+
+  it('the line where two objects\' faces meet is a point snap for the green corner, like an edge', () => {
+    const scene = texturedFixtureScene()
+    const { tool, previewFaceUv } = makeTool(scene)
+    enterIdle(tool)
+
+    tool.onPointerDown(makeSnap(), rayAt(0, -1))
+    tool.onPointerMove(pointSnapAt(1.5, -0.5, 0, 'on-intersection-line'), rayAt(1.4, -0.6))
+
+    const uv = applyFrame(lastPreviewFrame(previewFaceUv), [1.5, -0.5, 0])
+    expect(uv[0]).toBeCloseTo(1, 6)
+    expect(uv[1]).toBeCloseTo(0, 6)
   })
 
   it('a point snap takes on the green corner too', () => {
@@ -1138,6 +1156,33 @@ describe('PositionTextureTool — component instances', () => {
     expect(previewFaceUv).not.toHaveBeenCalled()
     expect(scene.set_face_uv_frame).not.toHaveBeenCalled()
     expect(onCommit).not.toHaveBeenCalled()
+  })
+
+  it('a face showing its placement\'s texture (no paint, no base: a linked copy) is positionable in the context', () => {
+    const pose = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0]
+    const scene = instanceFixtureScene(pose, {
+      faceMaterial: makeFaceMaterial(MATERIAL_SENTINEL, MATERIAL_SENTINEL),
+      expanded: { members: [3n], inherited: [9n] },
+    })
+    const { tool, onToast } = makeTool(scene)
+    tool.setEditContext({ kind: 'instance', id: 77n, component: 55n })
+    tool.onPointerDown(makeSnap(), worldRayForLocalPoint(pose, [0, 0, 0]))
+    expect(onToast).not.toHaveBeenCalled()
+    expect(tool.capturingInput()).toBe(true)
+    expect(scene.material_info).toHaveBeenCalledWith(9n)
+  })
+
+  it('an unpainted member under an unpainted placement still says to pick a textured face', () => {
+    const pose = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0]
+    const scene = instanceFixtureScene(pose, {
+      faceMaterial: makeFaceMaterial(MATERIAL_SENTINEL, MATERIAL_SENTINEL),
+      expanded: { members: [3n], inherited: [MATERIAL_SENTINEL] },
+    })
+    const { tool, onToast } = makeTool(scene)
+    tool.setEditContext({ kind: 'instance', id: 77n, component: 55n })
+    tool.onPointerDown(makeSnap(), worldRayForLocalPoint(pose, [0, 0, 0]))
+    expect(onToast).toHaveBeenCalledTimes(1)
+    expect(tool.capturingInput()).toBe(false)
   })
 
   it('the SAME instanced face becomes positionable once its instance is the active edit context, and stops being once the context is left', () => {

@@ -4,7 +4,7 @@ import { ALL_LOCALES, PSEUDO_LOCALE, SOURCE_LOCALE } from './src/i18n/locales'
 
 // Lingui extraction + compilation config (docs/LOCALIZATION.md). The locale
 // list lives in src/i18n/locales.ts so the app, this config, and the verify
-// gate's completeness check cannot disagree about which languages exist.
+// gate's coverage report cannot disagree about which languages exist.
 export default defineConfig({
   sourceLocale: SOURCE_LOCALE,
   locales: [...ALL_LOCALES],

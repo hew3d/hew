@@ -8,7 +8,8 @@
 	<longdescription>
 		Hew is a cross-platform 3D modeler: SketchUp's draw-on-faces and
 		push/pull interaction model on a solids-first kernel where every
-		closed extrusion is a watertight object. This package installs the
+		closed extrusion is a watertight object. It opens and saves
+		SketchUp files of every version, from SketchUp 3 through 2027. This package installs the
 		official binary release (the desktop app and the hew-cli sidecar).
 	</longdescription>
 	<upstream>

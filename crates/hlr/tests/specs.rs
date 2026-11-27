@@ -1,3 +1,9 @@
+// Test-only, and outside the determinism-critical kernel scope (kernel /
+// inference / tessellate / mesh-heal): transcendentals here build the
+// inputs and expectations of a native test, never a document a user keeps.
+// Suppress the workspace clippy.toml ban for this integration-test crate.
+#![allow(clippy::disallowed_methods)]
+
 //! Executable specs for `hlr::line_drawing` (docs/design/printing.md §7b).
 
 mod common;
@@ -475,4 +481,181 @@ fn an_edge_crossing_the_eye_plane_is_cut_not_dropped() {
         "the bar's long edges draw out to the near plane: {:?}",
         d.segs
     );
+}
+
+/// A 1 × 0.6 × 0.3 rounded-rectangle prism (corner radius 0.1, 6 facets per
+/// arc), centered on the origin in x and y.
+fn rounded_rect_prism() -> kernel::Object {
+    let (hx, hy, r, n) = (0.5, 0.3, 0.1, 6usize);
+    let plane =
+        kernel::Plane::from_point_normal(Point3::new(0.0, 0.0, 0.0), Vec3::new(0.0, 0.0, 1.0))
+            .unwrap();
+    let mut s = kernel::Sketch::on_plane(plane);
+    let corners = [
+        (hx - r, hy - r, 0.0),
+        (-hx + r, hy - r, std::f64::consts::FRAC_PI_2),
+        (-hx + r, -hy + r, std::f64::consts::PI),
+        (hx - r, -hy + r, 3.0 * std::f64::consts::FRAC_PI_2),
+    ];
+    let at = |cx: f64, cy: f64, a: f64| Point3::new(cx + r * a.cos(), cy + r * a.sin(), 0.0);
+    for (i, &(cx, cy, a0)) in corners.iter().enumerate() {
+        s.begin_curve_with(kernel::CurveGeom {
+            center: Point3::new(cx, cy, 0.0),
+            radius: r,
+        })
+        .unwrap();
+        for k in 0..n {
+            let step = std::f64::consts::FRAC_PI_2 / n as f64;
+            s.add_segment(
+                at(cx, cy, a0 + step * k as f64),
+                at(cx, cy, a0 + step * (k + 1) as f64),
+            )
+            .unwrap();
+        }
+        s.end_curve();
+        let (nx, ny, na) = corners[(i + 1) % 4];
+        s.add_segment(at(cx, cy, a0 + std::f64::consts::FRAC_PI_2), at(nx, ny, na))
+            .unwrap();
+    }
+    let region = s.regions().keys().next().unwrap();
+    kernel::Object::from_extrusion(&s.profile(region).unwrap(), 0.3).unwrap()
+}
+
+#[test]
+fn tangent_rails_draw_only_with_include_soft() {
+    // Seen from the front, the two rails where the front wall meets the
+    // corner arcs (x = ±0.4) face the viewer on both sides: they are not
+    // silhouettes, so a line drawing shows them only as soft lines on
+    // request (true-curves.md §3.3 rule 3).
+    let obj = rounded_rect_prism();
+    let mesh = tessellate::tessellate(&obj, &kernel::MaterialPalette::default()).unwrap();
+    assert_eq!(mesh.tangent_edge_positions.len(), 8 * 6);
+    let items = [Item {
+        mesh: &mesh,
+        pose: Transform::IDENTITY,
+        sid: 1,
+    }];
+    let cam = parallel([0.0, -10.0, 0.15], [0.0, 0.0, 0.15], [0.0, 0.0, 1.0]);
+    let at_rail =
+        |s: &hlr::Seg| (s.a[0] - s.b[0]).abs() < 1e-6 && (s.a[0].abs() - 0.4).abs() < 1e-6;
+    let d = hlr::line_drawing(&items, &cam, &Options::default()).unwrap();
+    assert!(!d.segs.iter().any(at_rail), "{:?}", d.segs);
+    let ds = hlr::line_drawing(
+        &items,
+        &cam,
+        &Options {
+            include_soft: true,
+            ..Options::default()
+        },
+    )
+    .unwrap();
+    let rails: Vec<_> = ds.segs.iter().filter(|s| at_rail(s)).collect();
+    assert_eq!(rails.len(), 2, "{rails:?}");
+    assert!(rails.iter().all(|s| s.kind == Kind::Soft));
+}
+
+#[test]
+fn filleted_box_rail_draws_only_with_include_soft() {
+    // A unit box with its front top edge filleted (r = 0.2). Seen from the
+    // front, the rail where the front face meets the fillet (z = 0.8) has
+    // both neighbors facing the viewer: a tangent edge, not a silhouette.
+    let p = |x: f64, y: f64, z: f64| Point3::new(x, y, z);
+    let pts = [
+        p(0.0, 0.0, 0.0),
+        p(1.0, 0.0, 0.0),
+        p(1.0, 1.0, 0.0),
+        p(0.0, 1.0, 0.0),
+        p(0.0, 0.0, 1.0),
+        p(1.0, 0.0, 1.0),
+        p(1.0, 1.0, 1.0),
+        p(0.0, 1.0, 1.0),
+    ];
+    let faces = vec![
+        vec![0, 3, 2, 1],
+        vec![4, 5, 6, 7],
+        vec![0, 1, 5, 4],
+        vec![1, 2, 6, 5],
+        vec![2, 3, 7, 6],
+        vec![3, 0, 4, 7],
+    ];
+    let cube = kernel::Object::from_polygons(&pts, &faces).unwrap();
+    let edge = cube
+        .edges()
+        .keys()
+        .find(|&e| {
+            let (a, b) = cube.edge_endpoints(e).unwrap();
+            a.y.abs() < 1e-12 && b.y.abs() < 1e-12 && a.z > 0.5 && b.z > 0.5
+        })
+        .unwrap();
+    let spec = kernel::BlendSpec {
+        edges: vec![edge],
+        profile: kernel::BlendProfile::Round {
+            radius: 0.2,
+            segments: 6,
+        },
+        primary: None,
+        corners: kernel::CornerStyle::Default,
+        stops: None,
+        handles: Vec::new(),
+    };
+    let (obj, _) = cube.blend_edges(&spec).unwrap();
+    let mesh = tessellate::tessellate(&obj, &kernel::MaterialPalette::default()).unwrap();
+    assert!(!mesh.tangent_edge_positions.is_empty());
+    let items = [Item {
+        mesh: &mesh,
+        pose: Transform::IDENTITY,
+        sid: 1,
+    }];
+    let cam = parallel([0.0, -10.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 1.0]);
+    let at_rail = |s: &hlr::Seg| (s.a[1] - 0.8).abs() < 1e-6 && (s.b[1] - 0.8).abs() < 1e-6;
+    let d = hlr::line_drawing(&items, &cam, &Options::default()).unwrap();
+    assert!(!d.segs.iter().any(at_rail), "{:?}", d.segs);
+    let ds = hlr::line_drawing(
+        &items,
+        &cam,
+        &Options {
+            include_soft: true,
+            ..Options::default()
+        },
+    )
+    .unwrap();
+    let rails: Vec<_> = ds.segs.iter().filter(|s| at_rail(s)).collect();
+    assert!(!rails.is_empty());
+    assert!(rails.iter().all(|s| s.kind == Kind::Soft), "{rails:?}");
+}
+
+#[test]
+fn imprint_edges_stay_in_line_drawings() {
+    // A rectangle drawn on a box's top face: two unclaimed coplanar faces
+    // either side of each imprint edge, which stay hard (decision I-20), so
+    // a top view draws the top square AND the drawn rectangle.
+    let mut doc = kernel::Document::new();
+    let (oid, _) = box_mesh(&mut doc, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0);
+    let mut obj = doc.object(oid).unwrap().clone();
+    let top = obj
+        .faces()
+        .iter()
+        .find(|(_, f)| f.plane.normal().z > 0.5)
+        .map(|(id, _)| id)
+        .unwrap();
+    obj.split_face_inner(
+        top,
+        &[
+            Point3::new(0.25, 0.25, 1.0),
+            Point3::new(0.75, 0.25, 1.0),
+            Point3::new(0.75, 0.75, 1.0),
+            Point3::new(0.25, 0.75, 1.0),
+        ],
+    )
+    .unwrap();
+    let mesh = tessellate::tessellate(&obj, &kernel::MaterialPalette::default()).unwrap();
+    let items = [Item {
+        mesh: &mesh,
+        pose: Transform::IDENTITY,
+        sid: 1,
+    }];
+    let cam = parallel([0.5, 0.5, 10.0], [0.5, 0.5, 0.5], [0.0, 1.0, 0.0]);
+    let d = hlr::line_drawing(&items, &cam, &Options::default()).unwrap();
+    assert_eq!(count(&d, Kind::Hard), 8, "{:?}", d.segs);
+    assert!(near(total_len(&d, Kind::Hard), 4.0 + 2.0, 1e-6));
 }

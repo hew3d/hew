@@ -135,14 +135,14 @@ test('a Model Health row isolates its object; the rest is not drawn or pickable 
   // Model Health is open on the import; its one row isolates the cube.
   const row = page.locator('[data-health-row]')
   await expect(row).toHaveCount(1)
-  const rev = await page.evaluate(() => window.__hew_test!.getStateHash())
+  const rev = await page.evaluate(() => window.__hew_test!.getModelStateHash())
   await row.click({ position: { x: 6, y: 6 } }) // the selected row grows action buttons
   await expect(bar(page)).toContainText('Showing 1 object')
   await expect(page.getByRole('button', { name: 'Show everything' })).toBeVisible()
   const iso = await page.evaluate(() => window.__hew_test!.getIsolation())
   expect(iso?.hiddenObjects.sort()).toEqual([a, b].sort())
   // Isolation is no document change: the document is byte-for-byte the same.
-  expect(await page.evaluate(() => window.__hew_test!.getStateHash())).toBe(rev)
+  expect(await page.evaluate(() => window.__hew_test!.getModelStateHash())).toBe(rev)
 
   // The others are not drawn: their pixels now read as background.
   await lookAt(page, wideCenter, wide)

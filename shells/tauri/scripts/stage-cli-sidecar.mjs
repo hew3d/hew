@@ -10,9 +10,13 @@
 // `cargo build` is its own staleness check (fast no-op when hew-cli's
 // sources haven't changed), so unlike build-wasm.mjs this doesn't need a
 // separate mtime comparison.
+//
+// A release build exports HEW_RELEASE_VERSION; spawnSync inherits the
+// environment, so cargo sees it and hew-cli's `--version` reports the tag's
+// version (see crates/hew-cli/src/lib.rs). Unset, it reports the crate's.
 
 import { spawnSync } from "node:child_process";
-import { mkdirSync, copyFileSync } from "node:fs";
+import { mkdirSync, copyFileSync, existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -24,6 +28,7 @@ function run(cmd, args) {
   const result = spawnSync(cmd, args, {
     cwd: repoRoot,
     encoding: "utf8",
+    maxBuffer: 32 * 1024 * 1024,
     stdio: ["ignore", "pipe", "inherit"],
   });
   if (result.error) {
@@ -38,7 +43,14 @@ function run(cmd, args) {
 }
 
 console.log("[stage-cli-sidecar] building hew-cli (release)…");
-run("cargo", ["build", "--release", "-p", "hew-cli"]);
+const messages = run("cargo", ["build", "--release", "-p", "hew-cli", "--message-format=json-render-diagnostics"]);
+// Cargo reports the actual executable, including custom target directories.
+const artifact = messages.split("\n").filter(Boolean).map(line => JSON.parse(line))
+  .find(message => message.reason === "compiler-artifact" && message.target.name === "hew-cli" && message.executable);
+if (!artifact) {
+  console.error("[stage-cli-sidecar] Cargo did not report the hew-cli executable");
+  process.exit(1);
+}
 
 const hostLine = run("rustc", ["-vV"])
   .split("\n")
@@ -51,8 +63,10 @@ const triple = hostLine.slice("host:".length).trim();
 const ext = triple.includes("windows") ? ".exe" : "";
 
 mkdirSync(binariesDir, { recursive: true });
-copyFileSync(
-  join(repoRoot, "target", "release", `hew-cli${ext}`),
-  join(binariesDir, `hew-cli-${triple}${ext}`),
-);
-console.log(`[stage-cli-sidecar] staged binaries/hew-cli-${triple}${ext}`);
+const destination = join(binariesDir, `hew-cli-${triple}${ext}`);
+if (existsSync(destination) && readFileSync(destination).equals(readFileSync(artifact.executable))) {
+  console.log(`[stage-cli-sidecar] binaries/hew-cli-${triple}${ext} is unchanged`);
+} else {
+  copyFileSync(artifact.executable, destination);
+  console.log(`[stage-cli-sidecar] staged binaries/hew-cli-${triple}${ext}`);
+}

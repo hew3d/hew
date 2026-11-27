@@ -14,20 +14,37 @@
  * on `currentColor` (same hand-drawn stroke style as TitleBar.tsx's glyphs).
  */
 
-import { useState, type CSSProperties, type ReactElement } from 'react'
+import { Suspense, useState, type CSSProperties, type ReactElement } from 'react'
 import { msg } from '@lingui/core/macro'
 import type { MessageDescriptor } from '@lingui/core'
 import { useLingui } from '@lingui/react/macro'
 import { UnitsPane } from './UnitsPane'
 import { ViewPane } from './ViewPane'
+import { EditingPane } from './EditingPane'
+import { ControlsPane } from './ControlsPane'
 import { ThemePane } from './ThemePane'
 import { LanguagePane } from './LanguagePane'
 import { DebugPane } from './DebugPane'
 import { FoldersPane } from './FoldersPane'
 import { AdvancedPane } from './AdvancedPane'
+import { paneAllowed, previewBuild } from '../preview'
+import { PluginsPane } from '../preview/loaderRoots'
+import { PREVIEW_SETTINGS } from '../preview/copy'
+import { PreviewPane } from '../preview/PreviewPane'
 import { useTextFieldMenuActions } from '../clipboard/useTextFieldMenuActions'
 
-type Category = 'units' | 'view' | 'theme' | 'language' | 'folders' | 'advanced' | 'debug'
+type Category =
+  | 'units'
+  | 'view'
+  | 'controls'
+  | 'editing'
+  | 'theme'
+  | 'language'
+  | 'folders'
+  | 'advanced'
+  | 'debug'
+  | 'preview'
+  | 'plugins'
 
 const iconProps = {
   width: 22,
@@ -39,6 +56,9 @@ const iconProps = {
   strokeLinecap: 'round',
   strokeLinejoin: 'round',
   'aria-hidden': true,
+  // The tab is a column flex box: without this a strip squeezed for height
+  // (a horizontal scrollbar in a narrow window) crushes the icon first.
+  style: { flexShrink: 0 },
 } as const
 
 /** Ruler — Units. */
@@ -51,12 +71,32 @@ function UnitsIcon() {
   )
 }
 
+/** Keyboard — Controls (keyboard shortcuts, and later the mouse). */
+function ControlsIcon() {
+  return (
+    <svg {...iconProps}>
+      <rect x="2.5" y="6.5" width="19" height="11" rx="1.8" />
+      <path d="M6 10h.01M9 10h.01M12 10h.01M15 10h.01M18 10h.01M7.5 14h9" />
+    </svg>
+  )
+}
+
 /** Eye — View. */
 function ViewIcon() {
   return (
     <svg {...iconProps}>
       <path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z" />
       <circle cx="12" cy="12" r="3" />
+    </svg>
+  )
+}
+
+/** Two overlapping squares (a copy) — Editing. */
+function EditingIcon() {
+  return (
+    <svg {...iconProps}>
+      <rect x="3.5" y="3.5" width="12" height="12" rx="1.5" />
+      <path d="M8.5 20.5h10a2 2 0 0 0 2-2v-10" />
     </svg>
   )
 }
@@ -113,14 +153,41 @@ function AdvancedIcon() {
   )
 }
 
-const TABS: { id: Category; label: MessageDescriptor; icon: ReactElement }[] = [
+/** Flask — Preview (unfinished features). */
+function PreviewIcon() {
+  return (
+    <svg {...iconProps}>
+      <path d="M9.5 3.5h5M10.5 3.5v6L5 19a1.5 1.5 0 0 0 1.3 2.2h11.4A1.5 1.5 0 0 0 19 19l-5.5-9.5v-6" />
+      <path d="M7.5 15h9" />
+    </svg>
+  )
+}
+
+/** Puzzle piece — Plugins (a Preview feature, so English only). */
+function PluginsIcon() {
+  return (
+    <svg {...iconProps} data-plugins-tab-icon="">
+      <path d="M9.5 4.5a2 2 0 0 1 4 0V6h3.5v3.5h1.5a2 2 0 0 1 0 4H17V17h-3.5v-1.5a2 2 0 0 0-4 0V17H6v-3.5H4.5a2 2 0 0 1 0-4H6V6h3.5z" />
+    </svg>
+  )
+}
+
+/** A tab's label: a catalog message, or plain English for the Preview tab. */
+const TABS: { id: Category; label: MessageDescriptor | string; icon: ReactElement }[] = [
   { id: 'units', label: msg`Units`, icon: <UnitsIcon /> },
   { id: 'view', label: msg`View`, icon: <ViewIcon /> },
+  { id: 'controls', label: msg`Controls`, icon: <ControlsIcon /> },
+  { id: 'editing', label: msg`Editing`, icon: <EditingIcon /> },
   { id: 'theme', label: msg`Theme`, icon: <ThemeIcon /> },
   { id: 'language', label: msg`Language`, icon: <LanguageIcon /> },
   { id: 'folders', label: msg`Folders`, icon: <FoldersIcon /> },
+  // Only while the Plugins preview switch is on; English only.
+  // oxlint-disable-next-line lingui/no-unlocalized-strings -- Preview copy, exempt from the catalogs
+  ...(previewBuild && paneAllowed('plugins') ? [{ id: 'plugins' as const, label: 'Plugins', icon: <PluginsIcon /> }] : []),
   { id: 'advanced', label: msg`Advanced`, icon: <AdvancedIcon /> },
   { id: 'debug', label: msg`Debug`, icon: <DebugIcon /> },
+  // Preview builds only, and English only (src/preview).
+  ...(previewBuild ? [{ id: 'preview' as const, label: PREVIEW_SETTINGS.heading, icon: <PreviewIcon /> }] : []),
 ]
 
 const tabStyle: CSSProperties = {
@@ -176,7 +243,10 @@ export function SettingsWindow() {
         aria-label={t`Settings`}
         style={{
           display: 'flex',
-          justifyContent: 'center',
+          // `safe`: a strip wider than its window (the Preview tab makes ten)
+          // scrolls from the left instead of clipping both ends.
+          justifyContent: 'safe center',
+          overflowX: 'auto',
           gap: '2px',
           padding: '7px 12px',
           background: 'var(--surface-bar, #202020)',
@@ -198,7 +268,7 @@ export function SettingsWindow() {
               style={selected ? activeTabStyle : tabStyle}
             >
               {tab.icon}
-              <span>{i18n._(tab.label)}</span>
+              <span>{typeof tab.label === 'string' ? tab.label : i18n._(tab.label)}</span>
             </button>
           )
         })}
@@ -213,11 +283,19 @@ export function SettingsWindow() {
       >
         {active === 'units' && <UnitsPane />}
         {active === 'view' && <ViewPane />}
+        {active === 'controls' && <ControlsPane />}
+        {active === 'editing' && <EditingPane />}
         {active === 'theme' && <ThemePane />}
         {active === 'language' && <LanguagePane />}
         {active === 'folders' && <FoldersPane />}
         {active === 'advanced' && <AdvancedPane />}
         {active === 'debug' && <DebugPane />}
+        {previewBuild && active === 'preview' && <PreviewPane />}
+        {previewBuild && paneAllowed('plugins') && active === 'plugins' && PluginsPane !== null && (
+          <Suspense fallback={null}>
+            <PluginsPane />
+          </Suspense>
+        )}
       </div>
     </div>
   )

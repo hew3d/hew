@@ -83,10 +83,10 @@ mod tests {
         // itself stored beside each image.
         let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../skp-import/tests/fixtures/house.skp");
-        let m = openskp::Model::read(&p).unwrap();
+        let m = skpwright::Model::read(&p).unwrap();
         let mut checked = 0;
         for mat in &m.materials {
-            let openskp::Material::Textured {
+            let skpwright::Material::Textured {
                 name,
                 image_bytes: Some(bytes),
                 avg_rgba: Some(want),

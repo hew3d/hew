@@ -130,7 +130,13 @@ fn merge_heal_survives_undo_redo_cycles() {
     for es in [2328960287675854673usize, 15360641641247688354] {
         let n = object.edges().len();
         let edge = object.edges().keys().nth(es % n).unwrap();
-        let _ = history.apply(&mut object, KernelOp::MergeFaces { edge });
+        let _ = history.apply(
+            &mut object,
+            KernelOp::MergeFaces {
+                edge,
+                keep_vertices: Vec::new(),
+            },
+        );
     }
     object.validate().expect("valid after forward ops");
     let end_state = polygons(&object);

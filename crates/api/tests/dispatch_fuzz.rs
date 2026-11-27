@@ -31,7 +31,22 @@
 //!    byte-identical (§6's atomicity); every success adds at most one
 //!    undo entry, which undoes cleanly when it added one.
 //!
-//! Suite 3 (MCP-frame fuzz) lives in
+//! 3. `hostile_plugin_declarations_and_replies_never_panic` — arbitrary
+//!    plugin command declarations (random ids, random JSON as schemas) go
+//!    through `Registry::register_plugin`, where either outcome is fine,
+//!    and every command that does register is called with arbitrary
+//!    params and completed with an arbitrary `ForwardReply`; so is a
+//!    known-good command. Every response must be well-formed (§4.4) and
+//!    answer the request's id, and no forward is left pending.
+//!
+//! 4. `a_locked_target_only_refuses_locked_node` and
+//!    `hostile_envelopes_never_change_a_locked_box` (Lock, OW-1) — every
+//!    node-editing command aimed at a locked box answers the
+//!    `locked_node` refusal naming it, with the document untouched; and
+//!    arbitrary envelopes against a document holding a locked box never
+//!    change that box (geometry, name, tags), whatever else they do.
+//!
+//! The MCP-frame fuzz lives in
 //! `crates/hew-cli/tests/mcp_fuzz.rs`, against `hew_cli::mcp::McpServer`
 //! directly — a different crate and a different-shaped surface (raw
 //! newline-delimited JSON-RPC text), not this dispatcher.
@@ -53,9 +68,15 @@
 //! adversarial framing is for: depth restored, undo did not error or
 //! corrupt anything.
 
-use api::{Connection, DispatchOutcome, NoHost, Profile, Registry, Request, RequestId, Response};
+use api::{
+    Connection, DispatchOutcome, Grant, NoHost, Permission, Registry, Request, RequestId, Response,
+};
 use proptest::prelude::*;
 use serde_json::{Value, json};
+
+/// The registry every dispatch in this file runs against.
+static REGISTRY: std::sync::LazyLock<api::Registry> =
+    std::sync::LazyLock::new(api::Registry::protocol_1);
 
 // --------------------------------------------------------------- plumbing
 //
@@ -75,6 +96,7 @@ fn req(id: Option<RequestId>, method: String, params: Option<Value>) -> Request 
 
 fn hello_attach(conn: &mut Connection, doc: &mut kernel::Document) {
     let DispatchOutcome::Reply(r) = conn.dispatch(
+        &REGISTRY,
         doc,
         &mut NoHost,
         req(
@@ -87,6 +109,7 @@ fn hello_attach(conn: &mut Connection, doc: &mut kernel::Document) {
     };
     assert!(r.error.is_none(), "hello failed: {:?}", r.error);
     let DispatchOutcome::Reply(r) = conn.dispatch(
+        &REGISTRY,
         doc,
         &mut NoHost,
         req(
@@ -110,6 +133,7 @@ fn ground_rect(corner_a: [f64; 3], corner_b: [f64; 3]) -> Value {
 /// with real (if unpredictable-to-the-fuzzer) content, not an empty one.
 fn seed_document(conn: &mut Connection, doc: &mut kernel::Document) {
     let DispatchOutcome::Reply(r) = conn.dispatch(
+        &REGISTRY,
         doc,
         &mut NoHost,
         req(
@@ -188,6 +212,7 @@ fn assert_well_formed_reply(response: &Response) -> Result<(), TestCaseError> {
 /// shared by both suites' "a mutating success undoes cleanly" check.
 fn undo_succeeds(conn: &mut Connection, doc: &mut kernel::Document) -> Result<bool, TestCaseError> {
     let DispatchOutcome::Reply(r) = conn.dispatch(
+        &REGISTRY,
         doc,
         &mut NoHost,
         req(
@@ -281,24 +306,35 @@ fn arb_key() -> impl Strategy<Value = String> {
 
 /// A string leaf: mostly small ASCII, occasionally a huge (~1KB) string,
 /// occasionally an id-shaped-but-nonexistent string, occasionally raw
-/// unicode/control characters.
-fn arb_string_leaf() -> impl Strategy<Value = Value> {
-    prop_oneof![
+/// unicode/control characters — and, when `ids` names real entities of
+/// the document under test, often one of those, so an envelope can reach
+/// a real node.
+fn arb_string_leaf_naming(ids: Vec<String>) -> BoxedStrategy<Value> {
+    let junk = prop_oneof![
         4 => "[a-zA-Z0-9_ ]{0,16}".prop_map(|s| json!(s)),
         1 => Just(json!("x".repeat(1024))),
         1 => prop::sample::select(vec!["obj_deadbeef", "rgn_1_2", "", "cmp_0"])
             .prop_map(|s| json!(s)),
         1 => proptest::collection::vec(any::<char>(), 0..20)
             .prop_map(|cs| json!(cs.into_iter().collect::<String>())),
-    ]
+    ];
+    if ids.is_empty() {
+        junk.boxed()
+    } else {
+        prop_oneof![
+            7 => junk,
+            3 => prop::sample::select(ids).prop_map(|s| json!(s)),
+        ]
+        .boxed()
+    }
 }
 
-fn arb_leaf() -> impl Strategy<Value = Value> {
+fn arb_leaf_naming(ids: Vec<String>) -> impl Strategy<Value = Value> {
     prop_oneof![
         2 => Just(Value::Null),
         2 => proptest::bool::ANY.prop_map(Value::Bool),
         3 => arb_number(),
-        3 => arb_string_leaf(),
+        3 => arb_string_leaf_naming(ids),
     ]
 }
 
@@ -311,7 +347,12 @@ fn arb_leaf() -> impl Strategy<Value = Value> {
 /// exist there), so this exercises `transact.rs`'s static rejection path
 /// even outside suite 2's explicit transaction fuzzing.
 fn arb_json() -> impl Strategy<Value = Value> {
-    arb_leaf().prop_recursive(4, 64, 6, |inner| {
+    arb_json_naming(Vec::new())
+}
+
+/// [`arb_json`] whose string leaves may name `ids`.
+fn arb_json_naming(ids: Vec<String>) -> impl Strategy<Value = Value> {
+    arb_leaf_naming(ids).prop_recursive(4, 64, 6, |inner| {
         prop_oneof![
             3 => proptest::collection::vec(inner.clone(), 0..6).prop_map(Value::Array),
             4 => proptest::collection::vec((arb_key(), inner.clone()), 0..6).prop_map(|kvs| {
@@ -329,10 +370,10 @@ fn arb_json() -> impl Strategy<Value = Value> {
     })
 }
 
-fn arb_params() -> impl Strategy<Value = Option<Value>> {
+fn arb_params_naming(ids: Vec<String>) -> impl Strategy<Value = Option<Value>> {
     prop_oneof![
         1 => Just(None),
-        8 => arb_json().prop_map(Some),
+        8 => arb_json_naming(ids).prop_map(Some),
     ]
 }
 
@@ -353,11 +394,16 @@ fn arb_jsonrpc() -> impl Strategy<Value = String> {
 }
 
 fn arb_hostile_request() -> impl Strategy<Value = Request> {
+    arb_hostile_request_naming(Vec::new())
+}
+
+/// [`arb_hostile_request`] whose params may name `ids`.
+fn arb_hostile_request_naming(ids: Vec<String>) -> impl Strategy<Value = Request> {
     (
         arb_jsonrpc(),
         arb_request_id(),
         arb_method(registry_method_names()),
-        arb_params(),
+        arb_params_naming(ids),
     )
         .prop_map(|(jsonrpc, id, method, params)| Request {
             document: None,
@@ -378,7 +424,33 @@ proptest! {
     /// cleanly.
     #[test]
     fn hostile_envelopes_never_panic_or_corrupt(request in arb_hostile_request()) {
-        let mut conn = Connection::new(Profile::Core, "fuzz-dispatch");
+        hostile_envelope_case(Grant::core(), request)?;
+    }
+
+    /// The same invariants under a restricted plugin grant bound to one
+    /// document (docs/agents/HEW_API.md §10): the binding, path, and
+    /// namespace checks never panic or let a refused envelope through.
+    #[test]
+    fn hostile_envelopes_never_panic_or_corrupt_under_a_plugin_grant(
+        request in arb_hostile_request()
+    ) {
+        hostile_envelope_case(
+            Grant::plugin(
+                "com.example.fuzz",
+                Some("doc_1"),
+                [Permission::ModelRead, Permission::ModelWrite, Permission::AttributesWrite]
+                    .into_iter()
+                    .collect(),
+            ),
+            request,
+        )?;
+    }
+}
+
+/// One hostile-envelope case under `grant`.
+fn hostile_envelope_case(grant: Grant, request: Request) -> Result<(), TestCaseError> {
+    {
+        let mut conn = Connection::new(grant, "fuzz-dispatch");
         let mut doc = kernel::Document::new();
         hello_attach(&mut conn, &mut doc);
         seed_document(&mut conn, &mut doc);
@@ -387,15 +459,30 @@ proptest! {
         let depth_before = doc.undo_depth();
 
         let method_name = request.method.clone();
-        let outcome = conn.dispatch(&mut doc, &mut NoHost, request);
+        let outcome = conn.dispatch(&REGISTRY, &mut doc, &mut NoHost, request);
 
         match outcome {
+            DispatchOutcome::Forward(f) => {
+                prop_assert!(false, "no plugin is registered, yet {} forwarded", f.method);
+            }
             DispatchOutcome::Dropped => {
                 // A client-originated notification is dropped UNEXECUTED
                 // (§4.1) — it must never reach the document at all.
                 prop_assert_eq!(
-                    doc.save(), bytes_before,
+                    doc.save(),
+                    bytes_before,
                     "a dropped notification must never mutate the document"
+                );
+                prop_assert_eq!(doc.undo_depth(), depth_before);
+            }
+            DispatchOutcome::DryRun(response) => {
+                // A rehearsal answers like any reply and never touches the
+                // document, success or failure.
+                assert_well_formed_reply(&response)?;
+                prop_assert_eq!(
+                    doc.save(),
+                    bytes_before,
+                    "a dry run must leave the document untouched"
                 );
                 prop_assert_eq!(doc.undo_depth(), depth_before);
             }
@@ -405,7 +492,8 @@ proptest! {
 
                 if response.error.is_some() {
                     prop_assert_eq!(
-                        doc.save(), bytes_before,
+                        doc.save(),
+                        bytes_before,
                         "a refused/errored envelope must leave the document untouched"
                     );
                     prop_assert_eq!(depth_after, depth_before);
@@ -432,28 +520,36 @@ proptest! {
                     let registry_state = matches!(
                         method_name.as_str(),
                         "hew.material.create" | "hew.tag.create" | "hew.tag.set_visible"
-                    ) || (method_name.starts_with("hew.scenes.") && method_name != "hew.scenes.list");
+                    ) || (method_name.starts_with("hew.scenes.")
+                        && method_name != "hew.scenes.list");
                     if !registry_state {
                         prop_assert_eq!(
-                            doc.save(), bytes_before,
+                            doc.save(),
+                            bytes_before,
                             "a success that added no undo entry must not change the document bytes"
                         );
                     }
                 } else {
                     prop_assert_eq!(
-                        depth_after, depth_before + 1,
+                        depth_after,
+                        depth_before + 1,
                         "a mutating success adds exactly one undo entry (§6.1)"
                     );
                     let ok = undo_succeeds(&mut conn, &mut doc)?;
-                    prop_assert!(ok, "hew.history.undo must restore a mutating success cleanly");
+                    prop_assert!(
+                        ok,
+                        "hew.history.undo must restore a mutating success cleanly"
+                    );
                     prop_assert_eq!(
-                        doc.undo_depth(), depth_before,
+                        doc.undo_depth(),
+                        depth_before,
                         "undo must restore the prior undo depth"
                     );
                 }
             }
         }
     }
+    Ok(())
 }
 
 // ============================================================ suite 2 ===
@@ -814,7 +910,7 @@ proptest! {
     /// the prior depth.
     #[test]
     fn transaction_envelopes_are_atomic_under_hostile_command_sequences(steps in arb_steps()) {
-        let mut conn = Connection::new(Profile::Core, "fuzz-transact");
+        let mut conn = Connection::new(Grant::core(), "fuzz-transact");
         let mut doc = kernel::Document::new();
         hello_attach(&mut conn, &mut doc);
         seed_document(&mut conn, &mut doc);
@@ -828,7 +924,7 @@ proptest! {
             "hew.doc.transact".to_string(),
             Some(json!({ "commands": commands })),
         );
-        let DispatchOutcome::Reply(response) = conn.dispatch(&mut doc, &mut NoHost, request) else {
+        let DispatchOutcome::Reply(response) = conn.dispatch(&REGISTRY, &mut doc, &mut NoHost, request) else {
             return Err(TestCaseError::fail("hew.doc.transact is a request, never a notification"));
         };
         assert_well_formed_reply(&response)?;
@@ -849,6 +945,715 @@ proptest! {
                 let ok = undo_succeeds(&mut conn, &mut doc)?;
                 prop_assert!(ok, "a successful transaction's one undo entry must undo cleanly");
                 prop_assert_eq!(doc.undo_depth(), depth_before, "undo must restore the prior undo depth");
+            }
+        }
+    }
+}
+
+// ============================================================ suite 3 ===
+// hostile plugin declarations and forward replies: never panic.
+
+/// A plugin id: mostly valid, sometimes reserved or garbage.
+fn arb_plugin_id() -> impl Strategy<Value = String> {
+    prop_oneof![
+        6 => "[a-z][a-z0-9]{0,6}\\.[a-z][a-z0-9-]{0,6}",
+        1 => Just("hew.evil".to_string()),
+        1 => "[A-Za-z0-9._ -]{0,12}",
+    ]
+}
+
+/// A command id: mostly valid (dotted or not), sometimes garbage.
+fn arb_command_id() -> impl Strategy<Value = String> {
+    prop_oneof![
+        6 => "[a-z_]{1,6}(\\.[a-z0-9_]{1,6}){0,2}",
+        1 => "[A-Za-z0-9._ -]{0,10}",
+    ]
+}
+
+/// A schema: a closed object built from supported keywords, or any JSON.
+fn arb_schema() -> impl Strategy<Value = Value> {
+    let leaf = prop_oneof![
+        Just(json!({ "type": "number", "minimum": 0 })),
+        Just(json!({ "type": "integer", "maximum": 10 })),
+        Just(json!({ "type": "string", "minLength": 1, "maxLength": 4 })),
+        Just(json!({ "enum": ["a", 1, null] })),
+        Just(json!({ "type": "array", "items": { "type": "boolean" }, "maxItems": 2 })),
+        Just(json!({ "oneOf": [{ "type": "string" }, { "type": "integer" }] })),
+        Just(json!({ "anyOf": [{ "type": "null" }, { "const": 3 }] })),
+        arb_json(),
+    ];
+    prop_oneof![
+        3 => proptest::collection::vec(("[a-z]{1,3}", leaf, proptest::bool::ANY), 0..4).prop_map(|props| {
+            let mut properties = serde_json::Map::new();
+            let mut required = Vec::new();
+            for (name, schema, needed) in props {
+                if needed {
+                    required.push(json!(name.clone()));
+                }
+                properties.insert(name, schema);
+            }
+            json!({ "type": "object", "properties": properties, "required": required, "additionalProperties": false })
+        }),
+        1 => arb_json(),
+    ]
+}
+
+fn arb_contribution() -> impl Strategy<Value = Value> {
+    (
+        arb_command_id(),
+        proptest::bool::ANY,
+        "[ -~]{0,12}",
+        proptest::option::of("[ -~]{0,12}"),
+        proptest::option::of(prop_oneof![
+            Just("model.read".to_string()),
+            Just("model.write".to_string()),
+            Just("documents.other".to_string()),
+            Just("all".to_string()),
+            "[a-z.:]{0,12}",
+        ]),
+        any::<u32>(),
+        proptest::bool::ANY,
+        arb_schema(),
+        arb_schema(),
+        proptest::collection::vec("[a-z_]{0,8}", 0..3),
+    )
+        .prop_map(
+            |(
+                id,
+                mutating,
+                summary,
+                label,
+                permission,
+                timeout,
+                serial,
+                params,
+                result,
+                refusals,
+            )| {
+                let mut decl = json!({
+                    "id": id,
+                    "class": if mutating { "mutating" } else { "read_only" },
+                    "summary": summary,
+                    "timeout_ms": timeout,
+                    "concurrency": if serial { "serial" } else { "parallel" },
+                    "params": params,
+                    "result": result,
+                    "refusals": refusals,
+                });
+                if let Some(label) = label {
+                    decl["label"] = json!(label);
+                }
+                if let Some(permission) = permission {
+                    decl["permission"] = json!(permission);
+                }
+                decl
+            },
+        )
+}
+
+fn arb_forward_reply() -> impl Strategy<Value = api::ForwardReply> {
+    use api::{ForwardFailure, ForwardReply};
+    prop_oneof![
+        4 => arb_json().prop_map(ForwardReply::Ok),
+        2 => ("[ -~]{0,12}", "[ -~]{0,20}", arb_json()).prop_map(|(name, explanation, detail)| {
+            ForwardReply::Refusal { name, explanation, detail }
+        }),
+        1 => Just(ForwardReply::Failed(ForwardFailure::Timeout)),
+        1 => Just(ForwardReply::Failed(ForwardFailure::Crashed)),
+        1 => Just(ForwardReply::Failed(ForwardFailure::Unavailable)),
+        1 => Just(ForwardReply::Failed(ForwardFailure::NoHandler)),
+        1 => Just(ForwardReply::Failed(ForwardFailure::Cancelled)),
+    ]
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(64))]
+
+    #[test]
+    fn hostile_plugin_declarations_and_replies_never_panic(
+        plugin in arb_plugin_id(),
+        decls in proptest::collection::vec(arb_contribution(), 0..4),
+        calls in proptest::collection::vec((arb_json(), arb_forward_reply()), 1..4),
+        good_reply in arb_forward_reply(),
+    ) {
+        let mut registry = Registry::protocol_1();
+        let good: Vec<plugin_manifest::CommandContribution> = serde_json::from_value(json!([{
+            "id": "sum", "class": "read_only", "summary": "Adds.",
+            "params": { "type": "object", "properties": { "a": { "type": "number" } }, "required": ["a"], "additionalProperties": false },
+            "result": { "type": "object", "properties": { "sum": { "type": "number" } }, "required": ["sum"], "additionalProperties": false }
+        }]))
+        .expect("the known-good declaration parses");
+        registry.register_plugin("org.fuzz.known", &good).expect("the known-good plugin registers");
+        let before = registry.commands().count();
+
+        // Hostile JSON may not even be a declaration; when it is, either
+        // registration outcome is fine.
+        let parsed: Result<Vec<plugin_manifest::CommandContribution>, _> =
+            serde_json::from_value(Value::Array(decls));
+        let registered = match parsed {
+            Ok(decls) => match registry.register_plugin(&plugin, &decls) {
+                Ok(()) => decls.len(),
+                Err(e) => {
+                    prop_assert!(!e.name().is_empty() && !e.to_string().is_empty());
+                    prop_assert_eq!(registry.commands().count(), before, "a refused registration inserts nothing");
+                    0
+                }
+            },
+            Err(_) => 0,
+        };
+        prop_assert_eq!(registry.commands().count(), before + registered);
+
+        let mut conn = Connection::new(Grant::core(), "fuzz-plugin");
+        let mut doc = kernel::Document::new();
+        for method in ["hew.meta.hello", "hew.doc.attach"] {
+            let params = if method == "hew.meta.hello" { json!({ "protocol": 1 }) } else { json!({}) };
+            conn.dispatch(&registry, &mut doc, &mut NoHost, req(Some(RequestId::Number(0)), method.into(), Some(params)));
+        }
+        let mut targets: Vec<(String, Value)> = registry
+            .plugin_commands(&plugin)
+            .map(|c| c.name.clone())
+            .zip(calls.iter().map(|(params, _)| params.clone()))
+            .collect();
+        targets.push(("org.fuzz.known.sum".into(), json!({ "a": 1 })));
+        let replies = calls.iter().map(|(_, r)| r.clone()).chain([good_reply]);
+        for (i, ((method, params), reply)) in targets.into_iter().zip(replies).enumerate() {
+            let id = RequestId::Number(100 + i as i64);
+            let outcome = conn.dispatch(&registry, &mut doc, &mut NoHost, req(Some(id.clone()), method.clone(), Some(params)));
+            let response = match outcome {
+                DispatchOutcome::Reply(r) | DispatchOutcome::DryRun(r) => r,
+                DispatchOutcome::Forward(f) => {
+                    prop_assert_eq!(&f.method, &method);
+                    prop_assert!(f.timeout_ms <= 50_000);
+                    conn.complete_forward(&registry, f.token, reply)
+                }
+                DispatchOutcome::Dropped => {
+                    return Err(TestCaseError::fail("a request with an id was dropped"));
+                }
+            };
+            assert_well_formed_reply(&response)?;
+            prop_assert_eq!(response.id, Some(id));
+        }
+        prop_assert_eq!(conn.pending_forward_count(), 0);
+    }
+}
+
+// ============================================================ suite 4 ===
+// Lock (OW-1): a locked target never produces anything but `locked_node`
+// or a read.
+
+/// One dispatch on the fixture's connection that must succeed; its
+/// command's result.
+fn call_ok(
+    conn: &mut Connection,
+    doc: &mut kernel::Document,
+    method: &str,
+    params: Value,
+) -> Value {
+    let DispatchOutcome::Reply(r) = conn.dispatch(
+        &REGISTRY,
+        doc,
+        &mut NoHost,
+        req(Some(RequestId::Number(5)), method.to_string(), Some(params)),
+    ) else {
+        panic!("{method} replies")
+    };
+    assert!(r.error.is_none(), "{method} failed: {:?}", r.error);
+    let result = r.result.expect("a result");
+    // A mutating command's answer is wrapped in its transaction's results.
+    result
+        .get("results")
+        .and_then(|r| r.as_array())
+        .and_then(|r| r.first())
+        .cloned()
+        .unwrap_or(result)
+}
+
+/// The public ids a lock fixture names.
+#[derive(Debug, Clone, PartialEq)]
+struct LockIds {
+    /// The locked box (tagged "Walls", wearing "Paint").
+    locked: String,
+    /// A free box beside it.
+    other: String,
+    /// A locked component copy and its component.
+    instance: String,
+    component: String,
+    /// "Paint", which the locked box wears, and "Varnish", which nothing
+    /// wears.
+    paint: String,
+    varnish: String,
+}
+
+impl LockIds {
+    fn all(&self) -> Vec<String> {
+        vec![
+            self.locked.clone(),
+            self.other.clone(),
+            self.instance.clone(),
+            self.component.clone(),
+            self.paint.clone(),
+            self.varnish.clone(),
+        ]
+    }
+}
+
+/// A document over a fresh connection holding: a unit box at the origin,
+/// tagged "Walls" and wearing "Paint", locked; a free box beside it; a
+/// third box made a component, its one copy locked. The locked box, the
+/// copy, and every public id. A fresh document numbers its entities the
+/// same way each time, so every fixture has the same ids.
+fn locked_box_document() -> (
+    Connection,
+    kernel::Document,
+    kernel::ObjectId,
+    kernel::InstanceId,
+    LockIds,
+) {
+    let mut conn = Connection::new(Grant::core(), "fuzz-lock");
+    let mut doc = kernel::Document::new();
+    hello_attach(&mut conn, &mut doc);
+    seed_document(&mut conn, &mut doc);
+    for x in [3.0, 6.0] {
+        call_ok(
+            &mut conn,
+            &mut doc,
+            "hew.doc.transact",
+            json!({
+                "commands": [
+                    { "method": "hew.sketch.draw_rect", "as": "p",
+                      "params": ground_rect([x, 0.0, 0.0], [x + 1.0, 1.0, 0.0]) },
+                    { "method": "hew.solid.extrude", "params": {
+                        "region": { "$ref": "p#/region_id" }, "distance": 1.0
+                    }}
+                ]
+            }),
+        );
+    }
+    let mut objects = doc.visible_object_ids();
+    let min_x = |doc: &kernel::Document, o: kernel::ObjectId| {
+        doc.object(o)
+            .unwrap()
+            .vertices()
+            .values()
+            .map(|v| v.position.x)
+            .fold(f64::MAX, f64::min)
+    };
+    objects.sort_by(|a, b| min_x(&doc, *a).total_cmp(&min_x(&doc, *b)));
+    let (locked, other, third) = (objects[0], objects[1], objects[2]);
+    let id_of = |doc: &kernel::Document, e: kernel::EntityRef| {
+        api::ids::public_id(&e, doc.sid_of(&e).expect("a stable id"))
+    };
+    let locked_id = id_of(&doc, kernel::EntityRef::Object(locked));
+    let other_id = id_of(&doc, kernel::EntityRef::Object(other));
+    let third_id = id_of(&doc, kernel::EntityRef::Object(third));
+    let paint = call_ok(
+        &mut conn,
+        &mut doc,
+        "hew.material.create",
+        json!({ "name": "Paint", "color": [200, 40, 40] }),
+    )["material"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let varnish = call_ok(
+        &mut conn,
+        &mut doc,
+        "hew.material.create",
+        json!({ "name": "Varnish", "color": [120, 90, 40] }),
+    )["material"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    call_ok(
+        &mut conn,
+        &mut doc,
+        "hew.material.set_default",
+        json!({ "id": locked_id, "material": paint }),
+    );
+    call_ok(
+        &mut conn,
+        &mut doc,
+        "hew.tag.create",
+        json!({ "path": ["Walls"] }),
+    );
+    call_ok(
+        &mut conn,
+        &mut doc,
+        "hew.tag.assign",
+        json!({ "id": locked_id, "path": ["Walls"] }),
+    );
+    let made = call_ok(
+        &mut conn,
+        &mut doc,
+        "hew.component.create",
+        json!({ "members": [third_id] }),
+    );
+    let instance_id = made["instance"].as_str().unwrap().to_string();
+    let component_id = made["component"].as_str().unwrap().to_string();
+    call_ok(
+        &mut conn,
+        &mut doc,
+        "hew.entity.lock",
+        json!({ "targets": [locked_id, instance_id] }),
+    );
+    let instance = doc
+        .instance_ids()
+        .into_iter()
+        .find(|&i| id_of(&doc, kernel::EntityRef::Instance(i)) == instance_id)
+        .expect("the copy");
+    let ids = LockIds {
+        locked: locked_id,
+        other: other_id,
+        instance: instance_id,
+        component: component_id,
+        paint,
+        varnish,
+    };
+    (conn, doc, locked, instance, ids)
+}
+
+/// The ids every lock fixture has.
+fn lock_ids() -> LockIds {
+    locked_box_document().4
+}
+
+/// What a lock keeps on a node: every vertex it renders where it stands
+/// (an instance through its pose), its name and its tags.
+fn node_print(
+    doc: &kernel::Document,
+    node: kernel::NodeId,
+) -> (Vec<[i64; 3]>, Option<String>, Vec<Vec<String>>) {
+    let quantize = |p: kernel::Point3| {
+        [
+            (p.x * 1e6).round() as i64,
+            (p.y * 1e6).round() as i64,
+            (p.z * 1e6).round() as i64,
+        ]
+    };
+    let mut pts: Vec<[i64; 3]> = Vec::new();
+    let name = match node {
+        kernel::NodeId::Object(o) => {
+            if let Some(obj) = doc.object(o) {
+                pts.extend(obj.vertices().values().map(|v| quantize(v.position)));
+            }
+            doc.object_name(o)
+        }
+        kernel::NodeId::Instance(i) => {
+            if let (Some(pose), Some(def)) = (doc.instance_pose(i), doc.instance_def(i)) {
+                for o in doc.def_members(def).unwrap_or_default() {
+                    if let Some(obj) = doc.object(o) {
+                        pts.extend(
+                            obj.vertices()
+                                .values()
+                                .map(|v| quantize(pose.apply_point(v.position))),
+                        );
+                    }
+                }
+            }
+            doc.instance_name(i)
+        }
+        kernel::NodeId::Group(g) => doc.group_name(g),
+    };
+    pts.sort_unstable();
+    (pts, name.map(str::to_string), doc.node_tags(node).to_vec())
+}
+
+/// The top face of the locked unit box, as a face locator.
+fn top_of(id: &str) -> Value {
+    json!({ "object": id, "at": [0.5, 0.5, 1.0] })
+}
+
+/// The node-editing commands, each aimed at a locked node of the fixture
+/// (`n` a free number), with the id the refusal must name. Commands this
+/// build's registry does not serve are left out.
+fn aimed_commands(ids: &LockIds, n: f64) -> Vec<(&'static str, Value, String)> {
+    let n = n.abs() + 0.5;
+    let (id, other) = (ids.locked.as_str(), ids.other.as_str());
+    let inst = ids.instance.as_str();
+    let on_box = |m: &'static str, p: Value| (m, p, ids.locked.clone());
+    let on_copy = |m: &'static str, p: Value| (m, p, ids.instance.clone());
+    let all = vec![
+        on_box(
+            "hew.entity.move",
+            json!({ "ids": [id], "translation": [n, 0.0, 0.0] }),
+        ),
+        on_box(
+            "hew.entity.rotate",
+            json!({ "ids": [id], "pivot": [0.0, 0.0, 0.0], "axis": [0.0, 0.0, 1.0], "angle": n }),
+        ),
+        on_box(
+            "hew.entity.scale",
+            json!({ "ids": [id], "anchor": [0.0, 0.0, 0.0], "factors": [n, n, n] }),
+        ),
+        on_box("hew.entity.delete", json!({ "id": id })),
+        on_box("hew.entity.rename", json!({ "id": id, "name": "Renamed" })),
+        on_box("hew.entity.flip", json!({ "ids": [id], "axis": "x" })),
+        on_box(
+            "hew.entity.set_frame",
+            json!({ "id": id, "origin": [n, 0.0, 0.0], "x": [1.0, 0.0, 0.0], "y": [0.0, 1.0, 0.0] }),
+        ),
+        on_box("hew.tag.assign", json!({ "id": id, "path": ["Roof"] })),
+        on_box(
+            "hew.tag.assign",
+            json!({ "id": id, "path": ["Walls"], "remove": true }),
+        ),
+        on_box(
+            "hew.tag.rename",
+            json!({ "path": ["Walls"], "new_path": ["Fences"] }),
+        ),
+        on_box("hew.tag.delete", json!({ "path": ["Walls"] })),
+        on_box(
+            "hew.attr.set",
+            json!({ "target": id, "ns": "com.example.fuzz", "key": "k", "value": n }),
+        ),
+        on_box("hew.group.create", json!({ "members": [id] })),
+        on_box("hew.component.create", json!({ "members": [id] })),
+        on_box("hew.solid.union", json!({ "a": other, "b": id })),
+        on_box("hew.solid.subtract", json!({ "a": id, "b": other })),
+        on_box(
+            "hew.solid.slice",
+            json!({ "object": id, "plane": { "origin": [0.5, 0.5, 0.5], "normal": [1.0, 0.0, 0.0] } }),
+        ),
+        on_box("hew.solid.intersect", json!({ "a": id, "b": other })),
+        on_box(
+            "hew.solid.push_pull",
+            json!({ "face": top_of(id), "distance": n }),
+        ),
+        on_box(
+            "hew.solid.shell",
+            json!({ "object": id, "thickness": 0.05 }),
+        ),
+        on_box(
+            "hew.solid.fillet",
+            json!({ "edges": [{ "face": top_of(id) }], "radius": 0.1 }),
+        ),
+        on_box(
+            "hew.solid.chamfer",
+            json!({ "edges": [{ "face": top_of(id) }], "distance": 0.1 }),
+        ),
+        on_box(
+            "hew.solid.soften",
+            json!({ "object": id, "max_angle": 1.7 }),
+        ),
+        on_box("hew.solid.mend", json!({ "object": id })),
+        on_box(
+            "hew.material.set_default",
+            json!({ "id": id, "material": null }),
+        ),
+        on_box(
+            "hew.material.paint",
+            json!({ "face": top_of(id), "material": ids.varnish }),
+        ),
+        on_box(
+            "hew.material.replace",
+            json!({ "from": ids.paint, "to": ids.varnish }),
+        ),
+        on_copy(
+            "hew.entity.move",
+            json!({ "ids": [inst], "translation": [n, 0.0, 0.0] }),
+        ),
+        on_copy("hew.component.explode", json!({ "instance": inst })),
+        on_copy(
+            "hew.component.flip_instance",
+            json!({ "instance": inst, "axis": "x" }),
+        ),
+        on_copy(
+            "hew.component.rebase",
+            json!({ "id": ids.component, "origin": [n, 0.0, 0.0], "x": [1.0, 0.0, 0.0], "y": [0.0, 1.0, 0.0] }),
+        ),
+        on_copy(
+            "hew.entity.rename",
+            json!({ "id": inst, "name": "Renamed" }),
+        ),
+    ];
+    let served = registry_method_names();
+    all.into_iter()
+        .filter(|(m, _, _)| served.iter().any(|s| s == m))
+        .collect()
+}
+
+/// What a lock allows on a locked node, each aimed at the fixture's box
+/// or copy: a linked copy, a separate copy, drawing on its face (a free
+/// drawing that does not cut it), Make Unique on the locked copy.
+fn allowed_commands(ids: &LockIds) -> Vec<(&'static str, Value)> {
+    vec![
+        (
+            "hew.entity.move",
+            json!({ "ids": [ids.locked], "translation": [0.0, 2.0, 0.0], "copy": { "count": 1 } }),
+        ),
+        (
+            "hew.entity.move",
+            json!({ "ids": [ids.locked], "translation": [0.0, 2.0, 0.0],
+                    "copy": { "count": 1, "linked": false } }),
+        ),
+        (
+            "hew.sketch.draw_rect",
+            json!({ "plane": { "face": top_of(&ids.locked) },
+                    "corner_a": [0.25, 0.25, 1.0], "corner_b": [0.75, 0.75, 1.0] }),
+        ),
+        (
+            "hew.component.make_unique",
+            json!({ "instance": ids.instance }),
+        ),
+    ]
+}
+
+/// Requests aimed at the fixture's locked nodes and then perturbed: a
+/// well-formed node edit with one field dropped or replaced by arbitrary
+/// JSON (which may name any fixture id), bare or in a transaction. The
+/// near-miss envelopes a hostile client sends, reaching real nodes.
+fn arb_aimed_request(ids: LockIds) -> impl Strategy<Value = Request> {
+    let count = aimed_commands(&ids, 0.0).len();
+    (
+        0..count,
+        -3.0f64..3.0,
+        proptest::option::of((
+            any::<usize>(),
+            proptest::option::of(arb_json_naming(ids.all())),
+        )),
+        proptest::bool::ANY,
+    )
+        .prop_map(move |(which, n, mutation, wrapped)| {
+            let (method, mut params, _) = aimed_commands(&ids, n).swap_remove(which);
+            if let (Some((key, value)), Some(map)) = (mutation, params.as_object_mut()) {
+                let keys: Vec<String> = map.keys().cloned().collect();
+                let key = &keys[key % keys.len()];
+                match value {
+                    Some(v) => map.insert(key.clone(), v),
+                    None => map.remove(key),
+                };
+            }
+            if wrapped {
+                req(
+                    Some(RequestId::Number(10)),
+                    "hew.doc.transact".to_string(),
+                    Some(json!({ "commands": [ { "method": method, "params": params } ] })),
+                )
+            } else {
+                req(
+                    Some(RequestId::Number(10)),
+                    method.to_string(),
+                    Some(params),
+                )
+            }
+        })
+}
+
+/// Every node-editing command aimed at a locked node, bare or inside a
+/// transaction, answers `locked_node` naming that node (not through a
+/// shared shape), and the document is untouched.
+#[test]
+fn a_locked_target_only_refuses_locked_node() {
+    let ids = lock_ids();
+    let commands = aimed_commands(&ids, 1.0);
+    assert!(
+        commands.len() >= 25,
+        "the list is served: {}",
+        commands.len()
+    );
+    for (method, params, cause) in commands {
+        for wrapped in [false, true] {
+            let (mut conn, mut doc, _, _, _) = locked_box_document();
+            let bytes = doc.save();
+            let depth = doc.undo_depth();
+            let request = if wrapped {
+                req(
+                    Some(RequestId::Number(10)),
+                    "hew.doc.transact".to_string(),
+                    Some(json!({ "commands": [ { "method": method, "params": params } ] })),
+                )
+            } else {
+                req(
+                    Some(RequestId::Number(10)),
+                    method.to_string(),
+                    Some(params.clone()),
+                )
+            };
+            let DispatchOutcome::Reply(r) =
+                conn.dispatch(&REGISTRY, &mut doc, &mut NoHost, request)
+            else {
+                panic!("{method} replies");
+            };
+            assert_well_formed_reply(&r).unwrap();
+            let error = r
+                .error
+                .as_ref()
+                .unwrap_or_else(|| panic!("{method} {params} on a locked node succeeded"));
+            assert_eq!(error.code, api::codes::REFUSED, "{method}: {error:?}");
+            let data = error.data.as_ref().expect("refusal data");
+            assert_eq!(data["refusal"], "locked_node", "{method} {params}: {data}");
+            assert_eq!(data["detail"]["node"], json!(cause), "{method}: {data}");
+            assert_eq!(data["detail"]["via_shared_shape"], json!(false), "{method}");
+            assert!(data["explanation"].as_str().is_some_and(|e| !e.is_empty()));
+            assert_eq!(doc.save(), bytes, "{method} changed the document");
+            assert_eq!(doc.undo_depth(), depth, "{method}");
+        }
+    }
+}
+
+/// What a lock allows succeeds on the locked box and copy, and neither
+/// changes nor comes free. (A linked copy of the box moves its lock onto
+/// the new shape, so the box stays frozen as that shape's member.)
+#[test]
+fn what_a_lock_allows_leaves_the_locked_nodes_as_they_were() {
+    let ids = lock_ids();
+    for (method, params) in allowed_commands(&ids) {
+        let (mut conn, mut doc, locked, instance, _) = locked_box_document();
+        let nodes = [
+            kernel::NodeId::Object(locked),
+            kernel::NodeId::Instance(instance),
+        ];
+        let before: Vec<_> = nodes.iter().map(|&n| node_print(&doc, n)).collect();
+        call_ok(&mut conn, &mut doc, method, params.clone());
+        for (k, &n) in nodes.iter().enumerate() {
+            assert!(
+                doc.node_frozen(n).is_some(),
+                "{method} {params}: {n:?} stays frozen"
+            );
+            assert_eq!(node_print(&doc, n), before[k], "{method} {params}: {n:?}");
+        }
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(256))]
+
+    /// Arbitrary envelopes against a document holding a locked box and a
+    /// locked component copy, half of them perturbed node edits aimed at
+    /// those nodes and the rest free-form JSON that may name any of the
+    /// document's ids: neither locked node ever changes, and a
+    /// `locked_node` refusal always names a node and says whether the
+    /// lock came through a shared shape.
+    #[test]
+    fn hostile_envelopes_never_change_a_locked_box(
+        request in prop_oneof![
+            1 => arb_hostile_request_naming(lock_ids().all()),
+            1 => arb_aimed_request(lock_ids()),
+        ]
+    ) {
+        let (mut conn, mut doc, locked, instance, ids) = locked_box_document();
+        prop_assert_eq!(&ids, &lock_ids(), "every fixture has the same ids");
+        let nodes = [kernel::NodeId::Object(locked), kernel::NodeId::Instance(instance)];
+        let before: Vec<_> = nodes.iter().map(|&n| node_print(&doc, n)).collect();
+        let outcome = conn.dispatch(&REGISTRY, &mut doc, &mut NoHost, request);
+        if let DispatchOutcome::Reply(r) | DispatchOutcome::DryRun(r) = &outcome {
+            assert_well_formed_reply(r)?;
+            if let Some(data) = r.error.as_ref().and_then(|e| e.data.as_ref())
+                && data["refusal"] == "locked_node"
+            {
+                prop_assert!(data["detail"]["node"].is_string(), "{}", data);
+                prop_assert!(data["detail"]["via_shared_shape"].is_boolean(), "{}", data);
+            }
+        }
+        // History navigation may take the lock itself back (undo pops it),
+        // after which a node is free: compare only while it is frozen. A
+        // linked copy of the box moves its lock onto the new shape (the
+        // box stays frozen as its member); Make Unique on the locked copy
+        // repoints it onto a new locked shape, the same geometry where it
+        // stands.
+        for (k, &n) in nodes.iter().enumerate() {
+            if doc.node_frozen(n).is_some() {
+                prop_assert_eq!(node_print(&doc, n), before[k].clone(), "{:?} changed while frozen", n);
             }
         }
     }

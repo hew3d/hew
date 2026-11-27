@@ -1,0 +1,50 @@
+{
+  "profile": "app",
+  "frames": [
+    {
+      "note": "the handshake",
+      "request": { "jsonrpc": "2.0", "id": 0, "method": "hew.meta.hello", "params": { "protocol": 1 } },
+      "compare": "/result/profile",
+      "response": "app"
+    },
+    {
+      "note": "attach binds the connection",
+      "request": { "jsonrpc": "2.0", "id": 1, "method": "hew.doc.attach", "params": {} },
+      "response": { "jsonrpc": "2.0", "id": 1, "result": {} }
+    },
+    {
+      "note": "the selection is host-served: a host with none refuses host_capability_missing in the canonical five fields",
+      "request": { "jsonrpc": "2.0", "id": 2, "method": "hew.selection.get", "params": {} },
+      "response": {
+        "jsonrpc": "2.0",
+        "id": 2,
+        "error": {
+          "code": -32000,
+          "message": "refused",
+          "data": {
+            "refusal": "host_capability_missing",
+            "failed_index": 0,
+            "failed_method": "hew.selection.get",
+            "detail": { "capability": "read the selection" },
+            "explanation": "This host cannot read the selection. Connect through a host that can (hew-cli has file access; the desktop app renders)."
+          }
+        }
+      }
+    },
+    {
+      "note": "hide is kernel-served: an id naming nothing refuses unknown_entity",
+      "request": { "jsonrpc": "2.0", "id": 3, "method": "hew.view.hide", "params": { "ids": ["obj_1"] } },
+      "compare": "/error/data/refusal",
+      "response": "unknown_entity"
+    },
+    {
+      "note": "hidden on an empty document: nothing hidden, and no isolation on a host without a viewport",
+      "request": { "jsonrpc": "2.0", "id": 4, "method": "hew.view.hidden", "params": {} },
+      "response": {
+        "jsonrpc": "2.0",
+        "id": 4,
+        "result": { "hidden": [], "tags_hidden": [], "isolated": null }
+      }
+    }
+  ]
+}

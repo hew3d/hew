@@ -11,7 +11,7 @@
 # fresh pull. That means no static-delta generation either (deltas need
 # continuous history to be worth anything); a client just does a full pull
 # on update, which is a fine trade at Hew's current scale. Expects
-# flatpak/flatpak-builder and the org.gnome.Platform//47 + org.gnome.Sdk//47
+# flatpak/flatpak-builder and the org.gnome.Platform//50 + org.gnome.Sdk//50
 # runtimes already installed, and PACKAGING_GPG_PRIVATE_KEY in the
 # environment. Writes <repo-dir>/../com.hew3d.Hew.flatpakrepo alongside the
 # repo.
@@ -33,19 +33,26 @@ flatpak-builder --force-clean --gpg-sign="$keyid" --gpg-homedir="$gpg_home" \
   --repo="$repo_dir" "$build_dir" "$here/flatpak/com.hew3d.Hew.yml"
 flatpak build-update-repo --gpg-sign="$keyid" --gpg-homedir="$gpg_home" "$repo_dir"
 
-flatpak_repo_url="${base_url%/}/flatpak/com.hew3d.Hew.flatpakrepo"
+# The bundle's update origin is Hew; its GNOME runtime comes from Flathub.
+# --runtime-repo expects a .flatpakrepo descriptor, --repo-url the raw repo.
+flatpak_repo_url="${base_url%/}/flatpak/repo"
+runtime_repo_url="https://dl.flathub.org/repo/flathub.flatpakrepo"
+# Carry the public key into the bundle so its auto-added update remote can
+# verify the same signed commits as installs via the .flatpakrepo descriptor.
+gpg --batch --homedir "$gpg_home" --export "$keyid" > "$gpg_home/public.gpg"
 mkdir -p "$(dirname "$bundle_out")"
 flatpak build-bundle --gpg-sign="$keyid" --gpg-homedir="$gpg_home" \
-  --runtime-repo="$flatpak_repo_url" \
+  --repo-url="$flatpak_repo_url" --runtime-repo="$runtime_repo_url" \
+  --gpg-keys="$gpg_home/public.gpg" \
   "$repo_dir" "$bundle_out" com.hew3d.Hew
 
-pubkey_b64="$(gpg --batch --homedir "$gpg_home" --export "$keyid" | base64 -w0)"
+pubkey_b64="$(base64 -w0 < "$gpg_home/public.gpg")"
 
 cat > "$(dirname "$repo_dir")/com.hew3d.Hew.flatpakrepo" <<EOF
 [Flatpak Repo]
 Title=Hew
 Comment=Hew — a 3D modeler built on watertight solids
-Url=${base_url%/}/flatpak/repo
+Url=${flatpak_repo_url}
 Homepage=https://hew3d.com
 GPGKey=${pubkey_b64}
 EOF

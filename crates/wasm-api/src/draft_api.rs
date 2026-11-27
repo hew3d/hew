@@ -16,7 +16,8 @@
 //!   exactly as `sketch_unit_keys` does.
 
 use kernel::{
-    ComponentId, DraftStore, FaceId, ObjectId, Plane, Point3, Sketch, SketchEdgeId, Transform, Vec3,
+    ComponentId, DraftStore, FaceId, ObjectId, Plane, PlaneUnits, Point3, Sketch, SketchEdgeId,
+    SketchId, Transform, Vec3,
 };
 use slotmap::{Key, KeyData};
 use wasm_bindgen::prelude::*;
@@ -66,13 +67,45 @@ pub(crate) struct OpenDraft {
     pose: Option<Pose>,
 }
 
+/// What a drafting context lifts (detached shapes §4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DraftScope {
+    /// The plane's arrangement: its drawing and the objects taking part.
+    Plane,
+    /// A detached shape's own context, nothing else on the plane taking
+    /// part: `Some(s)` is detached sketch `s` alone; `None` draws ONE new
+    /// detached sketch ([`Scene::draft_begin_detached`]).
+    Detached(Option<SketchId>),
+}
+
+/// Which form of context JSON a [`DraftCtx`] was resolved from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CtxForm {
+    /// `{"plane":[..]}`, optionally with `"instance"`.
+    Plane,
+    /// `{"plane":[..],"object":id}`: one object's own drawing.
+    ObjectPlane,
+    /// `{"face":{..}}`, optionally with `"instance"`.
+    Face,
+    /// `{"sketch":id}`, optionally with `"instance"`.
+    Sketch,
+}
+
 /// A resolved drafting context: the plane in its frame, the frame, the
-/// instance pose (if any), and the objects that take part.
+/// instance pose (if any), the objects that take part, what it lifts, the
+/// form it was given in, and the instance it was seen through.
 struct DraftCtx {
     plane: Plane,
     frame: Option<ComponentId>,
     pose: Option<Pose>,
     objects: Vec<ObjectId>,
+    scope: DraftScope,
+    form: CtxForm,
+    instance: Option<u64>,
+    /// The Object whose face a `{"face":..}` context addresses; `None` for
+    /// every other form. A face of a frozen Object opens its draft
+    /// detached ([`kernel::Document::face_draw_detaches`]).
+    addressed: Option<ObjectId>,
 }
 
 fn p3(a: [f64; 3]) -> Point3 {
@@ -95,6 +128,69 @@ fn hex(key: u64) -> String {
     format!("{key:016x}")
 }
 
+/// The numbers a listing names `plane` by: `[px,py,pz,nx,ny,nz]`, its point
+/// closest to the world origin and its unit normal.
+fn plane_numbers(plane: &Plane) -> [f64; 6] {
+    let n = plane.normal();
+    let o = Point3::ORIGIN + n * (-plane.signed_distance(Point3::ORIGIN));
+    [o.x, o.y, o.z, n.x, n.y, n.z]
+}
+
+/// The plane a `{"plane":[px,py,pz,nx,ny,nz]}` context names. The one
+/// constructor every plane context goes through, so a listing that keys
+/// against the plane a context will rebuild ([`Scene::plane_units_all_json`])
+/// and the draft opened on that context resolve the identical plane.
+fn plane_of_ctx_numbers(v: [f64; 6]) -> Result<Plane, ApiError> {
+    Plane::from_point_normal(Point3::new(v[0], v[1], v[2]), Vec3::new(v[3], v[4], v[5]))
+        .map_err(|e| api_err(&e, &e))
+}
+
+/// JavaScript's `Math.round`: the nearest integer, a half rounding up
+/// (toward +infinity), unlike [`f64::round`] (away from zero).
+fn js_round(x: f64) -> f64 {
+    let f = x.floor();
+    if x - f >= 0.5 { f + 1.0 } else { f }
+}
+
+/// `Math.hypot` of three finite numbers as V8 and JavaScriptCore compute it:
+/// scaled by the largest magnitude, squares summed with Kahan compensation.
+fn js_hypot3(a: f64, b: f64, c: f64) -> f64 {
+    let abs = [a.abs(), b.abs(), c.abs()];
+    let max = abs.iter().copied().fold(0.0, f64::max);
+    if max == 0.0 {
+        return 0.0;
+    }
+    let (mut sum, mut compensation) = (0.0f64, 0.0f64);
+    for x in abs {
+        let n = x / max;
+        let summand = n * n - compensation;
+        let preliminary = sum + summand;
+        compensation = (preliminary - sum) - summand;
+        sum = preliminary;
+    }
+    sum.sqrt() * max
+}
+
+/// The context numbers the app builds from a listed plane's numbers `e`
+/// (`canonicalPlane` in `app/src/tools/planeUnits.ts`, step for step in
+/// JavaScript's arithmetic): the unit normal and the closest point, rounded
+/// to 1e-12 with -0 folded to 0. `None` for a degenerate normal. The
+/// Outliner opens its edits on exactly this context, so the whole-document
+/// listing keys against the plane rebuilt from it (#103).
+fn app_ctx_numbers(e: [f64; 6]) -> Option<[f64; 6]> {
+    let r12 = |x: f64| {
+        let v = js_round(x * 1e12) / 1e12;
+        if v == 0.0 { 0.0 } else { v }
+    };
+    let len = js_hypot3(e[3], e[4], e[5]);
+    if !(len > 0.0 && len.is_finite()) {
+        return None;
+    }
+    let (nx, ny, nz) = (r12(e[3] / len), r12(e[4] / len), r12(e[5] / len));
+    let d = e[0] * nx + e[1] * ny + e[2] * nz;
+    Some([r12(nx * d), r12(ny * d), r12(nz * d), nx, ny, nz])
+}
+
 fn world_json(pose: Option<Pose>, p: Point3) -> serde_json::Value {
     let w = pose.map_or(p, |pz| pz.to_world(p));
     serde_json::json!([w.x, w.y, w.z])
@@ -102,6 +198,29 @@ fn world_json(pose: Option<Pose>, p: Point3) -> serde_json::Value {
 
 fn stale_draft() -> ApiError {
     stale("StaleDraft", "draft")
+}
+
+/// Parses a context's JSON.
+fn parse_ctx(ctx_json: &str) -> Result<serde_json::Value, ApiError> {
+    serde_json::from_str(ctx_json)
+        .map_err(|e| ApiError(format!("BadContext: malformed context JSON: {e}")))
+}
+
+/// The form of a context's JSON, as [`Scene::ctx_from_json`] reads it
+/// (`plane` before `face` before `sketch`); `None` for none of them.
+fn ctx_form(v: &serde_json::Value) -> Option<CtxForm> {
+    if v.get("plane").is_some() {
+        Some(match v.get("object") {
+            None | Some(serde_json::Value::Null) => CtxForm::Plane,
+            Some(_) => CtxForm::ObjectPlane,
+        })
+    } else if v.get("face").is_some() {
+        Some(CtxForm::Face)
+    } else if v.get("sketch").is_some() {
+        Some(CtxForm::Sketch)
+    } else {
+        None
+    }
 }
 
 /// Distance from `p` to the segment `a`-`b`.
@@ -142,6 +261,22 @@ fn in_ring(p: Point3, ring: &[Point3], normal: Vec3) -> bool {
     inside
 }
 
+/// The area of the polygon `ring` (its Newell normal along `normal`).
+fn ring_area(ring: &[Point3], normal: Vec3) -> f64 {
+    let n = ring.len();
+    let mut acc = Vec3::new(0.0, 0.0, 0.0);
+    for i in 0..n {
+        let (a, b) = (ring[i], ring[(i + 1) % n]);
+        acc = acc
+            + Vec3::new(
+                (a.y - b.y) * (a.z + b.z),
+                (a.z - b.z) * (a.x + b.x),
+                (a.x - b.x) * (a.y + b.y),
+            );
+    }
+    (acc.dot(normal) * 0.5).abs()
+}
+
 impl Scene {
     /// Resolves instance `instance` to its definition and pose.
     fn draft_instance_pose(&self, instance: u64) -> Result<(ComponentId, Pose), ApiError> {
@@ -160,25 +295,29 @@ impl Scene {
     }
 
     /// The objects that take part in a draft on `plane` in `frame`: those
-    /// with a face on it, minus this session's hidden objects.
+    /// with a face on it, narrowed to an open editing session's own in the
+    /// session frame ([`kernel::Document::draft_participants`], v1.5
+    /// decisions D1), minus this session's hidden objects.
     fn draft_participants(&self, plane: Plane, frame: Option<ComponentId>) -> Vec<ObjectId> {
         self.doc
-            .drawable_objects_on_plane(plane, frame)
+            .draft_participants(plane, frame)
             .into_iter()
             .filter(|o| !self.hidden_objects.contains(o))
             .collect()
     }
 
     fn ctx_plane(&self, world: [f64; 6], instance: Option<u64>) -> Result<DraftCtx, ApiError> {
-        let plane = Plane::from_point_normal(
-            Point3::new(world[0], world[1], world[2]),
-            Vec3::new(world[3], world[4], world[5]),
-        )
-        .map_err(|e| api_err(&e, &e))?;
+        let plane = plane_of_ctx_numbers(world)?;
         let (plane, frame, pose) = match instance {
             Some(i) => {
                 let (def, pose) = self.draft_instance_pose(i)?;
-                let local = pose.inv.apply_plane(&plane).map_err(|e| api_err(&e, &e))?;
+                // Side-keeping, as `begin_sketch_on_plane_in_instance`
+                // maps it: the local plane's normal is the pose-inverse
+                // image of the user's up, under a mirrored pose too.
+                let local = pose
+                    .inv
+                    .apply_plane_keeping_side(&plane)
+                    .map_err(|e| api_err(&e, &e))?;
                 (local, Some(def), Some(pose))
             }
             None => (plane, None, None),
@@ -189,6 +328,10 @@ impl Scene {
             frame,
             pose,
             objects,
+            scope: DraftScope::Plane,
+            form: CtxForm::Plane,
+            instance,
+            addressed: None,
         })
     }
 
@@ -211,9 +354,18 @@ impl Scene {
             frame: self.doc.object_owner_component(oid),
             pose: None,
             objects: vec![oid],
+            scope: DraftScope::Plane,
+            form: CtxForm::ObjectPlane,
+            instance: None,
+            addressed: None,
         })
     }
 
+    /// A face's context: its plane and the object's frame, with the plane's
+    /// participants. While an editing session is open, a face of an object
+    /// outside it resolves to the session frame's plane context there (the
+    /// object takes no part, v1.5 decisions D1): drawing on an outside face
+    /// makes the session's free drawing on that plane.
     fn ctx_face(
         &self,
         object: u64,
@@ -253,16 +405,29 @@ impl Scene {
             frame,
             pose,
             objects,
+            scope: DraftScope::Plane,
+            form: CtxForm::Face,
+            instance,
+            addressed: Some(oid),
         })
     }
 
+    /// A sketch's context: its plane and frame. A plain sketch's context is
+    /// the whole plane's arrangement; a detached sketch's is the sketch
+    /// alone (detached shapes D5), with no object taking part. A sketch of
+    /// the session frame outside an open editing session is refused
+    /// `ExplodeSessionScope` (v1.5 decisions D1; selection is
+    /// session-scoped, so the app never names one).
     fn ctx_sketch(&self, sketch: u64, instance: Option<u64>) -> Result<DraftCtx, ApiError> {
         let sid = sketch_id(sketch);
-        let plane = self
+        let sk = self
             .doc
             .sketch(sid)
-            .ok_or_else(|| stale("UnknownSketch", "sketch"))?
-            .plane();
+            .ok_or_else(|| stale("UnknownSketch", "sketch"))?;
+        if instance.is_none() && !self.doc.draft_scope_holds_sketch(sid) {
+            return Err(doc_err(kernel::DocumentError::ExplodeSessionScope));
+        }
+        let (plane, detached) = (sk.plane(), sk.detached());
         let owner = self.doc.sketch_owner_component(sid);
         let (frame, pose) = match instance {
             Some(i) => {
@@ -277,20 +442,32 @@ impl Scene {
             }
             None => (owner, None),
         };
-        let objects = self.draft_participants(plane, frame);
+        let (objects, scope) = if detached {
+            (Vec::new(), DraftScope::Detached(Some(sid)))
+        } else {
+            (self.draft_participants(plane, frame), DraftScope::Plane)
+        };
         Ok(DraftCtx {
             plane,
             frame,
             pose,
             objects,
+            scope,
+            form: CtxForm::Sketch,
+            instance,
+            addressed: None,
         })
     }
 
     /// Parses a `{"plane":[..]} | {"face":{..}} | {"sketch":id}` context,
-    /// each with an optional `"instance"`.
+    /// each with an optional `"instance"` (or `{"plane":[..],"object":id}`).
+    /// A detached sketch's context is that sketch alone.
     fn ctx_from_json(&self, ctx_json: &str) -> Result<DraftCtx, ApiError> {
-        let v: serde_json::Value = serde_json::from_str(ctx_json)
-            .map_err(|e| ApiError(format!("BadContext: malformed context JSON: {e}")))?;
+        self.ctx_from_value(&parse_ctx(ctx_json)?)
+    }
+
+    /// [`Scene::ctx_from_json`] of the parsed JSON.
+    fn ctx_from_value(&self, v: &serde_json::Value) -> Result<DraftCtx, ApiError> {
         let instance = match v.get("instance") {
             None | Some(serde_json::Value::Null) => None,
             Some(i) => Some(i.as_u64().ok_or_else(|| {
@@ -345,9 +522,28 @@ impl Scene {
         if self.open_draft.is_some() && self.doc.draft_sketch().is_none() {
             self.open_draft = None;
         }
-        self.doc
-            .begin_draft(ctx.plane, ctx.frame, &ctx.objects, label)
-            .map_err(doc_err)?;
+        // Drawing on a face of a frozen Object opens a NEW detached shape on
+        // its plane (OW-1, v1.5 owner's items D1): the face is not cut, and
+        // the shape pulls into a new Object. Only the draft is redirected;
+        // the context stays a plane context, so the face's listing
+        // (`plane_units_json`) is what it was.
+        let detaches = ctx.scope == DraftScope::Plane
+            && ctx
+                .addressed
+                .is_some_and(|o| self.doc.face_draw_detaches(o));
+        match ctx.scope {
+            DraftScope::Plane if detaches => self
+                .doc
+                .begin_draft_detached_new(ctx.plane, ctx.frame, label),
+            DraftScope::Plane => self
+                .doc
+                .begin_draft(ctx.plane, ctx.frame, &ctx.objects, label),
+            DraftScope::Detached(Some(s)) => self.doc.begin_draft_detached(s, label),
+            DraftScope::Detached(None) => self
+                .doc
+                .begin_draft_detached_new(ctx.plane, ctx.frame, label),
+        }
+        .map_err(doc_err)?;
         self.next_draft_handle += 1;
         let handle = self.next_draft_handle;
         self.open_draft = Some(OpenDraft {
@@ -389,28 +585,103 @@ impl Scene {
     }
 
     /// The working-sketch edges named by `keys`; refuses unknown keys.
+    /// (A listed edge that another plane's line crosses in the draft's
+    /// lift names every piece of it, [`kernel::Document::draft_edges_for_keys`].)
     fn draft_edges(&self, keys: &[u64]) -> Result<Vec<SketchEdgeId>, ApiError> {
-        let edges = self.doc.draft_edges_by_key(keys);
-        let sk = self.doc.draft_sketch().ok_or_else(stale_draft)?;
-        let plane = sk.plane();
-        let found: std::collections::BTreeSet<u64> = edges
-            .iter()
-            .filter_map(|&e| {
-                let ed = sk.edges().get(e)?;
-                Some(kernel::edge_key(
-                    &plane,
-                    sk.vertices()[ed.from].position,
-                    sk.vertices()[ed.to].position,
-                ))
-            })
-            .collect();
-        if let Some(k) = keys.iter().find(|k| !found.contains(k)) {
+        self.doc.draft_sketch().ok_or_else(stale_draft)?;
+        let (edges, missing) = self.doc.draft_edges_for_keys(keys);
+        if let Some(k) = missing.first() {
             return Err(ApiError(format!(
                 "UnknownEdge: no draft edge has key {}",
                 hex(*k)
             )));
         }
         Ok(edges)
+    }
+
+    /// The drawing a clipboard copy names ([`Scene::extract_clipboard`]):
+    /// a JSON array of `{"sketch":id}` (a whole free sketch),
+    /// `{"sketch":id,"islands":[id,..]}` (some islands of it; how a detached
+    /// shape is named), or `{"ctx":<context>,"keys":["hex",..]}` (the edges
+    /// a context's listing names by key, the context given as
+    /// [`Scene::plane_units_json`] takes it, as a JSON object or a string
+    /// holding one).
+    ///
+    /// # Errors
+    /// `BadDrawing` for malformed JSON; `BadContext` for a bad context or a
+    /// detached sketch's own context (name its islands instead); whatever a
+    /// context refuses.
+    pub(crate) fn drawn_sources(
+        &self,
+        drawing_json: &str,
+    ) -> Result<Vec<kernel::DrawnSource>, ApiError> {
+        let bad = |what: &str| ApiError(format!("BadDrawing: {what}"));
+        let v: serde_json::Value = serde_json::from_str(drawing_json)
+            .map_err(|e| bad(&format!("malformed drawing JSON: {e}")))?;
+        let items = v
+            .as_array()
+            .ok_or_else(|| bad("drawing must be an array"))?;
+        let mut out = Vec::with_capacity(items.len());
+        for it in items {
+            if let Some(ctx) = it.get("ctx") {
+                let ctx = match ctx {
+                    serde_json::Value::String(s) => parse_ctx(s)?,
+                    other => other.clone(),
+                };
+                let ctx = self.ctx_from_value(&ctx)?;
+                if ctx.scope != DraftScope::Plane {
+                    return Err(ApiError::new(
+                        "BadContext",
+                        "a detached shape is named by {\"sketch\":id,\"islands\":[..]}",
+                    ));
+                }
+                let keys = it
+                    .get("keys")
+                    .and_then(serde_json::Value::as_array)
+                    .ok_or_else(|| bad("\"keys\" must be an array"))?
+                    .iter()
+                    .map(|k| match k {
+                        serde_json::Value::String(s) => u64::from_str_radix(s, 16)
+                            .map_err(|_| bad("a key must be a 16-digit hex string")),
+                        other => other
+                            .as_u64()
+                            .ok_or_else(|| bad("a key must be a hex string")),
+                    })
+                    .collect::<Result<Vec<u64>, ApiError>>()?;
+                out.push(kernel::DrawnSource::PlaneKeys {
+                    plane: ctx.plane,
+                    frame: ctx.frame,
+                    objects: ctx.objects,
+                    keys,
+                });
+            } else if let Some(s) = it.get("sketch") {
+                let sid = sketch_id(
+                    s.as_u64()
+                        .ok_or_else(|| bad("\"sketch\" must be an unsigned integer id"))?,
+                );
+                match it.get("islands") {
+                    None | Some(serde_json::Value::Null) => {
+                        out.push(kernel::DrawnSource::Sketch(sid));
+                    }
+                    Some(list) => {
+                        let islands = list
+                            .as_array()
+                            .ok_or_else(|| bad("\"islands\" must be an array"))?
+                            .iter()
+                            .map(|i| {
+                                i.as_u64()
+                                    .map(|i| kernel::SketchIslandId::from(KeyData::from_ffi(i)))
+                                    .ok_or_else(|| bad("an island must be an unsigned integer id"))
+                            })
+                            .collect::<Result<Vec<_>, ApiError>>()?;
+                        out.push(kernel::DrawnSource::Islands(sid, islands));
+                    }
+                }
+            } else {
+                return Err(bad("each entry names a \"ctx\" or a \"sketch\""));
+            }
+        }
+        Ok(out)
     }
 
     fn draft_world_transform(
@@ -448,6 +719,7 @@ impl Scene {
         nz: f64,
         label: &str,
     ) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
         let ctx = self.ctx_plane([px, py, pz, nx, ny, nz], None)?;
         let handle = self.draft_open(ctx, label)?;
         recording::record(recording::RecordedCall::DraftBeginPlane {
@@ -479,6 +751,7 @@ impl Scene {
         nz: f64,
         label: &str,
     ) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
         let ctx = self.ctx_plane([px, py, pz, nx, ny, nz], Some(instance))?;
         let handle = self.draft_open(ctx, label)?;
         recording::record(recording::RecordedCall::DraftBeginPlaneInInstance {
@@ -497,12 +770,17 @@ impl Scene {
 
     /// Opens the draft on `face` of `object` (its plane; the object's
     /// owning definition as frame). Refuses a stale or hidden object/face.
+    /// On a face of a locked (frozen) Object the draft draws ONE new
+    /// detached shape, as [`Scene::draft_begin_detached`] does, so the face
+    /// is not cut; the same holds for the `{"face":..}` form of
+    /// [`Scene::draft_begin_ctx`].
     pub fn draft_begin_face(
         &mut self,
         object: u64,
         face: u64,
         label: &str,
     ) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
         let ctx = self.ctx_face(object, face, None)?;
         let handle = self.draft_open(ctx, label)?;
         recording::record(recording::RecordedCall::DraftBeginFace {
@@ -523,6 +801,7 @@ impl Scene {
         face: u64,
         label: &str,
     ) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
         let ctx = self.ctx_face(object, face, Some(instance))?;
         let handle = self.draft_open(ctx, label)?;
         recording::record(recording::RecordedCall::DraftBeginFaceInInstance {
@@ -535,8 +814,12 @@ impl Scene {
         Ok(handle)
     }
 
-    /// Opens the draft on `sketch`'s plane and frame.
+    /// Opens the draft on `sketch`'s plane and frame. On a detached sketch
+    /// the draft is that sketch's own context: nothing else on the plane
+    /// takes part, and everything lowers back into it (a Line chain
+    /// continues in the sketch its first segment created).
     pub fn draft_begin_sketch(&mut self, sketch: u64, label: &str) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
         let ctx = self.ctx_sketch(sketch, None)?;
         let handle = self.draft_open(ctx, label)?;
         recording::record(recording::RecordedCall::DraftBeginSketch {
@@ -551,8 +834,11 @@ impl Scene {
     /// takes it (`{"plane":[..]} | {"face":{..}} | {"sketch":id}`, each with
     /// an optional `"instance"`). A caller holding unit keys from
     /// `plane_units_json(ctx)` opens its edit with the SAME `ctx`, so both
-    /// resolve the identical plane and the keys name the same edges.
+    /// resolve the identical plane and the keys name the same edges. A
+    /// `{"sketch":id}` context on a detached sketch opens that sketch's own
+    /// context, as [`Scene::draft_begin_sketch`] does.
     pub fn draft_begin_ctx(&mut self, ctx_json: &str, label: &str) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
         let ctx = self.ctx_from_json(ctx_json)?;
         let handle = self.draft_open(ctx, label)?;
         recording::record(recording::RecordedCall::DraftBeginCtx {
@@ -563,37 +849,86 @@ impl Scene {
         Ok(handle)
     }
 
+    /// Opens a draft that draws ONE new **detached** shape (detached shapes
+    /// §4): drawing that takes part in no plane arrangement, so it neither
+    /// splits nor joins the face or the drawing under it, and extruding it
+    /// always makes a new Object. `ctx_json` is a `{"plane":[..]}` or
+    /// `{"face":{"object":id,"face":id}}` context (each with an optional
+    /// `"instance"`), giving the plane and frame only: nothing on the plane
+    /// is lifted. Everything drawn until [`Scene::draft_end`] lowers into
+    /// one new detached sketch, which the report's `sketches` names; to
+    /// continue it, open it with [`Scene::draft_begin_ctx`] (`{"sketch":id}`)
+    /// or [`Scene::draft_begin_sketch`].
+    ///
+    /// # Errors
+    /// `BadContext` for a malformed context, a `{"sketch":id}` context, or
+    /// the object-scoped `{"plane":[..],"object":id}` form; otherwise as
+    /// [`Scene::draft_begin_ctx`].
+    pub fn draft_begin_detached(&mut self, ctx_json: &str, label: &str) -> Result<u64, ApiError> {
+        self.ensure_not_busy()?;
+        // The form is checked before anything resolves, so a wrong form is
+        // refused as one whatever it names.
+        let v = parse_ctx(ctx_json)?;
+        match ctx_form(&v) {
+            Some(CtxForm::Plane | CtxForm::Face) | None => {}
+            Some(CtxForm::Sketch) => {
+                return Err(ApiError::new(
+                    "BadContext",
+                    "a detached shape starts on a plane or a face; to continue a detached sketch open it with draft_begin_ctx",
+                ));
+            }
+            Some(CtxForm::ObjectPlane) => {
+                return Err(ApiError::new(
+                    "BadContext",
+                    "a detached shape starts on a plane or a face, not on one object's own drawing",
+                ));
+            }
+        }
+        let mut ctx = self.ctx_from_value(&v)?;
+        ctx.scope = DraftScope::Detached(None);
+        ctx.objects.clear();
+        let handle = self.draft_open(ctx, label)?;
+        recording::record(recording::RecordedCall::DraftBeginDetached {
+            draft: handle,
+            ctx: ctx_json.to_string(),
+            label: label.to_string(),
+        });
+        Ok(handle)
+    }
+
     /// Lowers the draft as one undo step and closes it. Returns the report
-    /// as JSON `{"objects":[id..],"sketches":[id..],"kept_as_sketch":[[[x,y,z],[x,y,z]],..]}`
-    /// (world coordinates). A refusal leaves the draft open.
+    /// as JSON `{"objects":[id..],"sketches":[id..],"kept_as_sketch":[[[x,y,z],[x,y,z]],..],"faces_closed":[id..]}`
+    /// (world coordinates); `faces_closed` names the free sketches on other
+    /// planes the edit closed a face in (a loop on one plane is a face,
+    /// whichever sketches hold its lines); `cells` lists the solids the
+    /// edit made from closed faces, each one of `{"created":id}`,
+    /// `{"grew":{"from":id,"to":id}}`, `{"unjoined":{"object":id,"with":id}}`
+    /// (the union with `with` refused, so the shape is a solid of its own),
+    /// or `{"declined":{"reason":"…","open_edges":n,"non_planar_loops":n,"overlapping_edges":n}}`
+    /// (`overlapping_edges`: for `"overlapping_faces"`, how many edges two
+    /// faces lie over each other along, wireframe faces §16 R22).
+    /// A refusal leaves the draft open.
     pub fn draft_end(&mut self, draft: u64) -> Result<String, ApiError> {
+        self.ensure_not_busy()?;
         let pose = self.draft_check(draft)?;
         let (report, change) = self.doc.end_draft().map_err(doc_err)?;
         self.open_draft = None;
         self.reconcile(&change);
         recording::record(recording::RecordedCall::DraftEnd { draft });
-        let out = serde_json::json!({
-            "objects": report.objects.iter().map(|o| o.data().as_ffi()).collect::<Vec<_>>(),
-            "sketches": report.sketches.iter().map(|s| s.data().as_ffi()).collect::<Vec<_>>(),
-            "kept_as_sketch": report
-                .kept_as_sketch
-                .iter()
-                .map(|&(a, b)| serde_json::json!([world_json(pose, a), world_json(pose, b)]))
-                .collect::<Vec<_>>(),
-        });
-        Ok(out.to_string())
+        Ok(draft_report_json(&report, pose))
     }
 
     /// Abandons the draft; the document is untouched. `false` for a stale
     /// handle.
-    pub fn draft_cancel(&mut self, draft: u64) -> bool {
+    pub fn draft_cancel(&mut self, draft: u64) -> Result<bool, ApiError> {
+        self.ensure_not_busy()?;
         if self.draft_check(draft).is_err() {
-            return false;
+            return Ok(false);
         }
         self.doc.cancel_draft();
         self.open_draft = None;
         recording::record(recording::RecordedCall::DraftCancel { draft });
-        true
+        Ok(true)
     }
 
     // ------------------------------------------------------ history bracket
@@ -605,6 +940,7 @@ impl Scene {
     /// [`Scene::history_bracket_abort`] restores the document exactly as it
     /// was at open. One bracket at a time; it does not nest.
     pub fn history_bracket_open(&mut self) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         if self.open_bracket.is_some() {
             return Err(stale("HistoryBracketOpen", "history bracket"));
         }
@@ -619,12 +955,14 @@ impl Scene {
     /// or drafting gesture left open) refuses and restores the document as
     /// it was at open.
     pub fn history_bracket_commit(&mut self, label: &str) -> Result<bool, ApiError> {
+        self.ensure_not_busy()?;
         let Some(txn) = self.open_bracket.take() else {
             return Err(stale("NoHistoryBracket", "history bracket"));
         };
         let meta = kernel::CompoundMeta {
             label: label.to_string(),
             origin: kernel::HistoryOrigin::User,
+            coalesce: None,
         };
         match self.doc.commit_transaction(txn, meta) {
             Ok(committed) => {
@@ -647,14 +985,16 @@ impl Scene {
     /// Discards everything since [`Scene::history_bracket_open`]: the
     /// document, its undo and redo stacks included, is exactly as it was.
     /// A no-op without an open bracket.
-    pub fn history_bracket_abort(&mut self) {
+    pub fn history_bracket_abort(&mut self) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let Some(txn) = self.open_bracket.take() else {
-            return;
+            return Ok(());
         };
         recording::record(recording::RecordedCall::HistoryBracketAbort);
         self.doc.abort_transaction(txn);
         self.open_draft = None;
         self.full_resync();
+        Ok(())
     }
 
     // ------------------------------------------------------------ edits
@@ -672,6 +1012,7 @@ impl Scene {
         by: f64,
         bz: f64,
     ) -> Result<SegmentAddedJs, ApiError> {
+        self.ensure_not_busy()?;
         let report = self.draft_edit(draft, false, |sk, pose| {
             let (a, b) = (Point3::new(ax, ay, az), Point3::new(bx, by, bz));
             let (a, b) = pose.map_or((a, b), |p| (p.to_local(a), p.to_local(b)));
@@ -712,6 +1053,7 @@ impl Scene {
         center: &[f64],
         radius: f64,
     ) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         self.draft_curve_with(draft, center, radius, kernel::SketchCurveKind::Circle)?;
         recording::record(recording::RecordedCall::DraftBeginCurveWith {
             draft,
@@ -729,6 +1071,7 @@ impl Scene {
         center: &[f64],
         radius: f64,
     ) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         self.draft_curve_with(draft, center, radius, kernel::SketchCurveKind::Polygon)?;
         recording::record(recording::RecordedCall::DraftBeginPolygonWith {
             draft,
@@ -742,6 +1085,7 @@ impl Scene {
     /// `draft_end_curve` are one curve chain that selects and erases as one
     /// (an arc too flat to have a circle, drawn as its chord).
     pub fn draft_begin_curve(&mut self, draft: u64) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         self.draft_edit(draft, false, |sk, _| {
             sk.begin_curve();
             Ok(())
@@ -753,6 +1097,7 @@ impl Scene {
     /// Closes the curve chain opened by `draft_begin_curve`,
     /// `draft_begin_curve_with`, or `draft_begin_polygon_with`.
     pub fn draft_end_curve(&mut self, draft: u64) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         self.draft_edit(draft, false, |sk, _| {
             sk.end_curve();
             Ok(())
@@ -765,6 +1110,7 @@ impl Scene {
     /// `plane_units_json`). Unknown keys refuse; a solid's own edges are
     /// not drawing edges and cannot be named.
     pub fn draft_remove_edges(&mut self, draft: u64, keys: &[u64]) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         self.draft_check(draft)?;
         let edges = self.draft_edges(keys)?;
         self.draft_edit(draft, true, |sk, _| {
@@ -791,6 +1137,7 @@ impl Scene {
         keys: &[u64],
         affine: &[f64],
     ) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let pose = self.draft_check(draft)?;
         let (rows, t) = Self::draft_world_transform(pose, affine)?;
         let edges = self.draft_edges(keys)?;
@@ -814,6 +1161,7 @@ impl Scene {
         keys: &[u64],
         affine: &[f64],
     ) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let pose = self.draft_check(draft)?;
         let (rows, t) = Self::draft_world_transform(pose, affine)?;
         let edges = self.draft_edges(keys)?;
@@ -842,26 +1190,128 @@ impl Scene {
         ty: f64,
         tz: f64,
     ) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         let pose = self.draft_check(draft)?;
         let at = pose.map_or(Point3::new(x, y, z), |p| p.to_local(Point3::new(x, y, z)));
         let to = pose.map_or(Point3::new(tx, ty, tz), |p| {
             p.to_local(Point3::new(tx, ty, tz))
         });
-        let v = self
-            .doc
-            .draft_vertex_at(at)
-            .ok_or_else(|| ApiError::new("UnknownVertex", "no draft vertex at that position"))?;
-        self.draft_edit(draft, true, |sk, _| {
-            sk.move_vertex_arranging(v, to)
-                .map(|_| ())
-                .map_err(|e| api_err(&e, &e))
-        })?;
+        // A vertex drag moves its plane's drawing and never another plane's
+        // line (wireframe faces §4.1): the kernel lifts the draft without
+        // foreign edges first, and leaves it exactly as it was on a refusal.
+        match self.doc.draft_drag_vertex(at, to) {
+            None => {
+                return Err(ApiError::new(
+                    "UnknownVertex",
+                    "no draft vertex at that position",
+                ));
+            }
+            Some(Err(e)) => return Err(api_err(&e, &e)),
+            Some(Ok(_)) => {}
+        }
         recording::record(recording::RecordedCall::DraftMoveVertex {
             draft,
             at: [x, y, z],
             to: [tx, ty, tz],
         });
         Ok(())
+    }
+
+    /// Rounds or chamfers the drafted corner at `(x,y,z)` (world; the
+    /// vertex is found exactly as [`Scene::draft_move_vertex`] finds its
+    /// own, within the kernel's merge tolerance). `profile_json` is a
+    /// `kernel::CornerProfile`: `{"kind":"round","radius":r,"segments":n}`
+    /// (`r` in meters, `n` in 1..=1024) or
+    /// `{"kind":"chamfer","setback_a":a,"setback_b":b}` (meters; `a` runs
+    /// along the edge that starts the counter-clockwise order seen from the
+    /// plane normal). Lengths are world lengths: inside an instance the pose
+    /// must be a similarity.
+    ///
+    /// Contract. Mutates only the open draft's working sketch (lowered, with
+    /// everything else drawn, as the draft's single undo step); a refusal
+    /// leaves the draft exactly as it was. Records after success.
+    ///
+    /// # Errors
+    /// `StaleDraft`; `BadSpec` (malformed profile JSON); `UnknownVertex` (no
+    /// draft vertex there); `CornerNotBlendable`, `CornerIsStraight`,
+    /// `CornerRadiusTooLarge` (its message carries the largest size that
+    /// fits), `SegmentsBelowFloor`, `SegmentsAboveCap`, `DegenerateCurve`,
+    /// `DegenerateSegment`; and `CornerLeavesFace` when the corner is the
+    /// solid's own boundary or the arc or segment would leave the face.
+    pub fn draft_blend_corner(
+        &mut self,
+        draft: u64,
+        x: f64,
+        y: f64,
+        z: f64,
+        profile_json: &str,
+    ) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
+        let pose = self.draft_check(draft)?;
+        let profile = crate::curves_api::parse_corner_profile(profile_json)?;
+        let local = match pose {
+            Some(p) => crate::curves_api::scale_corner_profile(profile, 1.0 / p.scale()?),
+            None => profile,
+        };
+        let at = pose.map_or(Point3::new(x, y, z), |p| p.to_local(Point3::new(x, y, z)));
+        let v = self
+            .doc
+            .draft_check_corner(at, &local)
+            .map_err(|e| api_err(&e, &e))?;
+        self.draft_edit(draft, true, |sk, _| {
+            sk.blend_corner(v, local)
+                .map(|_| ())
+                .map_err(|e| api_err(&e, &e))
+        })?;
+        recording::record(recording::RecordedCall::DraftBlendCorner {
+            draft,
+            at: [x, y, z],
+            profile: profile_json.to_owned(),
+        });
+        Ok(())
+    }
+
+    /// The blendable corner of a context's drawing nearest `(x,y,z)` within
+    /// `aperture` (world meters), as its world position `[x,y,z]`, or
+    /// `None`. A blendable corner is a drawing vertex with exactly two
+    /// straight, non-curve edges that are not collinear, and neither edge
+    /// along a solid's own boundary (those never blend:
+    /// `draft_blend_corner` would refuse `CornerLeavesFace`). For hover
+    /// highlighting; read-only, opens no draft. `ctx_json` is as for
+    /// [`Scene::plane_units_json`].
+    ///
+    /// # Errors
+    /// `BadContext`, `BadVector` (non-finite `x,y,z` or `aperture`), and
+    /// whatever lifting the context's drawing refuses.
+    pub fn draft_blendable_corner_at(
+        &self,
+        ctx_json: &str,
+        x: f64,
+        y: f64,
+        z: f64,
+        aperture: f64,
+    ) -> Result<Option<Vec<f64>>, ApiError> {
+        if ![x, y, z, aperture].iter().all(|v| v.is_finite()) {
+            return Err(ApiError::new(
+                "BadVector",
+                "the point and aperture must be finite",
+            ));
+        }
+        let ctx = self.ctx_from_json(ctx_json)?;
+        let corners = self
+            .doc
+            .plane_blendable_corners(ctx.plane, ctx.frame, &ctx.objects)
+            .map_err(doc_err)?;
+        let at = Point3::new(x, y, z);
+        let mut best: Option<(f64, Point3)> = None;
+        for c in corners {
+            let w = ctx.pose.map_or(c, |p| p.to_world(c));
+            let d = (w - at).length();
+            if d <= aperture && best.is_none_or(|(bd, _)| d < bd) {
+                best = Some((d, w));
+            }
+        }
+        Ok(best.map(|(_, w)| vec![w.x, w.y, w.z]))
     }
 
     /// Offsets the region with key `region_key` by `distance` (world
@@ -872,6 +1322,7 @@ impl Scene {
         region_key: u64,
         distance: f64,
     ) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         self.draft_check(draft)?;
         let region = self.doc.draft_region_by_key(region_key).ok_or_else(|| {
             ApiError(format!(
@@ -903,6 +1354,7 @@ impl Scene {
         curve_key: u64,
         segments: u32,
     ) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
         self.draft_check(draft)?;
         let curves = self.doc.draft_curves_by_key(curve_key);
         if curves.is_empty() {
@@ -937,9 +1389,7 @@ impl Scene {
     pub fn object_drawing_planes(&self, object: u64) -> Vec<f64> {
         let mut out = Vec::new();
         for p in self.doc.object_drawing_planes(object_id(object)) {
-            let n = p.normal();
-            let o = Point3::ORIGIN + n * (-p.signed_distance(Point3::ORIGIN));
-            out.extend([o.x, o.y, o.z, n.x, n.y, n.z]);
+            out.extend(plane_numbers(&p));
         }
         out
     }
@@ -947,7 +1397,7 @@ impl Scene {
     /// The drawing on a context's plane as units and regions, as JSON
     /// (all points world; keys lowercase 16-digit hex strings):
     /// `{"units":[{"key","edges":[{"key","a":[x,y,z],"b":[x,y,z],
-    /// "store":{"kind":"topology","object":id}|{"kind":"owned","object":id,"sketch":id}|{"kind":"free","sketch":id},
+    /// "store":{"kind":"topology","object":id}|{"kind":"owned","object":id,"sketch":id}|{"kind":"free","sketch":id[,"detached":true]},
     /// "curve":{"center":[..],"radius":r|null}|null}],
     /// "curves":[{"key","curve_key","kind":"circle"|"polygon","center":[..],"radius":r|null,"edges":["<hex>"..]}]}],
     /// (a radius is null inside a non-uniformly scaled instance, where the
@@ -961,7 +1411,11 @@ impl Scene {
     /// `ctx_json` is `{"plane":[px,py,pz,nx,ny,nz]}`, `{"face":{"object":id,"face":id}}`
     /// or `{"sketch":id}`, each with an optional `"instance":id`; or
     /// `{"plane":[..],"object":id}` — that plane in the object's own frame
-    /// with only that object taking part. Read-only.
+    /// with only that object taking part. A free store that is a detached
+    /// sketch carries `"detached":true` (omitted otherwise). A plane or face
+    /// context lists the plane's arrangement, which no detached sketch is
+    /// in; `{"sketch":id}` on a detached sketch lists exactly that sketch.
+    /// Read-only.
     pub fn plane_units_json(&self, ctx_json: &str) -> Result<String, ApiError> {
         let ctx = self.ctx_from_json(ctx_json)?;
         Ok(self.plane_units_value(&ctx)?.0.to_string())
@@ -973,18 +1427,51 @@ impl Scene {
     /// The Outliner reads the whole document's drawing through this in one
     /// call rather than one `plane_units_json` per plane, which on a model
     /// of tens of thousands of small sketches took minutes.
+    ///
+    /// A detached sketch (in no plane's arrangement) is its own entry,
+    /// after the planes: `{plane, sketch: id, detached: true, units}`.
+    ///
+    /// A plane entry's keys are those `plane_units_json` gives for the
+    /// context the app builds from the entry's `plane` numbers (rounded to
+    /// 1e-12, [`app_ctx_numbers`]), so the Outliner, which seeds its cache
+    /// from this read under that context and opens its edits on it, finds
+    /// every key in the draft — on an oblique plane too, where the rounded
+    /// numbers rebuild a plane that differs from the sketch's in the last
+    /// bits (#103).
+    ///
+    /// While an editing session is open (v1.5 decisions D1), a plane with
+    /// drawing outside the session lists that drawing first, as its own
+    /// entry marked `context: true` (arranged among itself with the outside
+    /// objects; shown dimmed, never opened for editing), then the session's
+    /// drawing on the plane as the ordinary entry, whose keys are the
+    /// draft's. A detached sketch outside the session is marked
+    /// `context: true` too. Frozen drawing (a locked group's lines, OW-1)
+    /// lists the same way, session or not: a plane draft leaves it out, so
+    /// it is a `context: true` entry of its own. The flag is omitted
+    /// otherwise.
     pub fn plane_units_all_json(&self) -> Result<String, ApiError> {
         let mut out = Vec::new();
-        for (plane, units) in self
-            .doc
-            .free_plane_units(None, &self.hidden_objects.iter().copied().collect())
+        let on = |plane: Plane| {
+            app_ctx_numbers(plane_numbers(&plane))
+                .and_then(|c| plane_of_ctx_numbers(c).ok())
+                .unwrap_or(plane)
+        };
+        for (listing, units) in
+            self.doc
+                .free_plane_units_on(None, &self.hidden_objects.iter().copied().collect(), on)
         {
-            let n = plane.normal();
-            let o = Point3::ORIGIN + n * (-plane.signed_distance(Point3::ORIGIN));
-            out.push(serde_json::json!({
-                "plane": [o.x, o.y, o.z, n.x, n.y, n.z],
-                "units": Self::units_value(None, &units)?,
-            }));
+            let mut entry = serde_json::json!({
+                "plane": plane_numbers(&listing.plane()),
+                "units": self.units_value(None, &units)?,
+            });
+            if let kernel::PlaneListing::Detached { sketch, .. } = listing {
+                entry["sketch"] = serde_json::json!(sketch.data().as_ffi());
+                entry["detached"] = serde_json::json!(true);
+            }
+            if listing.is_context() {
+                entry["context"] = serde_json::json!(true);
+            }
+            out.push(entry);
         }
         Ok(serde_json::Value::Array(out).to_string())
     }
@@ -994,7 +1481,8 @@ impl Scene {
     /// opening a draft: the kernel's offset loops in the legacy
     /// `[loopCount, n0, x,y,z * n0, n1, ...]` wire format, outer loop first,
     /// world coordinates. What `draft_offset_region` would then arrange into
-    /// the drawing starts from exactly these loops.
+    /// the drawing starts from exactly these loops. On a `{"sketch":id}`
+    /// context naming a detached sketch the region is that sketch's own.
     pub fn offset_region_preview(
         &self,
         ctx_json: &str,
@@ -1002,10 +1490,13 @@ impl Scene {
         distance: f64,
     ) -> Result<Vec<f64>, ApiError> {
         let ctx = self.ctx_from_json(ctx_json)?;
-        let profile = self
-            .doc
-            .plane_region_profile(ctx.plane, ctx.frame, &ctx.objects, region_key)
-            .map_err(doc_err)?;
+        let profile = match ctx.scope {
+            DraftScope::Detached(Some(s)) => self.doc.detached_region_profile(s, region_key),
+            _ => self
+                .doc
+                .plane_region_profile(ctx.plane, ctx.frame, &ctx.objects, region_key),
+        }
+        .map_err(doc_err)?;
         let d = match ctx.pose {
             Some(p) => distance / p.scale()?,
             None => distance,
@@ -1029,6 +1520,18 @@ impl Scene {
     /// the region holding the point gives `{"region":"<hex>"}`; else (or a
     /// parallel/behind-the-origin ray) `"null"`. A solid's own edges never
     /// pick.
+    ///
+    /// A `plane` or `face` context also probes the detached sketches on
+    /// that plane in that frame (detached shapes D16), which are in no
+    /// plane's arrangement: the nearest edge within tolerance wins, a tie
+    /// going to the detached sketch; with no edge in reach, a detached
+    /// region holding the point (the smallest, when several do) wins over
+    /// the plane's own. A hit on a detached sketch carries
+    /// `"ctx":{"sketch":id}` (plus `"instance":id` when the request had
+    /// one), the context its keys belong to; without `ctx` the keys are the
+    /// request's own context's. A world detached sketch that is hidden (by
+    /// a tag or a hidden group) is not probed. A `{"sketch":id}` context on
+    /// a detached sketch picks within that sketch only.
     pub fn pick_plane_unit(
         &self,
         ctx_json: &str,
@@ -1064,20 +1567,51 @@ impl Scene {
         }
         let hit = o + d * t;
         let hit_world = world(hit);
-        let units = self
-            .doc
-            .plane_units(ctx.plane, ctx.frame, &ctx.objects)
-            .map_err(doc_err)?;
-        let mut best: Option<(f64, &kernel::DraftUnit, &kernel::DraftEdge)> = None;
-        for u in &units.units {
-            for e in &u.edges {
-                let dist = dist_to_segment(hit_world, world(e.a), world(e.b));
-                if dist <= tolerance_world && best.is_none_or(|(b, _, _)| dist < b) {
-                    best = Some((dist, u, e));
+        // The context's own listing first, then (plane and face contexts)
+        // each detached sketch on the plane, in its own context.
+        let mut listings: Vec<(Option<SketchId>, PlaneUnits)> = vec![(None, self.ctx_units(&ctx)?)];
+        if matches!(ctx.form, CtxForm::Plane | CtxForm::Face) {
+            for s in self.doc.detached_sketches_on(ctx.plane, ctx.frame) {
+                // Only a shown shape takes a click from what is under it
+                // (a world sketch hidden by a tag or group, as
+                // `pick_sketch_region` skips; a definition's sketch is
+                // shown through its instances).
+                if ctx.frame.is_none() && !self.doc.sketch_shown(s) {
+                    continue;
+                }
+                listings.push((Some(s), self.doc.detached_sketch_units(s).map_err(doc_err)?));
+            }
+        }
+        let mut best: Option<(f64, usize, &kernel::DraftUnit, &kernel::DraftEdge)> = None;
+        for (i, (sep, units)) in listings.iter().enumerate() {
+            for u in &units.units {
+                for e in &u.edges {
+                    let dist = dist_to_segment(hit_world, world(e.a), world(e.b));
+                    if dist > tolerance_world {
+                        continue;
+                    }
+                    // Nearest wins; a tie goes to a detached sketch over
+                    // the plane's own drawing.
+                    let better = best.is_none_or(|(b, bi, _, _)| {
+                        dist < b || (dist <= b && sep.is_some() && listings[bi].0.is_none())
+                    });
+                    if better {
+                        best = Some((dist, i, u, e));
+                    }
                 }
             }
         }
-        if let Some((_, u, e)) = best {
+        let with_ctx = |mut v: serde_json::Value, i: usize| {
+            if let Some(s) = listings[i].0 {
+                let mut c = serde_json::json!({ "sketch": s.data().as_ffi() });
+                if let Some(inst) = ctx.instance {
+                    c["instance"] = serde_json::json!(inst);
+                }
+                v["ctx"] = c;
+            }
+            v.to_string()
+        };
+        if let Some((_, i, u, e)) = best {
             let curve = e
                 .curve_key
                 .map(|k| serde_json::Value::String(hex(k)))
@@ -1089,18 +1623,36 @@ impl Scene {
                 .find(|r| r.edges.contains(&e.key))
                 .map(|r| serde_json::Value::String(hex(r.key)))
                 .unwrap_or(serde_json::Value::Null);
-            return Ok(serde_json::json!({
-                "edge": hex(e.key),
-                "unit": hex(u.key),
-                "curve": curve,
-                "run": run,
-            })
-            .to_string());
+            return Ok(with_ctx(
+                serde_json::json!({
+                    "edge": hex(e.key),
+                    "unit": hex(u.key),
+                    "curve": curve,
+                    "run": run,
+                }),
+                i,
+            ));
         }
-        for reg in &units.regions {
-            if in_ring(hit, &reg.outer, n) && !reg.holes.iter().any(|h| in_ring(hit, h, n)) {
-                return Ok(serde_json::json!({ "region": hex(reg.key) }).to_string());
+        let holds = |reg: &kernel::DraftRegion| {
+            in_ring(hit, &reg.outer, n) && !reg.holes.iter().any(|h| in_ring(hit, h, n))
+        };
+        // A detached region holding the point is what the cursor is on
+        // (the tie goes to it); the innermost when detached shapes overlap.
+        let mut inner: Option<(f64, usize, u64)> = None;
+        for (i, (_, units)) in listings.iter().enumerate().skip(1) {
+            for reg in units.regions.iter().filter(|r| holds(r)) {
+                let area = ring_area(&reg.outer, n)
+                    - reg.holes.iter().map(|h| ring_area(h, n)).sum::<f64>();
+                if inner.is_none_or(|(a, _, _)| area < a) {
+                    inner = Some((area, i, reg.key));
+                }
             }
+        }
+        if let Some((_, i, key)) = inner {
+            return Ok(with_ctx(serde_json::json!({ "region": hex(key) }), i));
+        }
+        if let Some(reg) = listings[0].1.regions.iter().find(|r| holds(r)) {
+            return Ok(serde_json::json!({ "region": hex(reg.key) }).to_string());
         }
         Ok("null".to_string())
     }
@@ -1112,17 +1664,26 @@ impl Scene {
         &self,
         ctx: &DraftCtx,
     ) -> Result<(serde_json::Value, kernel::PlaneUnits), ApiError> {
-        let units = self
-            .doc
-            .plane_units(ctx.plane, ctx.frame, &ctx.objects)
-            .map_err(doc_err)?;
-        let value = Self::units_value(ctx.pose, &units)?;
+        let units = self.ctx_units(ctx)?;
+        let value = self.units_value(ctx.pose, &units)?;
         Ok((value, units))
+    }
+
+    /// The units of a context: its plane's arrangement, or a detached
+    /// sketch alone (a new detached shape's context lists nothing yet).
+    fn ctx_units(&self, ctx: &DraftCtx) -> Result<PlaneUnits, ApiError> {
+        match ctx.scope {
+            DraftScope::Plane => self.doc.plane_units(ctx.plane, ctx.frame, &ctx.objects),
+            DraftScope::Detached(Some(s)) => self.doc.detached_sketch_units(s),
+            DraftScope::Detached(None) => Ok(PlaneUnits::default()),
+        }
+        .map_err(doc_err)
     }
 
     /// The JSON of one plane's listing, points through `pose` when the
     /// plane is a definition's seen through a placement.
     fn units_value(
+        &self,
         pose: Option<Pose>,
         units: &kernel::PlaneUnits,
     ) -> Result<serde_json::Value, ApiError> {
@@ -1150,7 +1711,13 @@ impl Scene {
                         "kind":"owned","object":o.data().as_ffi(),"sketch":s.data().as_ffi()
                     }),
                     DraftStore::Free(s) => {
-                        serde_json::json!({"kind":"free","sketch":s.data().as_ffi()})
+                        let mut v = serde_json::json!({"kind":"free","sketch":s.data().as_ffi()});
+                        // A detached shape says so; omitted otherwise, so a
+                        // plain listing reads as it always did.
+                        if self.doc.sketch(s).is_some_and(Sketch::detached) {
+                            v["detached"] = serde_json::json!(true);
+                        }
+                        v
                     }
                 };
                 let curve = match e.curve {
@@ -1224,9 +1791,423 @@ impl Scene {
     }
 }
 
+/// The most corners [`Scene::snap_owner_points`] returns.
+const MAX_SNAP_OWNER_POINTS: usize = 1024;
+
+impl Scene {
+    /// Definition-local to world for a read in `frame`: identity for the
+    /// world; for a definition, the pose of `instance` (or else of the
+    /// instance whose definition the inference engine has registered) when
+    /// that visible instance places the definition directly; `None` when no
+    /// placement resolves.
+    fn frame_pose(&self, frame: Option<ComponentId>, instance: Option<u64>) -> Option<Transform> {
+        let Some(def) = frame else {
+            return Some(Transform::IDENTITY);
+        };
+        let iid = instance
+            .map(instance_id)
+            .or(self.active_inference_instance)?;
+        if self.hidden_instances.contains(&iid) || self.doc.instance_def(iid) != Some(def) {
+            return None;
+        }
+        self.doc.instance_pose(iid)
+    }
+
+    /// The frame a sketch's geometry is stored in: its definition, or its
+    /// owning Object's.
+    fn sketch_frame(&self, sid: SketchId) -> Option<ComponentId> {
+        self.doc.sketch_owner_component(sid).or_else(|| {
+            self.doc
+                .sketch_owner_object(sid)
+                .and_then(|o| self.doc.object_owner_component(o))
+        })
+    }
+
+    /// The corners of the sketch island a sketch snap sits on, in the
+    /// sketch's frame (every vertex of the sketch when `element` is
+    /// absent); empty for a stale handle or an unknown kind.
+    fn sketch_owner_corners(&self, sid: SketchId, element: Option<u64>, kind: &str) -> Vec<Point3> {
+        let Some(sk) = self.doc.sketch(sid) else {
+            return Vec::new();
+        };
+        let Some(element) = element else {
+            return sk.vertices().values().map(|v| v.position).collect();
+        };
+        let edge = match kind {
+            "sketch-edge" => Some(SketchEdgeId::from(KeyData::from_ffi(element))),
+            "sketch-region" => {
+                let rid = kernel::SketchRegionId::from(KeyData::from_ffi(element));
+                sk.regions().get(rid).and_then(|r| {
+                    let (a, b) = (*r.outer.first()?, *r.outer.get(1)?);
+                    sk.edges()
+                        .iter()
+                        .find(|(_, e)| (e.from == a && e.to == b) || (e.from == b && e.to == a))
+                        .map(|(id, _)| id)
+                })
+            }
+            "sketch-curve" => sk
+                .curve_edges(kernel::SketchCurveId::from(KeyData::from_ffi(element)))
+                .first()
+                .copied(),
+            "sketch-vertex" => {
+                let v = kernel::SketchVertexId::from(KeyData::from_ffi(element));
+                sk.edges()
+                    .iter()
+                    .find(|(_, e)| e.from == v || e.to == v)
+                    .map(|(id, _)| id)
+            }
+            _ => None,
+        };
+        let Some(island) = edge.and_then(|e| sk.island_of_edge(e)) else {
+            return Vec::new();
+        };
+        let mut seen = std::collections::BTreeSet::new();
+        let mut out = Vec::new();
+        for &e in &sk.islands()[island].edges {
+            let ed = sk.edges()[e];
+            for v in [ed.from, ed.to] {
+                if seen.insert(v) {
+                    out.push(sk.vertices()[v].position);
+                }
+            }
+        }
+        out
+    }
+
+    /// The corners, in world space through `pose`, of every OTHER sketch of
+    /// `frame` that the inference engine holds a vertex for at sketch
+    /// `sid`'s vertex `v`: each island meeting at that corner (a ground
+    /// Rectangle and a wall standing on its edge share two). Empty for a
+    /// stale handle.
+    fn shared_corner_points(
+        &self,
+        sid: SketchId,
+        v: u64,
+        frame: Option<ComponentId>,
+        pose: &Transform,
+    ) -> Vec<Point3> {
+        let Some(at) = self.doc.sketch(sid).and_then(|sk| {
+            sk.vertices()
+                .get(kernel::SketchVertexId::from(KeyData::from_ffi(v)))
+                .map(|vx| vx.position)
+        }) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for (other, ov) in self
+            .inference
+            .sketch_vertices_at(pose.apply_point(at), kernel::tol::POINT_MERGE)
+        {
+            if other == sid || self.sketch_frame(other) != frame {
+                continue;
+            }
+            out.extend(
+                self.sketch_owner_corners(other, Some(ov.data().as_ffi()), "sketch-vertex")
+                    .into_iter()
+                    .map(|p| pose.apply_point(p)),
+            );
+        }
+        out
+    }
+
+    /// The vertices of the faces around a solid's snapped vertex, edge or
+    /// face, in the Object's frame; empty for a stale or hidden handle or
+    /// an unknown kind.
+    fn object_owner_corners(&self, oid: ObjectId, element: u64, kind: &str) -> Vec<Point3> {
+        if self.hidden_objects.contains(&oid) {
+            return Vec::new();
+        }
+        let Some(obj) = self.doc.object(oid) else {
+            return Vec::new();
+        };
+        let key = KeyData::from_ffi(element);
+        let faces: Vec<FaceId> = match kind {
+            "vertex" => {
+                let v = kernel::VertexId::from(key);
+                if !obj.vertices().contains_key(v) {
+                    return Vec::new();
+                }
+                let mut fs: Vec<FaceId> = obj
+                    .half_edges()
+                    .values()
+                    .filter(|h| h.origin == v)
+                    .map(|h| obj.loops()[h.loop_id].face)
+                    .collect();
+                fs.sort();
+                fs.dedup();
+                fs
+            }
+            "edge" => {
+                let Some(e) = obj.edges().get(kernel::EdgeId::from(key)) else {
+                    return Vec::new();
+                };
+                let he = &obj.half_edges()[e.half_edge];
+                let mut fs = vec![obj.loops()[he.loop_id].face];
+                if let Some(t) = he.twin {
+                    let f = obj.loops()[obj.half_edges()[t].loop_id].face;
+                    if !fs.contains(&f) {
+                        fs.push(f);
+                    }
+                }
+                fs
+            }
+            "face" => {
+                let f = FaceId::from(key);
+                if !obj.faces().contains_key(f) {
+                    return Vec::new();
+                }
+                vec![f]
+            }
+            _ => return Vec::new(),
+        };
+        let mut seen = std::collections::BTreeSet::new();
+        let mut out = Vec::new();
+        for f in faces {
+            let face = &obj.faces()[f];
+            for l in std::iter::once(face.outer_loop).chain(face.inner_loops.iter().copied()) {
+                for h in obj.loop_half_edges(l) {
+                    let v = obj.half_edges()[h].origin;
+                    if seen.insert(v) {
+                        out.push(obj.vertices()[v].position);
+                    }
+                }
+            }
+        }
+        out
+    }
+}
+
+#[wasm_bindgen]
+impl Scene {
+    /// **The start shape's corners** (wireframe faces §3.2, source 2): the
+    /// points a draw tool's first click lends reference lines from, as flat
+    /// WORLD-space xyz triples. Pass the first click's snap as it reports
+    /// itself: `sketch`/`object`, `element`, and `element_kind`, plus,
+    /// optionally, the snap's `instance`.
+    ///
+    /// - `"sketch-edge"`, `"sketch-region"`, `"sketch-curve"`,
+    ///   `"sketch-vertex"` (with `sketch`; `element` the edge, region,
+    ///   curve, or vertex): every vertex of the sketch island it lies on (of
+    ///   the whole sketch when `element` is absent). A plain corner's snap
+    ///   names no sketch; the tool resolves it with
+    ///   [`Scene::pick_sketch_vertex`] and passes the vertex
+    ///   (wireframe faces §16 R15). A vertex other sketches of the same
+    ///   frame also hold at that point (a wall standing on a ground
+    ///   Rectangle's edge) adds their islands' corners too: the gesture
+    ///   starts on every shape meeting at the corner.
+    /// - `"vertex"`, `"edge"`, `"face"` (with `object` and `element`): the
+    ///   vertices of the faces around that vertex or edge, or of that face
+    ///   (its holes included).
+    ///
+    /// A definition's geometry maps through `instance`'s pose, or, when it
+    /// is absent, through the pose of the instance the inference engine has
+    /// registered (`set_active_inference_instance`); with no placement of
+    /// that definition to map through, nothing is returned. Read-only. At
+    /// most 1024 points (the first found), each once. Empty for a stale or
+    /// hidden handle, an unknown kind, or another kind (`"meeting-line"`).
+    pub fn snap_owner_points(
+        &self,
+        sketch: Option<u64>,
+        object: Option<u64>,
+        element: Option<u64>,
+        element_kind: Option<String>,
+        instance: Option<u64>,
+    ) -> Vec<f64> {
+        let kind = element_kind.as_deref().unwrap_or("");
+        let (corners, frame) = match (sketch, object) {
+            (Some(s), _) if kind.starts_with("sketch-") => {
+                let sid = sketch_id(s);
+                (
+                    self.sketch_owner_corners(sid, element, kind),
+                    self.sketch_frame(sid),
+                )
+            }
+            (_, Some(o)) => {
+                let oid = object_id(o);
+                match element {
+                    Some(e) => (
+                        self.object_owner_corners(oid, e, kind),
+                        self.doc.object_owner_component(oid),
+                    ),
+                    None => (Vec::new(), None),
+                }
+            }
+            _ => (Vec::new(), None),
+        };
+        if corners.is_empty() {
+            return Vec::new();
+        }
+        let Some(pose) = self.frame_pose(frame, instance) else {
+            return Vec::new();
+        };
+        let mut world: Vec<Point3> = corners.into_iter().map(|p| pose.apply_point(p)).collect();
+        // A corner two shapes share starts the gesture on both of them.
+        if let (Some(s), Some(v), "sketch-vertex") = (sketch, element, kind) {
+            for p in self.shared_corner_points(sketch_id(s), v, frame, &pose) {
+                if !world
+                    .iter()
+                    .any(|q| (*q - p).length() <= kernel::tol::POINT_MERGE)
+                {
+                    world.push(p);
+                }
+            }
+        }
+        world
+            .into_iter()
+            .take(MAX_SNAP_OWNER_POINTS)
+            .flat_map(|w| [w.x, w.y, w.z])
+            .collect()
+    }
+
+    /// **Make Solid on drawn faces** (wireframe faces §6,
+    /// [`kernel::Document::make_solid_from_sketches`]): every faced region
+    /// of the free sketches `sketches` seeds the cells search; what closes
+    /// becomes a solid (or grows the solid it closed against) as ONE undo
+    /// step labeled "Make Solid". Returns JSON
+    /// `{"cells":[…],"created":n,"grew":n,"unjoined":n,"declined":n}`,
+    /// `cells` as [`Scene::draft_end`] lists them (`{"created":id}`,
+    /// `{"grew":{"from":id,"to":id}}`, `{"unjoined":{"object":id,"with":id}}`,
+    /// `{"declined":{"reason":"…","open_edges":n,"non_planar_loops":n,"overlapping_edges":n}}`),
+    /// the counts tallying them. It first fills the faces the sketches'
+    /// lines can close; when nothing closes, nothing changes, and when a
+    /// solid forms those faces stay, open shapes' included. Draw what is
+    /// missing with [`Scene::faces_open_edge_segments`].
+    ///
+    /// # Errors
+    /// `UnknownSketch` for a stale or deleted sketch; nothing changes.
+    pub fn make_solid_from_sketches(&mut self, sketches: Vec<u64>) -> Result<String, ApiError> {
+        self.ensure_not_busy()?;
+        let sids: Vec<SketchId> = sketches.iter().map(|&h| sketch_id(h)).collect();
+        let (outcomes, change) = self.doc.make_solid_from_sketches(&sids).map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::MakeSolidFromSketches { sketches });
+        let count = |f: fn(&kernel::CellOutcome) -> bool| outcomes.iter().filter(|c| f(c)).count();
+        Ok(serde_json::json!({
+            "cells": outcomes.iter().map(cell_json).collect::<Vec<_>>(),
+            "created": count(|c| matches!(c, kernel::CellOutcome::Created(_))),
+            "grew": count(|c| matches!(c, kernel::CellOutcome::Grew { .. })),
+            "unjoined": count(|c| matches!(c, kernel::CellOutcome::Unjoined { .. })),
+            "declined": count(|c| matches!(c, kernel::CellOutcome::Declined(_))),
+        })
+        .to_string())
+    }
+
+    /// **What drawn faces are missing** before Make Solid can close them
+    /// (wireframe faces §6, [`kernel::Document::faces_open_edges`]), for the
+    /// viewport's Model Health line overlay. Read-only. One flat array:
+    ///
+    /// `[n_open, n_loops, …open edges…, …loop edges…]`
+    ///
+    /// `n_open` open edges (one face, on no cappable rim) follow the
+    /// two-number header as six floats each (`ax ay az bx by bz`); every
+    /// remaining six floats are warn-colored segments: first the edges of
+    /// the `n_loops` closed loops of open edges that lie on no one plane
+    /// (each loop's edges in order, closing back to its first corner), then
+    /// the edges along which two faces that are not the same loop lie over
+    /// each other (a Make Solid that declined with overlapping faces,
+    /// wireframe faces §16 R22). Empty when nothing is missing: `[0, 0]`. World space; a definition's
+    /// sketches map through the pose of the instance the inference engine
+    /// has registered when it places that definition, and stay
+    /// definition-local otherwise. A stale or deleted sketch contributes
+    /// nothing.
+    pub fn faces_open_edge_segments(&self, sketches: Vec<u64>) -> Vec<f32> {
+        let mut by_frame: std::collections::BTreeMap<Option<ComponentId>, Vec<SketchId>> =
+            std::collections::BTreeMap::new();
+        for &h in &sketches {
+            let sid = sketch_id(h);
+            if self.doc.sketch(sid).is_some() {
+                by_frame
+                    .entry(self.sketch_frame(sid))
+                    .or_default()
+                    .push(sid);
+            }
+        }
+        let mut open: Vec<f32> = Vec::new();
+        let mut loops: Vec<f32> = Vec::new();
+        let mut overlaps: Vec<f32> = Vec::new();
+        let (mut n_open, mut n_loops) = (0usize, 0usize);
+        let seg = |out: &mut Vec<f32>, pose: &Transform, a: Point3, b: Point3| {
+            let (a, b) = (pose.apply_point(a), pose.apply_point(b));
+            out.extend([a.x, a.y, a.z, b.x, b.y, b.z].map(|x| x as f32));
+        };
+        for (frame, sids) in by_frame {
+            let missing = self.doc.faces_open_edges(&sids);
+            let pose = self.frame_pose(frame, None).unwrap_or(Transform::IDENTITY);
+            n_open += missing.open_edges.len();
+            for &(a, b) in &missing.open_edges {
+                seg(&mut open, &pose, a, b);
+            }
+            n_loops += missing.non_planar_loops.len();
+            for l in &missing.non_planar_loops {
+                for i in 0..l.len() {
+                    seg(&mut loops, &pose, l[i], l[(i + 1) % l.len()]);
+                }
+            }
+            for &(a, b) in &missing.overlapping_edges {
+                seg(&mut overlaps, &pose, a, b);
+            }
+        }
+        let mut out = Vec::with_capacity(2 + open.len() + loops.len() + overlaps.len());
+        out.push(n_open as f32);
+        out.push(n_loops as f32);
+        out.extend(open);
+        out.extend(loops);
+        out.extend(overlaps);
+        out
+    }
+}
+
+/// A [`kernel::DraftReport`] as the JSON [`Scene::draft_end`] returns (and
+/// the sketch moves and copies, wireframe faces §16 R20): `kept_as_sketch`
+/// in world coordinates through `pose`.
+pub(crate) fn draft_report_json(report: &kernel::DraftReport, pose: Option<Pose>) -> String {
+    serde_json::json!({
+        "objects": report.objects.iter().map(|o| o.data().as_ffi()).collect::<Vec<_>>(),
+        "sketches": report.sketches.iter().map(|s| s.data().as_ffi()).collect::<Vec<_>>(),
+        "kept_as_sketch": report
+            .kept_as_sketch
+            .iter()
+            .map(|&(a, b)| serde_json::json!([world_json(pose, a), world_json(pose, b)]))
+            .collect::<Vec<_>>(),
+        "faces_closed": report.faces_closed.iter().map(|s| s.data().as_ffi()).collect::<Vec<_>>(),
+        "cells": report.cells.iter().map(cell_json).collect::<Vec<_>>(),
+    })
+    .to_string()
+}
+
+/// One [`kernel::CellOutcome`] as `draft_end`'s `cells` entry.
+fn cell_json(c: &kernel::CellOutcome) -> serde_json::Value {
+    let id = |o: kernel::ObjectId| o.data().as_ffi();
+    match c {
+        kernel::CellOutcome::Created(o) => serde_json::json!({ "created": id(*o) }),
+        kernel::CellOutcome::Grew { from, to } => {
+            serde_json::json!({ "grew": { "from": id(*from), "to": id(*to) } })
+        }
+        kernel::CellOutcome::Unjoined { object, with } => {
+            serde_json::json!({ "unjoined": { "object": id(*object), "with": id(*with) } })
+        }
+        kernel::CellOutcome::Declined(d) => {
+            let reason = match d.reason {
+                kernel::CellDeclineReason::NotClosed => "not_closed",
+                kernel::CellDeclineReason::OverlappingFaces => "overlapping_faces",
+                kernel::CellDeclineReason::InsideSolid(_) => "inside_solid",
+                kernel::CellDeclineReason::SelfTouching => "self_touching",
+                kernel::CellDeclineReason::Invalid(_) => "invalid",
+            };
+            serde_json::json!({ "declined": {
+                "reason": reason,
+                "open_edges": d.open_edges.len(),
+                "non_planar_loops": d.non_planar_loops.len(),
+                "overlapping_edges": d.overlapping_edges.len(),
+            } })
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kernel::trig;
     use serde_json::Value;
 
     const GROUND: &str = r#"{"plane":[0,0,0,0,0,1]}"#;
@@ -1288,6 +2269,228 @@ mod tests {
             .collect()
     }
 
+    /// Whether the open draft's working sketch holds the edge `a`–`b`.
+    fn draft_holds(scene: &Scene, a: [f64; 3], b: [f64; 3]) -> bool {
+        let (a, b) = (Point3::new(a[0], a[1], a[2]), Point3::new(b[0], b[1], b[2]));
+        let w = scene.doc.draft_sketch().unwrap();
+        w.edges().values().any(|e| {
+            let (c, d) = (w.vertices()[e.from].position, w.vertices()[e.to].position);
+            (c.approx_eq(a, 1e-12) && d.approx_eq(b, 1e-12))
+                || (c.approx_eq(b, 1e-12) && d.approx_eq(a, 1e-12))
+        })
+    }
+
+    /// KB-2: a `.skp` holds its ground drawing as separate sketches on a
+    /// plane a hair below z = 0, lines crossing without meeting and loops
+    /// without a face. A circle drawn on the ground beside it is the region
+    /// every pick a tool makes finds (the fill pick, the plane's own pick,
+    /// the Select snap), it extrudes, and the file's drawing is left exactly
+    /// as it was: no loop of it gains a fill.
+    #[test]
+    fn a_circle_beside_drawing_a_hair_below_the_ground_is_picked() {
+        let z = -1.848_093_234_002_59e-13;
+        let below =
+            Plane::from_point_normal(Point3::new(0.0, 0.0, z), Vec3::new(0.0, 0.0, 1.0)).unwrap();
+        let mut doc = kernel::Document::new();
+        let square = doc.add_sketch(below);
+        {
+            let sk = doc.sketch_mut(square).unwrap();
+            for (a, b) in [
+                ((0.0, 0.0), (4.0, 0.0)),
+                ((4.0, 0.0), (4.0, 4.0)),
+                ((4.0, 4.0), (0.0, 4.0)),
+                ((0.0, 4.0), (0.0, 0.0)),
+            ] {
+                sk.add_segment(Point3::new(a.0, a.1, z), Point3::new(b.0, b.1, z))
+                    .unwrap();
+            }
+            sk.make_regions_faceless();
+        }
+        let cross = doc.add_sketch(below);
+        doc.sketch_mut(cross)
+            .unwrap()
+            .add_segment(Point3::new(2.0, -1.0, z), Point3::new(2.0, 5.0, z))
+            .unwrap();
+        let mut scene = Scene::new();
+        scene.load_core(&doc.save()).unwrap();
+
+        // The Circle tool's ground commit: one draft, one curve bracket.
+        let (cx, cy) = (20.0, 20.0);
+        let d = scene
+            .draft_begin_plane(0.0, 0.0, 0.0, 0.0, 0.0, 1.0, "Circle")
+            .unwrap();
+        scene
+            .draft_begin_curve_with(d, &[cx, cy, 0.0], 1.0)
+            .unwrap();
+        for i in 0..24 {
+            let (t0, t1) = (
+                std::f64::consts::TAU * f64::from(i) / 24.0,
+                std::f64::consts::TAU * f64::from(i + 1) / 24.0,
+            );
+            scene
+                .draft_add_segment(
+                    d,
+                    cx + trig::cos(t0),
+                    cy + trig::sin(t0),
+                    0.0,
+                    cx + trig::cos(t1),
+                    cy + trig::sin(t1),
+                    0.0,
+                )
+                .unwrap();
+        }
+        scene.draft_end_curve(d).unwrap();
+        scene.draft_end(d).unwrap();
+
+        // Push/Pull's fill pick, from above.
+        let hit = scene
+            .pick_sketch_region(cx + 0.3, cy + 0.2, 10.0, 0.0, 0.0, -1.0)
+            .expect("the circle's fill is under the cursor");
+        let sk = scene.doc.sketch(sketch_id(hit.sketch())).unwrap();
+        let rid = kernel::SketchRegionId::from(KeyData::from_ffi(hit.region()));
+        assert!((sk.region_area(rid).unwrap() - std::f64::consts::PI).abs() < 0.1);
+        // Select's snap names that sketch's region.
+        let snap = scene
+            .snap(
+                cx + 0.3,
+                cy + 0.2,
+                10.0,
+                0.0,
+                0.0,
+                -1.0,
+                0.005,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                Some(true),
+                None,
+                None,
+            )
+            .unwrap()
+            .expect("a snap on the circle");
+        assert_eq!(snap.element_kind().as_deref(), Some("sketch-region"));
+        assert_eq!(snap.sketch(), Some(hit.sketch()));
+        // The plane's own pick (Select's drawing pick) finds a region there.
+        let picked = json(
+            &scene
+                .pick_plane_unit(GROUND, &[cx + 0.3, cy + 0.2, 10.0, 0.0, 0.0, -1.0], 0.01)
+                .unwrap(),
+        );
+        assert!(picked["region"].is_string(), "{picked}");
+        // The file's drawing kept its lines and its loop's missing face:
+        // the only fill on the plane is the circle's.
+        let fills: usize = scene
+            .doc
+            .sketch_ids()
+            .into_iter()
+            .map(|s| {
+                let sk = scene.doc.sketch(s).unwrap();
+                sk.regions().values().filter(|r| !r.faceless).count()
+            })
+            .sum();
+        assert_eq!(fills, 1);
+        // (The crossing line is still one line of its own sketch.)
+        assert!(
+            scene
+                .doc
+                .sketch_ids()
+                .into_iter()
+                .any(|s| scene.doc.sketch(s).unwrap().edges().len() == 1)
+        );
+        // And it extrudes.
+        scene
+            .extrude_region(hit.sketch(), hit.region(), 1.0)
+            .unwrap();
+    }
+
+    /// A vertex drag (Move vertex) lifts its draft without foreign edges, so
+    /// a ground corner that a line on a wall's plane ends on moves alone; a
+    /// refused drag leaves the draft as it was, the foreign line still
+    /// lifted (wireframe faces §4.1).
+    #[test]
+    fn a_vertex_drag_drops_foreign_edges_only_when_it_moves() {
+        let mut scene = Scene::new();
+        // E on the vertical x–z plane, lying in the ground.
+        let d = scene
+            .draft_begin_plane(0.0, 0.0, 0.0, 0.0, 1.0, 0.0, "Line")
+            .unwrap();
+        scene
+            .draft_add_segment(d, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0)
+            .unwrap();
+        scene.draft_end(d).unwrap();
+        // G on the ground, from E's end.
+        let d = scene
+            .draft_begin_plane(0.0, 0.0, 0.0, 0.0, 0.0, 1.0, "Line")
+            .unwrap();
+        scene
+            .draft_add_segment(d, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0)
+            .unwrap();
+        scene.draft_end(d).unwrap();
+        let before = scene.doc.state_hash();
+        let e = ([0.0, 0.0, 0.0], [1.0, 0.0, 0.0]);
+
+        // Refused (onto G's other end) and missed drags: the lift stays.
+        let d = scene
+            .draft_begin_plane(0.0, 0.0, 0.0, 0.0, 0.0, 1.0, "Move vertex")
+            .unwrap();
+        assert!(draft_holds(&scene, e.0, e.1), "E is lifted as foreign");
+        assert!(
+            scene
+                .draft_move_vertex(d, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0)
+                .is_err()
+        );
+        assert!(
+            draft_holds(&scene, e.0, e.1),
+            "a refused drag keeps the lift"
+        );
+        assert!(
+            scene
+                .draft_move_vertex(d, 5.0, 5.0, 0.0, 6.0, 5.0, 0.0)
+                .is_err()
+        );
+        assert!(
+            draft_holds(&scene, e.0, e.1),
+            "a missed drag keeps the lift"
+        );
+        scene.draft_cancel(d).unwrap();
+        assert_eq!(scene.doc.state_hash(), before);
+
+        // The drag that moves: E dropped, G's end moves alone.
+        let d = scene
+            .draft_begin_plane(0.0, 0.0, 0.0, 0.0, 0.0, 1.0, "Move vertex")
+            .unwrap();
+        scene
+            .draft_move_vertex(d, 0.0, 0.0, 0.0, 0.0, -0.5, 0.0)
+            .unwrap();
+        assert!(!draft_holds(&scene, e.0, e.1), "the drag dropped E");
+        scene.draft_end(d).expect("the drag lowers");
+        let doc = &scene.doc;
+        let holds = |a: Point3, b: Point3| {
+            doc.sketch_ids().into_iter().any(|s| {
+                let sk = doc.sketch(s).unwrap();
+                sk.edges().values().any(|ed| {
+                    let (c, d) = (
+                        sk.vertices()[ed.from].position,
+                        sk.vertices()[ed.to].position,
+                    );
+                    (c.approx_eq(a, 1e-12) && d.approx_eq(b, 1e-12))
+                        || (c.approx_eq(b, 1e-12) && d.approx_eq(a, 1e-12))
+                })
+            })
+        };
+        let p = Point3::new;
+        assert!(holds(p(0.0, -0.5, 0.0), p(0.0, 1.0, 0.0)), "G's end moved");
+        assert!(holds(p(0.0, 0.0, 0.0), p(1.0, 0.0, 0.0)), "E stays");
+        assert!(
+            !holds(p(0.0, -0.5, 0.0), p(1.0, 0.0, 0.0)),
+            "nothing follows"
+        );
+    }
+
     #[test]
     fn ground_draft_rectangle_is_one_region_with_extrude() {
         let mut scene = Scene::new();
@@ -1333,7 +2536,7 @@ mod tests {
             let k = u64::from_str_radix(&key, 16).unwrap();
             let d = scene.draft_begin_ctx(&ctx, "Erase").unwrap();
             scene.draft_remove_edges(d, &[k]).unwrap();
-            assert!(scene.draft_cancel(d));
+            assert!(scene.draft_cancel(d).unwrap());
         }
     }
 
@@ -1414,11 +2617,11 @@ mod tests {
             scene
                 .draft_add_segment(
                     d,
-                    0.5 + r * a0.cos(),
-                    0.5 + r * a0.sin(),
+                    0.5 + r * trig::cos(a0),
+                    0.5 + r * trig::sin(a0),
                     1.0,
-                    0.5 + r * a1.cos(),
-                    0.5 + r * a1.sin(),
+                    0.5 + r * trig::cos(a1),
+                    0.5 + r * trig::sin(a1),
                     1.0,
                 )
                 .unwrap();
@@ -1497,7 +2700,7 @@ mod tests {
         );
         draw(&mut scene, 2.0);
         draw(&mut scene, 4.0);
-        scene.history_bracket_abort();
+        scene.history_bracket_abort().unwrap();
         assert_eq!(scene.save(), before, "abort restores the document");
         assert_eq!(scene.undo_depth(), depth);
 
@@ -1545,11 +2748,11 @@ mod tests {
             scene
                 .draft_add_segment(
                     d,
-                    1.0 + 0.5 * a0.cos(),
-                    1.0 + 0.5 * a0.sin(),
+                    1.0 + 0.5 * trig::cos(a0),
+                    1.0 + 0.5 * trig::sin(a0),
                     1.0,
-                    1.0 + 0.5 * a1.cos(),
-                    1.0 + 0.5 * a1.sin(),
+                    1.0 + 0.5 * trig::cos(a1),
+                    1.0 + 0.5 * trig::sin(a1),
                     1.0,
                 )
                 .unwrap();
@@ -1669,7 +2872,15 @@ mod tests {
                 std::f64::consts::TAU * f64::from(i + 1) / f64::from(n),
             );
             scene
-                .draft_add_segment(d, a0.cos(), a0.sin(), 0.0, a1.cos(), a1.sin(), 0.0)
+                .draft_add_segment(
+                    d,
+                    trig::cos(a0),
+                    trig::sin(a0),
+                    0.0,
+                    trig::cos(a1),
+                    trig::sin(a1),
+                    0.0,
+                )
                 .unwrap();
         }
         scene.draft_end_curve(d).unwrap();
@@ -1777,9 +2988,12 @@ mod tests {
             .draft_begin_plane(0.0, 0.0, 1.0, 0.0, 0.0, 1.0, "R")
             .unwrap();
         rect(&mut scene, d, 0.5, 0.5, 1.5, 1.5, 1.0);
-        assert!(scene.draft_cancel(d));
+        assert!(scene.draft_cancel(d).unwrap());
         assert_eq!(scene.save(), before);
-        assert!(!scene.draft_cancel(d), "a second cancel is a stale handle");
+        assert!(
+            !scene.draft_cancel(d).unwrap(),
+            "a second cancel is a stale handle"
+        );
     }
 
     #[test]
@@ -1878,12 +3092,482 @@ mod tests {
         scene
             .draft_add_segment(d, 10.2, 0.2, 1.0, 10.4, 0.3, 1.0)
             .unwrap();
-        scene.draft_cancel(d);
+        scene.draft_cancel(d).unwrap();
         // A stale instance refuses.
         assert!(
             scene
                 .draft_begin_face_in_instance(inst + 1000, member, f, "x")
                 .is_err()
+        );
+    }
+
+    /// Draws a detached circle of `n` facets in the plane z = `c[2]` through
+    /// `draft_begin_detached(ctx)` and returns the new sketch.
+    fn detached_circle(scene: &mut Scene, ctx: &str, c: [f64; 3], r: f64, n: usize) -> u64 {
+        let d = scene.draft_begin_detached(ctx, "Circle").unwrap();
+        scene.draft_begin_curve_with(d, &c, r).unwrap();
+        for i in 0..n {
+            let (a0, a1) = (
+                std::f64::consts::TAU * i as f64 / n as f64,
+                std::f64::consts::TAU * (i + 1) as f64 / n as f64,
+            );
+            scene
+                .draft_add_segment(
+                    d,
+                    c[0] + r * trig::cos(a0),
+                    c[1] + r * trig::sin(a0),
+                    c[2],
+                    c[0] + r * trig::cos(a1),
+                    c[1] + r * trig::sin(a1),
+                    c[2],
+                )
+                .unwrap();
+        }
+        scene.draft_end_curve(d).unwrap();
+        let report = json(&scene.draft_end(d).unwrap());
+        assert!(report["objects"].as_array().unwrap().is_empty(), "{report}");
+        let sketches = report["sketches"].as_array().unwrap();
+        assert_eq!(sketches.len(), 1, "one new detached sketch: {report}");
+        sketches[0].as_u64().unwrap()
+    }
+
+    fn sketch_ctx(s: u64) -> String {
+        format!(r#"{{"sketch":{s}}}"#)
+    }
+
+    /// Detached shapes §4: a detached circle centered on a box's top corner
+    /// leaves the face whole, lists only through its own sketch context
+    /// (every edge a free store marked detached, its one region extruding
+    /// as the sketch's own), lists as its own entry of the whole-document
+    /// listing, and extrudes into a new Object.
+    #[test]
+    fn a_detached_circle_on_a_face_leaves_the_face_whole() {
+        let mut scene = Scene::new();
+        let b = ground_box(&mut scene, 0.0, 0.0, 2.0, 2.0, 1.0);
+        let f = top_face(&scene, b);
+        let faces = scene.doc.object(object_id(b)).unwrap().faces().len();
+        let face_ctx = format!(r#"{{"face":{{"object":{b},"face":{f}}}}}"#);
+        let s = detached_circle(&mut scene, &face_ctx, [2.0, 2.0, 1.0], 0.5, 48);
+        assert!(scene.doc.sketch(sketch_id(s)).unwrap().detached());
+        assert_eq!(
+            scene.doc.object(object_id(b)).unwrap().faces().len(),
+            faces,
+            "the face is not split"
+        );
+        let top = units(&scene, &face_ctx);
+        assert!(
+            top["units"].as_array().unwrap().is_empty(),
+            "the face's plane has no drawing: {top}"
+        );
+        assert_eq!(
+            top["regions"].as_array().unwrap().len(),
+            1,
+            "the face alone"
+        );
+
+        let own = units(&scene, &sketch_ctx(s));
+        assert_eq!(own["units"].as_array().unwrap().len(), 1);
+        let edges = own["units"][0]["edges"].as_array().unwrap();
+        assert_eq!(edges.len(), 48, "a whole circle");
+        assert!(
+            edges.iter().all(
+                |e| e["store"] == serde_json::json!({"kind":"free","sketch":s,"detached":true})
+            )
+        );
+        let regions = own["regions"].as_array().unwrap();
+        assert_eq!(regions.len(), 1);
+        assert!(regions[0]["over"].is_null());
+        assert_eq!(regions[0]["extrude"]["sketch"].as_u64().unwrap(), s);
+
+        let all = json(&scene.plane_units_all_json().unwrap());
+        let entry = all
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["sketch"].as_u64() == Some(s))
+            .expect("listed as its own entry");
+        assert_eq!(entry["detached"], true);
+        assert!((entry["plane"][2].as_f64().unwrap() - 1.0).abs() < 1e-12);
+
+        let region = regions[0]["extrude"]["region"].as_u64().unwrap();
+        let cutter = scene.extrude_region(s, region, -0.5).unwrap();
+        assert_ne!(cutter, b);
+        assert_eq!(scene.object_ids().len(), 2, "a new Object");
+        assert_eq!(
+            scene.doc.object(object_id(b)).unwrap().faces().len(),
+            faces,
+            "the box is untouched"
+        );
+    }
+
+    /// `draft_begin_detached` takes a plane or face context only; a plain
+    /// sketch's listing never shows a detached sketch beside it.
+    #[test]
+    fn draft_begin_detached_takes_a_plane_or_face_context() {
+        let mut scene = Scene::new();
+        let s = detached_circle(&mut scene, GROUND, [0.0, 0.0, 0.0], 1.0, 24);
+        for ctx in [
+            sketch_ctx(s),
+            r#"{"plane":[0,0,0,0,0,1],"object":1}"#.to_string(),
+            "{}".to_string(),
+        ] {
+            let err = scene.draft_begin_detached(&ctx, "Circle").unwrap_err();
+            assert!(err.0.starts_with("BadContext"), "{ctx}: {}", err.0);
+        }
+        assert!(
+            scene
+                .draft_begin_detached(&sketch_ctx(s), "x")
+                .unwrap_err()
+                .0
+                .contains("draft_begin_ctx"),
+            "the refusal names the way to continue it"
+        );
+        // A plain rectangle over the detached circle ignores it.
+        let d = scene
+            .draft_begin_plane(0.0, 0.0, 0.0, 0.0, 0.0, 1.0, "Rectangle")
+            .unwrap();
+        rect(&mut scene, d, -0.5, -0.5, 2.0, 0.5, 0.0);
+        scene.draft_end(d).unwrap();
+        let ground = units(&scene, GROUND);
+        assert_eq!(ground["regions"].as_array().unwrap().len(), 1, "{ground}");
+        assert_eq!(edge_keys(&ground).len(), 4, "the rectangle alone");
+        assert_eq!(
+            edge_keys(&units(&scene, &sketch_ctx(s))).len(),
+            24,
+            "the circle is whole"
+        );
+    }
+
+    /// `sketch_is_detached` answers for any sketch handle: true for a
+    /// detached shape, false for an ordinary free sketch and for an unknown
+    /// handle.
+    #[test]
+    fn sketch_is_detached_reports_the_mode_of_any_sketch() {
+        let mut scene = Scene::new();
+        let s = detached_circle(
+            &mut scene,
+            r#"{"plane":[0,0,0,0,0,1]}"#,
+            [0.0, 0.0, 0.0],
+            0.5,
+            12,
+        );
+        assert!(scene.sketch_is_detached(s));
+        let d = scene
+            .draft_begin_plane(0.0, 0.0, 5.0, 0.0, 0.0, 1.0, "Line")
+            .unwrap();
+        scene
+            .draft_add_segment(d, 0.0, 0.0, 5.0, 1.0, 0.0, 5.0)
+            .unwrap();
+        let plain = json(&scene.draft_end(d).unwrap())["sketches"][0]
+            .as_u64()
+            .unwrap();
+        assert!(!scene.sketch_is_detached(plain));
+        assert!(!scene.sketch_is_detached(u64::MAX));
+    }
+
+    /// `sketch_owner_object` names the owning Object of an object-owned
+    /// sketch and is `None` for a free (detached) sketch and for an unknown
+    /// handle.
+    #[test]
+    fn sketch_owner_object_reports_ownership_of_any_sketch() {
+        let mut scene = Scene::new();
+        let free = detached_circle(
+            &mut scene,
+            r#"{"plane":[0,0,0,0,0,1]}"#,
+            [5.0, 5.0, 0.0],
+            0.5,
+            12,
+        );
+        assert_eq!(scene.sketch_owner_object(free), None);
+        assert_eq!(scene.sketch_owner_object(u64::MAX), None);
+        let b = ground_box(&mut scene, 0.0, 0.0, 2.0, 2.0, 1.0);
+        let f = top_face(&scene, b);
+        let d = scene.draft_begin_face(b, f, "Line").unwrap();
+        scene
+            .draft_add_segment(d, 0.2, 0.2, 1.0, 0.8, 0.5, 1.0)
+            .unwrap();
+        scene.draft_end(d).unwrap();
+        let ctx = format!(r#"{{"face":{{"object":{b},"face":{f}}}}}"#);
+        let u = units(&scene, &ctx);
+        let owned = u["units"][0]["edges"][0]["store"]["sketch"]
+            .as_u64()
+            .unwrap();
+        assert_eq!(scene.sketch_owner_object(owned), Some(b));
+    }
+
+    /// A `{"sketch":id}` context on a detached sketch is the sketch alone:
+    /// a draft opened on it (by context or by handle) arranges with its own
+    /// drawing and lowers back into it, never into the face under it.
+    #[test]
+    fn a_detached_sketchs_context_edits_it_alone() {
+        let mut scene = Scene::new();
+        let b = ground_box(&mut scene, 0.0, 0.0, 2.0, 2.0, 1.0);
+        let f = top_face(&scene, b);
+        let faces = scene.doc.object(object_id(b)).unwrap().faces().len();
+        let face_ctx = format!(r#"{{"face":{{"object":{b},"face":{f}}}}}"#);
+        let d = scene.draft_begin_detached(&face_ctx, "Rectangle").unwrap();
+        rect(&mut scene, d, 0.5, 0.5, 1.5, 1.5, 1.0);
+        let s = json(&scene.draft_end(d).unwrap())["sketches"][0]
+            .as_u64()
+            .unwrap();
+        // A line across it, continuing the sketch: two regions in it.
+        let d = scene.draft_begin_ctx(&sketch_ctx(s), "Line").unwrap();
+        scene
+            .draft_add_segment(d, 1.0, 0.5, 1.0, 1.0, 1.5, 1.0)
+            .unwrap();
+        let report = json(&scene.draft_end(d).unwrap());
+        assert_eq!(report["sketches"], serde_json::json!([s]), "{report}");
+        assert!(report["objects"].as_array().unwrap().is_empty());
+        let own = units(&scene, &sketch_ctx(s));
+        assert_eq!(own["regions"].as_array().unwrap().len(), 2);
+        // Move it by handle: still one detached sketch, face still whole.
+        let keys = edge_keys(&own);
+        let d = scene.draft_begin_sketch(s, "Move").unwrap();
+        let shift = [1.0, 0.0, 0.0, 0.25, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+        scene.draft_transform_edges(d, &keys, &shift).unwrap();
+        scene.draft_end(d).unwrap();
+        assert!(scene.doc.sketch(sketch_id(s)).unwrap().detached());
+        assert_eq!(scene.doc.object(object_id(b)).unwrap().faces().len(), faces);
+        assert!(
+            units(&scene, &face_ctx)["units"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        // Offset preview and offset in its own context.
+        let own = units(&scene, &sketch_ctx(s));
+        let key = u64::from_str_radix(own["regions"][0]["key"].as_str().unwrap(), 16).unwrap();
+        let data = scene
+            .offset_region_preview(&sketch_ctx(s), key, -0.1)
+            .unwrap();
+        assert_eq!(data[0], 1.0, "one loop");
+        assert!(
+            scene.offset_region_preview(&face_ctx, key, -0.1).is_err(),
+            "the face's plane does not hold the region"
+        );
+        let d = scene.draft_begin_ctx(&sketch_ctx(s), "Offset").unwrap();
+        scene.draft_offset_region(d, key, -0.1).unwrap();
+        scene.draft_end(d).unwrap();
+        assert_eq!(
+            units(&scene, &sketch_ctx(s))["regions"]
+                .as_array()
+                .unwrap()
+                .len(),
+            3
+        );
+        assert_eq!(scene.doc.object(object_id(b)).unwrap().faces().len(), faces);
+    }
+
+    /// Detached shapes D16: a pick on a face context also finds the detached
+    /// sketches on its plane and says so with `ctx`; a pick on the detached
+    /// sketch's own context is confined to it; through an instance the
+    /// returned context carries the instance.
+    #[test]
+    fn pick_plane_unit_probes_detached_sketches() {
+        let mut scene = Scene::new();
+        let b = ground_box(&mut scene, 0.0, 0.0, 2.0, 2.0, 1.0);
+        let f = top_face(&scene, b);
+        let face_ctx = format!(r#"{{"face":{{"object":{b},"face":{f}}}}}"#);
+        let s = detached_circle(&mut scene, &face_ctx, [1.0, 1.0, 1.0], 0.5, 24);
+        let own = units(&scene, &sketch_ctx(s));
+        let down = |x: f64, y: f64| [x, y, 5.0, 0.0, 0.0, -1.0];
+
+        // Inside the disk: the detached region wins the tie with the face.
+        let hit = json(
+            &scene
+                .pick_plane_unit(&face_ctx, &down(1.0, 1.0), 0.01)
+                .unwrap(),
+        );
+        assert_eq!(hit["region"], own["regions"][0]["key"], "{hit}");
+        assert_eq!(hit["ctx"], serde_json::json!({ "sketch": s }));
+        // On the rim: its edge, with its context.
+        let hit = json(
+            &scene
+                .pick_plane_unit(&face_ctx, &down(1.5, 1.0), 0.01)
+                .unwrap(),
+        );
+        assert!(hit["edge"].is_string() && hit["run"].is_string(), "{hit}");
+        assert_eq!(hit["unit"], own["units"][0]["key"]);
+        assert_eq!(hit["ctx"], serde_json::json!({ "sketch": s }));
+        // Away from it: the face's own region, no ctx.
+        let hit = json(
+            &scene
+                .pick_plane_unit(&face_ctx, &down(0.1, 0.1), 0.01)
+                .unwrap(),
+        );
+        assert!(
+            hit["region"].is_string() && hit.get("ctx").is_none(),
+            "{hit}"
+        );
+        // The same on the plane form of the context.
+        let plane_ctx = r#"{"plane":[0,0,1,0,0,1]}"#;
+        let hit = json(
+            &scene
+                .pick_plane_unit(plane_ctx, &down(1.0, 1.0), 0.01)
+                .unwrap(),
+        );
+        assert_eq!(hit["ctx"], serde_json::json!({ "sketch": s }));
+        // The sketch's own context: confined, and no ctx (it is the request's).
+        let hit = json(
+            &scene
+                .pick_plane_unit(&sketch_ctx(s), &down(1.0, 1.0), 0.01)
+                .unwrap(),
+        );
+        assert_eq!(hit["region"], own["regions"][0]["key"]);
+        assert!(hit.get("ctx").is_none(), "{hit}");
+        assert_eq!(
+            scene
+                .pick_plane_unit(&sketch_ctx(s), &down(0.1, 0.1), 0.01)
+                .unwrap(),
+            "null",
+            "the face is not in a detached sketch's context"
+        );
+        // A smaller detached shape inside it is the one picked inside both.
+        let small = detached_circle(&mut scene, &face_ctx, [1.0, 1.0, 1.0], 0.2, 24);
+        let hit = json(
+            &scene
+                .pick_plane_unit(&face_ctx, &down(1.0, 1.0), 0.01)
+                .unwrap(),
+        );
+        assert_eq!(hit["ctx"], serde_json::json!({ "sketch": small }), "{hit}");
+        let hit = json(
+            &scene
+                .pick_plane_unit(&face_ctx, &down(1.0, 1.35), 0.01)
+                .unwrap(),
+        );
+        assert_eq!(hit["ctx"], serde_json::json!({ "sketch": s }), "{hit}");
+        // A hidden one (drawn into a group the user hid) takes no click.
+        let other = ground_box(&mut scene, 5.0, 5.0, 6.0, 6.0, 1.0);
+        let g = scene.group_nodes(&[0], &[other]).unwrap();
+        scene
+            .doc
+            .set_sketch_group(sketch_id(small), Some(crate::group_id(g)))
+            .unwrap();
+        scene.set_node_user_hidden(1, g, true).unwrap();
+        let hit = json(
+            &scene
+                .pick_plane_unit(&face_ctx, &down(1.0, 1.0), 0.01)
+                .unwrap(),
+        );
+        assert_eq!(hit["ctx"], serde_json::json!({ "sketch": s }), "{hit}");
+
+        // Through an instance: the detached sketch is the definition's, and
+        // the pick's context names the instance too.
+        let mut scene = Scene::new();
+        let b = ground_box(&mut scene, 0.0, 0.0, 2.0, 2.0, 1.0);
+        let inst = scene.make_component(&[0], &[b]).unwrap();
+        let def = scene.instance_def(inst).unwrap();
+        let member = scene.component_member_objects(def)[0];
+        let f = top_face(&scene, member);
+        let shift = [1.0, 0.0, 0.0, 10.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+        scene.transform_instance(inst, &shift).unwrap();
+        let ctx = format!(r#"{{"face":{{"object":{member},"face":{f}}},"instance":{inst}}}"#);
+        let s = detached_circle(&mut scene, &ctx, [11.0, 1.0, 1.0], 0.5, 24);
+        assert!(scene.doc.sketch(sketch_id(s)).unwrap().detached());
+        let hit = json(&scene.pick_plane_unit(&ctx, &down(11.0, 1.0), 0.01).unwrap());
+        assert_eq!(
+            hit["ctx"],
+            serde_json::json!({ "sketch": s, "instance": inst }),
+            "{hit}"
+        );
+        // Its listing through that context is in world space.
+        let own = units(&scene, &format!(r#"{{"sketch":{s},"instance":{inst}}}"#));
+        let x = own["units"][0]["edges"][0]["a"][0].as_f64().unwrap();
+        assert!(x > 10.0, "world x: {x}");
+    }
+
+    /// `SketchRegionPickJs.detached` says whether the picked region's sketch
+    /// is detached; the island copy export copies a detached unit, in plane
+    /// too, as a new detached sketch.
+    #[test]
+    fn region_pick_reports_detached_and_copy_makes_a_new_detached_sketch() {
+        let mut scene = Scene::new();
+        let s = detached_circle(&mut scene, GROUND, [0.0, 0.0, 0.0], 1.0, 24);
+        let d = scene
+            .draft_begin_plane(0.0, 0.0, 0.0, 0.0, 0.0, 1.0, "Rectangle")
+            .unwrap();
+        rect(&mut scene, d, 5.0, 0.0, 6.0, 1.0, 0.0);
+        scene.draft_end(d).unwrap();
+        let pick = scene
+            .pick_sketch_region(0.0, 0.0, 5.0, 0.0, 0.0, -1.0)
+            .unwrap();
+        assert_eq!(pick.sketch(), s);
+        assert!(pick.detached());
+        let plain = scene
+            .pick_sketch_region(5.5, 0.5, 5.0, 0.0, 0.0, -1.0)
+            .unwrap();
+        assert!(!plain.detached());
+
+        let islands = scene.sketch_island_ids(s);
+        let shift = [1.0, 0.0, 0.0, 0.5, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+        let before = scene.doc.sketch(sketch_id(s)).unwrap().clone();
+        let report = scene.copy_sketch_islands(s, &islands, &shift).unwrap();
+        let report: serde_json::Value = serde_json::from_str(&report).unwrap();
+        let copy = report["sketches"][0].as_u64().unwrap();
+        assert_ne!(copy, s);
+        assert!(scene.doc.sketch(sketch_id(copy)).unwrap().detached());
+        assert_eq!(
+            scene.doc.sketch(sketch_id(s)).unwrap(),
+            &before,
+            "the overlapping original is untouched"
+        );
+        assert_eq!(edge_keys(&units(&scene, &sketch_ctx(copy))).len(), 24);
+    }
+
+    /// A recorded detached draw replays to the same document.
+    #[test]
+    fn detached_drafting_recording_round_trips() {
+        recording::reset();
+        let mut scene = Scene::new();
+        scene.start_recording();
+        let b = ground_box(&mut scene, 0.0, 0.0, 2.0, 2.0, 1.0);
+        let f = top_face(&scene, b);
+        let face_ctx = format!(r#"{{"face":{{"object":{b},"face":{f}}}}}"#);
+        let s = detached_circle(&mut scene, &face_ctx, [2.0, 2.0, 1.0], 0.5, 24);
+        let d = scene.draft_begin_ctx(&sketch_ctx(s), "Line").unwrap();
+        scene
+            .draft_add_segment(d, 1.5, 2.0, 1.0, 2.5, 2.0, 1.0)
+            .unwrap();
+        scene.draft_end(d).unwrap();
+        let own = units(&scene, &sketch_ctx(s));
+        let ex = &own["regions"][0]["extrude"];
+        scene
+            .extrude_region(
+                ex["sketch"].as_u64().unwrap(),
+                ex["region"].as_u64().unwrap(),
+                -0.5,
+            )
+            .unwrap();
+        let hash = scene.doc.state_hash();
+        let rec = scene.take_recording();
+        assert!(rec.contains("\"method\":\"draft_begin_detached\""), "{rec}");
+        let mut fresh = Scene::new();
+        assert_eq!(fresh.replay(&rec).unwrap(), hash);
+    }
+
+    /// A plane draft opened through a MIRRORED instance on the world plane
+    /// of a member's top face lands on that face: the context plane maps
+    /// into the definition keeping its side, so it matches the face's
+    /// outward normal and the face takes part in the draft.
+    #[test]
+    fn a_plane_draft_through_a_mirrored_instance_lands_on_the_member_face() {
+        let mut scene = Scene::new();
+        let b = ground_box(&mut scene, 0.0, 0.0, 2.0, 2.0, 1.0);
+        let inst = scene.make_component(&[0], &[b]).unwrap();
+        let def = scene.instance_def(inst).unwrap();
+        // Mirror x, then shift: the box covers x in [3, 5].
+        let mirror = [-1.0, 0.0, 0.0, 5.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+        scene.transform_instance(inst, &mirror).unwrap();
+        let member = scene.component_member_objects(def)[0];
+        let d = scene
+            .draft_begin_plane_in_instance(inst, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, "Rectangle")
+            .unwrap();
+        rect(&mut scene, d, 3.5, 0.5, 4.5, 1.5, 1.0);
+        let report = json(&scene.draft_end(d).unwrap());
+        assert_eq!(
+            report["objects"],
+            serde_json::json!([member]),
+            "the member's top face took the drawing: {report}"
         );
     }
 
@@ -1906,11 +3590,11 @@ mod tests {
             scene
                 .draft_add_segment(
                     d,
-                    1.0 + 0.5 * a0.cos(),
-                    1.0 + 0.5 * a0.sin(),
+                    1.0 + 0.5 * trig::cos(a0),
+                    1.0 + 0.5 * trig::sin(a0),
                     1.0,
-                    1.0 + 0.5 * a1.cos(),
-                    1.0 + 0.5 * a1.sin(),
+                    1.0 + 0.5 * trig::cos(a1),
+                    1.0 + 0.5 * trig::sin(a1),
                     1.0,
                 )
                 .unwrap();
@@ -1931,9 +3615,897 @@ mod tests {
         scene
             .draft_add_segment(d, 0.0, 0.0, 5.0, 1.0, 0.0, 5.0)
             .unwrap();
-        scene.draft_cancel(d);
+        scene.draft_cancel(d).unwrap();
         let hash = scene.doc.state_hash();
         let rec = scene.take_recording();
+        let mut fresh = Scene::new();
+        assert_eq!(fresh.replay(&rec).unwrap(), hash);
+    }
+
+    // ---------------------------------------- wireframe faces §3.2, §6
+
+    /// A closed polygon as one raw (legacy) sketch gesture on a new sketch
+    /// on its plane: recorded and replayable, and closing nothing on its
+    /// own, so five faces of a cube can stay open.
+    fn raw_face(scene: &mut Scene, corners: &[[f64; 3]]) -> u64 {
+        let pts: Vec<Point3> = corners.iter().map(|&c| p3(c)).collect();
+        let pl = Plane::from_polygon(&pts).unwrap();
+        let (o, n) = (pl.point(), pl.normal());
+        let s = scene
+            .begin_sketch_on_plane(o.x, o.y, o.z, n.x, n.y, n.z)
+            .unwrap();
+        scene.sketch_begin_gesture(s).unwrap();
+        for i in 0..corners.len() {
+            let (a, b) = (corners[i], corners[(i + 1) % corners.len()]);
+            scene
+                .sketch_add_segment(s, a[0], a[1], a[2], b[0], b[1], b[2])
+                .unwrap();
+        }
+        scene.sketch_end_gesture(s).unwrap();
+        s
+    }
+
+    const CUBE_TOP: [[f64; 3]; 4] = [[0., 0., 1.], [1., 0., 1.], [1., 1., 1.], [0., 1., 1.]];
+
+    fn open_cube(scene: &mut Scene) -> Vec<u64> {
+        let (a, b, c, d) = ([0., 0., 0.], [1., 0., 0.], [1., 1., 0.], [0., 1., 0.]);
+        let [a1, b1, c1, d1] = CUBE_TOP;
+        vec![
+            raw_face(scene, &[a, b, c, d]),
+            raw_face(scene, &[a, b, b1, a1]),
+            raw_face(scene, &[b, c, c1, b1]),
+            raw_face(scene, &[c, d, d1, c1]),
+            raw_face(scene, &[d, a, a1, d1]),
+        ]
+    }
+
+    fn triples(flat: &[f64]) -> Vec<[f64; 3]> {
+        flat.chunks(3).map(|c| [c[0], c[1], c[2]]).collect()
+    }
+
+    fn has(pts: &[[f64; 3]], q: [f64; 3]) -> bool {
+        pts.iter()
+            .any(|p| (0..3).all(|i| (p[i] - q[i]).abs() < 1e-9))
+    }
+
+    /// §3.2 source 2 on a sketch: every vertex of the snapped island, for
+    /// an edge, a region and (no element) the whole sketch; a stale handle
+    /// or an unknown kind returns nothing.
+    #[test]
+    fn snap_owner_points_lists_a_sketch_islands_corners() {
+        let mut scene = Scene::new();
+        let d = scene
+            .draft_begin_plane(0.0, 0.0, 0.0, 0.0, 0.0, 1.0, "Rectangle")
+            .unwrap();
+        rect(&mut scene, d, 0.0, 0.0, 2.0, 1.0, 0.0);
+        rect(&mut scene, d, 5.0, 5.0, 6.0, 6.0, 0.0);
+        let report = json(&scene.draft_end(d).unwrap());
+        let s = report["sketches"][0].as_u64().unwrap();
+        let sk = scene.doc.sketch(sketch_id(s)).unwrap();
+        let (eid, edge) = sk
+            .edges()
+            .iter()
+            .find(|(_, e)| sk.vertices()[e.from].position.x < 3.0)
+            .unwrap();
+        let _ = edge;
+        let region = sk
+            .regions()
+            .iter()
+            .find(|(_, r)| sk.vertices()[r.outer[0]].position.x < 3.0)
+            .map(|(id, _)| id.data().as_ffi())
+            .unwrap();
+        let e = eid.data().as_ffi();
+        let corners = [[0., 0., 0.], [2., 0., 0.], [2., 1., 0.], [0., 1., 0.]];
+        for (el, kind) in [(Some(e), "sketch-edge"), (Some(region), "sketch-region")] {
+            let pts = triples(&scene.snap_owner_points(Some(s), None, el, Some(kind.into()), None));
+            assert_eq!(pts.len(), 4, "{kind}: {pts:?}");
+            assert!(corners.iter().all(|&c| has(&pts, c)), "{kind}");
+        }
+        let all = scene.snap_owner_points(Some(s), None, None, Some("sketch-edge".into()), None);
+        assert_eq!(all.len(), 8 * 3, "the whole sketch without an element");
+        assert!(
+            scene
+                .snap_owner_points(Some(s), None, Some(e), Some("vertex".into()), None)
+                .is_empty()
+        );
+        assert!(
+            scene
+                .snap_owner_points(
+                    Some(s + 977),
+                    None,
+                    Some(e),
+                    Some("sketch-edge".into()),
+                    None
+                )
+                .is_empty()
+        );
+    }
+
+    /// §16 R15: a plain corner's snap names no sketch, so the tool picks
+    /// the vertex on the click ray and asks with `"sketch-vertex"`: the
+    /// picked vertex's island corners come back (and only that island's).
+    #[test]
+    fn snap_owner_points_lists_a_picked_sketch_vertexs_island() {
+        let mut scene = Scene::new();
+        let d = scene
+            .draft_begin_plane(0.0, 0.0, 0.0, 0.0, 0.0, 1.0, "Rectangle")
+            .unwrap();
+        rect(&mut scene, d, 0.0, 0.0, 2.0, 1.0, 0.0);
+        rect(&mut scene, d, 5.0, 5.0, 6.0, 6.0, 0.0);
+        scene.draft_end(d).unwrap();
+        // Straight down onto the corner (2, 1, 0).
+        let pick = scene
+            .pick_sketch_vertex(2.0, 1.0, 5.0, 0.0, 0.0, -1.0)
+            .expect("the corner is picked");
+        assert!((pick.x - 2.0).abs() < 1e-9 && (pick.y - 1.0).abs() < 1e-9 && pick.z.abs() < 1e-9);
+        let pts = triples(&scene.snap_owner_points(
+            Some(pick.sketch),
+            None,
+            Some(pick.vertex),
+            Some("sketch-vertex".into()),
+            None,
+        ));
+        assert_eq!(pts.len(), 4, "{pts:?}");
+        for c in [[0., 0., 0.], [2., 0., 0.], [2., 1., 0.], [0., 1., 0.]] {
+            assert!(has(&pts, c), "{c:?} in {pts:?}");
+        }
+        // A stale vertex handle returns nothing.
+        assert!(
+            scene
+                .snap_owner_points(
+                    Some(pick.sketch),
+                    None,
+                    Some(pick.vertex + 977),
+                    Some("sketch-vertex".into()),
+                    None
+                )
+                .is_empty()
+        );
+    }
+
+    /// §3.2 source 2 at a corner two shapes share (playtest step 4, walls
+    /// stood on a ground square): the gesture starts on every shape that
+    /// holds the clicked corner, so each island meeting there lends its
+    /// corners, whichever sketch the pick ranked first. Without the
+    /// wall's top corners the next wall's height has nothing to snap to,
+    /// and the walls' tops miss each other by the cursor's error.
+    #[test]
+    fn snap_owner_points_at_a_shared_corner_lists_every_shape_meeting_there() {
+        let mut scene = Scene::new();
+        let (a, b, c, d) = ([0., 0., 0.], [1., 0., 0.], [1., 1., 0.], [0., 1., 0.]);
+        let ground = raw_face(&mut scene, &[a, b, c, d]);
+        let wall = raw_face(&mut scene, &[a, b, [1., 0., 0.7], [0., 0., 0.7]]);
+        let expected = [a, b, c, d, [1., 0., 0.7], [0., 0., 0.7]];
+        let vertex_at = |scene: &Scene, s: u64, p: [f64; 3]| {
+            let sk = scene.doc.sketch(sketch_id(s)).unwrap();
+            sk.vertices()
+                .iter()
+                .find(|(_, v)| v.position == p3(p))
+                .map(|(id, _)| id.data().as_ffi())
+                .expect("the corner is a vertex of the sketch")
+        };
+        for s in [ground, wall] {
+            let v = vertex_at(&scene, s, b);
+            let pts = triples(&scene.snap_owner_points(
+                Some(s),
+                None,
+                Some(v),
+                Some("sketch-vertex".into()),
+                None,
+            ));
+            assert_eq!(pts.len(), expected.len(), "sketch {s}: {pts:?}");
+            for p in expected {
+                assert!(has(&pts, p), "sketch {s}: {p:?} in {pts:?}");
+            }
+        }
+        // A corner only the ground holds lends the ground's island alone.
+        let v = vertex_at(&scene, ground, c);
+        let pts = triples(&scene.snap_owner_points(
+            Some(ground),
+            None,
+            Some(v),
+            Some("sketch-vertex".into()),
+            None,
+        ));
+        assert_eq!(pts.len(), 4, "{pts:?}");
+    }
+
+    /// §3.2 source 2 on a solid: the vertices of the faces around the
+    /// snapped vertex, edge or face, world-space through an instance pose.
+    #[test]
+    fn snap_owner_points_lists_the_faces_around_a_solid_element() {
+        let mut scene = Scene::new();
+        let b = ground_box(&mut scene, 0.0, 0.0, 1.0, 1.0, 1.0);
+        let obj = scene.doc.object(object_id(b)).unwrap();
+        let top = top_face(&scene, b);
+        let corner = obj
+            .vertices()
+            .iter()
+            .find(|(_, v)| v.position.approx_eq(Point3::new(0., 0., 1.), 1e-12))
+            .map(|(id, _)| id.data().as_ffi())
+            .unwrap();
+        let edge = obj
+            .edges()
+            .keys()
+            .find(|&e| {
+                let (a, b) = obj.edge_endpoints(e).unwrap();
+                a.z == 1.0 && b.z == 1.0 && a.y == 0.0 && b.y == 0.0
+            })
+            .unwrap()
+            .data()
+            .as_ffi();
+        let count = |el: u64, kind: &str| {
+            scene
+                .snap_owner_points(None, Some(b), Some(el), Some(kind.into()), None)
+                .len()
+                / 3
+        };
+        assert_eq!(count(top, "face"), 4);
+        assert_eq!(count(edge, "edge"), 6, "the top and the front: 6 corners");
+        assert_eq!(count(corner, "vertex"), 7, "three faces at a corner");
+        assert_eq!(count(top, "meeting-line"), 0);
+        assert_eq!(count(top + 991, "face"), 0, "a stale face");
+
+        // Through an instance: world-space, by the given instance or the
+        // registered one; nothing without a placement to map through.
+        let inst = scene.make_component(&[0], &[b]).unwrap();
+        scene
+            .transform_instance(inst, &[1., 0., 0., 10., 0., 1., 0., 0., 0., 0., 1., 0.])
+            .unwrap();
+        let member = scene
+            .doc
+            .def_members(scene.doc.instance_def(instance_id(inst)).unwrap())
+            .unwrap()[0]
+            .data()
+            .as_ffi();
+        let top = top_face(&scene, member);
+        let pts = |scene: &Scene, i: Option<u64>| {
+            triples(&scene.snap_owner_points(None, Some(member), Some(top), Some("face".into()), i))
+        };
+        assert!(pts(&scene, None).is_empty(), "no placement to map through");
+        let world = pts(&scene, Some(inst));
+        assert_eq!(world.len(), 4);
+        assert!(
+            has(&world, [10., 0., 1.]) && has(&world, [11., 1., 1.]),
+            "{world:?}"
+        );
+        scene.set_active_inference_instance(Some(inst));
+        assert_eq!(pts(&scene, None), world);
+    }
+
+    /// §6, §11 stage 5, as §16 R26/R27 amend it: Make Solid on a cube's
+    /// floor and three walls declines (the overlay array names the open
+    /// rim, one loop of six edges on no one plane, in the warn color) and
+    /// changes nothing; with the fourth wall it fills the lid on the way and
+    /// makes the solid; the calls record and replay.
+    #[test]
+    fn make_solid_from_sketches_declines_then_closes_and_replays() {
+        recording::reset();
+        let mut scene = Scene::new();
+        scene.start_recording();
+        let (a, b, c, d) = ([0., 0., 0.], [1., 0., 0.], [1., 1., 0.], [0., 1., 0.]);
+        let [a1, b1, c1, d1] = CUBE_TOP;
+        let four = vec![
+            raw_face(&mut scene, &[a, b, c, d]),
+            raw_face(&mut scene, &[a, b, b1, a1]),
+            raw_face(&mut scene, &[b, c, c1, b1]),
+            raw_face(&mut scene, &[c, d, d1, c1]),
+        ];
+        let hash = scene.state_hash();
+        let out = json(&scene.make_solid_from_sketches(four.clone()).unwrap());
+        assert_eq!(out["declined"], 1, "{out}");
+        assert_eq!(out["created"], 0);
+        assert_eq!(out["cells"][0]["declined"]["reason"], "not_closed");
+        assert_eq!(scene.state_hash(), hash, "a decline changes nothing");
+
+        let seg = scene.faces_open_edge_segments(four.clone());
+        assert_eq!(seg[0], 0.0, "no open edge off the loop");
+        assert_eq!(seg[1], 1.0, "one non-planar loop");
+        assert_eq!(seg.len(), 2 + 6 * 6, "its six edges");
+
+        raw_face(&mut scene, &[d, a, a1, d1]);
+        let out = json(&scene.make_solid_from_sketches(vec![four[1]]).unwrap());
+        assert_eq!(out["created"], 1, "{out}");
+        let id = out["cells"][0]["created"].as_u64().unwrap();
+        assert!(scene.object_solid(id));
+        assert_eq!(scene.faces_open_edge_segments(four.clone()), vec![0.0, 0.0]);
+        assert!(
+            scene.make_solid_from_sketches(four).is_err(),
+            "the consumed sketches are gone"
+        );
+
+        scene.stop_recording();
+        let golden = scene.state_hash();
+        let rec = scene.take_recording();
+        assert!(rec.contains("\"method\":\"make_solid_from_sketches\""));
+        let mut fresh = Scene::new();
+        assert_eq!(fresh.replay(&rec).unwrap(), golden);
+        assert_eq!(fresh.save(), scene.save());
+    }
+
+    /// §16 R22: faces lying over each other (a whole front wall over one
+    /// split in two) decline Make Solid with `overlapping_faces`, the count
+    /// of edges where they do, and those edges as warn segments after the
+    /// (empty) open edges and loops; the same wall drawn twice makes the
+    /// solid.
+    #[test]
+    fn make_solid_names_overlapping_faces_and_takes_one_of_a_twin() {
+        let mut scene = Scene::new();
+        let (a, b, c, d) = ([0., 0., 0.], [1., 0., 0.], [1., 1., 0.], [0., 1., 0.]);
+        let [a1, b1, c1, d1] = CUBE_TOP;
+        let (m, m1) = ([0.5, 0., 0.], [0.5, 0., 1.]);
+        let ids = vec![
+            raw_face(&mut scene, &[a, b, c, d]),
+            raw_face(&mut scene, &[a, m, m1, a1]),
+            raw_face(&mut scene, &[m, b, b1, m1]),
+            raw_face(&mut scene, &[a, b, b1, a1]),
+            raw_face(&mut scene, &[b, c, c1, b1]),
+            raw_face(&mut scene, &[c, d, d1, c1]),
+            raw_face(&mut scene, &[d, a, a1, d1]),
+            raw_face(&mut scene, &CUBE_TOP),
+        ];
+        let hash = scene.state_hash();
+        let out = json(&scene.make_solid_from_sketches(ids.clone()).unwrap());
+        assert_eq!(out["declined"], 1, "{out}");
+        let d0 = &out["cells"][0]["declined"];
+        assert_eq!(d0["reason"], "overlapping_faces");
+        let n = d0["overlapping_edges"].as_u64().unwrap();
+        assert!(n > 0);
+        assert_eq!(scene.state_hash(), hash);
+        let seg = scene.faces_open_edge_segments(ids);
+        assert_eq!(&seg[..2], &[0.0, 0.0], "no open edge, no loop");
+        assert_eq!(seg.len(), 2 + 6 * n as usize, "the overlap's edges follow");
+        assert!(seg[2..].chunks(3).all(|q| q[1] == 0.0), "all on the front");
+
+        let mut scene = Scene::new();
+        let mut ids = open_cube(&mut scene);
+        ids.push(raw_face(&mut scene, &CUBE_TOP));
+        let twin = raw_face(&mut scene, &CUBE_TOP);
+        ids.push(twin);
+        let out = json(&scene.make_solid_from_sketches(ids).unwrap());
+        assert_eq!(out["created"], 1, "{out}");
+        assert!(scene.sketch_ids().contains(&twin), "the later twin stays");
+    }
+
+    /// A raw sketch holding one segment `a–b`, on the plane through it with
+    /// normal `n` (no close pass runs).
+    fn raw_line(scene: &mut Scene, a: [f64; 3], b: [f64; 3], n: [f64; 3]) -> u64 {
+        let s = scene
+            .begin_sketch_on_plane(a[0], a[1], a[2], n[0], n[1], n[2])
+            .unwrap();
+        scene.sketch_begin_gesture(s).unwrap();
+        scene
+            .sketch_add_segment(s, a[0], a[1], a[2], b[0], b[1], b[2])
+            .unwrap();
+        scene.sketch_end_gesture(s).unwrap();
+        s
+    }
+
+    fn shift(dx: f64, dy: f64, dz: f64) -> [f64; 12] {
+        [1., 0., 0., dx, 0., 1., 0., dy, 0., 0., 1., dz]
+    }
+
+    /// §16 R20: a sketch move reports what it closed, in a draw's report
+    /// shape. Moving the top face of an open cube into place closes the
+    /// cube: `cells` names the new solid and `sketches` the moved sketch,
+    /// first; one undo restores the open cube. A move that closes nothing
+    /// reports empty `faces_closed` and `cells`.
+    #[test]
+    fn transform_sketch_islands_reports_the_solid_it_closes() {
+        let mut scene = Scene::new();
+        open_cube(&mut scene);
+        let high: Vec<[f64; 3]> = CUBE_TOP.iter().map(|c| [c[0], c[1], 3.]).collect();
+        let top = raw_face(&mut scene, &high);
+        let islands = scene.sketch_island_ids(top);
+        // Clear of everything: nothing closes.
+        let out = json(
+            &scene
+                .transform_sketch_islands(top, &islands, &shift(0., 0., 1.))
+                .unwrap(),
+        );
+        assert_eq!(out["sketches"][0], top, "{out}");
+        assert_eq!(out["faces_closed"], serde_json::json!([]));
+        assert_eq!(out["cells"], serde_json::json!([]));
+        assert_eq!(out["objects"], serde_json::json!([]));
+        assert_eq!(out["kept_as_sketch"], serde_json::json!([]));
+        let before = scene.state_hash();
+        let islands = scene.sketch_island_ids(top);
+        let out = json(
+            &scene
+                .transform_sketch_islands(top, &islands, &shift(0., 0., -3.))
+                .unwrap(),
+        );
+        assert_eq!(out["sketches"][0], top, "{out}");
+        let id = out["cells"][0]["created"]
+            .as_u64()
+            .unwrap_or_else(|| panic!("a solid: {out}"));
+        assert!(scene.object_solid(id));
+        scene.scene_undo().unwrap();
+        assert_eq!(scene.state_hash(), before, "one undo step");
+    }
+
+    /// §16 R20: a sketch copy reports in a draw's report shape too, the
+    /// copy's handle first in `sketches`. Copying a high top face onto an
+    /// open cube closes it; the source stays.
+    #[test]
+    fn copy_sketch_islands_reports_the_solid_it_closes() {
+        let mut scene = Scene::new();
+        open_cube(&mut scene);
+        let high: Vec<[f64; 3]> = CUBE_TOP.iter().map(|c| [c[0], c[1], 3.]).collect();
+        let top = raw_face(&mut scene, &high);
+        let islands = scene.sketch_island_ids(top);
+        let before = scene.state_hash();
+        let out = json(
+            &scene
+                .copy_sketch_islands(top, &islands, &shift(0., 0., -2.))
+                .unwrap(),
+        );
+        let copy = out["sketches"][0].as_u64().unwrap();
+        assert_ne!(copy, top, "the copy is a sketch of its own");
+        let id = out["cells"][0]["created"]
+            .as_u64()
+            .unwrap_or_else(|| panic!("a solid: {out}"));
+        assert!(scene.object_solid(id));
+        assert!(scene.sketch_ids().contains(&top), "the source stays");
+        scene.scene_undo().unwrap();
+        assert_eq!(scene.state_hash(), before, "one undo step");
+    }
+
+    /// §16 R20: a move that closes a face on another plane names it in
+    /// `faces_closed`: a slanted line moved onto a ground rectangle's
+    /// corner closes the triangle with the other slanted line.
+    #[test]
+    fn transform_sketch_islands_reports_the_faces_it_closes() {
+        let mut scene = Scene::new();
+        let (a, b, c, d) = ([0., 0., 0.], [1., 0., 0.], [1., 1., 0.], [0., 1., 0.]);
+        let apex = [0.5, 0.5, 1.];
+        raw_face(&mut scene, &[a, b, c, d]);
+        raw_line(&mut scene, apex, a, [1., -1., 0.]);
+        let far = raw_line(&mut scene, [5.5, 0.5, 1.], [6., 0., 0.], [1., 1., 0.]);
+        let islands = scene.sketch_island_ids(far);
+        let out = json(
+            &scene
+                .transform_sketch_islands(far, &islands, &shift(-5., 0., 0.))
+                .unwrap(),
+        );
+        let closed = out["faces_closed"].as_array().unwrap();
+        assert_eq!(closed.len(), 1, "{out}");
+        assert_eq!(out["sketches"][0], far);
+        assert_eq!(out["cells"], serde_json::json!([]));
+    }
+
+    /// §6: a gap whose rim lies on no one plane comes back as a loop (after
+    /// the header's open-edge segments, of which there are none).
+    #[test]
+    fn faces_open_edge_segments_lists_a_non_planar_loop() {
+        let mut scene = Scene::new();
+        let (a, b, c, d) = ([0., 0., 0.], [1., 0., 0.], [1., 1., 0.], [0., 1., 0.]);
+        let [a1, b1, c1, _] = CUBE_TOP;
+        let d1 = [0., 1., 2.];
+        let five = vec![
+            raw_face(&mut scene, &[a, b, c, d]),
+            raw_face(&mut scene, &[a, b, b1, a1]),
+            raw_face(&mut scene, &[b, c, c1, b1]),
+            raw_face(&mut scene, &[c, d, d1, c1]),
+            raw_face(&mut scene, &[d, a, a1, d1]),
+        ];
+        let seg = scene.faces_open_edge_segments(five);
+        assert_eq!((seg[0], seg[1]), (0.0, 1.0));
+        assert_eq!(seg.len(), 2 + 4 * 6, "the loop's four edges");
+    }
+
+    /// The context string the Outliner builds from a whole-document listing
+    /// entry's plane numbers (`ctxOfPlane` in `app/src/tools/planeUnits.ts`;
+    /// Rust's float formatting is shortest-round-trip, like
+    /// `JSON.stringify`).
+    fn app_ctx_of_listing_plane(e: &[f64]) -> String {
+        let c = app_ctx_numbers(e.try_into().unwrap()).unwrap();
+        format!(
+            r#"{{"plane":[{},{},{},{},{},{}]}}"#,
+            c[0], c[1], c[2], c[3], c[4], c[5]
+        )
+    }
+
+    /// [`app_ctx_numbers`] matches the app's `canonicalPlane` bit for bit;
+    /// the expected values are Node's (V8) output for the same inputs, and
+    /// [`js_round`] rounds a negative half up, as `Math.round` does.
+    // Node's output rounded to 1e-12, not an approximation of 1/sqrt(2).
+    #[allow(clippy::approx_constant)]
+    #[test]
+    fn app_ctx_numbers_match_the_apps_canonical_plane() {
+        assert_eq!(
+            app_ctx_numbers([
+                0.1,
+                -2.3,
+                4.56789,
+                0.2672612419124244,
+                -0.5345224838248488,
+                0.8017837257372732
+            ]),
+            Some([
+                1.314547857141,
+                -2.629095714286,
+                3.943643571426,
+                0.267261241912,
+                -0.534522483825,
+                0.801783725737
+            ])
+        );
+        assert_eq!(
+            app_ctx_numbers([3.0, 4.0, 5.0, 3.0, 4.0, 5.0]),
+            Some([
+                3.000000000001,
+                3.999999999999,
+                5.000000000004,
+                0.424264068712,
+                0.565685424949,
+                0.707106781187
+            ])
+        );
+        assert_eq!(js_hypot3(1e-200, 3e-200, 2e-200), 3.741657386773941e-200);
+        assert_eq!(js_round(-2.5), -2.0);
+        assert_eq!(js_round(2.5), 3.0);
+        assert_eq!(app_ctx_numbers([0.0, 0.0, 0.0, 0.0, 0.0, 0.0]), None);
+        // -0 folds to 0, as the app's `r12` does.
+        let c = app_ctx_numbers([0.0, 0.0, 0.0, 0.0, -0.0, 1.0]).unwrap();
+        assert!(c.iter().all(|x| x.is_sign_positive()), "{c:?}");
+    }
+
+    /// #103: the Outliner seeds its listing cache from the whole-document
+    /// read and opens the edit on the context string it builds from each
+    /// entry's plane, so every key that read lists must name an edge in a
+    /// draft opened on that string — on oblique planes too, where the
+    /// string's rounded numbers rebuild a plane that differs from the
+    /// sketch's in the last bits. A sweep over pseudo-random oblique planes
+    /// (a fixed LCG, so a failure names its plane).
+    #[test]
+    fn whole_document_listing_keys_name_edges_in_a_draft_on_the_apps_context() {
+        let mut seed: u64 = 0x9e37_79b9_7f4a_7c15;
+        let mut rnd = move || {
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            ((seed >> 11) as f64) / ((1u64 << 53) as f64) * 2.0 - 1.0
+        };
+        let mut failed = Vec::new();
+        for i in 0..300 {
+            let n = Vec3::new(rnd(), rnd(), rnd());
+            if n.length() < 0.2 {
+                continue;
+            }
+            let n = n * (1.0 / n.length());
+            let p = Point3::new(rnd() * 5.0, rnd() * 5.0, rnd() * 5.0);
+            let helper = if n.x.abs() < 0.9 {
+                Vec3::new(1.0, 0.0, 0.0)
+            } else {
+                Vec3::new(0.0, 1.0, 0.0)
+            };
+            let u = n.cross(helper);
+            let u = u * (1.0 / u.length());
+            let v = n.cross(u);
+            let a = p + u * 1.0 + v * 0.3;
+            let b = p + u * -0.7 + v * 1.1;
+            let mut scene = Scene::new();
+            let d = scene
+                .draft_begin_plane(p.x, p.y, p.z, n.x, n.y, n.z, "Line")
+                .unwrap();
+            scene
+                .draft_add_segment(d, a.x, a.y, a.z, b.x, b.y, b.z)
+                .unwrap();
+            scene.draft_end(d).unwrap();
+            let all = json(&scene.plane_units_all_json().unwrap());
+            let entries = all.as_array().unwrap();
+            assert_eq!(entries.len(), 1, "plane {i}: one entry");
+            let plane: Vec<f64> = entries[0]["plane"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|x| x.as_f64().unwrap())
+                .collect();
+            let ctx = app_ctx_of_listing_plane(&plane);
+            let keys = edge_keys(&entries[0]["units"]);
+            assert_eq!(keys.len(), 1, "plane {i}: one edge");
+            let d = scene.draft_begin_ctx(&ctx, "Erase").unwrap();
+            if scene.draft_remove_edges(d, &keys).is_err() {
+                failed.push((i, ctx.clone()));
+            }
+            scene.draft_cancel(d).unwrap();
+            // The per-context read the cache stands in for agrees too.
+            assert_eq!(
+                edge_keys(&units(&scene, &ctx)),
+                keys,
+                "plane {i}: the batch and the context's own listing key alike"
+            );
+        }
+        assert!(
+            failed.is_empty(),
+            "{} planes failed: {failed:?}",
+            failed.len()
+        );
+    }
+
+    /// Copy and paste of drawing (v1.5 decisions D3): a rectangle named by
+    /// its context's listing keys copies to clipboard bytes, its Paste In
+    /// Place affine is its bottom center, and a paste with an origin draws
+    /// it at the destination as one undo step, reporting where it landed.
+    /// The same bytes inserted without an origin (a Library insert) skip it.
+    #[test]
+    fn drawing_copies_and_pastes_through_the_clipboard() {
+        let mut scene = Scene::new();
+        let d = scene.draft_begin_ctx(GROUND, "Rect").unwrap();
+        rect(&mut scene, d, 1.0, 1.0, 2.0, 2.0, 0.0);
+        scene.draft_end(d).unwrap();
+        let keys: Vec<String> = edge_keys(&units(&scene, GROUND))
+            .into_iter()
+            .map(hex)
+            .collect();
+        let drawing = serde_json::json!([{ "ctx": GROUND, "keys": keys }]).to_string();
+        let bytes = scene
+            .extract_clipboard(&[], &[], &drawing, "win".into())
+            .unwrap();
+        let placement = scene
+            .extract_clipboard_placement(&[], &[], &drawing)
+            .unwrap()
+            .expect("a placement");
+        assert_eq!(
+            (placement[3], placement[7], placement[11]),
+            (1.5, 1.5, 0.0),
+            "the bottom center"
+        );
+        // The placement ghost draws the copied lines, and its box is
+        // theirs (item coordinates: the 1 m square around the origin).
+        let ghost = crate::item_ghost_mesh(&bytes).unwrap();
+        assert_eq!(ghost.edge_positions().len(), 4 * 2 * 3);
+        assert_eq!(ghost.bbox(), vec![-0.5, -0.5, 0.0, 0.5, 0.5, 0.0]);
+
+        // Paste 3 m along x from where it was copied.
+        let mut affine = placement.clone();
+        affine[3] += 3.0;
+        let report = scene
+            .insert_item_composed(&bytes, &affine, None, None, Some("win".into()))
+            .unwrap();
+        assert_eq!(report.drawn.len(), 1);
+        assert_eq!(report.drawn[0].anchors.len(), 4);
+        assert!(!report.drawing_unchanged);
+        assert!(
+            report.drawn[0]
+                .anchors
+                .iter()
+                .any(|(a, _)| a.approx_eq(Point3::new(4.0, 1.0, 0.0), 1e-9)),
+            "{:?}",
+            report.drawn[0].anchors
+        );
+        assert_eq!(units(&scene, GROUND)["units"].as_array().unwrap().len(), 2);
+        scene.scene_undo().unwrap();
+        assert_eq!(
+            units(&scene, GROUND)["units"].as_array().unwrap().len(),
+            1,
+            "one undo removes the paste"
+        );
+
+        // A Library insert of the same bytes skips the drawing.
+        let report = scene
+            .insert_item_composed(&bytes, &affine, None, None, None)
+            .unwrap();
+        assert_eq!(report.world_sketches_skipped, 1);
+        assert!(report.drawn.is_empty());
+    }
+
+    /// The drawing JSON's other forms: a detached shape named by its
+    /// islands copies; a detached sketch's own context with keys is refused
+    /// (name its islands); malformed JSON and an empty selection refuse.
+    #[test]
+    fn clipboard_drawing_json_forms() {
+        let mut scene = Scene::new();
+        let s = detached_circle(&mut scene, GROUND, [0.0, 0.0, 0.0], 1.0, 16);
+        let islands = scene.sketch_island_ids(s);
+        let drawing = serde_json::json!([{ "sketch": s, "islands": islands }]).to_string();
+        let bytes = scene
+            .extract_clipboard(&[], &[], &drawing, "win".into())
+            .unwrap();
+        let item = kernel::Document::load(&bytes).unwrap();
+        let carried = item.carried_drawing();
+        assert_eq!(carried.len(), 1);
+        assert!(item.sketch(carried[0]).unwrap().detached());
+
+        let whole = serde_json::json!([{ "sketch": s }]).to_string();
+        assert!(
+            scene
+                .extract_clipboard(&[], &[], &whole, "win".into())
+                .is_ok()
+        );
+
+        let own = serde_json::json!([{ "ctx": sketch_ctx(s), "keys": [] }]).to_string();
+        let err = scene
+            .extract_clipboard(&[], &[], &own, "win".into())
+            .unwrap_err();
+        assert!(err.0.starts_with("BadContext"), "{}", err.0);
+        let err = scene
+            .extract_clipboard(&[], &[], "{", "win".into())
+            .unwrap_err();
+        assert!(err.0.starts_with("BadDrawing"), "{}", err.0);
+        let err = scene
+            .extract_clipboard(&[], &[], "[]", "win".into())
+            .unwrap_err();
+        assert!(err.0.starts_with("EmptyComponent"), "{}", err.0);
+    }
+
+    /// A box at the origin, locked; its id and top face.
+    fn locked_ground_box(scene: &mut Scene) -> (u64, u64) {
+        let b = ground_box(scene, 0.0, 0.0, 2.0, 2.0, 1.0);
+        scene.set_nodes_locked(&[0], &[b], true).unwrap();
+        (b, top_face(scene, b))
+    }
+
+    /// The report of a rectangle drawn in draft `d` on the box's top, and
+    /// the new sketch it names, which must be detached and leave the box.
+    fn locked_face_rect(scene: &mut Scene, b: u64, d: u64) -> u64 {
+        let faces = scene.doc.object(object_id(b)).unwrap().faces().len();
+        rect(scene, d, 0.5, 0.5, 1.5, 1.5, 1.0);
+        let report = json(&scene.draft_end(d).unwrap());
+        assert_eq!(report["objects"], serde_json::json!([]), "{report}");
+        let sketches = report["sketches"].as_array().unwrap();
+        assert_eq!(sketches.len(), 1, "one new sketch: {report}");
+        let s = sketches[0].as_u64().unwrap();
+        assert!(scene.doc.sketch(sketch_id(s)).unwrap().detached());
+        assert_eq!(
+            scene.doc.object(object_id(b)).unwrap().faces().len(),
+            faces,
+            "the locked face is not cut"
+        );
+        s
+    }
+
+    /// OW-1 (v1.5 owner's items D1): drawing on a face of a locked Object
+    /// opens the draft detached, so the shape is one new detached sketch
+    /// and the face is whole. The face's own context stays a plane
+    /// context: its listing is what it was before the draw (a frozen
+    /// Object takes no part in it, so it lists nothing), and after unlock
+    /// it is the face alone, whole. The shape pulls into a new Object.
+    #[test]
+    fn a_face_draft_on_a_locked_object_draws_a_detached_shape() {
+        let mut scene = Scene::new();
+        let (b, f) = locked_ground_box(&mut scene);
+        let face_ctx = format!(r#"{{"face":{{"object":{b},"face":{f}}}}}"#);
+        let listed = units(&scene, &face_ctx);
+        let d = scene.draft_begin_face(b, f, "Rectangle").unwrap();
+        let s = locked_face_rect(&mut scene, b, d);
+        assert_eq!(units(&scene, &face_ctx), listed, "the face's listing");
+
+        scene.set_nodes_locked(&[0], &[b], false).unwrap();
+        let u = units(&scene, &face_ctx);
+        let regions = u["regions"].as_array().unwrap();
+        assert_eq!(regions.len(), 1, "the face alone: {u}");
+        assert_eq!(regions[0]["over"]["object"], serde_json::json!(b), "{u}");
+        assert_eq!(regions[0]["over"]["face"], serde_json::json!(f), "{u}");
+        assert_eq!(regions[0]["holes"], serde_json::json!([]), "whole: {u}");
+        assert!(u["units"].as_array().unwrap().is_empty(), "{u}");
+
+        // It pulls into a new Object; the box keeps its faces.
+        let faces = scene.doc.object(object_id(b)).unwrap().faces().len();
+        let own = units(&scene, &sketch_ctx(s));
+        let ex = &own["regions"][0]["extrude"];
+        let made = scene
+            .extrude_region(
+                ex["sketch"].as_u64().unwrap(),
+                ex["region"].as_u64().unwrap(),
+                0.5,
+            )
+            .unwrap();
+        assert_ne!(made, b);
+        assert_eq!(scene.doc.object(object_id(b)).unwrap().faces().len(), faces);
+    }
+
+    /// OW-1: the detached shape drawn on a locked face pulls into a new
+    /// Object while the box is STILL locked, the way Push/Pull reaches it:
+    /// the face and the region are picked on one ray and tie on depth from
+    /// any eye point (oblique, far, a non-unit direction), the region is
+    /// detached, and `extrude_region` makes a new Object. The locked box is
+    /// untouched and stays locked.
+    #[test]
+    fn a_detached_shape_on_a_locked_face_pulls_while_the_box_stays_locked() {
+        let mut scene = Scene::new();
+        let (b, f) = locked_ground_box(&mut scene);
+        let d = scene.draft_begin_face(b, f, "Rectangle").unwrap();
+        locked_face_rect(&mut scene, b, d);
+        let before = scene.doc.state_hash();
+        let faces = scene.doc.object(object_id(b)).unwrap().faces().len();
+
+        for (o, t) in [
+            ([23.0, -17.0, 11.0], [1.1, 0.9, 1.0]),
+            ([-40.0, 33.0, 9.0], [0.7, 1.3, 1.0]),
+            ([3.0, 2.0, 400.0], [1.2, 1.2, 1.0]),
+            ([1.0e3, -2.0e3, 1.5e3], [1.0, 1.0, 1.0]),
+        ] {
+            let dir = [
+                (t[0] - o[0]) * 3.7,
+                (t[1] - o[1]) * 3.7,
+                (t[2] - o[2]) * 3.7,
+            ];
+            let face = scene
+                .pick_face(o[0], o[1], o[2], dir[0], dir[1], dir[2])
+                .unwrap();
+            let region = scene
+                .pick_sketch_region(o[0], o[1], o[2], dir[0], dir[1], dir[2])
+                .unwrap();
+            // The region's depth is in raw-ray units, the face's in metres
+            // along the normalized ray (the app scales one onto the other).
+            let len = (dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]).sqrt();
+            assert!(
+                (region.depth() * len - face.depth()).abs() <= 1e-7,
+                "the shape ties with the face from {o:?}: {} vs {}",
+                region.depth() * len,
+                face.depth()
+            );
+        }
+        let face = scene.pick_face(1.0, 1.0, 5.0, 0.0, 0.0, -1.0).unwrap();
+        assert_eq!(face.object(), b);
+        let region = scene
+            .pick_sketch_region(1.0, 1.0, 5.0, 0.0, 0.0, -1.0)
+            .unwrap();
+        assert!(region.detached(), "the shape on the face is detached");
+        assert!(
+            region.depth() <= face.depth() + 1e-7,
+            "the shape ties with the face it lies on: {} vs {}",
+            region.depth(),
+            face.depth()
+        );
+        let made = scene
+            .extrude_region(region.sketch(), region.region(), 0.5)
+            .unwrap();
+        assert_ne!(made, b);
+        assert_ne!(scene.doc.state_hash(), before, "a new Object");
+        assert_eq!(scene.doc.object(object_id(b)).unwrap().faces().len(), faces);
+        assert!(scene.node_locked(0, b).unwrap(), "the box stays locked");
+        assert!(
+            scene.node_frozen(0, made).unwrap().is_none(),
+            "the new Object is free"
+        );
+    }
+
+    /// The same through `draft_begin_ctx` with a face form.
+    #[test]
+    fn a_face_context_draft_on_a_locked_object_draws_a_detached_shape() {
+        let mut scene = Scene::new();
+        let (b, f) = locked_ground_box(&mut scene);
+        let face_ctx = format!(r#"{{"face":{{"object":{b},"face":{f}}}}}"#);
+        let d = scene.draft_begin_ctx(&face_ctx, "Rectangle").unwrap();
+        locked_face_rect(&mut scene, b, d);
+    }
+
+    /// A face of a member of a locked shape still refuses: even a detached
+    /// drawing in the shape's frame would edit it.
+    #[test]
+    fn a_face_draft_in_a_locked_shape_is_refused() {
+        let mut scene = Scene::new();
+        let b = ground_box(&mut scene, 0.0, 0.0, 2.0, 2.0, 1.0);
+        let inst = scene.make_component(&[0], &[b]).unwrap();
+        let def = scene.instance_def(inst).unwrap();
+        let member = scene.component_member_objects(def)[0];
+        let f = top_face(&scene, member);
+        scene.set_nodes_locked(&[2], &[inst], true).unwrap();
+        let before = scene.doc.state_hash();
+        let err = scene
+            .draft_begin_face_in_instance(inst, member, f, "Rectangle")
+            .unwrap_err();
+        assert!(err.0.starts_with("LockedNode"), "{}", err.0);
+        assert!(scene.doc.draft_sketch().is_none(), "no draft opened");
+        assert_eq!(scene.doc.state_hash(), before);
+    }
+
+    /// A recorded face draw on a locked Object replays to the same state:
+    /// `DraftBeginFace` replays through the same detached branch.
+    #[test]
+    fn a_locked_face_draw_recording_round_trips() {
+        recording::reset();
+        let mut scene = Scene::new();
+        scene.start_recording();
+        let (b, f) = locked_ground_box(&mut scene);
+        let d = scene.draft_begin_face(b, f, "Rectangle").unwrap();
+        locked_face_rect(&mut scene, b, d);
+        let hash = scene.doc.state_hash();
+        let rec = scene.take_recording();
+        assert!(rec.contains("\"method\":\"draft_begin_face\""), "{rec}");
         let mut fresh = Scene::new();
         assert_eq!(fresh.replay(&rec).unwrap(), hash);
     }

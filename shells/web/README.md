@@ -10,9 +10,18 @@ config at `shells/web/deploy/nginx.conf`.
 ## Content Security Policy
 
 The build injects a CSP `<meta>` into `dist/index.html` via `inject-csp.mjs`
-(the last step of `build`). It is a web-only copy of the desktop policy in
-`shells/tauri/src-tauri/tauri.conf.json`, minus Tauri's `ipc:` sources and plus
-`manifest-src` for the PWA manifest.
+(the last step of `build`). The policy text is `web.production` in
+`shells/csp/policies.json`. It differs from the desktop policy in three
+places: it has no Tauri `ipc:` sources, it adds `manifest-src` for the PWA
+manifest, and its `connect-src` is `'self' blob: https:` so the Library can
+read sources on other hosts (the desktop reads them through Rust and has no
+`https:` entry). `frame-ancestors` is absent because a `<meta>` policy
+ignores it.
+
+`inject-csp.mjs` reads two build-time variables. `HEW_PREVIEW=1` injects
+`web.preview`. `HEW_WEB_SOURCES=off` injects `web.strict`, whose
+`connect-src` is `'self' blob:`; the app sees that policy at run time and
+turns Library sources off. Setting both is a build error.
 
 The CSP lives here, not in the shared `app/index.html`, on purpose: the web
 build copies `app/dist`, so anything in the source `index.html` would also land
@@ -25,16 +34,27 @@ an HTTP header, e.g. `Content-Security-Policy: frame-ancestors 'none'` (or
 `<meta>` is strictly better if the host allows it — the meta is the portable
 floor for dumb static hosts.
 
-Validated: the built bundle loads in Chromium with the app booting (React mount,
-WASM kernel init, WebGL canvas) and **zero CSP violations**.
+**Hosted copies.** `app.hew3d.com` is the Cloudflare Pages project
+`hew-app`, deployed by `release.yml` with `_headers` copied into `dist/`.
+The beta copy at `beta.hew3d.com` is a second project, `hew-app-beta`,
+deployed by the `deploy-beta` job in `ci.yml`, which copies `_headers.beta`
+in its place. That file is the same header set plus `X-Robots-Tag: noindex`,
+so the unlinked beta stays out of search. Neither file goes into the
+self-hosting tarball.
 
-**Deploy note — no edge-injected scripts.** `script-src` and `connect-src`
-admit `'self'` only (the "Open on Phone" relay is served from the same
-origin under `/relay/` — a Workers route on app.hew3d.com, or `hew-relay`
-behind the self-hoster's own web server; see workers/share-relay/README.md
-and docs/SELF_HOSTING.md), so any tag a CDN or host injects into the served
-HTML — an analytics beacon, a RUM agent, a tag manager — still violates the
-policy. Such a tag
+`scripts/check-production-artifacts.mjs` holds a built `dist/index.html`
+to the production policy or the strict one, each pinned to a copy under
+`shells/csp/baseline/`.
+
+**Deploy note — no edge-injected scripts.** `script-src` admits `'self'`
+only, in the default policy and the strict one. The `https:` in
+`connect-src` lets the page read data from other hosts; it does not let a
+script from another host run. (The "Open on Phone" relay needs no entry of
+its own: it is served from the same origin under `/relay/`, a Workers route
+on app.hew3d.com or `hew-relay` behind the self-hoster's own web server; see
+workers/share-relay/README.md and docs/SELF_HOSTING.md.) Any tag a CDN or
+host injects into the served HTML — an analytics beacon, a RUM agent, a tag
+manager — violates the policy. Such a tag
 is either blocked (collecting nothing, so the feature is a lie) or executing in
 defiance of the policy, and its exceptions reach the page as muted
 cross-origin errors with no attribution. Leave host-side script injection

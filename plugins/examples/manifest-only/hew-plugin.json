@@ -1,0 +1,10 @@
+{
+  "manifest": 1,
+  "id": "com.example.manifest-only",
+  "name": "Manifest Only",
+  "version": "0.1.0",
+  "description": "A plugin with a manifest and an empty background script, for trying the install flow.",
+  "api": 1,
+  "main": "dist/background.js",
+  "permissions": ["model.read", "network:api.example.com"]
+}

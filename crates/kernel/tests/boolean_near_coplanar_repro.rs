@@ -12,6 +12,7 @@
 //! variants are pinned here — this is the desk-organizer tutorial's bin
 //! scoop at its real dimensions.
 
+use kernel::trig;
 use std::f64::consts::FRAC_PI_2;
 
 use kernel::{BooleanOp, Object, Plane, Point3, Profile, Transform, Vec3, WatertightState};
@@ -23,8 +24,8 @@ fn ngon_prism(center: Point3, radius: f64, n: usize, height: f64) -> Object {
         .map(|i| {
             let a = 2.0 * std::f64::consts::PI * (i as f64) / (n as f64);
             Point3::new(
-                center.x + radius * a.cos(),
-                center.y + radius * a.sin(),
+                center.x + radius * trig::cos(a),
+                center.y + radius * trig::sin(a),
                 center.z,
             )
         })

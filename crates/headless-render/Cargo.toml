@@ -1,0 +1,16 @@
+[package]
+name = "headless-render"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# The renderers behind hew.view.snapshot and hew.view.line_drawing, shared by
+# every host that owns a Document: hew-cli's CliHost and the app's LiveHost.
+# Pure over &Document; no I/O, no filesystem, no network.
+
+[dependencies]
+api = { workspace = true }
+kernel = { workspace = true }
+softrender = { workspace = true }
+hlr = { workspace = true }
+serde_json = { workspace = true }

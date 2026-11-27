@@ -3,8 +3,17 @@ name = "kernel"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+# The integration tests are one binary, tests/all.rs, with each spec file a
+# module of it (see that file). Auto-discovery would build every file a
+# second time as its own binary.
+autotests = false
+
+[[test]]
+name = "all"
+path = "tests/all.rs"
 
 [dependencies]
+libm.workspace = true
 slotmap.workspace = true
 serde.workspace = true
 serde_json.workspace = true

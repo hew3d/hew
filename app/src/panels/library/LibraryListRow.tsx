@@ -9,9 +9,12 @@
  */
 
 import { useLingui } from '@lingui/react/macro'
-import { categoryTypeLabel, formatBytes } from '../../library/libraryModel'
+import { categoryTypeLabel, formatBytes, isBuiltInItem } from '../../library/libraryModel'
 import type { LibraryItem } from '../../library/types'
 import type { LibraryListColWidths } from './LibraryListHead'
+import type { MarkedState } from '../../library/libraryUpdates'
+import { LibraryMark } from '../LibraryMark'
+import { SourceMark } from '../SourceMark'
 import { CubeGlyph, WarningGlyph } from './icons'
 import { MaterialFill, tileElementId } from './LibraryTile'
 
@@ -24,6 +27,14 @@ export interface LibraryListRowProps {
   placementCount: number
   /** Material items only: content-equal entry already in the palette. */
   inPalette: boolean
+  /** Where the model's copies of this item stand against it, when they differ. */
+  linkState?: MarkedState | undefined
+  /** A newer version of this item exists at the source it came from. */
+  sourceNewer?: boolean | undefined
+  /** A source view's state label, shown after the name. */
+  subText?: string | undefined
+  /** No menu button: a source view's row, whose actions live in the detail pane. */
+  noActions?: boolean | undefined
   /** Name/Type column widths, shared with `LibraryListHead` so the header
    * and every row line up under it. Size always takes the remainder. */
   widths: LibraryListColWidths
@@ -39,6 +50,10 @@ export function LibraryListRow({
   selected,
   placementCount,
   inPalette,
+  linkState,
+  sourceNewer = false,
+  subText,
+  noActions = false,
   widths,
   onSelect,
   onActivateDefault,
@@ -86,13 +101,17 @@ export function LibraryListRow({
           )}
         </div>
         <span className="hwlib__row-name">{item.displayName}</span>
+        {linkState !== undefined && <span style={{ marginLeft: 6 }}><LibraryMark state={linkState} /></span>}
+        {sourceNewer && <span style={{ marginLeft: 6 }}><SourceMark /></span>}
+        {subText !== undefined && <span className="hwlib__row-state">{subText}</span>}
       </div>
       <div className="hwlib__row-cell hwlib__row-cell--type" style={{ flex: `0 0 ${widths.type}px`, width: widths.type }}>
-        {item.error ? t`Failed to load` : categoryTypeLabel(item.category)}
+        {item.error ? t`Failed to load` : isBuiltInItem(item) ? t`Profile (built-in)` : categoryTypeLabel(item.category)}
       </div>
       <div className="hwlib__row-cell hwlib__row-cell--size" style={{ flex: '1 1 0', minWidth: 70 }}>
-        {formatBytes(item.file.size)}
+        {isBuiltInItem(item) ? '\u2014' : formatBytes(item.file.size)}
       </div>
+      {!isBuiltInItem(item) && !noActions && (
       <button
         type="button"
         className="hwlib__row-menu-btn"
@@ -105,6 +124,7 @@ export function LibraryListRow({
       >
         ⋯
       </button>
+      )}
     </div>
   )
 }

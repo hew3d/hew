@@ -11,10 +11,16 @@
 //! | model | `tag_paths` | `[[layer name, [segment, …]], …]` — each layer's tag path |
 //! | model, definition | `loose` | `"sketches"` (loose geometry of the list is drawn sketches) or `"object"` (the definition's geometry is one solid) |
 //! | model, definition | `sketch_planes` | `[[origin xyz, normal xyz], …]`, one per sketch drawn into the list |
+//! | model | `folders` | true: the file's layer folders spell the tags' hierarchy (a reader takes a layer's folders over its recorded `tag_paths`) |
 //! | model | `scene_display` | `[[scene name, grid, axes, guides], …]` |
 //! | definition | `unnamed` | true: the definition's geometry is a solid that had no name of its own |
 //! | definition | `built` | true: Hew wrote the definition's geometry (a reader takes it as written, unrepaired) |
 //! | model | `loose_built` | true: Hew wrote the model's loose geometry (likewise) |
+//! | model | `view_style` | true: the display settings were written from the document's view style (absent: it had none) |
+//! | model | `imported_marks` | true: the file records which solids and sketches are still a foreign file's (the two keys below); a reader marks those imported, and also the geometry a save back carried as the file's own (a list without `built` / `loose_built`). Absent (an earlier Hew): nothing is marked |
+//! | definition | `imported` | true: the definition's geometry is one Object still imported (a foreign file's solid the user had not drawn on) |
+//! | model, definition | `imported_sketches` | `[index, …]` into the list's `sketch_planes`: the sketches still imported (a foreign file's drawing the user had not drawn in) |
+//! | model | `fov_across` | true: a camera that holds an aspect ratio stores its angle across the frame, as SketchUp does (a file an earlier Hew wrote stored the vertical angle there, without this key) |
 //! | placement | `kind` | `"object"` or `"group"` |
 //! | placement | `unnamed` | true: the node had no name (the definition's is SketchUp's own) |
 //! | placement | `tags` | `[[segment, …], …]` when the node had more than one tag |
@@ -27,7 +33,7 @@
 use std::collections::BTreeMap;
 
 use kernel::AttrValue;
-use openskp::{Dictionary, Value};
+use skpwright::{Dictionary, Value};
 
 /// The name of Hew's own dictionary.
 pub(crate) const HEW: &str = "hew";
@@ -60,6 +66,62 @@ pub(crate) fn from_attrs(dict: &kernel::AttrDict) -> Vec<Dictionary> {
             }
         })
         .collect()
+}
+
+/// Whether the import leaves `v` out of the document (an undecoded 8-byte
+/// value, a non-finite number, an array holding one): the document never
+/// has it, so a save back must not take it from the file.
+fn unread(v: &Value) -> bool {
+    match v {
+        Value::Bytes8(_) => true,
+        Value::Float(f) => !f.is_finite(),
+        Value::Double(f) => !f.is_finite(),
+        Value::Vector(v) | Value::Direction(v) => v.iter().any(|x| !x.is_finite()),
+        Value::Array(items) => items.iter().any(unread),
+        _ => false,
+    }
+}
+
+/// The document's dictionaries `ours` for an owner, with the entries of the
+/// file's own dictionaries for that owner that the import could not read put
+/// back (a dictionary holding nothing else comes back whole-of-those), so a
+/// save back loses nothing the document never held.
+pub(crate) fn with_unread(
+    old: &[skpwright::Attributes],
+    owner: &skpwright::Owner,
+    mut ours: Vec<Dictionary>,
+) -> Vec<Dictionary> {
+    for od in old
+        .iter()
+        .filter(|a| &a.owner == owner)
+        .flat_map(|a| a.dictionaries.iter())
+        .filter(|d| d.name != HEW)
+    {
+        let lost: Vec<(String, Value)> = od
+            .entries
+            .iter()
+            .filter(|(k, v)| k != "hew_json" && unread(v))
+            .cloned()
+            .collect();
+        if lost.is_empty() {
+            continue;
+        }
+        match ours.iter_mut().find(|d| d.name == od.name) {
+            Some(d) => {
+                for e in lost {
+                    if !d.entries.iter().any(|(k, _)| *k == e.0) {
+                        d.entries.push(e);
+                    }
+                }
+            }
+            None => ours.push(Dictionary {
+                name: od.name.clone(),
+                entries: lost,
+                flag: od.flag,
+            }),
+        }
+    }
+    ours
 }
 
 /// A Hew value SketchUp can hold as it is.
@@ -247,5 +309,72 @@ mod tests {
             "hew_json".into(),
             Value::Array(vec![Value::Text("k".into())])
         )));
+    }
+
+    fn dict(name: &str, entries: Vec<(&str, Value)>) -> skpwright::Attributes {
+        skpwright::Attributes {
+            owner: skpwright::Owner::Material(0),
+            dictionaries: vec![Dictionary {
+                name: name.into(),
+                entries: entries.into_iter().map(|(k, v)| (k.into(), v)).collect(),
+                flag: 1,
+            }],
+        }
+    }
+
+    #[test]
+    fn undecoded_values_are_put_back_beside_the_documents_entries() {
+        let old = [dict(
+            "d",
+            vec![
+                ("raw", Value::Bytes8([1, 2, 3, 4, 5, 6, 7, 8])),
+                ("n", Value::Int(1)),
+            ],
+        )];
+        let owner = skpwright::Owner::Material(0);
+        let ours = vec![Dictionary {
+            name: "d".into(),
+            entries: vec![("n".into(), Value::Int(2))],
+            flag: 0,
+        }];
+        let out = with_unread(&old, &owner, ours);
+        assert_eq!(out.len(), 1);
+        assert!(out[0].entries.contains(&("n".into(), Value::Int(2))));
+        assert!(
+            out[0]
+                .entries
+                .contains(&("raw".into(), Value::Bytes8([1, 2, 3, 4, 5, 6, 7, 8])))
+        );
+        // The file's readable entry is not copied over the document's.
+        assert_eq!(out[0].entries.len(), 2);
+        // A dictionary the document lacks comes back with only the lost entries.
+        let out = with_unread(&old, &owner, Vec::new());
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].entries.len(), 1);
+        assert_eq!(out[0].flag, 1);
+        // Another owner's are left alone.
+        let other = skpwright::Owner::Material(1);
+        assert!(with_unread(&old, &other, Vec::new()).is_empty());
+    }
+
+    #[test]
+    fn non_finite_numbers_are_kept_and_finite_ones_are_not() {
+        let old = [dict(
+            "d",
+            vec![
+                ("nan", Value::Double(f64::NAN)),
+                ("inf", Value::Float(f32::INFINITY)),
+                ("vec", Value::Vector([0.0, f64::INFINITY, 0.0])),
+                (
+                    "arr",
+                    Value::Array(vec![Value::Int(1), Value::Double(f64::NAN)]),
+                ),
+                ("ok", Value::Double(1.5)),
+                ("hew_json", Value::Bytes8([0; 8])),
+            ],
+        )];
+        let out = with_unread(&old, &skpwright::Owner::Material(0), Vec::new());
+        let keys: Vec<&str> = out[0].entries.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(keys, ["nan", "inf", "vec", "arr"]);
     }
 }

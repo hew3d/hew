@@ -366,3 +366,136 @@ describe('followMeStart — chainPath', () => {
     expect(chainPath([])).toBeNull()
   })
 })
+
+describe('followMeStart — a rebate profile inside the loop at a corner (#75)', () => {
+  // The board's top face, 0.34 x 0.20, as the path; a 6 mm square profile on
+  // the end plane (x = 0) or side plane (y = 0) through a corner, hanging over
+  // the board — inside the loop. The kernel carries it onto the corner's miter
+  // plane and sweeps it like the mid-edge placement (ops.rs "a corner profile
+  // hanging inside the loop"; `follow_me_rebate_profile_at_any_corner_sweeps_
+  // like_mid_edge` in op_specs.rs), so the cue must not call it a fold.
+  const L = 0.34
+  const W = 0.2
+  const A = 0.006
+
+  /** The board's rim as a closed path, optionally with STRAIGHT vertices (an
+   *  imprint ending on the rim leaves one), and optionally as the f32 face
+   *  loop `face_boundary` hands over. */
+  function boardPath(opts: { straight?: Vec3[]; exact?: boolean } = {}): PathPolyline {
+    const exact = opts.exact ?? true
+    const f = (p: Vec3): Vec3 => (exact ? p : [Math.fround(p[0]), Math.fround(p[1]), Math.fround(p[2])])
+    const corners: Vec3[] = [
+      [0, 0, 0],
+      [L, 0, 0],
+      [L, W, 0],
+      [0, W, 0],
+    ]
+    const pts: Vec3[] = []
+    for (let i = 0; i < 4; i++) {
+      const a = corners[i]
+      const b = corners[(i + 1) % 4]
+      pts.push(a)
+      const onSide = (opts.straight ?? []).filter((p) => {
+        const ab = [b[0] - a[0], b[1] - a[1]]
+        const ap = [p[0] - a[0], p[1] - a[1]]
+        const cr = ab[0] * ap[1] - ab[1] * ap[0]
+        const t = (ab[0] * ap[0] + ab[1] * ap[1]) / (ab[0] * ab[0] + ab[1] * ab[1])
+        return Math.abs(cr) < 1e-12 && t > 0 && t < 1
+      })
+      onSide.sort(
+        (p, q) => Math.hypot(p[0] - a[0], p[1] - a[1]) - Math.hypot(q[0] - a[0], q[1] - a[1]),
+      )
+      pts.push(...onSide)
+    }
+    const segments: PathSegment[] = pts.map((p, i) => ({
+      a: f(p),
+      b: f(pts[(i + 1) % pts.length]),
+      curve: null,
+    }))
+    return { segments, closed: true, exact }
+  }
+
+  /** A `w`-wide, 6 mm deep square profile at corner `c`, on the plane square
+   *  to `normal`, reaching `w` from `c` along `inward` and down -z. */
+  function rebate(c: Vec3, inward: Vec3, w = A): Vec3[] {
+    const at = (s: number, z: number): Vec3 => [c[0] + inward[0] * s, c[1] + inward[1] * s, c[2] + z]
+    return [at(0, 0), at(w, 0), at(w, -A), at(0, -A)]
+  }
+
+  /** Every top corner, both square planes: (corner, plane normal, inward). */
+  const placements: [Vec3, Vec3, Vec3][] = [
+    [[0, 0, 0], [1, 0, 0], [0, 1, 0]],
+    [[0, 0, 0], [0, 1, 0], [1, 0, 0]],
+    [[L, 0, 0], [1, 0, 0], [0, 1, 0]],
+    [[L, 0, 0], [0, 1, 0], [-1, 0, 0]],
+    [[L, W, 0], [1, 0, 0], [0, -1, 0]],
+    [[L, W, 0], [0, 1, 0], [-1, 0, 0]],
+    [[0, W, 0], [1, 0, 0], [0, -1, 0]],
+    [[0, W, 0], [0, 1, 0], [1, 0, 0]],
+  ]
+
+  it('accepts the inside-the-loop profile at every corner, on either plane', () => {
+    for (const [c, n, inward] of placements) {
+      expect(evaluateStart(boardPath(), plane(c, n), rebate(c, inward))).toEqual({ kind: 'ok' })
+    }
+  })
+
+  it('never warns about it on the f32 face loop a face path arrives as', () => {
+    // The playtest's false warning: the hover said "hangs back over the
+    // corner" for a profile the click then swept. On a face loop no `ok` can
+    // be claimed, but no refusal either.
+    for (const [c, n, inward] of placements) {
+      const ring = rebate(c, inward).map((p): Vec3 => [Math.fround(p[0]), Math.fround(p[1]), Math.fround(p[2])])
+      expect(evaluateStart(boardPath({ exact: false }), plane(c, n), ring)).toEqual({ kind: 'unknown' })
+    }
+  })
+
+  it('reads a straight rim vertex as no corner (an imprint on the end face leaves one)', () => {
+    // After a 6 mm square is imprinted on the x = 0 end face at y 0..0.006
+    // or 0.194..0.2, the top face's rim gains a vertex 6 mm from the corner
+    // where it runs straight on. The kernel sweeps through it; so does the cue.
+    for (const straight of [[[0, A, 0]], [[0, W - A, 0]], [[0, A, 0], [0, W - A, 0], [L, A, 0]]] as Vec3[][]) {
+      for (const [c, n, inward] of placements) {
+        expect(evaluateStart(boardPath({ straight }), plane(c, n), rebate(c, inward))).toEqual({ kind: 'ok' })
+        expect(
+          evaluateStart(boardPath({ straight, exact: false }), plane(c, n), rebate(c, inward)).kind,
+        ).not.toBe('refused')
+      }
+    }
+  })
+
+  it('does not bless a profile too wide for the loop, nor misname its refusal', () => {
+    // Half the short side or wider: the kernel refuses ProfileTooWideForCorner.
+    // That is not the straddle the hover copy describes, so the cue stays
+    // silent rather than say "ok" or the wrong thing — with or without a
+    // straight rim vertex.
+    for (const straight of [[], [[0, A, 0]]] as Vec3[][]) {
+      for (const w of [W / 2, W / 2 + 0.01, 0.15]) {
+        const c: Vec3 = [0, 0, 0]
+        const v = evaluateStart(boardPath({ straight }), plane(c, [1, 0, 0]), rebate(c, [0, 1, 0], w))
+        expect(v).toEqual({ kind: 'unknown' })
+      }
+      // A hair narrower sweeps.
+      const c: Vec3 = [0, 0, 0]
+      expect(
+        evaluateStart(boardPath({ straight }), plane(c, [1, 0, 0]), rebate(c, [0, 1, 0], W / 2 - 0.001)),
+      ).toEqual({ kind: 'ok' })
+    }
+  })
+
+  it('still refuses a profile straddling the corner, straight rim vertices or not', () => {
+    const c: Vec3 = [0, 0, 0]
+    const ring: Vec3[] = [
+      [0, -0.003, 0],
+      [0, 0.003, 0],
+      [0, 0.003, -A],
+      [0, -0.003, -A],
+    ]
+    for (const straight of [[], [[0, A, 0]], [[0.003, 0, 0]]] as Vec3[][]) {
+      expect(evaluateStart(boardPath({ straight }), plane(c, [1, 0, 0]), ring)).toEqual({
+        kind: 'refused',
+        reason: 'corner-overhang',
+      })
+    }
+  })
+})

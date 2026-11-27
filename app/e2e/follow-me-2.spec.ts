@@ -43,7 +43,7 @@ test('Follow Me: a solid FACE as the profile sweeps a NEW object, source untouch
     // The profile SOURCE: a small cube well away from the path, so the sweep
     // and the source can never overlap or be confused for one another.
     const cube = h.drawBox([5, 5, 0], [5.2, 5.2, 0], 0.2)
-    const top = h.pickFace([5.1, 5.1, 0.2], [0, 0, 1])
+    const top = h.pickFace([5.1, 5.1, 1], [0, 0, -1])
     if (top === null) return { error: 'no cube top face' as const }
 
     // The PATH: a straight ground line far from the cube.
@@ -85,7 +85,7 @@ test('Follow Me: the merged commit fuses a sketch-region profile with the path s
     const h = window.__hew_test!
     // The BASE solid the molding merges into.
     const base = h.drawBox([0, 0, 0], [1, 1, 0], 0.2)
-    const top = h.pickFace([0.5, 0.5, 0.2], [0, 0, 1])
+    const top = h.pickFace([0.5, 0.5, 1], [0, 0, -1])
     if (top === null) return { error: 'no base top face' as const }
 
     // A small profile sketch region near the base's rim — auto-orientation

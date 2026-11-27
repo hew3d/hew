@@ -4,6 +4,7 @@ members = [
     "crates/api",
     "crates/softrender",
     "crates/hlr",
+    "crates/headless-render",
     "crates/pdfwrite",
     "crates/kernel",
     "crates/inference",
@@ -18,8 +19,11 @@ members = [
     "crates/stl-import",
     "crates/image-import",
     "crates/library",
+    "crates/sources",
     "crates/hew-cli",
     "crates/hew-relay",
+    "crates/plugin-manifest",
+    "crates/plugin-host",
 ]
 # The Tauri host crate is deliberately NOT a workspace member: it drags
 # desktop-only dependencies into `cargo test --workspace` and would slow the
@@ -34,7 +38,7 @@ exclude = [
 ]
 
 [workspace.package]
-version = "1.3.1"
+version = "1.4.0"
 edition = "2024"
 # AGPL-3.0-only plus an additional permission for closed-source plugins that
 # use only the documented Plugin API — see LICENSE and LICENSE-EXCEPTION.
@@ -44,6 +48,7 @@ license = "AGPL-3.0-only"
 api = { path = "crates/api" }
 softrender = { path = "crates/softrender" }
 hlr = { path = "crates/hlr" }
+headless-render = { path = "crates/headless-render" }
 pdfwrite = { path = "crates/pdfwrite" }
 kernel = { path = "crates/kernel" }
 inference = { path = "crates/inference" }
@@ -57,25 +62,38 @@ skp-export = { path = "crates/skp-export" }
 stl-import = { path = "crates/stl-import" }
 image-import = { path = "crates/image-import" }
 library = { path = "crates/library" }
+plugin-manifest = { path = "crates/plugin-manifest" }
+plugin-host = { path = "crates/plugin-host" }
 # Clean-room SketchUp .skp reader (the 2026 container and the 2017 format):
-# a crates.io semver pin on the hosted OpenSKP releases, so CI resolves it
+# a crates.io semver pin on the hosted Skpwright releases, so CI resolves it
 # like any other dependency. No Trimble SDK material anywhere in its chain
-# (rule 7 admissibility test). Local dev clone: ../openskp.
-openskp = "0.5.0"
+# (rule 7 admissibility test). Local dev clone: ../skpwright.
+skpwright = "0.6.1"
 
 slotmap = "1"
+# The kernel's transcendental math (crates/kernel/src/trig.rs), one pure-Rust
+# implementation on every target. Held to an exact version, unlike the rest:
+# a new release can round a function differently in the last bit, which moves
+# geometry, so a bump is its own reviewed change with regenerated goldens.
+libm = "=0.2.16"
+# Plugin manifest versions and ranges (crates/plugin-manifest). The serde
+# feature lets `Manifest` derive its own (de)serialization.
+semver = { version = "1", features = ["serde"] }
 proptest = "1"
+# Source-reference and request-URL parsing in crates/sources (shared library
+# sources, docs/design/shared-library-sources.md 6.2).
+url = "2"
 wasm-bindgen = "0.2"
 js-sys = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
-zip = { version = "9", default-features = false }
+zip = { version = "9.0.5", default-features = false }
 # Library item content hashing (docs/agents/HEW_API.md §8.1's
 # `LibraryProvenance.content_hash`): `crates/library` (the headless/desktop
 # hosts) and `crates/wasm-api` (`LiveHost::library_write`, which computes the
 # hash itself since it has no filesystem to defer the write to) both need
 # the identical SHA-256, so it's pinned once here.
-sha2 = "0.10"
+sha2 = "0.11"
 # Structured diagnostic logging (docs/dev/DEVELOPMENT.md, M14). kernel/inference use only
 # the `tracing` facade (events, no I/O); wasm-api owns the Subscriber + the
 # wasm→shell drain seam. default-features=false drops the `#[instrument]` proc
@@ -87,6 +105,17 @@ dae-parser = { path = "crates/vendor/dae-parser" }
 # no default features, so the WASM bundle takes only the decoders.
 png = { version = "0.18", default-features = false }
 jpeg-decoder = { version = "0.3", default-features = false }
+
+# `cargo test` compiles the workspace optimized. The suite is dominated by
+# geometry-heavy specs and property tests, which run an order of magnitude
+# slower unoptimized; the extra compile time is a fraction of what the run
+# saves. Debug assertions and overflow checks stay on (this profile inherits
+# `dev`), so a test still trips everything a debug build would. Line tables
+# keep file:line in a panic backtrace without the link cost of full debug
+# info. `cargo build` and `cargo clippy` are unaffected.
+[profile.test]
+opt-level = 2
+debug = "line-tables-only"
 
 [profile.release]
 # WASM payload size matters for the web shell.

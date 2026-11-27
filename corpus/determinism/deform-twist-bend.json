@@ -1,0 +1,16 @@
+{
+  "title": "A box twisted a quarter turn, and a bar bent onto an arc",
+  "from": "Deform: twist about the bounding box and bend along a path.",
+  "build": [
+    {"method": "hew.sketch.draw_rect", "as": "base", "params": {"plane": {"ground": true}, "corner_a": [0, 0, 0], "corner_b": ["80mm", "80mm", 0]}},
+    {"method": "hew.solid.extrude", "as": "box", "params": {"region": {"$ref": "base#/region_id"}, "distance": "100mm"}},
+    {"method": "hew.solid.deform", "params": {"object": {"$ref": "box#/object_id"}, "mode": "twist", "end": "+z", "angle": 1.5707963267948966}},
+    {"method": "hew.sketch.draw_rect", "as": "barbase", "params": {"plane": {"ground": true}, "corner_a": [0.5, 2, 0], "corner_b": [1.5, 2.04, 0]}},
+    {"method": "hew.solid.extrude", "as": "bar", "params": {"region": {"$ref": "barbase#/region_id"}, "distance": 0.04}},
+    {"method": "hew.sketch.draw_arc", "as": "arc", "params": {"plane": {"ground": true}, "center": [0.5, 3, 0], "radius": 1.0, "start_angle": -1.5707963267948966, "end_angle": 0.0}},
+    {
+      "method": "hew.solid.deform",
+      "params": {"object": {"$ref": "bar#/object_id"}, "mode": "bend_to_path", "base": {"from": [0.5, 2, 0], "to": [1.5, 2, 0]}, "path": {"curve": {"$ref": "arc#/curve_id"}}}
+    }
+  ]
+}

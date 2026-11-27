@@ -1,0 +1,119 @@
+{
+  "title": "An isosceles trapezoid prism, 80 mm base, 40 mm top, 30 mm deep, 25 mm tall",
+  "from": "Non-right corners: 56.3-degree and 123.7-degree vertical edges.",
+  "build": [
+    {
+      "method": "hew.sketch.draw_line",
+      "as": "base",
+      "params": {
+        "plane": {"ground": true},
+        "points": [[0, 0, 0], ["80mm", 0, 0], ["60mm", "30mm", 0], ["20mm", "30mm", 0], [0, 0, 0]]
+      }
+    },
+    {
+      "method": "hew.solid.extrude",
+      "as": "trap",
+      "params": {"region": {"$ref": "base#/region_id"}, "distance": "25mm"}
+    }
+  ],
+  "cases": [
+    {
+      "id": "top-loop-round",
+      "note": "Cap loop of the 80/40 x 30 trapezoid. The cap's largest inscribed circle has radius 15 mm and the 36.06 mm leg holds 1.868 x size (acute end) + 0.535 x size (obtuse end) = 15 mm too, so nothing larger exists; 14 mm leaves 1 mm of margin.",
+      "method": "hew.solid.fillet",
+      "params": {
+        "edges": [{"face": {"object": {"$ref": "trap#/object_id"}, "at": ["40mm", "15mm", "25mm"]}}]
+      },
+      "sizes": ["0.1mm", "1mm", "5mm", "10mm", "14mm", "15mm", "16mm", "20mm", "30mm"],
+      "fits_to": "14mm",
+      "never_above": "15mm",
+      "volume": "less"
+    },
+    {
+      "id": "top-loop-chamfer",
+      "method": "hew.solid.chamfer",
+      "params": {
+        "edges": [{"face": {"object": {"$ref": "trap#/object_id"}, "at": ["40mm", "15mm", "25mm"]}}]
+      },
+      "sizes": ["0.1mm", "1mm", "5mm", "10mm", "14mm", "15mm", "16mm", "20mm", "30mm"],
+      "fits_to": "14mm",
+      "never_above": "15mm",
+      "volume": "less"
+    },
+    {
+      "id": "bottom-loop-round",
+      "method": "hew.solid.fillet",
+      "params": {"edges": [{"face": {"object": {"$ref": "trap#/object_id"}, "at": ["40mm", "15mm", 0]}}]},
+      "sizes": ["0.1mm", "1mm", "5mm", "10mm", "14mm", "15mm", "16mm", "20mm", "30mm"],
+      "fits_to": "14mm",
+      "never_above": "15mm",
+      "volume": "less"
+    },
+    {
+      "id": "bottom-loop-chamfer",
+      "method": "hew.solid.chamfer",
+      "params": {"edges": [{"face": {"object": {"$ref": "trap#/object_id"}, "at": ["40mm", "15mm", 0]}}]},
+      "sizes": ["0.1mm", "1mm", "5mm", "10mm", "14mm", "15mm", "16mm", "20mm", "30mm"],
+      "fits_to": "14mm",
+      "never_above": "15mm",
+      "volume": "less"
+    },
+    {
+      "id": "acute-vertical-edge-round",
+      "note": "The 56.3-degree vertical edge at (0,0). The tangent line sits size / tan(28.15 deg) = 1.868 x size from the edge along the 36.06 mm leg: limit 19.3 mm.",
+      "method": "hew.solid.fillet",
+      "params": {"edges": [{"object": {"$ref": "trap#/object_id"}, "at": [0, 0, "12mm"]}]},
+      "sizes": ["0.1mm", "1mm", "5mm", "15mm", "19mm", "19.5mm", "25mm"],
+      "fits_to": "19mm",
+      "never_above": "19.4mm",
+      "volume": "less"
+    },
+    {
+      "id": "acute-vertical-edge-chamfer",
+      "method": "hew.solid.chamfer",
+      "params": {"edges": [{"object": {"$ref": "trap#/object_id"}, "at": [0, 0, "12mm"]}]},
+      "sizes": ["0.1mm", "1mm", "5mm", "15mm", "25mm", "35mm", "36mm", "36.5mm", "40mm"],
+      "fits_to": "35mm",
+      "never_above": "36.1mm",
+      "volume": "less",
+      "note": "A chamfer's distance is measured along each face from the edge, so the 36.06 mm leg limits it at either vertical edge."
+    },
+    {
+      "id": "obtuse-vertical-edge-round",
+      "note": "The 123.7-degree vertical edge at (20,30). Tangent line sits 0.535 x size from the edge along the 36.06 mm leg: limit 67.4 mm.",
+      "method": "hew.solid.fillet",
+      "params": {"edges": [{"object": {"$ref": "trap#/object_id"}, "at": ["20mm", "30mm", "12mm"]}]},
+      "sizes": ["0.1mm", "1mm", "5mm", "15mm", "30mm", "60mm", "67mm", "70mm", "80mm"],
+      "fits_to": "60mm",
+      "never_above": "67.4mm",
+      "volume": "less"
+    },
+    {
+      "id": "obtuse-vertical-edge-chamfer",
+      "method": "hew.solid.chamfer",
+      "params": {"edges": [{"object": {"$ref": "trap#/object_id"}, "at": ["20mm", "30mm", "12mm"]}]},
+      "sizes": ["0.1mm", "1mm", "5mm", "15mm", "25mm", "35mm", "36mm", "36.5mm", "40mm"],
+      "fits_to": "35mm",
+      "never_above": "36.1mm",
+      "volume": "less",
+      "note": "A chamfer's distance is measured along each face from the edge, so the 36.06 mm leg limits it at either vertical edge."
+    },
+    {
+      "id": "all-edges-round",
+      "note": "All 12 edges; top and bottom rounds share the 25 mm walls, so 12.5 mm at most (they would meet). No fits_to: the acute corners set a tighter bound that was not worked out.",
+      "method": "hew.solid.fillet",
+      "params": {"edges": [{"object": {"$ref": "trap#/object_id"}, "all": true}]},
+      "sizes": ["0.1mm", "1mm", "5mm", "10mm", "12mm", "12.5mm", "14mm", "20mm"],
+      "never_above": "12.5mm",
+      "volume": "less"
+    },
+    {
+      "id": "all-edges-chamfer",
+      "method": "hew.solid.chamfer",
+      "params": {"edges": [{"object": {"$ref": "trap#/object_id"}, "all": true}]},
+      "sizes": ["0.1mm", "1mm", "5mm", "10mm", "12mm", "12.5mm", "14mm", "20mm"],
+      "never_above": "12.5mm",
+      "volume": "less"
+    }
+  ]
+}

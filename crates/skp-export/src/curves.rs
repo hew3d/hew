@@ -3,7 +3,7 @@
 //! `.skp` curves (`SKP_FORMAT.md` §6.4), so a circle or arc drawn in Hew is
 //! one selectable curve in SketchUp rather than loose segments.
 //!
-//! SketchUp's rules for a curve, from OpenSKP's acceptance work
+//! SketchUp's rules for a curve, from Skpwright's acceptance work
 //! (`docs/WRITING.md`): members run in their edges' own start-to-end
 //! direction from a chain end, and an arc's start is the start vertex of
 //! its first member; a curve whose members break either rule is dropped on
@@ -13,7 +13,7 @@
 
 use std::collections::BTreeMap;
 
-use kernel::{Point3, Vec3};
+use kernel::{Point3, Vec3, trig};
 
 /// One candidate member: the run's edge index, and its two run vertex
 /// indices with their positions.
@@ -42,7 +42,7 @@ type Oriented = Vec<(usize, u32, u32)>;
 /// A chain, oriented: each member's `(edge, from, to)`.
 pub(crate) struct Chain {
     pub members: Oriented,
-    pub curve: openskp::Curve,
+    pub curve: skpwright::Curve,
 }
 
 /// Split one claim's members into connected, unbranched chains and build
@@ -118,7 +118,7 @@ pub(crate) fn chains(members: &[Member], claim: Claim) -> Vec<Chain> {
             Claim::Plain => vec![(c, None)],
         })
         .map(|(c, arc)| Chain {
-            curve: openskp::Curve {
+            curve: skpwright::Curve {
                 pid: 0,
                 members: c.len() as u32,
                 arc,
@@ -138,7 +138,7 @@ fn arcs_of(
     pos: &BTreeMap<u32, Point3>,
     center: Point3,
     radius: f64,
-) -> Vec<(Oriented, openskp::Arc)> {
+) -> Vec<(Oriented, skpwright::Arc)> {
     if let Some(arc) = arc_of(&chain, pos, center, radius) {
         return vec![(chain, arc)];
     }
@@ -185,7 +185,7 @@ fn arc_of(
     pos: &BTreeMap<u32, Point3>,
     center: Point3,
     radius: f64,
-) -> Option<openskp::Arc> {
+) -> Option<skpwright::Arc> {
     let p = |v: u32| pos[&v] - center;
     let (_, f0, _) = chain[0];
     // The axis the whole chain turns about (every chord's turn summed): a
@@ -209,14 +209,14 @@ fn arc_of(
             return None;
         }
         let (a, b) = (flat(f), flat(t));
-        sweep += a.cross(b).dot(normal).atan2(a.dot(b));
+        sweep += trig::atan2(a.cross(b).dot(normal), a.dot(b));
     }
     let closed = chain.last().map(|&(_, _, t)| t) == Some(f0);
     // An orthonormal frame in that plane, x through the first vertex.
     let x = flat(f0).normalized().ok()?;
     let y = normal.cross(x);
     let m = |v: Vec3| [v.x, v.y, v.z];
-    Some(openskp::Arc {
+    Some(skpwright::Arc {
         center_m: [center.x, center.y, center.z],
         normal: m(normal),
         x_axis_m: m(x * radius),
@@ -237,7 +237,7 @@ mod tests {
 
     fn on_circle(r: f64, deg: f64, z: f64) -> Point3 {
         let t = deg.to_radians();
-        Point3::new(r * t.cos(), r * t.sin(), z)
+        Point3::new(r * trig::cos(t), r * trig::sin(t), z)
     }
 
     #[test]
@@ -283,7 +283,7 @@ mod tests {
         assert!((x.length() - r).abs() < 1e-12 && (y.length() - r).abs() < 1e-12);
         assert!(x.dot(y).abs() < 1e-15 && x.dot(n).abs() < 1e-15 && y.dot(n).abs() < 1e-15);
         // And it ends where the chain does, seen in its plane.
-        let end = x * (arc.end_rad.cos() / r) + y * (arc.end_rad.sin() / r);
+        let end = x * (trig::cos(arc.end_rad) / r) + y * (trig::sin(arc.end_rad) / r);
         let last = pts[5] - Point3::ORIGIN;
         let last = (last - n * last.dot(n)).normalized().unwrap();
         assert!((end - last).length() < 1e-9, "{end:?} vs {last:?}");

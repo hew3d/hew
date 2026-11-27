@@ -23,12 +23,112 @@
 import { i18n } from '@lingui/core'
 import { msg, t } from '@lingui/core/macro'
 import type { MessageDescriptor } from '@lingui/core'
+import { behaviorEnabled } from './preview'
+import { BLEND_ERRORS } from './kernelErrorCopy/blend'
+import { LOFT_ERRORS } from './kernelErrorCopy/loft'
+import { REVOLVE_ERRORS } from './kernelErrorCopy/revolve'
+import { FOLLOW_ME_TWIST_ERRORS } from './kernelErrorCopy/followMeTwist'
+import { PROJECT_ERRORS } from './kernelErrorCopy/project'
+import { SHELL_ERRORS } from './kernelErrorCopy/shell'
+import { DEFORM_ERRORS } from './kernelErrorCopy/deform'
+import { SMOOTH_ERRORS } from './kernelErrorCopy/smooth'
+import { CREASE_ERRORS } from './kernelErrorCopy/crease'
+import { PATH_ARRAY_ERRORS } from './kernelErrorCopy/pathArray'
+import { SHAPE_COMMON_ERRORS } from './kernelErrorCopy/shapeCommon'
+import { REMOVE_DEGENERATE_FACES_ERRORS } from './kernelErrorCopy/removeDegenerateFaces'
 
 // Every entry below is a whole sentence pair written out in full, including
 // the shared tail ("To make it solid, ..." / "If this keeps happening, ..."),
 // so a translator sees and can reorder the complete message. The table is
 // built once at import, so it holds descriptors; `kernelErrorMessage`
 // resolves them against the active language at call time.
+
+/** `DegenerateInput` where "Remove degenerate faces" is not offered. */
+const DEGENERATE_INPUT_PLAIN: MessageDescriptor = msg`One of these objects has a face with no area, so these objects can't be combined.`
+
+/** The curve features' copy, one file per feature (`./kernelErrorCopy/`). */
+const CURVE_FEATURE_ERRORS: Record<string, MessageDescriptor> = {
+  ...BLEND_ERRORS,
+  ...LOFT_ERRORS,
+  ...REVOLVE_ERRORS,
+  ...FOLLOW_ME_TWIST_ERRORS,
+  ...PROJECT_ERRORS,
+  ...SHELL_ERRORS,
+  ...DEFORM_ERRORS,
+  ...SMOOTH_ERRORS,
+  ...CREASE_ERRORS,
+  ...PATH_ARRAY_ERRORS,
+  ...SHAPE_COMMON_ERRORS,
+  ...REMOVE_DEGENERATE_FACES_ERRORS,
+}
+
+/** The order these codes were listed in before the table was split by
+ *  feature. The generated Rust refusal copy (`crates/api/src/refusal_copy.
+ *  gen.rs`) lists codes in table order, so the order is kept as it was. A
+ *  new code not listed here goes after the listed ones. */
+/* oxlint-disable lingui/no-unlocalized-strings -- kernel error code identifiers, not copy */
+const CURVE_ERROR_ORDER: readonly string[] = [
+  'EmptySpec',
+  'BlendNeedsSolid',
+  'EdgeIsSmooth',
+  'UnsupportedEdge',
+  'UnsupportedVertex',
+  'RadiusTooLarge',
+  'ProfileTooWide',
+  'ProfileNeedsConvexEdge',
+  'BullnoseNeedsParallelSides',
+  'InvalidProfile',
+  'UnknownProfile',
+  'RenderFailed',
+  'StopOutOfRange',
+  'Obstructed',
+  'SegmentsOutOfRange',
+  'NonUniformInstance',
+  'BlendModified',
+  'UnknownBlend',
+  'BlendDegenerate',
+  'CornerNotBlendable',
+  'CornerIsStraight',
+  'CornerRadiusTooLarge',
+  'CornerLeavesFace',
+  'DependentBlend',
+  'BadSpec',
+  'TwistNeedsOpenPath',
+  'SelfIntersecting',
+  'WallTooThick',
+  'OpenProfile',
+  'LoftProfileHasHole',
+  'LoftNeedsTwoProfiles',
+  'LoftTooManyRails',
+  'RailMissesProfile',
+  'AxisNotInProfilePlane',
+  'ProjectMisses',
+  'ProjectNeedsClosedShape',
+  'WouldSever',
+  'UnsupportedShellCorner',
+  'ShapeNeedsSolid',
+  'AmountOutOfRange',
+  'SmoothTooDense',
+  'PathTooShortForCount',
+  'CreaseOnSoftEdge',
+  'CreaseOnBoundary',
+  'ShapeDegenerate',
+  'ReshapeRedoDiverged',
+  'TooThinToDeform',
+  'PreviewTooLarge',
+  'BlendFacesFlush',
+  'NothingToRemove',
+  'NonPlanarInput',
+  'DegenerateInput',
+]
+/* oxlint-enable lingui/no-unlocalized-strings */
+
+function inLegacyOrder(table: Record<string, MessageDescriptor>): Record<string, MessageDescriptor> {
+  const ordered: Record<string, MessageDescriptor> = {}
+  for (const code of CURVE_ERROR_ORDER) if (code in table) ordered[code] = table[code]
+  for (const code of Object.keys(table)) if (!(code in ordered)) ordered[code] = table[code]
+  return ordered
+}
 
 /**
  * Human copy for every kernel error code that can cross the wasm boundary,
@@ -103,6 +203,7 @@ const DESCRIPTIONS: Record<string, MessageDescriptor> = {
   EmptySceneName: msg`A Scene needs a name.`,
   InvalidSectionPlane: msg`That section plane isn't valid. Place it again on a face or the ground.`,
   DegenerateUvFrame: msg`That texture position isn't valid. Drag the handle further before releasing it.`,
+  InvalidMaterialPbr: msg`Metallic and roughness must each be between 0 and 100%.`,
   BadUvFrame: msg`That texture position couldn't be read. Press Escape and start the positioning again.`,
 
   // ------------------------------------------------- extrude / push-pull
@@ -118,7 +219,7 @@ const DESCRIPTIONS: Record<string, MessageDescriptor> = {
   NotASubFace: msg`Push/Pull here needs a shape drawn on the face. Draw a closed outline on the face first.`,
   RadiusVanishes: msg`Pushing that far would shrink the curved wall to nothing. Push a shorter distance.`,
   WallNeighborNonPlanar:
-    msg`Offsetting this curved wall would bend a neighboring face out of flat, so it was refused. Adjust or simplify the touching faces first.`,
+    msg`Moving this face would bend a face that touches it out of flat, so it was refused. Adjust or simplify the touching faces first.`,
 
   // -------------------------------------------------------- follow me
   EmptyPath: msg`Follow Me needs a path. Select or click the line, curve, or face edge to follow.`,
@@ -136,6 +237,8 @@ const DESCRIPTIONS: Record<string, MessageDescriptor> = {
     msg`The path doubles back on itself — or turns nearly all the way around — so there is no clean corner to turn. Remove the reversal, or soften the corner.`,
   PathTooTight:
     msg`The path turns tighter than the profile is wide, so the sweep would fold into itself. Use a smaller profile or gentler turns.`,
+  ProfileTooWideForCorner:
+    msg`The profile is too wide to fit inside this corner, so the sweep would run into itself. Draw the profile at a corner of the path, square to the edge it starts along, and narrower than half the shortest side.`,
   ProfileCrossesAxis:
     msg`This profile crosses the circle's center axis, so revolving it would lose the geometry on one side. Draw the profile entirely on one side of the axis instead.`,
   PartialSweepOnPole:
@@ -184,7 +287,15 @@ const DESCRIPTIONS: Record<string, MessageDescriptor> = {
     msg`The result would be empty — the objects don't overlap that way. Check that the solids actually intersect.`,
   SingularTransform: msg`One object's placement is scaled down to nothing, so the operation can't run.`,
   DegenerateContact:
-    msg`The objects only touch along a face, edge, or corner — combining needs real overlap. Nudge one object so their volumes intersect.`,
+    msg`The objects only touch, or graze each other along an edge or at a corner, so there is no clean solid to make. Nudge one object a little and try again.`,
+  OperandFaceNotFlat:
+    msg`One of these objects has a face that isn't flat enough to cut. Some imported models have them. Try the cut on a different part of the object, or export the model again from the program it came from with its faces as triangles.`,
+  ArrangementFailed:
+    msg`Hew couldn't work out a clean result where these two objects meet. Move one of them a little and try again. If it keeps happening, please send a bug report with Help ▸ Report Bug.`,
+  ResultTooThin:
+    msg`The cut passes so close to a corner or edge that it would leave a piece too thin to keep. Move one of the objects a tiny bit (a hundredth of a millimeter is enough) and try again.`,
+  NothingRemoved:
+    msg`Nothing was cut away: the solids only touch or sit apart. Check that each cutter is the shape you expect, then move it so it passes through the solid you're cutting.`,
 
   // ----------------------------------------------------------- slice
   NotSolid: msg`Only a solid can be sliced. To make it solid, select it and choose Object ▸ Make Solid…`,
@@ -197,10 +308,10 @@ const DESCRIPTIONS: Record<string, MessageDescriptor> = {
   Singular: msg`That transform would scale the object down to nothing, so it was refused.`,
   DegenerateAxis:
     msg`The rotation axis needs two distinct points. Pick a second point further from the first.`,
-  Reflection:
-    msg`This would turn the object inside out (a mirror), which can't be baked into a solid. Mirror a component instance instead.`,
   DegenerateTextureFrame:
     msg`That would stretch a picture or texture on the object so far it couldn't stay on its face, so it was refused. Try a smaller stretch.`,
+  FaceNotFlat:
+    msg`That shape is too far from the origin, or would be stretched too far, for its faces to stay flat, so it was refused. Try moving it closer to the origin, or use a smaller change.`,
   InvalidRescaleFactor:
     msg`That resize factor isn't valid. Pick two points that aren't on top of each other and type a positive distance.`,
 
@@ -222,8 +333,6 @@ const DESCRIPTIONS: Record<string, MessageDescriptor> = {
     msg`That would nest components deeper than Hew supports. Flatten one of the levels — explode an instance, or make it unique — before placing this one.`,
   ComponentExpansionExceeded:
     msg`That would multiply past a million rendered component parts. Reduce how many copies the nested components repeat — explode or thin out a level — and try again.`,
-  CannotExplodeReflected:
-    msg`A mirrored instance can't be exploded — baking the mirror would turn the solid inside out. Use Make Unique instead.`,
   CannotExplodeNonUniformScale:
     msg`This instance has an unfinished sketch inside it, and its scale isn't even across all three axes, so the sketch's circles and arcs can't be baked exactly. Even out the instance's scale first, or finish (extrude) the sketch before exploding.`,
   DuplicateMember: msg`The same object is in the selection twice. Reselect and try again.`,
@@ -231,10 +340,31 @@ const DESCRIPTIONS: Record<string, MessageDescriptor> = {
     msg`Only siblings can be grouped — everything selected must be top-level, or all inside the same group. Move them to one level first.`,
   GroupCycle:
     msg`A group can't be moved into itself or into one of its own members. Pick a different group, or move it out to the top level.`,
+  TooManyOccurrences: msg`This model has more placed parts than Hew can list at once.`,
+  InvalidFrame:
+    msg`That frame is not a valid right-handed set of axes. Give three unit-length, mutually perpendicular directions.`,
+  RebaseDuringSession: msg`Finish editing the component before changing its axes.`,
+  NotPlaced: msg`That part is no longer in the model. Pick it again.`,
+  NoPartFrame: msg`That part has no faces to measure.`,
+  NoGeometry: msg`There is nothing in that selection to measure.`,
+  BooleanNeedsTwo: msg`Select at least two objects to combine.`,
   GroupedOperand:
     msg`This operation can't target an object inside a group. Ungroup it, or leave the group context, first.`,
   BooleanOperandHasInstance:
     msg`Combining can't consume a component instance — its geometry is shared with every copy. Explode the instance (or Make Unique, then Explode) first.`,
+  AmbiguousHost:
+    msg`This copy is made of more than one part, so there's no single part to cut. Pick the part you want to cut, then try again.`,
+  NotWrappable:
+    msg`Only an object or a group can start a set of linked copies. This is already a component, so copy it as it is.`,
+  NotLinkable: msg`A component can't be turned back into linked copies. Copy one of its parts to start a new set.`,
+  NotLinked: msg`This is already a component, not a set of linked copies, so there's nothing to change.`,
+  NotIdentical: msg`These aren't the same shape.`,
+  LockedNode: msg`Locked. Unlock it to change it.`,
+  // The indirect lock: the shape being edited is also used inside a locked
+  // group or component, so editing it would change that locked thing. Not
+  // a kernel variant — the wasm boundary's code for `LockedNode` with
+  // `via_shared_shape` (the API's `locked_node` with that detail flag).
+  LockedNodeViaSharedShape: msg`This shape is also used inside a locked group. Make this copy unique to change it.`,
   BooleanOperandNotSolid:
     msg`Something in that selection isn't solid, so it can't be combined. To make it solid, select it and choose Object ▸ Make Solid…`,
   BooleanOperandEmpty:
@@ -251,7 +381,8 @@ const DESCRIPTIONS: Record<string, MessageDescriptor> = {
   // ------------------------------------------------ Model Health repairs
   ObjectIsSolid: msg`This is already solid, so there's nothing to close. Use Push/Pull to change its shape.`,
   UnknownRim: msg`That opening is already closed. Check the list again for what is left.`,
-  RimNotPlanar: msg`This opening isn't flat, so one face can't close it. Draw faces across it by hand.`,
+  RimNotPlanar:
+    msg`This opening isn't flat, so one face can't close it. Mend in Model Health can fill small ones; otherwise draw faces across it by hand.`,
   RimSelfIntersecting:
     msg`The edge of this opening crosses itself, so one face can't close it. Draw faces across it by hand.`,
   CapWouldBeCoplanar:
@@ -268,17 +399,19 @@ const DESCRIPTIONS: Record<string, MessageDescriptor> = {
   ThicknessTooSmall: msg`That thickness is too small. Enter at least 0.001 mm.`,
   UnjoinedSeam:
     msg`Two faces in this panel meet without sharing an edge, so a thickness would leave a crack inside. Draw a line where they meet, then try again.`,
+  RejoinNotPossible:
+    msg`These pieces can't be joined into one solid. An opening may keep the result open, there may be only one piece, the pieces may sit in different groups, they may not fit together into one solid, or they may be in a group inside a component, which Hew can't rejoin yet. Use Rejoin to close each piece instead.`,
 
   // ---------------------------------------------------------- explode session
   ExplodeSessionOpen:
     msg`This component is already open for editing further out. Step back out to it (Escape) instead of opening it again — and close the editor before saving.`,
   ExplodeSessionNotOpen: msg`No component is currently open for editing.`,
   ExplodeSessionPoseUnsupported:
-    msg`This instance's pose is scaled unevenly or mirrored, so it can't be opened for direct editing. Even out its scale and unmirror it first.`,
+    msg`This instance is scaled unevenly, so it can't be opened for direct editing. Even out its scale first.`,
   ExplodeSessionScope:
     msg`That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again.`,
   ExplodeSessionGroupedInstance:
-    msg`A placement of this component sits inside a group, so it opens in the in-context editing mode instead.`,
+    msg`This instance sits inside a group, so it opens in the in-context editing mode instead.`,
   ExplodeSessionNestedGroup:
     msg`This group is nested inside another one, so it can't be opened for editing directly. Enter its enclosing group first, then drill down to this one.`,
   // App-side refusal (not a kernel code, like InvalidSelection above): a
@@ -288,7 +421,12 @@ const DESCRIPTIONS: Record<string, MessageDescriptor> = {
   // asking the kernel, since a pose/grouped-instance refusal on the SAME
   // instance would otherwise fall back to K1 silently.
   NestedComponentInContext:
-    msg`This nested component can't open for editing here — its placement is mirrored, unevenly scaled, or inside a group. Explode the instance, or make it unique, to edit its parts.`,
+    msg`This nested component can't open for editing here — its placement is unevenly scaled or inside a group. Explode the instance, or make it unique, to edit its parts.`,
+
+  // App-side refusal (not a kernel code): the window declined an entry
+  // `hew.view.enter` had the kernel accept, for a reason it has no name of
+  // its own for (the kernel's own code rides in the refusal's detail).
+  EnterRefused: msg`Hew couldn't open that for editing.`,
 
   // ---------------------------------------------------------- history
   NothingToUndo: msg`Nothing to undo.`,
@@ -314,6 +452,13 @@ const DESCRIPTIONS: Record<string, MessageDescriptor> = {
     msg`A connected tool changed which group or component was open for editing without putting it back, so its whole batch was discarded and the model was left unchanged.`,
   TransactionGestureUnbalanced:
     msg`A connected tool left a drawing step unfinished at the end of its batch, so the whole batch was discarded and the model was left unchanged.`,
+  // A plugin command held the document and its compound bookkeeping did not
+  // line up (docs/agents/PLUGINS.md "Compounds"): a host bug, never the
+  // person's doing.
+  CompoundTokenMismatch: msg`Hew lost track of a plugin's work in progress. Nothing was changed; if this keeps happening, use Report Bug.`,
+  // Not a kernel variant: the wasm boundary's busy guard, while a plugin
+  // command holds the document.
+  DocumentBusy: msg`A plugin is still working on this model. Wait for it to finish, or cancel it from the notice at the top of the window.`,
 
   // ------------------------------------------- attribute dictionaries
   // Reachable only through the API surface (the UI has no attribute
@@ -324,6 +469,11 @@ const DESCRIPTIONS: Record<string, MessageDescriptor> = {
   NonFiniteAttrValue: msg`Attribute numbers can't be NaN or infinity. Use a finite number and try again.`,
   AttrValueTooDeep: msg`This attribute value is nested too deeply to store. Flatten it and try again.`,
   UnknownAttr: msg`That attribute doesn't exist on this item, so there was nothing to remove.`,
+
+  // ------------------------------------------------------ geo-location
+  // Reachable only through the API surface (hew.geo.set).
+  InvalidGeoReference:
+    msg`That geo-location has a number that isn't finite or a unit size that isn't above zero, so it wasn't set. Fix the value and try again.`,
 
   // ------------------------------------------------------ file loading
   NotAContainer: msg`This file isn't a Hew document. Pick a .hew file saved by Hew.`,
@@ -385,10 +535,18 @@ const DESCRIPTIONS: Record<string, MessageDescriptor> = {
     msg`Hew's own request to the model kernel carried a malformed selection list. If this keeps happening, use Report Bug.`,
   BadLibraryMeta:
     msg`Hew's own request to the model kernel carried malformed library-item metadata. If this keeps happening, use Report Bug.`,
+  BadLibrary:
+    msg`Hew's own request to the model kernel carried a malformed Library listing. If this keeps happening, use Report Bug.`,
+  UnknownLibraryItem:
+    msg`That part's Library item is no longer in the Library, so it can't be updated.`,
+  LoadFailed:
+    msg`The Library item couldn't be read, so the part wasn't updated. The Library file may be damaged.`,
   BadSelection:
     msg`Hew's own request to the model kernel carried a malformed selection. If this keeps happening, use Report Bug.`,
   BadCount:
     msg`Hew's own request to the model kernel asked for an invalid copy count. If this keeps happening, use Report Bug.`,
+  BadFlip:
+    msg`Hew's own request to the model kernel carried a malformed flip plane or copy choice. If this keeps happening, use Report Bug.`,
   BadAnchor:
     msg`Hew's own request to the model kernel carried a malformed snap point. If this keeps happening, use Report Bug.`,
   BadAxis:
@@ -402,9 +560,32 @@ const DESCRIPTIONS: Record<string, MessageDescriptor> = {
   ImageTooLarge: msg`That picture is larger than 64 megapixels. Save a smaller copy of it and place that instead.`,
   ImageTooSmall: msg`That picture would be too small to place: each side needs to be at least 0.001 mm. Drag it out larger or type a bigger width.`,
   ImageTooBig: msg`That picture would be too big to place: each side can be at most 1,000,000 m. Drag it out smaller or type a smaller width.`,
+  GRANT: msg`A plugin could not connect because its permissions were unreadable. Reinstall the plugin, or use Report Bug if this keeps happening.`,
+  REGISTER: msg`A plugin's commands could not be added: its manifest declares a command Hew cannot accept. Update or reinstall the plugin.`,
+  FORWARD: msg`A plugin command's answer could not be delivered. If this keeps happening, use Report Bug.`,
+  SELECTION: msg`The selection could not be shared with a connected program. If this keeps happening, use Report Bug.`,
+  ISOLATION: msg`What is isolated could not be shared with a connected program. If this keeps happening, use Report Bug.`,
+  CONTEXT: msg`What is open for editing could not be shared with a connected program. If this keeps happening, use Report Bug.`,
   BadRenderMode:
     msg`The view mode must be shaded, xray or wireframe. If this keeps happening, use Report Bug.`,
   REPLAY: msg`This recorded session couldn't be replayed. If this keeps happening, use Report Bug.`,
+  // ---------------------------------- true-curves features (one file each)
+  ...inLegacyOrder(CURVE_FEATURE_ERRORS),
+
+  // ------------------------------------------------------------- mend
+  NothingToMend: msg`Nothing to mend here: no nearby points, touching parts or small gaps.`,
+  WeldDistanceOutOfRange: msg`That distance for merging points is out of range. Try a distance nearer the one first shown.`,
+  WeldFoldsFaces: msg`Merging those points would fold faces onto each other. Turn on Separate parts that touch at a point too.`,
+  WeldCollapsesObject: msg`Merging points that far apart would leave nothing. Try a smaller distance.`,
+  FillCrossesFaces: msg`Filling this gap would cut through other faces, so it was left open.`,
+  FillRimTooSmall: msg`This gap is too small or thin to fill.`,
+  StillOpen: msg`Mend would leave this object open, so nothing was changed.`,
+  FoldRemovalPinches: msg`Removing those overlaps would leave parts touching at one point. Turn on Separate parts that touch at a point too.`,
+  WeldFlipsFaces: msg`Merging points that far apart would turn a thin face over onto its neighbor. Try a smaller distance.`,
+  MendOpensObject: msg`Mend would leave this object more open than it is now, so nothing was changed. Try a smaller distance.`,
+  WeldFlattensObject: msg`Merging points that far apart would press the sides of a thin part together. Try a smaller distance.`,
+  BadMendPlan: msg`Couldn't read those Mend settings.`,
+  BadHistoryBudget: msg`The undo memory limit has to be a size of zero or more.`,
 }
 
 /**
@@ -424,6 +605,11 @@ export function parseKernelErrorCode(err: unknown): string | null {
  * test — still gets a plain sentence, with the code kept for Report Bug.
  */
 export function kernelErrorMessage(code: string, rawMsg: string): string {
+  // Without the Remove degenerate faces preview (the Preview wall) the
+  // boolean refusal cannot point at it.
+  if (code === 'DegenerateInput' && !behaviorEnabled('health-remove-degenerate')) {
+    return i18n._(DEGENERATE_INPUT_PLAIN)
+  }
   const described = DESCRIPTIONS[code]
   if (described !== undefined) return i18n._(described)
   return t`Hew couldn't complete that (${code}: ${rawMsg}). If this keeps happening, use Report Bug.`
@@ -476,7 +662,9 @@ export function describedErrorCodes(): string[] {
 const ERROR_LEVEL_CODES: ReadonlySet<string> = new Set([
   'WouldVanish', 'NonManifoldResult', 'ObjectNotSolid', 'DegenerateGeometry',
   'OperandNotSolid', 'DegenerateContact', 'EmptyResult', 'SingularTransform',
+  'NothingRemoved', 'OperandFaceNotFlat', 'ArrangementFailed', 'ResultTooThin',
   'BooleanOperandHasInstance', 'BooleanOperandNotSolid', 'BooleanOperandEmpty',
+  'NonPlanarInput', 'DegenerateInput',
   // A refusal to rebuild geometry the user asked to rebuild. Its sibling
   // segment-count codes stay at warn: those are an out-of-range number, not a
   // refusal of the shape.

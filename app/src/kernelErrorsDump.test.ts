@@ -27,6 +27,7 @@ import { fileURLToPath } from 'node:url'
 import { spawnSync } from 'node:child_process'
 import { describe, it, expect } from 'vitest'
 import { describedErrorCodes, kernelErrorMessage } from './kernelErrors'
+import { requiresPreview } from './test/requiresPreview'
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
 const GEN_PATH = resolve(REPO_ROOT, 'crates/api/src/refusal_copy.gen.rs')
@@ -91,7 +92,8 @@ function rustfmt(source: string): string {
 }
 
 describe('refusal_copy.gen.rs', () => {
-  it('stays in sync with app/src/kernelErrors.ts', () => {
+  it('stays in sync with app/src/kernelErrors.ts', (ctx) => {
+    requiresPreview(ctx, 'remove-degenerate-faces')
     const fresh = rustfmt(generate())
     if (process.env.REGENERATE_REFUSAL_COPY) {
       writeFileSync(GEN_PATH, fresh)
@@ -109,7 +111,9 @@ describe('refusal_copy.gen.rs', () => {
       committed,
       `crates/api/src/refusal_copy.gen.rs is out of date with app/src/kernelErrors.ts — regenerate with: ${REGEN_COMMAND}`,
     ).toBe(fresh)
-  })
+    // rustfmt shares the runner with the whole parallel suite, so a loaded CI
+    // box can take well past vitest's 5 s default.
+  }, 60_000)
 
   it('covers a large, plausible-sized inventory (guards against the scrape silently regressing)', () => {
     // Mirrors kernelErrors.test.ts's own floor on DERIVED_KERNEL_ERROR_CODES:

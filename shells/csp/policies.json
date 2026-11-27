@@ -1,0 +1,13 @@
+{
+  "web": {
+    "production": "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' blob: https:; worker-src 'self' blob:; manifest-src 'self'; media-src 'self' blob:; object-src 'none'; base-uri 'self'",
+    "preview": "default-src 'self'; script-src 'self' 'wasm-unsafe-eval' 'sha256-01VLapYTaY8NvdSpPUYwfMX5qN5kCuRh/4+zFeJB5l0='; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' blob: https:; worker-src 'self' blob:; manifest-src 'self'; media-src 'self' blob:; object-src 'none'; base-uri 'self'",
+    "strict": "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' blob:; worker-src 'self' blob:; manifest-src 'self'; media-src 'self' blob:; object-src 'none'; base-uri 'self'",
+    "probe": "default-src 'self'; script-src 'self' 'wasm-unsafe-eval' blob: 'sha256-Egx2DNg4hmltoX81gGTsHxrST87w3aygelblMpjL62Q='; style-src 'self' 'unsafe-inline' blob:; img-src 'self' data: blob:; font-src 'self' data: blob:; connect-src 'self' blob: https://plugins.hew3d.org; worker-src 'self' blob:; manifest-src 'self'; media-src 'self' blob:; object-src 'none'; base-uri 'self'"
+  },
+  "desktop": {
+    "production": "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost blob:; worker-src 'self' blob:; media-src 'self' blob:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'",
+    "preview": "default-src 'self'; script-src 'self' 'wasm-unsafe-eval' 'sha256-01VLapYTaY8NvdSpPUYwfMX5qN5kCuRh/4+zFeJB5l0='; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost blob:; worker-src 'self' blob:; media-src 'self' blob:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'",
+    "probe": "default-src 'self'; script-src 'self' 'wasm-unsafe-eval' blob: 'sha256-Egx2DNg4hmltoX81gGTsHxrST87w3aygelblMpjL62Q='; style-src 'self' 'unsafe-inline' blob:; img-src 'self' data: blob:; font-src 'self' data: blob:; connect-src 'self' ipc: http://ipc.localhost blob: https://plugins.hew3d.org; worker-src 'self' blob:; media-src 'self' blob:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"
+  }
+}

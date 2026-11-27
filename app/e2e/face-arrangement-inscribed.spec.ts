@@ -160,10 +160,10 @@ test('a circle tangent to three sides of a rectangle on a wall, rim on the left 
 
   // One undo entry: Ctrl+Z restores the plain rectangle, redo the arrangement.
   await page.keyboard.press('Escape')
-  await page.keyboard.press('Control+z')
+  await page.keyboard.press('ControlOrMeta+z')
   await page.waitForTimeout(250)
   await expectPlainRectangle(page, object)
-  await page.keyboard.press('Control+Shift+Z')
+  await page.keyboard.press('ControlOrMeta+Shift+Z')
   await page.waitForTimeout(250)
   await expectArranged(page, object)
 })
@@ -184,13 +184,13 @@ test('a typed 1.9mm radius after a shorter rim click makes the same four faces',
   await page.locator('canvas').first().screenshot({ path: testInfo.outputPath('3-typed.png') })
 
   await page.keyboard.press('Escape')
-  await page.keyboard.press('Control+z')
+  await page.keyboard.press('ControlOrMeta+z')
   await page.waitForTimeout(250)
   list = await imprints(page, object)
   // The retype replaced the small circle in place, so one undo goes back to
   // the plain rectangle.
   expect(list.map((f) => f.kind)).toEqual(['sub_face'])
-  await page.keyboard.press('Control+Shift+Z')
+  await page.keyboard.press('ControlOrMeta+Shift+Z')
   await page.waitForTimeout(250)
   await expectArranged(page, object)
 })

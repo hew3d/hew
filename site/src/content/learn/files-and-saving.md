@@ -21,13 +21,15 @@ Before anything would discard unsaved work — closing the window or tab, openin
 
 ## SketchUp files
 
-A SketchUp `.skp` file opens as a document, not only as an import. File ▸ Open takes a `.skp` (the 2026 format that current SketchUp saves, or the 2017 format) the same way it takes a `.hew`: the title shows `Model.skp`, the document starts clean, and Save writes the file back in the format it was opened in. Open Recent, drag-and-drop, and the desktop app's Open With menu all work the same way. File ▸ Import… is separate and unchanged: it adds a SketchUp file's contents to the current document and does not bind the document to that file.
+A SketchUp `.skp` file opens as a document, not only as an import. File ▸ Open takes a `.skp` of any SketchUp version, from SketchUp 3 through 2027 (the format that SketchUp 2021 and later save, or a release from 3 to 8 or 2013 to 2020) the same way it takes a `.hew`: the title shows `Model.skp`, the document starts clean, and Save writes the file back in the format it was opened in. Open Recent, drag-and-drop, and the desktop app's Open With menu all work the same way. File ▸ Import… is separate and unchanged: it adds a SketchUp file's contents to the current document and does not bind the document to that file.
 
-**Save As…** offers three formats:
+**Save As…** offers sixteen formats:
 
 - **Hew document (.hew)**, the native format.
-- **SketchUp (.skp)**, the 2026 format.
-- **SketchUp 2017 (.skp)**, which opens in SketchUp Make 2017 and later.
+- **SketchUp 2021 and later (.skp)**, the format SketchUp 2021 through 2027 save.
+- **SketchUp 2020 (.skp)** down to **SketchUp 2013 (.skp)**, and **SketchUp 8 (.skp)** down to **SketchUp 3 (.skp)**, each the format of that release, which opens in it and every later release.
+
+A file opened from a stream release saves back in its own release. A file from SketchUp 2021 to 2027 shares one container across those releases: it opens, and saves back in that container, and an option writes it so that every SketchUp since 2021 can open it. Between them, Open and Save As cover every SketchUp version from 3 through 2027.
 
 The list starts on the document's current format (Hew for a new document). Changing it changes the name's extension to match, so `Model.skp` becomes `Model.hew`, never `Model.skp.hew`.
 
@@ -66,9 +68,11 @@ Recovery snapshots are an emergency net, not a save system. Save normally, and t
 
 ## Undo history
 
-Undo (`⌘Z` / `Ctrl+Z`) and redo (`⇧⌘Z` / `Ctrl+Shift+Z`) span the whole document — every modeling operation, transform, paint, rename, and delete. History lives for the session; it isn't stored in the file. The Edit menu names the specific step you're about to undo or redo ("Undo Push/Pull," "Redo Move"), not just the bare verb.
+Undo (`⌘Z` / `Ctrl+Z`) and redo (`⇧⌘Z` / `Ctrl+Shift+Z` or `Ctrl+Y`) span the whole document — every modeling operation, transform, paint, rename, and delete. History lives for the session; it isn't stored in the file. The Edit menu names the specific step you're about to undo or redo ("Undo Push/Pull," "Redo Move"), not just the bare verb.
 
 Your view is the one exception to both rules above. It's saved with the file, so reopening a model brings back the last view you had it framed in, but changing it is never an undo step — panning, orbiting, or walking around isn't something you'd want an accidental `Ctrl+Z` to reverse.
+
+On a very large model, such as a dense scan, each step can hold a lot of memory. To keep the app responsive, Hew sets a memory budget for undo and lets go of the oldest steps once the history passes it. When that happens the status bar says "Undo history trimmed to save memory: 12 steps kept" (with the real number), and hovering it explains that the most recent steps can still be undone. Smaller models never reach the budget, so their history is not cut. The note is only a heads-up; nothing in your model changes.
 
 Opening and closing a group or component for editing is on that same undo list — `Ctrl+Z` right after double-clicking in really does back out of the edit — but it isn't a *change*: it never marks the document dirty, and it's left off the Changes panel below, since nothing about the model actually moved.
 

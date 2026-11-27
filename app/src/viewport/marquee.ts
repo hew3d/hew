@@ -22,8 +22,12 @@ export interface MarqueeRect {
   maxY: number
 }
 
-/** Window = fully contained (L→R drag); crossing = touched (R→L drag). */
+/** Window = fully contained or mostly covered (L→R drag); crossing = touched (R→L drag). */
 export type MarqueeMode = 'window' | 'crossing'
+
+export function emptyScreenBounds(): ScreenBounds {
+  return { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity }
+}
 
 export function normalizedRect(x0: number, y0: number, x1: number, y1: number): MarqueeRect {
   return {
@@ -38,6 +42,33 @@ export function normalizedRect(x0: number, y0: number, x1: number, y1: number): 
 
 export function pointInRect(x: number, y: number, r: MarqueeRect): boolean {
   return x >= r.minX && x <= r.maxX && y >= r.minY && y <= r.maxY
+}
+
+/** Screen-space bounding box of an object's projected vertices. */
+export interface ScreenBounds {
+  minX: number
+  minY: number
+  maxX: number
+  maxY: number
+}
+
+/**
+ * How much of an object a window selection must cover to pick it without
+ * enclosing it completely: the share of the object's on-screen bounding box
+ * that lies inside the drag rectangle. A window that swallows most of an
+ * object is clearly aimed at it; a stray corner overlap is not.
+ */
+export const WINDOW_COVERAGE_MIN = 0.8
+
+/** Fraction (0–1) of `b`'s area inside `r`; 0 for a degenerate (edge-on) box. */
+export function boundsCoverage(b: ScreenBounds, r: MarqueeRect): number {
+  const w = b.maxX - b.minX
+  const h = b.maxY - b.minY
+  if (!(w > 0) || !(h > 0)) return 0
+  const iw = Math.min(b.maxX, r.maxX) - Math.max(b.minX, r.minX)
+  const ih = Math.min(b.maxY, r.maxY) - Math.max(b.minY, r.minY)
+  if (iw <= 0 || ih <= 0) return 0
+  return (iw * ih) / (w * h)
 }
 
 /** Proper/improper 2D segment intersection via signed-area orientation. */
@@ -198,6 +229,105 @@ export class MarqueeProjector {
       if (!this.inFront(vz)) return false
       this.projectInto(0, vx, vy, vz)
       if (!pointInRect(this.px[0], this.px[1], rect)) return false
+    }
+    return true
+  }
+
+  /**
+   * Grow `acc` (start it at `emptyScreenBounds()`) by every vertex of one
+   * mesh. False when any vertex is behind the near plane — such an object
+   * has no meaningful screen extent, so it only ever matches by strict
+   * containment, never by coverage.
+   */
+  extendScreenBounds(
+    positions: ArrayLike<number>, matrixWorld: THREE.Matrix4, acc: ScreenBounds,
+  ): boolean {
+    const e = this.mv.multiplyMatrices(this.view, matrixWorld).elements
+    for (let i = 0; i < positions.length; i += 3) {
+      const x = positions[i], y = positions[i + 1], z = positions[i + 2]
+      const vx = e[0] * x + e[4] * y + e[8] * z + e[12]
+      const vy = e[1] * x + e[5] * y + e[9] * z + e[13]
+      const vz = e[2] * x + e[6] * y + e[10] * z + e[14]
+      if (!this.inFront(vz)) return false
+      this.projectInto(0, vx, vy, vz)
+      const sx = this.px[0], sy = this.px[1]
+      if (sx < acc.minX) acc.minX = sx
+      if (sx > acc.maxX) acc.maxX = sx
+      if (sy < acc.minY) acc.minY = sy
+      if (sy > acc.maxY) acc.maxY = sy
+    }
+    return true
+  }
+
+  /**
+   * Whether every vertex projects onto one screen line (or point) within
+   * `tolPx` — a single line, collinear lines, or lines seen edge-on: geometry
+   * with no screen area, whatever its axis-aligned bounding rect looks like
+   * (a diagonal segment has a large rect and zero area). False when empty or
+   * any vertex is behind the near plane (such geometry has no screen extent
+   * and the callers already treat it strictly).
+   */
+  isScreenCollinear(
+    positions: ArrayLike<number>, matrixWorld: THREE.Matrix4, tolPx = 0.5,
+  ): boolean {
+    if (positions.length === 0) return false
+    const e = this.mv.multiplyMatrices(this.view, matrixWorld).elements
+    const n = positions.length / 3
+    const sx = new Float64Array(n)
+    const sy = new Float64Array(n)
+    for (let k = 0; k < n; k++) {
+      const x = positions[3 * k], y = positions[3 * k + 1], z = positions[3 * k + 2]
+      const vx = e[0] * x + e[4] * y + e[8] * z + e[12]
+      const vy = e[1] * x + e[5] * y + e[9] * z + e[13]
+      const vz = e[2] * x + e[6] * y + e[10] * z + e[14]
+      if (!this.inFront(vz)) return false
+      this.projectInto(0, vx, vy, vz)
+      sx[k] = this.px[0]
+      sy[k] = this.px[1]
+    }
+    // Baseline: from the first point to the one farthest from it.
+    let far = 0
+    let best = -1
+    for (let k = 1; k < n; k++) {
+      const d = (sx[k] - sx[0]) ** 2 + (sy[k] - sy[0]) ** 2
+      if (d > best) { best = d; far = k }
+    }
+    if (far === 0 || best <= tolPx * tolPx) return true
+    const len = Math.sqrt(best)
+    const dx = (sx[far] - sx[0]) / len
+    const dy = (sy[far] - sy[0]) / len
+    for (let k = 0; k < n; k++) {
+      if (Math.abs((sx[k] - sx[0]) * dy - (sy[k] - sy[0]) * dx) > tolPx) return false
+    }
+    return true
+  }
+
+  /**
+   * Screen bounds of a local-space box's eight corners, written to `out`.
+   * Every vertex of the mesh the box encloses projects inside these bounds
+   * (perspective maps a convex hull's corners to its extreme screen points
+   * while all of it is in front of the camera), so they cull whole meshes
+   * without a vertex scan. False when any corner is behind the near plane;
+   * the caller then falls back to the exact per-vertex tests.
+   */
+  boxScreenBounds(box: THREE.Box3, matrixWorld: THREE.Matrix4, out: ScreenBounds): boolean {
+    const e = this.mv.multiplyMatrices(this.view, matrixWorld).elements
+    out.minX = out.minY = Infinity
+    out.maxX = out.maxY = -Infinity
+    for (let c = 0; c < 8; c++) {
+      const x = c & 1 ? box.max.x : box.min.x
+      const y = c & 2 ? box.max.y : box.min.y
+      const z = c & 4 ? box.max.z : box.min.z
+      const vx = e[0] * x + e[4] * y + e[8] * z + e[12]
+      const vy = e[1] * x + e[5] * y + e[9] * z + e[13]
+      const vz = e[2] * x + e[6] * y + e[10] * z + e[14]
+      if (!this.inFront(vz)) return false
+      this.projectInto(0, vx, vy, vz)
+      const sx = this.px[0], sy = this.px[1]
+      if (sx < out.minX) out.minX = sx
+      if (sx > out.maxX) out.maxX = sx
+      if (sy < out.minY) out.minY = sy
+      if (sy > out.maxY) out.maxY = sy
     }
     return true
   }

@@ -23,6 +23,10 @@ The panel contains:
 - **Add color** and **Add texture** are collapsed by default — click either header to expand it. In Add color, name the material and click the swatch button to open the color picker; **+ Add color** stays disabled until you've actually picked a color.
 - **Add texture**: choose a PNG or JPEG image and give it a real-world size (width × height in meters). The image tiles across faces at that physical scale.
 
+## Metallic and roughness
+
+Select a swatch and drag **Metallic** or **Roughness** to give the material a physically based look: metal and a polished or matte surface, each from 0% to 100%. A plain material is not metallic and fully rough. Hew shows an approximation in the viewport (a Phong-shaded stand-in, not a full physically based render). A SketchUp 2021-and-later file's metallic, roughness, normal, and occlusion maps open and draw, and they are written back when you save to that format. Each change is one undo step.
+
 ## Renaming and deleting a material
 
 Double-click a swatch's name (or click the pencil next to it) to rename it in place — type the new name and press `Enter`, or `Esc` to back out.
@@ -85,6 +89,16 @@ Positioning works inside components too, but you have to be editing the componen
 Every object has an optional **base material** — the color its faces show when they haven't been painted individually. Individually painted faces override the base. The base is why painted models stay painted as you keep working: when an operation creates new faces (pulling a boss out of a painted box, slicing, booleans), the new faces inherit the object's base material instead of reverting to gray.
 
 Set the base material with `⌘`/`Ctrl`-click in the Paint tool.
+
+## Painting a component
+
+Click a component with the Paint tool and you paint **that copy**, not the component's faces. The copy you clicked takes the color on every face nobody has painted, and the other copies stay as they were, so the same table can stand in the room in oak and in walnut. `⌘`/`Ctrl`-click does the same thing. While the pointer is over a component, its outline lights up to show which copy a click will paint.
+
+Faces that were painted one by one, and objects with a base material, keep their own color in every copy. To paint those, edit the component: double-click into it, then click a face. That face changes in every copy, including the ones you colored from outside, because a face's own paint always wins.
+
+A component inside another component follows the closest copy that has a color. Paint the inner one and it keeps its color whatever the outer one is painted.
+
+`Alt`-click on a painted copy picks up the copy's color. Exploding a painted copy keeps its look: the pieces it turns into take the copy's color wherever they had none. A material used only by a painted copy counts as in use, so **Purge Unused** leaves it alone.
 
 ## Materials survive modeling
 

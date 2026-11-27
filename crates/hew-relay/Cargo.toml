@@ -21,7 +21,7 @@ path = "src/main.rs"
 # gives both directly (docs/design/self-hosting-relay.md §5).
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time", "signal", "sync"] }
-tower-http = { version = "0.6", features = ["timeout"] }
+tower-http = { version = "0.7", features = ["timeout"] }
 http-body-util = "0.1"
 # The accept loop is hand-rolled over hyper-util (rather than `axum::serve`)
 # so a header-read timeout can be armed on every connection — axum::serve
@@ -35,7 +35,7 @@ clap = { version = "4", features = ["derive", "env"] }
 # Constant-time compare for the optional upload key.
 subtle = "2"
 # 128 random bits per token — the same grammar as the Worker's.
-getrandom = "0.3"
+getrandom = "0.4"
 serde_json = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }

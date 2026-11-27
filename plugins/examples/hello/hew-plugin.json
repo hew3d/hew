@@ -1,0 +1,35 @@
+{
+  "manifest": 1,
+  "id": "com.example.hello",
+  "name": "Hello",
+  "version": "0.1.0",
+  "description": "Says hello, counts the objects in the model, and remembers how many times it was asked.",
+  "api": 1,
+  "main": "dist/background.js",
+  "permissions": ["model.read"],
+  "activation": ["on_command"],
+  "contributes": {
+    "commands": [
+      {
+        "id": "greet",
+        "class": "read_only",
+        "summary": "Says hello and counts the objects in the model.",
+        "params": {
+          "type": "object",
+          "properties": { "name": { "type": "string", "maxLength": 100 } },
+          "additionalProperties": false
+        },
+        "result": {
+          "type": "object",
+          "properties": {
+            "greeting": { "type": "string" },
+            "objects": { "type": "integer" },
+            "times": { "type": "integer" }
+          },
+          "required": ["greeting", "objects", "times"],
+          "additionalProperties": false
+        }
+      }
+    ]
+  }
+}

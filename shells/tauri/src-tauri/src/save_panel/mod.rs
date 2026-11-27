@@ -41,7 +41,16 @@ pub fn run(window: &tauri::WebviewWindow, request: PanelRequest) -> PanelAnswer 
     let mut answer = platform::run(window, request)?;
     if let Some(r) = answer.as_mut() {
         if let Some((_, ext)) = extensions.iter().find(|(id, _)| id == &r.format) {
+            let typed = r.path.clone();
             r.path = model::with_extension(&r.path, ext);
+            // The platform panel asked about replacing the name the user
+            // typed, not the one the extension rule made of it (GTK re-asks
+            // itself; macOS and Windows do not): never overwrite unasked.
+            if let Some(refusal) =
+                model::unasked_overwrite(&typed, &r.path, |p| std::path::Path::new(p).exists())
+            {
+                return Err(refusal);
+            }
         }
     }
     Ok(answer)

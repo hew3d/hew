@@ -92,6 +92,7 @@ fn replay_cycles_do_not_accumulate_noise() {
                 loop_path,
                 restore: None,
                 curves: Vec::new(),
+                edge_attrs: Vec::new(),
             },
         );
     }

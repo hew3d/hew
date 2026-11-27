@@ -37,11 +37,19 @@ import dragPanSvg from '@material-symbols/svg-400/outlined/drag_pan.svg?raw'
 import verticalSplitSvg from '@material-symbols/svg-400/outlined/vertical_split.svg?raw'
 import personPinSvg from '@material-symbols/svg-400/outlined/person_pin.svg?raw'
 import threeSixtySvg from '@material-symbols/svg-400/outlined/360.svg?raw'
+import layersSvg from '@material-symbols/svg-400/outlined/layers.svg?raw'
+import airwaveSvg from '@material-symbols/svg-400/outlined/airwave.svg?raw'
 import directionsWalkSvg from '@material-symbols/svg-400/outlined/directions_walk.svg?raw'
 import controlCameraSvg from '@material-symbols/svg-400/outlined/control_camera.svg?raw'
 import lineAxisSvg from '@material-symbols/svg-400/outlined/line_axis.svg?raw'
+import timelineSvg from '@material-symbols/svg-400/outlined/timeline.svg?raw'
+import selectAllSvg from '@material-symbols/svg-400/outlined/select_all.svg?raw'
+import textureSvg from '@material-symbols/svg-400/outlined/texture.svg?raw'
+import inkEraserSvg from '@material-symbols/svg-400/outlined/ink_eraser.svg?raw'
 import squareFootSvg from '@material-symbols/svg-400/outlined/square_foot.svg?raw'
 import textFieldsSvg from '@material-symbols/svg-400/outlined/text_fields.svg?raw'
+import roundedCornerSvg from '@material-symbols/svg-400/outlined/rounded_corner.svg?raw'
+import flipSvg from '@material-symbols/svg-400/outlined/flip.svg?raw'
 
 /** Keep in sync with the `ToolName` union in App.tsx (not imported here to
  * avoid a UI-module -> App.tsx dependency edge; the key set is asserted by
@@ -55,12 +63,21 @@ export type ToolName =
   | 'Line'
   | 'Push/Pull'
   | 'Follow Me'
+  | 'Revolve'
+  | 'Loft'
+  | 'Deform'
   | 'Offset'
+  | 'Fillet'
+  | 'Array along Path'
+  | 'Shell'
+  | 'Project'
+  | 'Eraser'
   | 'Paint'
   | 'Position Texture'
   | 'Move'
   | 'Rotate'
   | 'Scale'
+  | 'Flip'
   | 'Tape Measure'
   | 'Dimension'
   | 'Protractor'
@@ -87,12 +104,21 @@ export const TOOL_ICON_SVG: Record<ToolName, string> = {
   'Line': polylineSvg,
   'Push/Pull': unfoldMoreSvg, // matches the up/down-arrow cursor stop-gap
   'Follow Me': conversionPathSvg,
+  'Loft': layersSvg, // shapes stacked and skinned
+  'Revolve': threeSixtySvg, // a profile turned a full circle
+  'Deform': airwaveSvg, // a wave: twist, bend, taper
   'Offset': allOutSvg, // concentric outline pushed outward
+  'Fillet': roundedCornerSvg, // a corner with a rounded inside curve
+  'Array along Path': timelineSvg,
+  'Shell': selectAllSvg,
+  'Project': textureSvg,
+  'Eraser': inkEraserSvg,
   'Paint': formatPaintSvg,
   'Position Texture': controlCameraSvg,
   'Move': openWithSvg,
   'Rotate': rotateRightSvg,
   'Scale': aspectRatioSvg,
+  'Flip': flipSvg,
   'Tape Measure': straightenSvg,
   'Dimension': squareFootSvg,
   'Protractor': architectureSvg,
@@ -122,12 +148,21 @@ const CURSOR_HOTSPOT: Record<ToolName, { x: number; y: number }> = {
   'Line': { x: 0.1, y: 0.9 },
   'Push/Pull': { x: 0.5, y: 0.5 },
   'Follow Me': { x: 0.25, y: 0.75 },
+  'Revolve': { x: 0.5, y: 0.5 },
+  'Loft': { x: 0.5, y: 0.5 },
+  'Deform': { x: 0.5, y: 0.5 },
   'Offset': { x: 0.5, y: 0.5 },
+  'Fillet': { x: 0.5, y: 0.5 },
+  'Array along Path': { x: 0.1, y: 0.9 },
+  'Shell': { x: 0.1, y: 0.9 },
+  'Project': { x: 0.1, y: 0.9 },
+  'Eraser': { x: 0.2, y: 0.85 },
   'Paint': { x: 0.15, y: 0.9 },
   'Position Texture': { x: 0.5, y: 0.5 },
   'Move': { x: 0.5, y: 0.5 },
   'Rotate': { x: 0.5, y: 0.5 },
   'Scale': { x: 0.5, y: 0.5 },
+  'Flip': { x: 0.5, y: 0.5 },
   'Tape Measure': { x: 0.1, y: 0.9 },
   'Dimension': { x: 0.1, y: 0.9 },
   'Protractor': { x: 0.1, y: 0.9 },
@@ -173,7 +208,9 @@ function innerMarkup(svg: string): string {
  * the same hotspot as Paint's own cursor (a point-and-click tip, matching
  * the eyedropper's real "pick point").
  */
-export function cursorFor(toolName: string, copyBadge = false, eyedropper = false): string {
+export type CopyCursorBadge = boolean | '' | '+' | '+ independent' | '+ linked'
+
+export function cursorFor(toolName: string, copyBadge: CopyCursorBadge = false, eyedropper = false): string {
   const icon = eyedropper ? colorizeSvg : (TOOL_ICON_SVG[toolName as ToolName] ?? TOOL_ICON_SVG['Select'])
   const hotspot = eyedropper ? CURSOR_HOTSPOT['Paint'] : (CURSOR_HOTSPOT[toolName as ToolName] ?? CURSOR_HOTSPOT['Select'])
   const glyph = innerMarkup(icon)
@@ -187,12 +224,32 @@ export function cursorFor(toolName: string, copyBadge = false, eyedropper = fals
 
   // The badge is stroke-drawn (a plus is two strokes), so it carries its own
   // white halo underneath instead of the glyph's paint-order trick.
-  const badge = copyBadge
-    ? `<g stroke-linecap="round" fill="none">` +
-      `<path d="M26 3v8M21.5 8.5h9" stroke="#fff" stroke-width="5"/>` +
-      `<path d="M26 3v8M21.5 8.5h9" stroke="#111" stroke-width="2.5"/>` +
-      `</g>`
-    : ''
+  // `+` is a plain copy; the two spelled-out kinds add a small mark under
+  // the plus: two touching rings for linked, two separated dots for independent.
+  const plus =
+    `<g stroke-linecap="round" fill="none">` +
+    `<path d="M26 3v8M21.5 8.5h9" stroke="#fff" stroke-width="5"/>` +
+    `<path d="M26 3v8M21.5 8.5h9" stroke="#111" stroke-width="2.5"/>` +
+    `</g>`
+  const linkMark =
+    `<g fill="none" stroke-linecap="round">` +
+    `<path d="M22.5 18h7" stroke="#fff" stroke-width="5"/>` +
+    `<circle cx="23.5" cy="18" r="2.2" stroke="#111" stroke-width="1.6"/>` +
+    `<circle cx="28.5" cy="18" r="2.2" stroke="#111" stroke-width="1.6"/>` +
+    `</g>`
+  const apartMark =
+    `<g stroke-linecap="round">` +
+    `<circle cx="22.5" cy="18" r="2.2" fill="#111" stroke="#fff" stroke-width="1.5"/>` +
+    `<circle cx="29.5" cy="18" r="2.2" fill="#111" stroke="#fff" stroke-width="1.5"/>` +
+    `</g>`
+  const badge =
+    copyBadge === false || copyBadge === ''
+      ? ''
+      : copyBadge === '+ linked'
+        ? plus + linkMark
+        : copyBadge === '+ independent'
+          ? plus + apartMark
+          : plus
 
   const svg =
     `<svg xmlns="http://www.w3.org/2000/svg" width="${CURSOR_SIZE}" height="${CURSOR_SIZE}" viewBox="0 0 ${CURSOR_SIZE} ${CURSOR_SIZE}">` +

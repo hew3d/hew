@@ -12,6 +12,7 @@
 //! Scene: a hexagonal prism, three cap splits (with an undo/redo mixed in),
 //! a recess and a raise on two cap pieces, then a full unwind. Before the
 //! orientation-epsilon fix the first undo (the raise's collapse) failed.
+use kernel::trig;
 use kernel::{History, KernelOp, Object, Plane, Point3, Profile, Vec3};
 
 fn nth_face(object: &Object, sel: usize) -> kernel::FaceId {
@@ -60,7 +61,7 @@ fn undo_survives_ulp_noise_on_straddling_wall_edges() {
     let outer: Vec<Point3> = (0..6)
         .map(|k| {
             let a = std::f64::consts::TAU * k as f64 / 6.0;
-            Point3::new(r * a.cos(), r * a.sin(), 0.0)
+            Point3::new(r * trig::cos(a), r * trig::sin(a), 0.0)
         })
         .collect();
     let profile = Profile::new(plane, outer, vec![]).unwrap();

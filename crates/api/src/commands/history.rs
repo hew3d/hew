@@ -11,7 +11,7 @@ use kernel::HistoryOrigin;
 use serde_json::Value;
 
 /// This namespace's slice of the handler table.
-pub fn handler(name: &str) -> Option<Handler> {
+pub(crate) fn handler(name: &str) -> Option<Handler> {
     Some(match name {
         "hew.history.undo" => undo,
         "hew.history.redo" => redo,
@@ -76,7 +76,7 @@ fn empty_params(params: &Value) -> Result<(), CmdError> {
 fn status(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
     empty_params(params)?;
     let entries = ctx.doc.history_entries();
-    Ok(serde_json::json!({
+    let status = serde_json::json!({
         "undo_depth": ctx.doc.undo_depth(),
         "redo_depth": ctx.doc.redo_depth(),
         "top": top_json(ctx),
@@ -85,7 +85,8 @@ fn status(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
             "undo": entries.undo.iter().map(entry_json).collect::<Vec<_>>(),
             "redo": entries.redo.iter().map(entry_json).collect::<Vec<_>>(),
         },
-    }))
+    });
+    Ok(super::with_clock(ctx.doc, status))
 }
 
 #[derive(Debug, serde::Deserialize)]

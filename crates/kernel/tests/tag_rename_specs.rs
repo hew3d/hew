@@ -177,6 +177,7 @@ fn rename_and_delete_carry_a_guides_tags_with_undo() {
         roots: Vec::new(),
         guides: vec![
             ImportGuide::Line {
+                dash: kernel::GuideDash::default(),
                 origin: Point3::ORIGIN,
                 direction: Vec3::new(1.0, 0.0, 0.0),
                 tags: vec![p(&["Rig"]), p(&["Cameras"])],
@@ -202,6 +203,7 @@ fn rename_and_delete_carry_a_guides_tags_with_undo() {
         section: None,
         view_style: None,
         extra: Default::default(),
+        geo: None,
     };
     doc.ingest(scene, Vec::new()).unwrap();
     let ids = doc.guide_ids();

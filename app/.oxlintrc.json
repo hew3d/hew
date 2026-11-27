@@ -221,5 +221,5 @@
       }
     ]
   },
-  "ignorePatterns": ["src/wasm/pkg/**", "src/**/*.test.ts", "src/**/*.test.tsx", "src/test/**", "e2e/**", "src/locales/**"]
+  "ignorePatterns": ["src/wasm/pkg/**", "src/plugins/boot/**", "src/**/*.test.ts", "src/**/*.test.tsx", "src/test/**", "e2e/**", "src/locales/**"]
 }

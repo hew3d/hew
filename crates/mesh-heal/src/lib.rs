@@ -33,8 +33,12 @@
 //! meshes that `from_polygons` would reject are still emitted — the kernel
 //! reports them as skipped (DEVELOPMENT.md rule 4).
 
+use kernel::trig;
 use kernel::{Plane, Point3, Transform, Vec3, tol};
 
+/// Faces whose hole loops overlap: a hole drawn twice loses its extra copy,
+/// any other overlap leaves the face out (always reported by the caller).
+pub mod holes;
 /// Non-manifold mesh splitting: cut kernel-rejectable meshes into
 /// buildable open shells (never repaired, always reported by the caller).
 pub mod split;
@@ -134,7 +138,7 @@ pub fn weld(positions: &[Point3]) -> (Vec<Point3>, Vec<usize>) {
 /// Weld positions, merging any two within `weld_tol` (Euclidean). See [`weld`].
 pub fn weld_with_tol(positions: &[Point3], weld_tol: f64) -> (Vec<Point3>, Vec<usize>) {
     // Map (bucket_key) → index in the representative list.
-    let mut cell_to_rep: BTreeMap<(i64, i64, i64), usize> = BTreeMap::new();
+    let mut cell_to_rep = CellIndex::with_capacity(positions.len() / 3);
     let mut unique: Vec<Point3> = Vec::new();
     let mut old_to_new: Vec<usize> = Vec::with_capacity(positions.len());
 
@@ -153,7 +157,7 @@ pub fn weld_with_tol(positions: &[Point3], weld_tol: f64) -> (Vec<Point3>, Vec<u
                         key.1.saturating_add(dk1),
                         key.2.saturating_add(dk2),
                     );
-                    if let Some(&rep_idx) = cell_to_rep.get(&probe) {
+                    if let Some(rep_idx) = cell_to_rep.get(probe) {
                         let rep = unique[rep_idx];
                         let dx = p.x - rep.x;
                         let dy = p.y - rep.y;
@@ -177,6 +181,83 @@ pub fn weld_with_tol(positions: &[Point3], weld_tol: f64) -> (Vec<Point3>, Vec<u
     }
 
     (unique, old_to_new)
+}
+
+/// One slot of [`CellIndex`]: a cell key and its representative.
+type CellSlot = Option<((i64, i64, i64), usize)>;
+
+/// Cell key → representative index for [`weld_with_tol`]: an open-addressing
+/// table with a fixed hash (no random state, nothing iterated), so lookups
+/// and overwrites answer exactly as the ordered map they replace while
+/// costing one probe instead of a tree walk on a dense scan's ~10⁶ cells.
+struct CellIndex {
+    slots: Vec<CellSlot>,
+    len: usize,
+}
+
+impl CellIndex {
+    fn with_capacity(n: usize) -> Self {
+        let cap = (n.max(8) * 2).next_power_of_two();
+        CellIndex {
+            slots: vec![None; cap],
+            len: 0,
+        }
+    }
+
+    fn slot_of(&self, k: (i64, i64, i64)) -> usize {
+        // splitmix64 finalizer folded over the three components, so keys
+        // that differ only in high bits still spread across the table.
+        #[inline]
+        fn mix(mut z: u64) -> u64 {
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^ (z >> 31)
+        }
+        let mut h = mix((k.0 as u64).wrapping_add(0x9E37_79B9_7F4A_7C15));
+        h = mix(h ^ (k.1 as u64).wrapping_add(0x9E37_79B9_7F4A_7C15));
+        h = mix(h ^ (k.2 as u64).wrapping_add(0x9E37_79B9_7F4A_7C15));
+        (h as usize) & (self.slots.len() - 1)
+    }
+
+    fn get(&self, k: (i64, i64, i64)) -> Option<usize> {
+        let mask = self.slots.len() - 1;
+        let mut i = self.slot_of(k);
+        loop {
+            match self.slots[i] {
+                None => return None,
+                Some((key, v)) if key == k => return Some(v),
+                Some(_) => i = (i + 1) & mask,
+            }
+        }
+    }
+
+    /// Inserts or overwrites.
+    fn insert(&mut self, k: (i64, i64, i64), v: usize) {
+        if (self.len + 1) * 2 > self.slots.len() {
+            let old = std::mem::take(&mut self.slots);
+            self.slots = vec![None; old.len() * 2];
+            self.len = 0;
+            for (key, val) in old.into_iter().flatten() {
+                self.insert(key, val);
+            }
+        }
+        let mask = self.slots.len() - 1;
+        let mut i = self.slot_of(k);
+        loop {
+            match self.slots[i] {
+                None => {
+                    self.slots[i] = Some((k, v));
+                    self.len += 1;
+                    return;
+                }
+                Some((key, _)) if key == k => {
+                    self.slots[i] = Some((k, v));
+                    return;
+                }
+                Some(_) => i = (i + 1) & mask,
+            }
+        }
+    }
 }
 
 /// Remap face indices through `old_to_new`, dropping degenerate faces (where
@@ -602,7 +683,17 @@ impl CandidateGrid {
     /// would visit more cells than the grid has falls back to gathering
     /// every occupied cell — never worse than the full scan, and the same
     /// superset guarantee holds trivially.
-    fn gather(&mut self, pa: Point3, pb: Point3, out: &mut Vec<usize>) {
+    ///
+    /// Only candidates `keep` accepts are collected (a pure filter: the
+    /// caller's cheap box test), so a large neighbourhood is scanned in
+    /// place rather than copied, sorted and deduplicated whole.
+    fn gather(
+        &mut self,
+        pa: Point3,
+        pb: Point3,
+        keep: impl Fn(usize) -> bool,
+        out: &mut Vec<usize>,
+    ) {
         out.clear();
 
         let ab = pb - pa;
@@ -614,7 +705,7 @@ impl CandidateGrid {
             // key order with ascending ids inside; a global sort restores
             // ascending vertex-id order across cells.
             for ids in self.cells.values() {
-                out.extend_from_slice(ids);
+                out.extend(ids.iter().copied().filter(|&v| keep(v)));
             }
             out.sort_unstable();
             return;
@@ -638,11 +729,12 @@ impl CandidateGrid {
             }
             prev_base = Some(base);
             sampled_cells += 1;
-            out.extend_from_slice(Self::neighborhood(
-                &self.cells,
-                &mut self.neighborhoods,
-                base,
-            ));
+            out.extend(
+                Self::neighborhood(&self.cells, &mut self.neighborhoods, base)
+                    .iter()
+                    .copied()
+                    .filter(|&v| keep(v)),
+            );
         }
         // A single sampled cell yields its memoized union verbatim — already
         // sorted and unique. Multiple cells' unions can overlap: sort to
@@ -801,15 +893,42 @@ fn split_t_junctions_impl(
             // stable sort below breaks equal-t ties identically.
             let pa = positions[a];
             let pb = positions[b];
+            // A point within `on_tol` of the open segment lies inside the
+            // segment's box grown by `on_tol`; the box test (with a margin
+            // over that bound) only skips the exact predicate where it
+            // cannot pass, so the hits are unchanged.
+            let pad = 2.0 * on_tol;
+            let (lo, hi) = (
+                [
+                    pa.x.min(pb.x) - pad,
+                    pa.y.min(pb.y) - pad,
+                    pa.z.min(pb.z) - pad,
+                ],
+                [
+                    pa.x.max(pb.x) + pad,
+                    pa.y.max(pb.y) + pad,
+                    pa.z.max(pb.z) + pad,
+                ],
+            );
+            let in_box = |v: usize| {
+                let q = positions[v];
+                q.x >= lo[0]
+                    && q.x <= hi[0]
+                    && q.y >= lo[1]
+                    && q.y <= hi[1]
+                    && q.z >= lo[2]
+                    && q.z <= hi[2]
+            };
             let edge_candidates: &[usize] = match grid.as_mut() {
                 Some(g) => {
-                    g.gather(pa, pb, &mut near);
+                    g.gather(pa, pb, in_box, &mut near);
                     &near
                 }
                 None => &candidates,
             };
             let mut hits: Vec<(f64, usize)> = edge_candidates
                 .iter()
+                .filter(|&&v| in_box(v))
                 .filter(|&&v| !boundary.contains(&v))
                 .filter_map(|&v| {
                     point_on_open_segment(positions[v], pa, pb, on_tol).map(|t| (t, v))
@@ -899,10 +1018,25 @@ fn winding_number(p: Point3, faces: &[Vec<usize>], positions: &[Point3]) -> f64 
             let (la, lb, lc) = (a.length(), b.length(), c.length());
             let det = a.dot(b.cross(c));
             let denom = la * lb * lc + a.dot(b) * lc + b.dot(c) * la + c.dot(a) * lb;
-            total += 2.0 * det.atan2(denom);
+            total += 2.0 * trig::atan2(det, denom);
         }
     }
     total / (4.0 * std::f64::consts::PI)
+}
+
+/// Every ring of a face set — the outer loops, then each face's hole loops —
+/// as one list. A hole loop winds opposite its face's outer loop
+/// ([`normalize_hole_winding`]), so the list reads as an oriented surface in
+/// which a hole's edge pairs with the wall that runs through it: the closed
+/// test, signed volume and winding number all need the hole rings, or a
+/// face with a hole (the annulus round a shank) leaves its hole's wall edges
+/// unpaired and the whole shell reads open.
+fn rings_with_holes(faces: &[Vec<usize>], face_holes: &[Vec<Vec<usize>>]) -> Vec<Vec<usize>> {
+    let mut rings: Vec<Vec<usize>> = faces.to_vec();
+    for holes in face_holes {
+        rings.extend(holes.iter().cloned());
+    }
+    rings
 }
 
 /// True if every directed edge `(a, b)` of the face set has its reverse
@@ -983,27 +1117,34 @@ pub fn orient_outward(
         components.entry(uf.find(fi)).or_default().push(fi);
     }
 
-    // Classify each component once: its faces, whether it is closed, and its
-    // signed volume.
+    // Classify each component once: its rings (outer loops and hole loops),
+    // whether it is closed, and its signed volume. Hole loops are read
+    // wound against their face's outer loop whatever the source gave.
+    let holes_opposed = normalize_hole_winding(faces, face_holes, positions);
     struct Comp {
         face_ids: Vec<usize>,
-        faces: Vec<Vec<usize>>,
+        rings: Vec<Vec<usize>>,
         closed: bool,
         volume6: f64,
     }
     let comps: Vec<Comp> = components
         .into_values()
         .map(|face_ids| {
-            let comp_faces: Vec<Vec<usize>> = face_ids.iter().map(|&f| faces[f].clone()).collect();
-            let closed = is_closed(&comp_faces);
+            let outers: Vec<Vec<usize>> = face_ids.iter().map(|&f| faces[f].clone()).collect();
+            let holes: Vec<Vec<Vec<usize>>> = face_ids
+                .iter()
+                .map(|&f| holes_opposed.get(f).cloned().unwrap_or_default())
+                .collect();
+            let rings = rings_with_holes(&outers, &holes);
+            let closed = is_closed(&rings);
             let volume6 = if closed {
-                signed_volume6(&comp_faces, positions)
+                signed_volume6(&rings, positions)
             } else {
                 0.0
             };
             Comp {
                 face_ids,
-                faces: comp_faces,
+                rings,
                 closed,
                 volume6,
             }
@@ -1022,7 +1163,7 @@ pub fn orient_outward(
         if !comp.closed || comp.volume6 >= 0.0 {
             continue;
         }
-        let Some(probe) = comp.faces.iter().find(|f| !f.is_empty()).map(|f| f[0]) else {
+        let Some(probe) = comp.rings.iter().find(|f| !f.is_empty()).map(|f| f[0]) else {
             continue;
         };
         let p = positions[probe];
@@ -1030,7 +1171,7 @@ pub fn orient_outward(
             j != i
                 && other.closed
                 && other.volume6 > 0.0
-                && winding_number(p, &other.faces, positions).abs() > WINDING_ENCLOSED
+                && winding_number(p, &other.rings, positions).abs() > WINDING_ENCLOSED
         });
         if !enclosed {
             for &f in &comp.face_ids {
@@ -1081,20 +1222,19 @@ fn apply_winding_flips(
 
 // ── Consistent orientation (flood fill) ─────────────────────────────────────────
 
-/// True if `face`, optionally read in reverse, traverses the directed edge
-/// `a -> b` along its outer loop.
-fn outer_traverses(face: &[usize], reversed: bool, a: usize, b: usize) -> bool {
-    let m = face.len();
-    for k in 0..m {
-        let (mut x, mut y) = (face[k], face[(k + 1) % m]);
-        if reversed {
-            std::mem::swap(&mut x, &mut y);
-        }
-        if x == a && y == b {
-            return true;
-        }
-    }
-    false
+/// True if any of `rings` (a face's outer loop, then its hole loops),
+/// optionally read in reverse, traverses the directed edge `a -> b`.
+fn rings_traverse(rings: &[&[usize]], reversed: bool, a: usize, b: usize) -> bool {
+    rings.iter().any(|ring| {
+        let m = ring.len();
+        (0..m).any(|k| {
+            let (mut x, mut y) = (ring[k], ring[(k + 1) % m]);
+            if reversed {
+                std::mem::swap(&mut x, &mut y);
+            }
+            x == a && y == b
+        })
+    })
 }
 
 /// Make adjacent faces *consistently* wound: across every interior (manifold)
@@ -1105,6 +1245,11 @@ fn outer_traverses(face: &[usize], reversed: bool, a: usize, b: usize) -> bool {
 /// over edge adjacency flips faces into agreement with a per-connected-component
 /// seed.
 ///
+/// A face's hole loops are edges like its outer loop's: the wall that runs
+/// through a hole shares the hole's edges, so adjacency and agreement read
+/// every ring. Hole loops must already wind opposite their face's outer loop
+/// ([`normalize_hole_winding`]), as they do for a face that is flipped whole.
+///
 /// Only edges shared by *exactly two* faces drive propagation. Boundary edges
 /// (one face) and genuinely non-manifold edges (>2 faces) are skipped: a
 /// non-manifold mesh therefore stays inconsistent and is still reported as
@@ -1114,7 +1259,7 @@ fn outer_traverses(face: &[usize], reversed: bool, a: usize, b: usize) -> bool {
 /// every neighbour already agrees, so no face is reversed). Runs before
 /// [`orient_outward`], which then flips the now-consistent shell so its normals
 /// point outward. Hole loops are reversed together with their face, matching
-/// `orient_outward`; final hole winding is fixed by [`normalize_hole_winding`].
+/// `orient_outward`.
 pub fn orient_consistent(
     faces: &[Vec<usize>],
     face_materials: &[u32],
@@ -1124,16 +1269,35 @@ pub fn orient_consistent(
     use std::collections::VecDeque;
 
     let n = faces.len();
+    let no_holes: Vec<Vec<usize>> = Vec::new();
+    // A face's rings: its outer loop first, then its hole loops.
+    let rings_of = |fi: usize| -> Vec<&[usize]> {
+        std::iter::once(faces[fi].as_slice())
+            .chain(
+                face_holes
+                    .get(fi)
+                    .unwrap_or(&no_holes)
+                    .iter()
+                    .map(Vec::as_slice),
+            )
+            .collect()
+    };
 
-    // Undirected outer edge -> incident face indices.
+    // Undirected edge -> incident face indices (once per face, however many
+    // of its rings carry the edge).
     let mut edge_faces: BTreeMap<(usize, usize), Vec<usize>> = BTreeMap::new();
-    for (fi, face) in faces.iter().enumerate() {
-        let m = face.len();
-        for k in 0..m {
-            let a = face[k];
-            let b = face[(k + 1) % m];
-            let key = if a < b { (a, b) } else { (b, a) };
-            edge_faces.entry(key).or_default().push(fi);
+    for fi in 0..n {
+        for ring in rings_of(fi) {
+            let m = ring.len();
+            for k in 0..m {
+                let a = ring[k];
+                let b = ring[(k + 1) % m];
+                let key = if a < b { (a, b) } else { (b, a) };
+                let entry = edge_faces.entry(key).or_default();
+                if !entry.contains(&fi) {
+                    entry.push(fi);
+                }
+            }
         }
     }
 
@@ -1148,40 +1312,41 @@ pub fn orient_consistent(
         let mut queue = VecDeque::new();
         queue.push_back(seed);
         while let Some(fi) = queue.pop_front() {
-            let face = &faces[fi];
-            let m = face.len();
-            for k in 0..m {
-                // The directed edge this face (in its FINAL orientation) traverses.
-                let (mut a, mut b) = (face[k], face[(k + 1) % m]);
-                if flip[fi] {
-                    std::mem::swap(&mut a, &mut b);
+            for ring in rings_of(fi) {
+                let m = ring.len();
+                for k in 0..m {
+                    // The directed edge this face (in its FINAL orientation) traverses.
+                    let (mut a, mut b) = (ring[k], ring[(k + 1) % m]);
+                    if flip[fi] {
+                        std::mem::swap(&mut a, &mut b);
+                    }
+                    let key = if a < b { (a, b) } else { (b, a) };
+                    let incident = &edge_faces[&key];
+                    if incident.len() != 2 {
+                        continue; // boundary or non-manifold edge: don't propagate
+                    }
+                    let nb = if incident[0] == fi {
+                        incident[1]
+                    } else {
+                        incident[0]
+                    };
+                    if visited[nb] {
+                        continue; // already decided; conflicts left for the kernel to reject
+                    }
+                    // The neighbour must traverse the reverse edge (b -> a). Pick the
+                    // flip that makes it do so.
+                    let nb_rings = rings_of(nb);
+                    let need_flip = if rings_traverse(&nb_rings, false, b, a) {
+                        false
+                    } else if rings_traverse(&nb_rings, true, b, a) {
+                        true
+                    } else {
+                        continue; // shared vertex pair but not a shared edge; ignore
+                    };
+                    visited[nb] = true;
+                    flip[nb] = need_flip;
+                    queue.push_back(nb);
                 }
-                let key = if a < b { (a, b) } else { (b, a) };
-                let incident = &edge_faces[&key];
-                if incident.len() != 2 {
-                    continue; // boundary or non-manifold edge: don't propagate
-                }
-                let nb = if incident[0] == fi {
-                    incident[1]
-                } else {
-                    incident[0]
-                };
-                if visited[nb] {
-                    continue; // already decided; conflicts left for the kernel to reject
-                }
-                // The neighbour must traverse the reverse edge (b -> a). Pick the
-                // flip that makes it do so.
-                let nb_face = &faces[nb];
-                let need_flip = if outer_traverses(nb_face, false, b, a) {
-                    false
-                } else if outer_traverses(nb_face, true, b, a) {
-                    true
-                } else {
-                    continue; // shared vertex pair but not a shared edge; ignore
-                };
-                visited[nb] = true;
-                flip[nb] = need_flip;
-                queue.push_back(nb);
             }
         }
     }
@@ -1741,6 +1906,9 @@ fn heal(
         //    faces (invisible in its double-sided view), which otherwise reads as
         //    "directed edge traversed by more than one face" and gets the whole mesh
         //    skipped. Non-manifold meshes are left inconsistent (still skipped).
+        //    Hole loops are first wound against their outer loops, so a face and
+        //    the wall through its hole agree on the shared edge's direction.
+        let split_holes = normalize_hole_winding(&split_faces, &split_holes, &unique_positions);
         let (consistent_faces, consistent_mats, consistent_uvs, consistent_holes) =
             orient_consistent(&split_faces, &split_mats, &split_uvs, &split_holes);
 
@@ -1778,12 +1946,17 @@ fn heal(
     //    (step 3) gates on effective HEIGHT relative to `weld_tol` — the source's
     //    coincidence precision — but `Object::from_polygons`'s degeneracy gate is
     //    `Plane::from_polygon`, which fails when the Newell normal magnitude (= 2×
-    //    area) falls below the ABSOLUTE floor `tol::NORMALIZE_MIN_LENGTH`. A small
-    //    sliver can clear the height gate yet trip the absolute one, and because
-    //    `Document::ingest` builds each object all-or-nothing, ONE such face out of
-    //    ~110k skips the ENTIRE model (as a 3DBenchy-class real-world STL routinely
-    //    does). Filter with the kernel's OWN predicate here so the healer's output
-    //    is buildable by construction — the two agree, no threshold drift. This is
+    //    area) falls below the ABSOLUTE floor `tol::NORMALIZE_MIN_LENGTH` and the
+    //    face is also under `tol::MIN_FACE_WIDTH` wide. A small sliver can clear
+    //    the height gate yet trip that, and because `Document::ingest` builds
+    //    each object all-or-nothing, ONE such face out of ~110k skips the ENTIRE
+    //    model (as a 3DBenchy-class real-world STL routinely does). Filter here
+    //    with `Plane::from_polygon_import`, the import boundary's own floor (the
+    //    area floor alone, about 5e-13 m²): it rejects every face the kernel's
+    //    predicate rejects and more, so the healer's output is buildable by
+    //    construction (a face too large for its Newell length to be finite
+    //    excepted: it passes, and the kernel refuses the mesh typed, a
+    //    reported skip), and a file heals to the same face set it always has. This is
     //    import-boundary normalization (foreign-input artefact), not silent kernel
     //    repair; a dropped face may open the shell, and the object then arrives
     //    honestly LEAKY rather than skipped. The count is returned so callers put
@@ -1902,8 +2075,13 @@ fn drop_zero_area_faces(
             longest_edge_sq = longest_edge_sq.max(e.length_squared());
         }
         // Keep iff effective height 2A/longest_edge exceeds weld_tol,
-        // i.e. (2A)² > longest_edge² · weld_tol².
-        if area2 * area2 > longest_edge_sq * weld_tol * weld_tol {
+        // i.e. (2A)² > longest_edge² · weld_tol². A face so large that both
+        // sides overflow (a scale-relative weld tolerance on a mesh some
+        // 1e80 m across) cannot be measured here and is no sliver: it is
+        // kept, so the kernel refuses the mesh typed (its plane fit
+        // overflows too) rather than the mesh vanishing without a word.
+        let (height_sq, gate_sq) = (area2 * area2, longest_edge_sq * weld_tol * weld_tol);
+        if height_sq > gate_sq || (height_sq == f64::INFINITY && gate_sq == f64::INFINITY) {
             out_faces.push(face.clone());
             out_mats.push(mat);
             out_uvs.push(corner_uvs.clone());
@@ -1916,18 +2094,24 @@ fn drop_zero_area_faces(
     (out_faces, out_mats, out_uvs, out_holes)
 }
 
-/// Drop any face the kernel's `Object::from_polygons` would reject as a
-/// `DegenerateFace` — i.e. one whose outer loop `Plane::from_polygon` cannot
-/// fit a plane through (Newell normal magnitude below the ABSOLUTE floor
-/// `tol::NORMALIZE_MIN_LENGTH`). Uses the kernel's own predicate so the healer
-/// and the kernel agree exactly, with no threshold drift: a near-degenerate
+/// Drop any face whose outer loop is under the import boundary's area floor:
+/// `Plane::from_polygon_import` cannot fit a plane through it (Newell normal
+/// magnitude below the ABSOLUTE floor `tol::NORMALIZE_MIN_LENGTH`, about
+/// 5e-13 m² of area). The kernel's own predicate, `Plane::from_polygon`,
+/// also keeps faces under that floor that are at least `tol::MIN_FACE_WIDTH`
+/// wide; the import boundary keeps a floor of its own so a file heals to the
+/// same face set it always has, and every face kept here builds, because the
+/// kernel's rule accepts everything this one does, except a face so large its
+/// Newell vector overflows its length: this keeps it, on a zero normal, and
+/// the kernel refuses its mesh typed, so the import reports the mesh skipped
+/// with a reason instead of dropping its faces. A near-degenerate
 /// sliver that clears `drop_zero_area_faces`'s scale-relative height gate but
-/// trips the kernel's absolute one is removed HERE, at the import boundary,
+/// trips the absolute one is removed HERE, at the import boundary,
 /// instead of skipping the whole object at ingest (which is all-or-nothing per
 /// object — one bad face out of a real STL's ~110k would drop the entire
 /// model).
 ///
-/// Only the OUTER loop is tested (that is what `Plane::from_polygon` fits in
+/// Only the OUTER loop is tested (that is what the kernel's plane fit uses in
 /// `from_polygons_impl`); hole loops ride with their face. A dropped face may
 /// open the shell — the object then arrives honestly leaky, never patched or
 /// silently repaired (DEVELOPMENT.md rule 4 governs kernel operations; this is
@@ -1970,9 +2154,9 @@ fn drop_kernel_degenerate_faces(
         )
     {
         let pts: Vec<Point3> = face.iter().map(|&i| positions[i]).collect();
-        // Keep iff the kernel could fit a plane through the outer loop — the
-        // exact `from_polygons` DegenerateFace criterion.
-        if Plane::from_polygon(&pts).is_ok() {
+        // Keep iff the outer loop clears the import boundary's area floor, a
+        // stricter test than the kernel's `from_polygons` DegenerateFace one.
+        if Plane::from_polygon_import(&pts).is_ok() {
             out_faces.push(face.clone());
             out_mats.push(mat);
             out_uvs.push(corner_uvs.clone());
@@ -2359,6 +2543,173 @@ mod tests {
         let open_holes: [Vec<Vec<usize>>; 5] = Default::default();
         let (f3, _, _, _) = orient_outward(&open, &open_mats, &open_uvs, &open_holes, &positions);
         assert_eq!(f3, open, "open shell orientation is left untouched");
+    }
+
+    /// A square slab 0..4 x 0..4 x 0..1 with a square through-hole 1..3,
+    /// wound outward: annular top and bottom (hole loops against their
+    /// outer loops), four outer walls, four walls facing into the hole.
+    #[allow(clippy::type_complexity)]
+    fn annular_slab() -> (Vec<Point3>, Vec<Vec<usize>>, Vec<Vec<Vec<usize>>>) {
+        let mut positions = Vec::new();
+        for z in [0.0, 1.0] {
+            for (x, y) in [(0.0, 0.0), (4.0, 0.0), (4.0, 4.0), (0.0, 4.0)] {
+                positions.push(Point3::new(x, y, z));
+            }
+        }
+        for z in [0.0, 1.0] {
+            for (x, y) in [(1.0, 1.0), (3.0, 1.0), (3.0, 3.0), (1.0, 3.0)] {
+                positions.push(Point3::new(x, y, z));
+            }
+        }
+        // Outward-wound: bottom/top annuli (outer CCW from outside, hole CW),
+        // four outer walls, four inner walls facing into the hole.
+        let mut faces: Vec<Vec<usize>> = vec![vec![0, 3, 2, 1], vec![4, 5, 6, 7]];
+        let mut holes: Vec<Vec<Vec<usize>>> =
+            vec![vec![vec![8, 9, 10, 11]], vec![vec![12, 15, 14, 13]]];
+        for k in 0..4 {
+            let n = (k + 1) % 4;
+            faces.push(vec![k, n, 4 + n, 4 + k]); // outer wall
+            holes.push(Vec::new());
+            faces.push(vec![8 + n, 8 + k, 12 + k, 12 + n]); // inner wall
+            holes.push(Vec::new());
+        }
+        (positions, faces, holes)
+    }
+
+    /// A closed shell whose top is an annulus (a face with a hole — the
+    /// ring round a shank, as in a knob) was never judged closed, so an
+    /// inside-out one stayed inside-out and a renderer that culls back
+    /// faces showed its far walls through the cap. The hole's edges pair
+    /// with the wall running through it; a flipped subset is consistent
+    /// again by the flood fill, and the whole turns outward.
+    #[test]
+    fn annular_face_shell_orients_consistent_then_outward() {
+        let (positions, faces, holes) = annular_slab();
+        let outer_rings = |f: &[Vec<usize>], h: &[Vec<Vec<usize>>]| rings_with_holes(f, h);
+        assert!(is_closed(&outer_rings(&faces, &holes)));
+        assert!(signed_volume6(&outer_rings(&faces, &holes), &positions) > 0.0);
+
+        // Every face reversed: inside-out, still consistent.
+        let rev = |f: &Vec<Vec<usize>>| -> Vec<Vec<usize>> {
+            f.iter()
+                .map(|r| r.iter().rev().copied().collect())
+                .collect()
+        };
+        let inv_faces = rev(&faces);
+        let inv_holes: Vec<Vec<Vec<usize>>> = holes.iter().map(rev).collect();
+        let mats = vec![0u32; faces.len()];
+        let uvs: Vec<Vec<[f64; 2]>> = vec![Vec::new(); faces.len()];
+        let (f, _, _, h) = orient_outward(&inv_faces, &mats, &uvs, &inv_holes, &positions);
+        assert!(
+            signed_volume6(&rings_with_holes(&f, &h), &positions) > 0.0,
+            "an inside-out shell with an annular face turns outward"
+        );
+
+        // Two walls reversed on their own: the flood fill brings them back
+        // across the hole's edges as well as the outer ones.
+        let mut mixed_faces = faces.clone();
+        let mut mixed_holes = holes.clone();
+        for i in [2usize, 3] {
+            mixed_faces[i].reverse();
+        }
+        mixed_faces[1].reverse(); // the top annulus, hole and all
+        mixed_holes[1] = rev(&mixed_holes[1]);
+        let (f, _, _, h) = orient_consistent(&mixed_faces, &mats, &uvs, &mixed_holes);
+        let rings = rings_with_holes(&f, &h);
+        assert_eq!(dup_directed_edges(&rings), 0, "agrees across every ring");
+    }
+
+    /// Hole loops wound the SAME way as their outer loop (what a source may
+    /// give: COLLADA `<h>` winding is unspecified) are read against it before
+    /// the shell is judged, so an inside-out annular shell still turns outward.
+    #[test]
+    fn orient_outward_reads_same_wound_holes_against_their_outer() {
+        let (positions, faces, holes) = annular_slab();
+        // Inside-out, with every hole loop also turned to wind with its outer.
+        let inv_faces: Vec<Vec<usize>> = faces
+            .iter()
+            .map(|r| r.iter().rev().copied().collect())
+            .collect();
+        let same_wound: Vec<Vec<Vec<usize>>> = holes
+            .iter()
+            .zip(&inv_faces)
+            .map(|(hs, outer)| {
+                hs.iter()
+                    .map(|h| {
+                        let n_outer = face_normal(outer, &positions).unwrap();
+                        let n_hole = face_normal(h, &positions).unwrap();
+                        if n_hole.dot(n_outer) > 0.0 {
+                            h.clone()
+                        } else {
+                            h.iter().rev().copied().collect()
+                        }
+                    })
+                    .collect()
+            })
+            .collect();
+        let mats = vec![0u32; faces.len()];
+        let uvs: Vec<Vec<[f64; 2]>> = vec![Vec::new(); faces.len()];
+        let (f, _, _, h) = orient_outward(&inv_faces, &mats, &uvs, &same_wound, &positions);
+        let opposed = normalize_hole_winding(&f, &h, &positions);
+        assert!(
+            signed_volume6(&rings_with_holes(&f, &opposed), &positions) > 0.0,
+            "the shell turns outward whatever winding its holes arrived with"
+        );
+    }
+
+    /// A free-standing inside-out post in a plate's bore is not enclosed by
+    /// the plate: the bore is open air, so the post turns outward. (The
+    /// plate's outer loops alone read as a solid slab round it.)
+    #[test]
+    fn orient_pieces_outward_flips_a_post_in_a_bore() {
+        let (plate_positions, plate_faces, plate_holes) = annular_slab();
+        let plate = split::MeshPiece {
+            face_materials: vec![0; plate_faces.len()],
+            face_corner_uvs: vec![Vec::new(); plate_faces.len()],
+            positions: plate_positions,
+            faces: plate_faces,
+            face_holes: plate_holes,
+        };
+        // A small inside-out cube centred at (2, 2, 0.5), clear of the walls.
+        let c = Point3::new(2.0, 2.0, 0.5);
+        let h = 0.2;
+        let corners: Vec<Point3> = [
+            (-1.0, -1.0, -1.0),
+            (1.0, -1.0, -1.0),
+            (1.0, 1.0, -1.0),
+            (-1.0, 1.0, -1.0),
+            (-1.0, -1.0, 1.0),
+            (1.0, -1.0, 1.0),
+            (1.0, 1.0, 1.0),
+            (-1.0, 1.0, 1.0),
+        ]
+        .iter()
+        .map(|(x, y, z)| Point3::new(c.x + x * h, c.y + y * h, c.z + z * h))
+        .collect();
+        let outward = [
+            vec![0usize, 3, 2, 1],
+            vec![4, 5, 6, 7],
+            vec![0, 1, 5, 4],
+            vec![1, 2, 6, 5],
+            vec![2, 3, 7, 6],
+            vec![3, 0, 4, 7],
+        ];
+        let inside_out: Vec<Vec<usize>> = outward
+            .iter()
+            .map(|r| r.iter().rev().copied().collect())
+            .collect();
+        let post = split::MeshPiece {
+            face_materials: vec![0; 6],
+            face_corner_uvs: vec![Vec::new(); 6],
+            face_holes: vec![Vec::new(); 6],
+            positions: corners,
+            faces: inside_out,
+        };
+        let out = split::orient_pieces_outward(vec![plate, post]);
+        assert!(
+            signed_volume6(&out[1].faces, &out[1].positions) > 0.0,
+            "a post standing in a bore is a solid, not a cavity"
+        );
     }
 
     /// Count directed edges traversed by more than one face — the exact condition
@@ -3085,8 +3436,8 @@ mod tests {
         );
     }
 
-    /// `drop_kernel_degenerate_faces` removes exactly the faces the kernel's
-    /// `Plane::from_polygon` would reject (Newell normal below
+    /// `drop_kernel_degenerate_faces` removes exactly the faces under the
+    /// import floor, `Plane::from_polygon_import` (Newell normal below
     /// `tol::NORMALIZE_MIN_LENGTH`), keeping well-formed faces — so no face the
     /// kernel calls `DegenerateFace` ever reaches `from_polygons`.
     #[test]
@@ -3097,7 +3448,7 @@ mod tests {
             Point3::new(1.0, 0.0, 0.0),
             Point3::new(0.0, 1.0, 0.0),
             // A near-degenerate sliver: base 1e-5, height 1e-8 → 2·area = 1e-13,
-            // below NORMALIZE_MIN_LENGTH (1e-12), so Plane::from_polygon fails.
+            // below NORMALIZE_MIN_LENGTH (1e-12), so Plane::from_polygon_import fails.
             Point3::new(0.0, 0.0, 1.0),
             Point3::new(1e-5, 0.0, 1.0),
             Point3::new(5e-6, 1e-8, 1.0),
@@ -3108,8 +3459,8 @@ mod tests {
         let holes: Vec<Vec<Vec<usize>>> = vec![Vec::new(), Vec::new()];
 
         // The sliver really is kernel-degenerate; the good triangle is not.
-        assert!(Plane::from_polygon(&[positions[0], positions[1], positions[2]]).is_ok());
-        assert!(Plane::from_polygon(&[positions[3], positions[4], positions[5]]).is_err());
+        assert!(Plane::from_polygon_import(&[positions[0], positions[1], positions[2]]).is_ok());
+        assert!(Plane::from_polygon_import(&[positions[3], positions[4], positions[5]]).is_err());
 
         let (out_faces, out_mats, _uvs, _holes) =
             drop_kernel_degenerate_faces(&faces, &mats, &uvs, &holes, &positions);

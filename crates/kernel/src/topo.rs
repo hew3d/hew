@@ -4,11 +4,46 @@
 //! apply inside it, never across Objects. Its watertightness is tracked
 //! explicitly and kept honest by the validator.
 
+use crate::trig;
+use std::collections::BTreeMap;
+
 use slotmap::SlotMap;
 
+use crate::attr::AttrDict;
 use crate::ids::{EdgeId, FaceId, HalfEdgeId, LoopId, ShellId, VertexId};
 use crate::material::{FaceMaterial, UvFrame};
 use crate::math::{Plane, Point3, Vec3};
+use crate::shared::{Shared, Watch};
+
+/// An index into an [`Object`]'s interned attribute dictionaries
+/// (docs/agents/HEW_API.md §8, face and edge targets), or
+/// [`AttrSlot::NONE`] for an element that carries no dictionary.
+///
+/// Slots are values, never edited in place: a write interns a new
+/// dictionary and repoints the face or edge, so two elements may share a
+/// slot. A slot stays valid for the life of its Object in memory (nothing
+/// renumbers a live table), which is what lets undo snapshots
+/// ([`FaceAttrs::attrs`]) record one by value. Meaningful only against the
+/// Object it was read from; a slot crosses Objects only as the dictionary
+/// it names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct AttrSlot(pub(crate) u32);
+
+impl AttrSlot {
+    /// No dictionary.
+    pub const NONE: AttrSlot = AttrSlot(u32::MAX);
+
+    /// Whether this is [`AttrSlot::NONE`].
+    pub fn is_none(self) -> bool {
+        self == AttrSlot::NONE
+    }
+}
+
+impl Default for AttrSlot {
+    fn default() -> Self {
+        AttrSlot::NONE
+    }
+}
 
 /// A mesh vertex.
 #[derive(Debug, Clone, Copy)]
@@ -91,6 +126,22 @@ pub struct Edge {
     /// any other transform (a stretched polygon is no longer regular).
     /// Persisted in geometry buffer v7.
     pub polygon: Option<crate::sketch::CurveGeom>,
+    /// The user's keep-sharp-under-Smooth mark (true-curves.md §6.1): set by
+    /// the Eraser's Ctrl/Cmd gesture, never derived. Interior only, and never
+    /// together with `soft` (a soft seam cannot crease) — both pinned by the
+    /// validator. Survives splits (both fragments keep it) and every
+    /// transform, similarity or not: a crease is a statement about the edge,
+    /// not about any analytic shape. Dropped where the edge does not survive,
+    /// except that booleans re-derive it by provenance. Persisted in
+    /// geometry buffer v10.
+    pub crease: bool,
+    /// The edge's attribute dictionary ([`Object::edge_attrs`]), or
+    /// [`AttrSlot::NONE`]. Like `soft`, it rides the edge's identity: an
+    /// op that keeps the `EdgeId` keeps it, both fragments of a split edge
+    /// take it, and an edge built from positions (a builder, a boolean, a
+    /// component rebuild) starts without one. Persisted in geometry buffer
+    /// v9.
+    pub attrs: AttrSlot,
 }
 
 /// Whether a loop is a face's outer boundary or a hole.
@@ -138,11 +189,58 @@ pub enum SurfaceRef {
         /// Cylinder radius in meters, > [`crate::tol::POINT_MERGE`].
         radius: f64,
     },
+    /// A sphere: the blend engine's rolled corners and hemisphere ends,
+    /// Follow Me and Revolve sweeps of a circle about an axis through its
+    /// center. A chord facet's vertices lie on the sphere; its plane is at
+    /// most one radius from the center.
+    Sphere {
+        /// The sphere's center.
+        center: Point3,
+        /// Radius in meters, > [`crate::tol::POINT_MERGE`].
+        radius: f64,
+    },
+    /// A ring torus or horn torus: the surface swept by a circle of radius
+    /// `minor_radius` whose center travels the circle of radius
+    /// `major_radius` about `axis` through `center` (rim fillets, Follow Me
+    /// around a drawn circle). `minor_radius > POINT_MERGE`,
+    /// `major_radius > POINT_MERGE`. A torus whose major radius is within
+    /// [`crate::tol::POINT_MERGE`] of 0 is never constructed: the engine
+    /// writes `Sphere` instead (see [`SurfaceRef::torus_or_sphere`]).
+    Torus {
+        /// Center of the ring (on the axis).
+        center: Point3,
+        /// Unit axis direction; a line, so its sign carries no meaning.
+        axis: Vec3,
+        /// Distance from the axis to the tube's center circle, meters.
+        major_radius: f64,
+        /// Tube radius, meters.
+        minor_radius: f64,
+    },
+    /// One nappe of a right circular cone: points whose axial coordinate
+    /// `t = (p − apex)·axis ≥ 0` and whose distance from the axis is
+    /// `t · tan(half_angle)` (rim chamfers, linear variable-radius fillets,
+    /// coaxial lofts). `0 < half_angle < π/2`. A chord facet between two
+    /// generators lies in a plane through the apex.
+    Cone {
+        /// The apex.
+        apex: Point3,
+        /// Unit axis direction from the apex into the nappe; its sign
+        /// selects the nappe.
+        axis: Vec3,
+        /// Angle between the axis and every generator, radians.
+        half_angle: f64,
+    },
 }
 
 impl SurfaceRef {
     /// Whether two references describe the same surface geometrically —
-    /// tolerance-aware, unlike `==` (which is bitwise). Two cylinders agree
+    /// tolerance-aware, unlike `==` (which is bitwise). Different classes
+    /// never agree. Two spheres agree with centers and radii within
+    /// [`crate::tol::POINT_MERGE`]; two tori with parallel or antiparallel
+    /// axes (within [`crate::tol::NORMAL_DIRECTION`]), centers and both radii
+    /// within `POINT_MERGE`; two cones with the SAME axis direction (it
+    /// selects the nappe), apexes within `POINT_MERGE` and half-angles whose
+    /// sine and cosine agree within `NORMAL_DIRECTION`. Two cylinders agree
     /// iff they describe the same axis **line** (parallel or antiparallel
     /// axes within [`crate::tol::NORMAL_DIRECTION`], each axis point within
     /// [`crate::tol::POINT_MERGE`] of the other's axis line) and radii
@@ -151,24 +249,122 @@ impl SurfaceRef {
     /// push/pull, soft edges), so they can never disagree about what one
     /// wall is.
     pub fn same_surface(&self, other: &SurfaceRef) -> bool {
-        let SurfaceRef::Cylinder {
-            axis_point: ap_a,
-            axis: ax_a,
-            radius: r_a,
-        } = *self;
-        let SurfaceRef::Cylinder {
-            axis_point: ap_b,
-            axis: ax_b,
-            radius: r_b,
-        } = *other;
+        use crate::tol::{NORMAL_DIRECTION, POINT_MERGE};
         let dist_to_line = |p: Point3, origin: Point3, axis: Vec3| -> f64 {
             let d = p - origin;
             (d - axis * d.dot(axis)).length()
         };
-        ax_a.dot(ax_b).abs() >= 1.0 - crate::tol::NORMAL_DIRECTION
-            && (r_a - r_b).abs() <= crate::tol::POINT_MERGE
-            && dist_to_line(ap_b, ap_a, ax_a) <= crate::tol::POINT_MERGE
+        let par = |a: Vec3, b: Vec3| a.dot(b).abs() >= 1.0 - NORMAL_DIRECTION;
+        let same_dir = |a: Vec3, b: Vec3| a.dot(b) >= 1.0 - NORMAL_DIRECTION;
+        let near = |a: Point3, b: Point3| (a - b).length() <= POINT_MERGE;
+        let close = |a: f64, b: f64| (a - b).abs() <= POINT_MERGE;
+        match (*self, *other) {
+            (
+                SurfaceRef::Cylinder {
+                    axis_point: ap_a,
+                    axis: ax_a,
+                    radius: r_a,
+                },
+                SurfaceRef::Cylinder {
+                    axis_point: ap_b,
+                    axis: ax_b,
+                    radius: r_b,
+                },
+            ) => {
+                ax_a.dot(ax_b).abs() >= 1.0 - NORMAL_DIRECTION
+                    && (r_a - r_b).abs() <= POINT_MERGE
+                    && dist_to_line(ap_b, ap_a, ax_a) <= POINT_MERGE
+            }
+            (
+                SurfaceRef::Sphere {
+                    center: c_a,
+                    radius: r_a,
+                },
+                SurfaceRef::Sphere {
+                    center: c_b,
+                    radius: r_b,
+                },
+            ) => near(c_a, c_b) && close(r_a, r_b),
+            (
+                SurfaceRef::Torus {
+                    center: c_a,
+                    axis: ax_a,
+                    major_radius: m_a,
+                    minor_radius: n_a,
+                },
+                SurfaceRef::Torus {
+                    center: c_b,
+                    axis: ax_b,
+                    major_radius: m_b,
+                    minor_radius: n_b,
+                },
+            ) => par(ax_a, ax_b) && near(c_a, c_b) && close(m_a, m_b) && close(n_a, n_b),
+            (
+                SurfaceRef::Cone {
+                    apex: p_a,
+                    axis: ax_a,
+                    half_angle: h_a,
+                },
+                SurfaceRef::Cone {
+                    apex: p_b,
+                    axis: ax_b,
+                    half_angle: h_b,
+                },
+            ) => {
+                same_dir(ax_a, ax_b)
+                    && near(p_a, p_b)
+                    && (trig::cos(h_a) - trig::cos(h_b)).abs() <= NORMAL_DIRECTION
+                    && (trig::sin(h_a) - trig::sin(h_b)).abs() <= NORMAL_DIRECTION
+            }
+            _ => false,
+        }
     }
+}
+
+/// Identifies one blend within one Object. Allocated by the blend engine as
+/// (the largest id present on the object) + 1 ([`Object::next_blend_id`]);
+/// never persisted separately from the faces that carry it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct BlendId(pub u32);
+
+/// What kind of blend a tagged face belongs to. Wire values 0, 1, 2.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlendKind {
+    /// A rolling-ball round (convex or concave), a cove or a bullnose.
+    Fillet,
+    /// A flat blend between two setbacks.
+    Chamfer,
+    /// A router profile (a bundled or Library profile shape).
+    Profile,
+}
+
+/// The part of a blend a tagged face is. Wire values 0, 1, 2.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlendRole {
+    /// A facet of the strip running along a blended edge.
+    Strip,
+    /// A face made at a vertex where blends meet (a rolled corner's sphere
+    /// fan, a flat chamfer corner).
+    Corner,
+    /// A facet of the fan where a stopped blend dies into its sharp edge.
+    Runout,
+}
+
+/// The per-face blend tag (true-curves.md §3.2): groups the faces of one
+/// blend so it can be found, resized, removed and painted as one. It
+/// stores no size and no original edge: the object's
+/// [`crate::blend::BlendRecord`] for the id holds what the blend replaced,
+/// and a tag without a record re-derives those from the geometry. Either
+/// way the edit is verified, so a tag left on a face the user has since cut
+/// through refuses edits instead of editing wrongly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlendTag {
+    /// Which blend on this Object.
+    pub id: BlendId,
+    /// The blend's kind.
+    pub kind: BlendKind,
+    /// This face's role in it.
+    pub role: BlendRole,
 }
 
 /// The per-face attribute state undo must be able to restore exactly: the
@@ -187,6 +383,13 @@ pub struct FaceAttrs {
     pub uv_frame: Option<UvFrame>,
     /// The face's analytic surface reference (see [`Face::surface`]).
     pub surface: Option<SurfaceRef>,
+    /// The face's blend tag (see [`Face::blend`]).
+    pub blend: Option<BlendTag>,
+    /// The face's attribute dictionary slot (see [`Face::attrs`]). Valid
+    /// against the Object the snapshot was taken from, which is the only
+    /// Object a restore applies it to (slots are never renumbered on a
+    /// live Object).
+    pub attrs: AttrSlot,
 }
 
 /// A planar polygonal face; holes are represented as inner loops.
@@ -222,6 +425,25 @@ pub struct Face {
     /// extruded arc/circle side wall). See [`SurfaceRef`] for the
     /// propagation (map-or-drop) contract. Persisted in geometry buffer v4.
     pub surface: Option<SurfaceRef>,
+    /// The blend this face belongs to, when the blend engine made it
+    /// ([`BlendTag`]). Contract, in step with `surface`:
+    /// - split and boolean sub-faces inherit it;
+    /// - a similarity transform keeps it; a non-similarity transform drops
+    ///   it, exactly where `surface` drops;
+    /// - an ordinary Push/Pull that moves the face off its plane drops it
+    ///   with the claim;
+    /// - a boolean renumbers operand B's ids past operand A's largest, so
+    ///   two blends never share an id on the result.
+    ///
+    /// Persisted in geometry buffer v10.
+    pub blend: Option<BlendTag>,
+    /// The face's attribute dictionary ([`Object::face_attrs`]), or
+    /// [`AttrSlot::NONE`]. A face built from an existing one (a split
+    /// fragment, an imprint, a boolean result face, a thickened copy)
+    /// takes its source's; a face built with no source (extrusion and boss
+    /// walls, caps) has none. A merge keeps the survivor's. Persisted in
+    /// geometry buffer v9.
+    pub attrs: AttrSlot,
 }
 
 impl Face {
@@ -232,6 +454,8 @@ impl Face {
             back_material: self.back_material,
             uv_frame: self.uv_frame,
             surface: self.surface,
+            blend: self.blend,
+            attrs: self.attrs,
         }
     }
 
@@ -242,6 +466,8 @@ impl Face {
         self.back_material = attrs.back_material;
         self.uv_frame = attrs.uv_frame;
         self.surface = attrs.surface;
+        self.blend = attrs.blend;
+        self.attrs = attrs.attrs;
     }
 }
 
@@ -268,12 +494,12 @@ pub enum WatertightState {
 /// (DEVELOPMENT.md rule 2).
 #[derive(Debug, Clone)]
 pub struct Object {
-    pub(crate) vertices: SlotMap<VertexId, Vertex>,
-    pub(crate) half_edges: SlotMap<HalfEdgeId, HalfEdge>,
-    pub(crate) edges: SlotMap<EdgeId, Edge>,
-    pub(crate) loops: SlotMap<LoopId, Loop>,
-    pub(crate) faces: SlotMap<FaceId, Face>,
-    pub(crate) shells: SlotMap<ShellId, Shell>,
+    pub(crate) vertices: Shared<SlotMap<VertexId, Vertex>>,
+    pub(crate) half_edges: Shared<SlotMap<HalfEdgeId, HalfEdge>>,
+    pub(crate) edges: Shared<SlotMap<EdgeId, Edge>>,
+    pub(crate) loops: Shared<SlotMap<LoopId, Loop>>,
+    pub(crate) faces: Shared<SlotMap<FaceId, Face>>,
+    pub(crate) shells: Shared<SlotMap<ShellId, Shell>>,
     pub(crate) watertight: WatertightState,
     /// The object's base material ( follow-up): a face whose own `material`
     /// is `None` resolves to this. New faces (extrude walls, boolean walls) are
@@ -289,6 +515,105 @@ pub struct Object {
     /// read this, so native objects stay strict while imports are accepted as the
     /// planar polygons they represent. Persisted in geometry buffer v3.
     pub(crate) planarity_tol: f64, // crate::tol::PLANE_DIST by default
+    /// What each blend on this object replaced, by blend id
+    /// ([`crate::blend::BlendRecord`]): Remove and Resize replay it. A
+    /// blend without one (from a file older than the records) restores by
+    /// derivation instead. Copy-on-write like the element tables, so a
+    /// [`ObjectStamp`] can tell it unchanged.
+    pub(crate) blend_records: Shared<BTreeMap<BlendId, crate::blend::BlendRecord>>,
+    /// Interned attribute dictionaries that faces and edges point into
+    /// ([`Face::attrs`], [`Edge::attrs`]). Append-only while the Object
+    /// lives: a dictionary nothing references any more stays until the
+    /// Object is saved (the writer emits only referenced ones) or rebuilt,
+    /// so every recorded [`AttrSlot`] stays valid. Never holds an empty
+    /// dictionary (an empty one is [`AttrSlot::NONE`]). Copy-on-write like
+    /// the element tables.
+    pub(crate) attr_dicts: Shared<Vec<AttrDict>>,
+}
+
+/// Proof that an Object is unchanged since the stamp was taken
+/// ([`Object::stamp`], [`Object::has_stamp`]): a [`Watch`] on each of its
+/// copy-on-write tables and a copy of its plain fields. A write to a
+/// watched table always moves the writer to a table of its own, and the
+/// watched one's address stays reserved while the stamp lives, so a table
+/// that is still the watched one has not changed. What an Object answers
+/// from its own state (its blends, say) can be kept against a stamp and
+/// served again while the Object still has it. Holds no table's contents.
+pub(crate) struct ObjectStamp {
+    vertices: Watch<SlotMap<VertexId, Vertex>>,
+    half_edges: Watch<SlotMap<HalfEdgeId, HalfEdge>>,
+    edges: Watch<SlotMap<EdgeId, Edge>>,
+    loops: Watch<SlotMap<LoopId, Loop>>,
+    faces: Watch<SlotMap<FaceId, Face>>,
+    shells: Watch<SlotMap<ShellId, Shell>>,
+    watertight: WatertightState,
+    default_material: FaceMaterial,
+    planarity_tol: u64,
+    blend_records: Watch<BTreeMap<BlendId, crate::blend::BlendRecord>>,
+    attr_dicts: Watch<Vec<AttrDict>>,
+}
+
+impl Object {
+    /// This Object's [`ObjectStamp`].
+    pub(crate) fn stamp(&self) -> ObjectStamp {
+        // Every field, by name: a field added to Object fails to compile
+        // here until the stamp covers it.
+        let Object {
+            vertices,
+            half_edges,
+            edges,
+            loops,
+            faces,
+            shells,
+            watertight,
+            default_material,
+            planarity_tol,
+            blend_records,
+            attr_dicts,
+        } = self;
+        ObjectStamp {
+            vertices: vertices.watch(),
+            half_edges: half_edges.watch(),
+            edges: edges.watch(),
+            loops: loops.watch(),
+            faces: faces.watch(),
+            shells: shells.watch(),
+            watertight: *watertight,
+            default_material: *default_material,
+            planarity_tol: planarity_tol.to_bits(),
+            blend_records: blend_records.watch(),
+            attr_dicts: attr_dicts.watch(),
+        }
+    }
+
+    /// Whether this Object is, field for field, the one `stamp` was taken
+    /// of, unchanged since (or a clone of it that has not been written).
+    pub(crate) fn has_stamp(&self, stamp: &ObjectStamp) -> bool {
+        let Object {
+            vertices,
+            half_edges,
+            edges,
+            loops,
+            faces,
+            shells,
+            watertight,
+            default_material,
+            planarity_tol,
+            blend_records,
+            attr_dicts,
+        } = self;
+        vertices.is_watched_by(&stamp.vertices)
+            && half_edges.is_watched_by(&stamp.half_edges)
+            && edges.is_watched_by(&stamp.edges)
+            && loops.is_watched_by(&stamp.loops)
+            && faces.is_watched_by(&stamp.faces)
+            && shells.is_watched_by(&stamp.shells)
+            && *watertight == stamp.watertight
+            && *default_material == stamp.default_material
+            && planarity_tol.to_bits() == stamp.planarity_tol
+            && blend_records.is_watched_by(&stamp.blend_records)
+            && attr_dicts.is_watched_by(&stamp.attr_dicts)
+    }
 }
 
 impl Object {
@@ -296,16 +621,48 @@ impl Object {
     /// through [`Object::from_polygons`], which rejects empty input.
     pub(crate) fn empty() -> Object {
         Object {
-            vertices: SlotMap::with_key(),
-            half_edges: SlotMap::with_key(),
-            edges: SlotMap::with_key(),
-            loops: SlotMap::with_key(),
-            faces: SlotMap::with_key(),
-            shells: SlotMap::with_key(),
+            vertices: Shared::new(SlotMap::with_key()),
+            half_edges: Shared::new(SlotMap::with_key()),
+            edges: Shared::new(SlotMap::with_key()),
+            loops: Shared::new(SlotMap::with_key()),
+            faces: Shared::new(SlotMap::with_key()),
+            shells: Shared::new(SlotMap::with_key()),
             watertight: WatertightState::Open,
             default_material: None,
             planarity_tol: crate::tol::PLANE_DIST,
+            blend_records: Shared::new(BTreeMap::new()),
+            attr_dicts: Shared::new(Vec::new()),
         }
+    }
+
+    /// Each element table's identity and estimated heap bytes: the undo
+    /// memory budget counts a table once however many snapshots share it
+    /// ([`crate::shared`]). Capacity-based and O(1) per table except the
+    /// shells' face lists (a handful of shells per object), so a dense
+    /// mesh costs nothing extra to measure.
+    pub(crate) fn table_footprints(&self) -> [(usize, usize); 6] {
+        use crate::shared::slotmap_heap_bytes as table;
+        let shell_lists: usize = self
+            .shells
+            .values()
+            .map(|s| s.faces.capacity() * std::mem::size_of::<FaceId>())
+            .sum();
+        [
+            (self.vertices.addr(), table(&self.vertices)),
+            (self.half_edges.addr(), table(&self.half_edges)),
+            (self.edges.addr(), table(&self.edges)),
+            (self.loops.addr(), table(&self.loops)),
+            (self.faces.addr(), table(&self.faces)),
+            (self.shells.addr(), table(&self.shells) + shell_lists),
+        ]
+    }
+
+    /// The planarity tolerance this object's faces are held to (meters):
+    /// [`tol::PLANE_DIST`](crate::tol::PLANE_DIST) for native geometry,
+    /// [`tol::IMPORT_PLANE_DIST`](crate::tol::IMPORT_PLANE_DIST) for
+    /// imported geometry and anything built from it.
+    pub fn planarity_tol(&self) -> f64 {
+        self.planarity_tol
     }
 
     /// Vertex storage (read-only).
@@ -357,6 +714,70 @@ impl Object {
     /// own material resolves to. `None` = the renderer's neutral default.
     pub fn default_material(&self) -> FaceMaterial {
         self.default_material
+    }
+
+    /// The dictionary `slot` names in this Object's table, or `None` for
+    /// [`AttrSlot::NONE`] (or a slot this table does not hold).
+    pub(crate) fn attr_dict(&self, slot: AttrSlot) -> Option<&AttrDict> {
+        if slot.is_none() {
+            return None;
+        }
+        self.attr_dicts.get(slot.0 as usize)
+    }
+
+    /// The attribute dictionary of `face` (namespace → key → value), or
+    /// `None` when the face carries none or is not in this Object.
+    pub fn face_attrs(&self, face: FaceId) -> Option<&AttrDict> {
+        self.attr_dict(self.faces.get(face)?.attrs)
+    }
+
+    /// The attribute dictionary of `edge`, or `None` when the edge carries
+    /// none or is not in this Object.
+    pub fn edge_attrs(&self, edge: EdgeId) -> Option<&AttrDict> {
+        self.attr_dict(self.edges.get(edge)?.attrs)
+    }
+
+    /// Whether any live face or edge carries a dictionary.
+    pub(crate) fn has_element_attrs(&self) -> bool {
+        self.faces.values().any(|f| !f.attrs.is_none())
+            || self.edges.values().any(|e| !e.attrs.is_none())
+    }
+
+    /// Interns `dict`: the slot of an equal dictionary already in the
+    /// table, else a new slot. An empty dictionary is [`AttrSlot::NONE`].
+    /// Never edits or renumbers an existing slot.
+    pub(crate) fn intern_attrs(&mut self, dict: AttrDict) -> AttrSlot {
+        if dict.is_empty() {
+            return AttrSlot::NONE;
+        }
+        if let Some(i) = self.attr_dicts.iter().position(|d| *d == dict) {
+            return AttrSlot(i as u32);
+        }
+        self.attr_dicts.push(dict);
+        AttrSlot((self.attr_dicts.len() - 1) as u32)
+    }
+
+    /// Points `face` at `dict` (interned; empty = none) and returns the
+    /// slot it had. The caller guarantees `face` is live.
+    pub(crate) fn set_face_attrs(&mut self, face: FaceId, dict: AttrDict) -> AttrSlot {
+        let slot = self.intern_attrs(dict);
+        std::mem::replace(&mut self.faces[face].attrs, slot)
+    }
+
+    /// Points `edge` at `dict` (interned; empty = none) and returns the
+    /// slot it had. The caller guarantees `edge` is live.
+    pub(crate) fn set_edge_attrs(&mut self, edge: EdgeId, dict: AttrDict) -> AttrSlot {
+        let slot = self.intern_attrs(dict);
+        std::mem::replace(&mut self.edges[edge].attrs, slot)
+    }
+
+    /// Whether two faces of this Object carry equal dictionaries (both
+    /// none counts as equal). The seam-cleanup gate: faces with different
+    /// dictionaries keep the seam between them, as differently painted
+    /// faces do.
+    pub(crate) fn face_attrs_eq(&self, a: FaceId, b: FaceId) -> bool {
+        let (sa, sb) = (self.faces[a].attrs, self.faces[b].attrs);
+        sa == sb || self.attr_dict(sa) == self.attr_dict(sb)
     }
 
     /// The half-edges of `loop_id` in cycle order, starting at its
@@ -422,6 +843,86 @@ impl Object {
             .collect()
     }
 
+    /// The centers of this object's sphere and torus claims (true-curves.md
+    /// §5.1: a revolved canopy's center snaps): one per distinct sphere and
+    /// one per distinct torus, grouped by [`SurfaceRef::same_surface`] in
+    /// first-appearance order over faces in slot order. Each carries its
+    /// group's lowest-slot claiming face as the representative. Cones
+    /// contribute nothing (an apex is not a center); cylinders offer theirs
+    /// through [`Object::analytic_cap_centers`]. Pure and deterministic.
+    pub fn analytic_centers(&self) -> Vec<(Point3, FaceId)> {
+        let mut groups: Vec<(SurfaceRef, Point3, FaceId)> = Vec::new();
+        for (fid, face) in &self.faces {
+            let Some(s) = face.surface else { continue };
+            let center = match s {
+                SurfaceRef::Sphere { center, .. } | SurfaceRef::Torus { center, .. } => center,
+                SurfaceRef::Cylinder { .. } | SurfaceRef::Cone { .. } => continue,
+            };
+            if !groups.iter().any(|(g, _, _)| g.same_surface(&s)) {
+                groups.push((s, center, fid));
+            }
+        }
+        groups.into_iter().map(|(_, c, f)| (c, f)).collect()
+    }
+
+    /// The largest [`BlendId`] any face of this object carries, or `None`
+    /// when no face is tagged.
+    pub fn max_blend_id(&self) -> Option<BlendId> {
+        self.faces
+            .values()
+            .filter_map(|f| f.blend.map(|t| t.id))
+            .max()
+    }
+
+    /// The id a new blend on this object takes: one past the largest
+    /// present, or `BlendId(1)` when there is none.
+    pub fn next_blend_id(&self) -> BlendId {
+        BlendId(
+            self.max_blend_id()
+                .map_or(1, |BlendId(m)| m.saturating_add(1)),
+        )
+    }
+
+    /// Test support only: overwrites a face's analytic surface claim,
+    /// bypassing every invariant (the validator, map-or-drop, stamping
+    /// checks). Never call from product code; executable specs use it to
+    /// build claimed facets the stamping operations do not make yet, and to
+    /// tamper with claims to exercise the validator.
+    #[doc(hidden)]
+    pub fn set_face_surface_for_test(&mut self, face: FaceId, surface: Option<SurfaceRef>) {
+        if let Some(f) = self.faces.get_mut(face) {
+            f.surface = surface;
+        }
+    }
+
+    /// Test support only: overwrites a face's blend tag, bypassing every
+    /// invariant. Never call from product code.
+    #[doc(hidden)]
+    pub fn set_face_blend_for_test(&mut self, face: FaceId, blend: Option<BlendTag>) {
+        if let Some(f) = self.faces.get_mut(face) {
+            f.blend = blend;
+        }
+    }
+
+    /// Test support only: overwrites an edge's soft flag, bypassing every
+    /// invariant. Never call from product code.
+    #[doc(hidden)]
+    pub fn set_edge_soft_for_test(&mut self, edge: EdgeId, soft: bool) {
+        if let Some(e) = self.edges.get_mut(edge) {
+            e.soft = soft;
+        }
+    }
+
+    /// Test support only: overwrites an edge's crease flag, bypassing every
+    /// invariant (the validator still runs on the next checked operation).
+    /// Never call from product code.
+    #[doc(hidden)]
+    pub fn set_edge_crease_for_test(&mut self, edge: EdgeId, crease: bool) {
+        if let Some(e) = self.edges.get_mut(edge) {
+            e.crease = crease;
+        }
+    }
+
     /// The rim circles derived from this object's analytic surface
     /// references: for each distinct claimed cylinder, the exact circles at
     /// the claiming faces' two axial extremes (the drawn circle's bottom and
@@ -470,11 +971,16 @@ impl Object {
             let Some(surface) = face.surface else {
                 continue;
             };
+            // Rims come from cylinders only; spheres, tori and cones offer
+            // their centers through `analytic_centers`.
             let SurfaceRef::Cylinder {
                 axis_point,
                 axis,
                 radius,
-            } = surface;
+            } = surface
+            else {
+                continue;
+            };
             let group = groups.iter().position(|g| {
                 SurfaceRef::Cylinder {
                     axis_point: g.axis_point,
@@ -513,7 +1019,7 @@ impl Object {
                 if radial.length() <= crate::tol::NORMALIZE_MIN_LENGTH {
                     (t, None)
                 } else {
-                    (t, Some(radial.dot(g.v).atan2(radial.dot(g.u))))
+                    (t, Some(trig::atan2(radial.dot(g.v), radial.dot(g.u))))
                 }
             };
             let positions: Vec<Point3> = self.loop_positions(face.outer_loop).collect();
@@ -683,7 +1189,7 @@ impl Object {
                 let d = p - center;
                 let radial = d - axis * d.dot(axis);
                 (radial.length() > crate::tol::NORMALIZE_MIN_LENGTH)
-                    .then(|| radial.dot(v).atan2(radial.dot(u)))
+                    .then(|| trig::atan2(radial.dot(v), radial.dot(u)))
             };
             let a = self.vertices[he.origin].position;
             let b = self.vertices[self.half_edges[he.next].origin].position;
@@ -776,8 +1282,8 @@ impl AnalyticRim {
             .filter(|&q| self.covers(q))
             .map(|q| {
                 self.center
-                    + self.basis_u * (self.radius * q.cos())
-                    + self.basis_v * (self.radius * q.sin())
+                    + self.basis_u * (self.radius * trig::cos(q))
+                    + self.basis_v * (self.radius * trig::sin(q))
             })
             .collect()
     }

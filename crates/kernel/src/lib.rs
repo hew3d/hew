@@ -8,55 +8,107 @@
 //! filesystem, or network dependencies, ever. The WASM boundary lives in
 //! `crates/wasm-api`.
 //!
-//! Module map: `math`, `tol`, `ids`, `topo`, `error`, `transform`,
+//! Module map: `math`, `trig`, `tol`, `ids`, `topo`, `error`, `transform`,
 //! construction (`build`), the validator (`validate`), and the fully
 //! implemented `sketch`, `ops`, `history`, and `serialize`. Executable
 //! specs live in `tests/op_specs.rs`.
 
+mod blend;
 mod boolean;
 mod build;
 mod geom2d;
+mod offset3d;
+mod rederive;
 mod retrace;
+mod sketch_corner;
 mod validate;
 
 pub mod annotation;
 pub mod attr;
 pub mod axes;
 pub mod camera;
+pub mod changes;
+pub mod deform;
 pub mod document;
 pub mod error;
+pub mod geo;
 pub mod guide;
 pub mod health;
 pub mod history;
 pub mod ids;
 pub mod import;
+pub mod loft;
 pub mod material;
 pub mod math;
 pub mod offset;
 pub mod ops;
+/// The patch primitive and its guards. Crate-internal API; public only so
+/// the executable specs can drive it through the `…_for_test` hooks.
+#[doc(hidden)]
+pub mod patch;
+pub mod project;
 pub mod repair;
 pub mod scenes;
 pub mod serialize;
+pub mod shape_error;
+pub mod shared;
+pub mod shell;
 pub mod sketch;
+pub mod smooth;
+/// The skin builder shared by generated sweeps. Crate-internal API; public
+/// only so the executable specs can drive it through the `…_for_test` hooks.
+#[doc(hidden)]
+pub mod station;
 pub mod style;
+pub mod subdiv;
+pub mod surface;
 pub mod tol;
 pub mod topo;
 pub mod transform;
+pub mod triangulate;
+pub mod trig;
 pub mod unit_key;
 
 pub use annotation::{Anchor, Annotation, CapturedCurve, RadialKind};
 pub use attr::{AttrDict, AttrValue, AttrValueError};
 pub use axes::{AxesFrame, AxesFrameError};
-pub use camera::{CameraProjection, CameraState};
-pub use document::{
-    AttrTarget, CompoundMeta, DocChange, DocTransaction, Document, DocumentError, DraftCurveRun,
-    DraftEdge, DraftRegion, DraftRegionWhy, DraftReport, DraftStore, DraftUnit, EntityRef,
-    FollowMePath, HistoryArg, HistoryEntries, HistoryEntryInfo, HistoryKind, HistoryOrigin,
-    IngestJob, IngestProgress, InsertOptions, InsertReport, LibraryProvenance, MAX_COMPONENT_DEPTH,
-    MaterialScope, NodeId, PendingActionKind, PlaneUnits, PurgeReport,
+pub use blend::{BallAt, Bridge, StationRecord};
+pub use blend::{
+    BlendError, BlendFeature, BlendLimit, BlendProfile, BlendReport, BlendSpec, BlendStops,
+    Convexity, CornerStyle, LimitFeature, ProfileSample, ProfileSeg, ProfileShape, RadiusHandle,
+    adjacency_builds_for_test, blend_feature_scans_for_test, blend_verifications_for_test,
+    bundled as bundled_profiles, chain_query_work_for_test, limit_attempts_for_test,
+    limit_probes_for_test, limit_searches_for_test, locate_work_for_test, same_geometry_for_test,
+    swept_balls_for_test, swept_rail_check_for_test,
 };
+pub use camera::{CameraProjection, CameraState};
+pub use changes::{
+    AttrChange, AttrScope, CHANGE_RING_CAP, ChangeKind, ChangeRecord, ChangeRef, ChangeSet,
+};
+pub use document::{
+    AttrTarget, Axis, CellDecline, CellDeclineReason, CellOutcome, CellScope, CellSeed,
+    ClosingEdge, CompoundMeta, CompoundOutcome, CompoundToken, DocChange, DocTransaction, Document,
+    DocumentError, DraftCurveRun, DraftEdge, DraftRegion, DraftRegionWhy, DraftReport, DraftStore,
+    DraftUnit, DrawingInsert, DrawnInsert, DrawnSource, EntityRef, FlipAbout, FollowMePath,
+    HEW_ATTR_NS, HistoryArg, HistoryEntries, HistoryEntryInfo, HistoryKind, HistoryOrigin,
+    IngestJob, IngestProgress, InsertOptions, InsertReport, LINKED_ATTR_KEY, LibraryProvenance,
+    LinkPolicy, LinkedJoin, LinkedWrap, MAX_COMPONENT_DEPTH, MAX_OCCURRENCES, MaterialScope,
+    NodeId, Occurrence, OpenEdges, PendingActionKind, PlaneListing, PlaneUnits, PurgeReport, Remap,
+    RenderRoot, WRAPPED_DEF_SID,
+};
+pub use document::{
+    CONTENT_PRINT_SCHEME, LibraryLink, LibraryLinkState, LibraryPrints, LibraryStamp,
+    LibraryUpdate, LibraryUpdateReport, PrintDigest, content_print_text, is_current_print,
+    library_link_state,
+};
+pub use document::{
+    DEFAULT_HISTORY_BUDGET_BYTES, DEFAULT_HISTORY_MIN_STEPS, HistoryBudget, HistoryMemory,
+    HistoryTrim,
+};
+pub use document::{MAX_ARRAY_COUNT, PathArraySpec};
 pub use error::TopologyError;
-pub use guide::{Guide, GuideSpan};
+pub use geo::{GeoReference, GeoReferenceError};
+pub use guide::{Guide, GuideDash, GuideSpan};
 pub use history::{History, HistoryEntry, HistoryError, KernelOp, KernelOpError, KernelOpReport};
 pub use ids::{
     AnnotationId, ComponentId, EdgeId, FaceId, GroupId, GuideId, HalfEdgeId, InstanceId, LoopId,
@@ -65,10 +117,10 @@ pub use ids::{
 pub use import::{
     DefRecipe, ImportAttrTarget, ImportGuide, ImportNode, ImportReport, ImportScene,
     ImportSceneExtra, ImportSceneRecipe, ImportSketch, ImportTag, MeshExtra, MeshRecipe,
-    SkippedMesh,
+    SkippedMesh, first_overlapping_holes, rings_trace_each_other,
 };
 pub use material::{
-    FaceMaterial, ImageFormat, Material, MaterialPalette, Rgba8, Texture, UvFrame,
+    FaceMaterial, ImageFormat, Material, MaterialPalette, Pbr, PbrMap, Rgba8, Texture, UvFrame,
     material_content_hash,
 };
 pub use math::{MathError, Plane, Point3, Vec3};
@@ -76,9 +128,9 @@ pub use offset::{
     FaceOffsetError, OffsetError, OffsetLoop, ProfileOffset, offset_face_boundary, offset_profile,
 };
 pub use ops::{
-    BooleanError, BooleanOp, CollapseSubFaceReport, ExtrudeError, FaceAttrsAt,
+    BooleanError, BooleanOp, BooleanTidy, CollapseSubFaceReport, ExtrudeError, FaceAttrsAt,
     FaceMergeInnerReport, FaceMergeReport, FaceSplitInnerReport, FaceSplitReport, FollowMeError,
-    LoopImprintPlan, Operand, PushPullError, PushPullReport, SliceError, StickyError,
+    LoopImprintPlan, Operand, PushPullError, PushPullReport, SliceError, StickyError, SweepOptions,
     TransformSubFaceReport,
 };
 pub use retrace::{FaceRetraceReport, RetracePath};
@@ -88,6 +140,7 @@ pub use serialize::{
     MaterialSummary, NO_MATERIAL, read_item_asset, read_item_summary,
     read_item_summary_from_reader,
 };
+pub use shape_error::ShapeError;
 pub use sketch::{
     CurveAnalytic, CurveGeom, CurveRefaceted, EdgeRemoved, MAX_CIRCLE_SEGMENTS,
     MIN_CIRCLE_SEGMENTS, Profile, ProfileError, RegionOffsetAdded, SegmentAdded, Sketch,
@@ -95,7 +148,12 @@ pub use sketch::{
     SketchIsland, SketchIslandId, SketchRegion, SketchRegionId, SketchVertex, SketchVertexId,
     VertexMoved,
 };
-pub use style::ViewStyle;
-pub use topo::{AnalyticRim, FaceAttrs, Object, SurfaceRef, WatertightState};
+pub use sketch_corner::{CornerBlendReport, CornerProfile};
+pub use style::{SectionLook, ViewStyle};
+pub use surface::{EdgeSmoothness, RailGap};
+pub use topo::{
+    AnalyticRim, AttrSlot, BlendId, BlendKind, BlendRole, BlendTag, FaceAttrs, Object, SurfaceRef,
+    WatertightState,
+};
 pub use transform::{Transform, TransformError};
 pub use unit_key::{SketchUnitKeys, chain_key, curve_key, edge_key, region_key};

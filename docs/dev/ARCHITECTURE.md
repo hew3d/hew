@@ -106,7 +106,7 @@ hatch without paying for it now.
 - **The licensing wall** (§4). Nothing derived from the SketchUp SDK —
   headers, constants, or knowledge obtained under its license — may
   enter the dependency chain. `.skp` support exists only through
-  [OpenSKP](https://github.com/hew3d/openskp), a clean-room reader.
+  [Skpwright](https://github.com/hew3d/skpwright), a clean-room reader.
 - **Plugins will run sandboxed, never in-process** (§4). A plugin is a
   separate program reaching Hew through the documented API. This keeps
   the license exception true by construction and a crashed plugin

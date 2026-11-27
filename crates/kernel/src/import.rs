@@ -96,6 +96,32 @@ impl MeshRecipe {
     }
 }
 
+/// The first pair `(i, j)`, `i < j`, of one face's hole rings that overlap
+/// (the rule of [`crate::TopologyError::HolesOverlap`]: a proper crossing,
+/// a point of one strictly inside the other, or one outline traced twice),
+/// or `None`. `normal` is the face's unit normal. A ring of fewer than
+/// three points overlaps nothing (the builder refuses it as
+/// [`crate::TopologyError::DegenerateFace`]). The import builder
+/// refuses such a face ([`crate::TopologyError::OverlappingHoles`]); an
+/// importer asks first, to resolve it loudly instead of losing the mesh.
+pub fn first_overlapping_holes(
+    holes: &[Vec<Point3>],
+    normal: crate::math::Vec3,
+) -> Option<(usize, usize)> {
+    crate::geom2d::first_overlapping_holes(holes, normal)
+}
+
+/// Whether every vertex of ring `a` lies within `tol` of ring `b`'s
+/// boundary, and every vertex of `b` within `tol` of `a`'s: the two are
+/// one outline drawn twice, a hair apart.
+pub fn rings_trace_each_other(a: &[Point3], b: &[Point3], tol: f64) -> bool {
+    let on = |p: Point3, ring: &[Point3]| {
+        let n = ring.len();
+        (0..n).any(|i| crate::geom2d::point_near_segment(p, ring[i], ring[(i + 1) % n], tol))
+    };
+    !a.is_empty() && !b.is_empty() && a.iter().all(|&p| on(p, b)) && b.iter().all(|&p| on(p, a))
+}
+
 /// Source claims about a mesh's edges and faces, applied by `ingest` to the
 /// built Object wherever they hold — claims are metadata, never geometry,
 /// so one the built Object contradicts is dropped (the map-or-drop
@@ -123,6 +149,15 @@ pub struct MeshExtra {
     /// (`NO_MATERIAL` for none; empty for a mesh with none): a `.skp`
     /// face painted on its back (see [`crate::topo::Face::back_material`]).
     pub face_back_materials: Vec<u32>,
+    /// Locked in the source (a locked `.skp` group standing for one
+    /// solid): the Object is built locked ([`crate::Document::node_locked`]).
+    pub locked: bool,
+    /// In a native import ([`ImportSceneExtra::native`]: a `.skp` Hew
+    /// wrote), the mesh is still a foreign file's solid the user had not
+    /// drawn on when Hew saved it, and its Object is marked imported again
+    /// ([`crate::Document::object_is_imported`]). A foreign import marks
+    /// every Object whatever this says.
+    pub imported: bool,
 }
 
 /// A drawn, unextruded sketch carried by an import: one planar set of
@@ -144,11 +179,26 @@ pub struct ImportSketch {
     /// Welded curves: the segment indices of each chain, and the circle it
     /// was drawn from when it has one.
     pub curves: Vec<(Vec<usize>, Option<CurveAnalytic>)>,
+    /// The outer rings of the faces the source drew on these segments (a
+    /// `.skp` Hew wrote holds each filled region as a face on its edges).
+    /// A closed region whose outer ring coincides with one of them — the
+    /// same corners within [`tol::POINT_MERGE`](crate::tol::POINT_MERGE),
+    /// from any start, in either direction — keeps its face; every other
+    /// region is a loop of edges alone ([`crate::SketchRegion::faceless`]).
+    /// A ring matching no region changes nothing. Empty for bare edges,
+    /// the drawing a foreign file brings (its faces arrive as solids).
+    pub filled: Vec<Vec<Point3>>,
     /// Tag paths the sketch carries (a `.skp` edge's layer), root-first:
     /// it is not shown while one of them, or a tag above one, is hidden.
     /// Empty for none. An import declares the tags it uses
     /// ([`ImportScene::tags`]).
     pub tags: Vec<Vec<String>>,
+    /// In a native import ([`ImportSceneExtra::native`]: a `.skp` Hew
+    /// wrote), the sketch is still a foreign file's drawing the user had
+    /// not drawn in when Hew saved it, and is marked imported again
+    /// ([`crate::Sketch::imported`]). A foreign import marks every sketch
+    /// whatever this says.
+    pub imported: bool,
 }
 
 /// What an imported attribute dictionary hangs on.
@@ -182,6 +232,15 @@ pub struct ImportSceneExtra {
     /// Each annotation's tag paths, parallel to `annotations` (empty, or
     /// short, for none).
     pub annotation_tags: Vec<Vec<Vec<String>>>,
+    /// The import is Hew's own work, not a foreign file's: a `.skp` Hew
+    /// wrote (its `hew` dictionary says so) or a picture Hew placed. Its
+    /// objects and sketches are the user's, so it marks imported only the
+    /// ones its recipes say still are ([`MeshExtra::imported`],
+    /// [`ImportSketch::imported`]). `false` (the default) for a foreign
+    /// file: every object and sketch it builds is marked
+    /// ([`crate::Document::object_is_imported`], [`crate::Sketch::imported`])
+    /// until the user draws on it.
+    pub native: bool,
 }
 
 /// A shared definition recipe: a subtree in definition-local coords.
@@ -196,6 +255,12 @@ pub struct DefRecipe {
     /// back through the recipe graph — `ingest` refuses cyclic scenes with a
     /// typed error, never repairs them).
     pub children: Vec<ImportNode>,
+    /// The definition is built locked. A lock belongs to the shared shape,
+    /// so every placement of it is locked; an importer whose source locks
+    /// one copy at a time decides how its copies combine (`skp-import`:
+    /// any locked copy locks the shape). A linked set's root member never
+    /// carries a lock of its own: `ingest` hoists one onto the definition.
+    pub locked: bool,
 }
 
 impl DefRecipe {
@@ -205,6 +270,7 @@ impl DefRecipe {
         DefRecipe {
             name,
             children: meshes.into_iter().map(ImportNode::Mesh).collect(),
+            locked: false,
         }
     }
 
@@ -243,6 +309,11 @@ pub enum ImportNode {
         /// USER-hidden in the source (a `.skp` hidden group): imported,
         /// registered hidden-by-default (manifest v6), never dropped.
         hidden: bool,
+        /// Locked in the source (a locked `.skp` group): the Group is
+        /// built locked. (An [`ImportNode::Instance`] carries no lock: a
+        /// placement is locked when its definition is,
+        /// [`DefRecipe::locked`].)
+        locked: bool,
         /// The importer's own identity for this node (a `.skp` archive
         /// slot), so an [`ImportSceneRecipe`]'s hidden-node list can name
         /// it before the node exists. `None` when no scene refers to it.
@@ -294,6 +365,11 @@ pub struct ImportSceneRecipe {
     /// The look the scene captures (a `.skp` scene's saved style:
     /// backdrop and axes), when it captures one.
     pub view_style: Option<crate::style::ViewStyle>,
+    /// The scene's own transition time in seconds; `None` is the
+    /// document's own.
+    pub transition_s: Option<f64>,
+    /// The scene's own delay in seconds; `None` is the document's own.
+    pub delay_s: Option<f64>,
 }
 
 /// A construction guide carried by an import (`.skp` guides).
@@ -310,6 +386,8 @@ pub enum ImportGuide {
         /// direction from `origin` ([`crate::GuideSpan::INFINITE`] for the
         /// whole line; one of no length → skipped, reported).
         span: crate::guide::GuideSpan,
+        /// How the line is drawn (a `.skp` guide's stipple mask).
+        dash: crate::guide::GuideDash,
         /// Tag paths, root-first (a `.skp` guide's layer, then each
         /// container's above it); the guide hides with them.
         tags: Vec<Vec<String>>,
@@ -363,6 +441,10 @@ pub struct ImportScene {
     /// How the source document is shown (`style.rs`), adopted under the
     /// same empty-document rule as [`ImportScene::camera`].
     pub view_style: Option<crate::style::ViewStyle>,
+    /// The source document's coordinate reference system, adopted under
+    /// the same empty-document rule as [`ImportScene::camera`]. A record
+    /// that fails [`crate::GeoReference::validate`] is not adopted.
+    pub geo: Option<crate::GeoReference>,
     /// Sketches and attribute dictionaries.
     pub extra: ImportSceneExtra,
 }
@@ -414,6 +496,9 @@ pub struct ImportReport {
     /// The annotations created, in [`ImportSceneExtra::annotations`] order
     /// (`None` for one that was skipped — reported in `skipped`).
     pub annotations: Vec<Option<crate::ids::AnnotationId>>,
+    /// The stable id of each scene created, in [`ImportScene::scenes`]
+    /// order (`None` for one that could not be added).
+    pub scenes: Vec<Option<u64>>,
 }
 
 // ── DocAction::Imported + ingest ──────────────────────────────────────────────

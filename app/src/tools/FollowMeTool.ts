@@ -127,7 +127,7 @@
  * outright (its geometry is stored in definition-local space); it is now a
  * legal PATH — `follow_me_around_instance_face` (design §2e) takes the
  * instance handle too and poses the loop into world space kernel-side, a
- * reflected placement refusing typed — but never a legal PROFILE through
+ * reflected placement bakes like any other — but never a legal PROFILE through
  * THAT entry point (no world `follow_me_face_*` variant takes an instance).
  *
  * A face reached while EDITING a component INSTANCE's shared DEFINITION
@@ -161,22 +161,34 @@
  * active-context stack via `setEditContext`.
  */
 
-import { t } from '@lingui/core/macro'
+import { plural, t } from '@lingui/core/macro'
 import * as THREE from 'three'
 import { LineSegments2 } from 'three/examples/jsm/lines/LineSegments2.js'
 import type { Tool, Snap, EditContext } from './types'
 import { editContextEq } from './types'
 import type { Ray } from '../viewport/math'
-import { screenConstantWorldHalfFromWorldPerPixel } from '../viewport/math'
+import { sameRay, screenConstantWorldHalfFromWorldPerPixel } from '../viewport/math'
 import type { Scene as WasmScene } from '../wasm/loader'
 import type { NodeRef } from '../panels/treeModel'
 import { parseKernelErrorCode, kernelErrorMessage } from '../kernelErrors'
 import { defaultFaceEligible, type FaceEligible } from './faceDraw'
+import { lockHintForPick } from '../lock/lockModel'
 import { clearPreview } from './transformPreview'
 import { getResolvedTheme } from '../settings/theme'
 import { makeFatSegments, disposeFatSegments, PREVIEW_LINE_STYLE } from '../viewport/fatLine'
 import { EDGE_COLOR_SELECTED } from '../viewport/SceneRenderer'
+import {
+  editShapeBuffer,
+  isShapeInputKey,
+  isBareModifier,
+  isZeroPercent,
+  parseShapeToken,
+  formatDegrees,
+  formatPercent,
+} from './shapeInput'
 import { editLengthBuffer, isLengthInputKey } from './moveInput'
+import { RetypeWindow, idleRetypeCapturesKey, retypeStaleMessage } from './retypeWindow'
+import { behaviorEnabled } from '../preview'
 import { formatLength, parseLengthToMeters, getLengthUnit, typedReadout } from '../settings/units'
 import {
   evaluateStart,
@@ -190,7 +202,20 @@ import {
   type Vec3,
 } from './followMeStart'
 import { isDraftRef, resolveDraft } from './planeUnits'
+import { pickRegionAt, pickFaceAt, regionRing, ringSegments, rayAtProfile } from './profilePick'
+import { pickEdgePath } from './edgePathPick'
 import { seamWalk, nearestOnWalk, subWalkTo, reverseWalk, type SeamWalk } from './followMeDrag'
+
+/**
+ * Twist and end scale are a Preview feature (src/preview, `follow-me-twist`).
+ * Without it Follow Me types a length and nothing else: no suffix grammar, no
+ * offer in the hint, no retype of a finished sweep. Fixed when the app loads.
+ */
+const TWIST = behaviorEnabled('follow-me-twist')
+const isInputKey = (key: string): boolean => (TWIST ? isShapeInputKey(key) : isLengthInputKey(key))
+const editBuffer = (buf: string, key: string, format: ReturnType<typeof getLengthUnit>): string =>
+  TWIST ? editShapeBuffer(buf, key, format) : editLengthBuffer(buf, key, format)
+const parseToken = (buf: string): ReturnType<typeof parseShapeToken> => (TWIST ? parseShapeToken(buf) : null)
 
 export type PathTarget =
   | { kind: 'edges'; sketchHandle: bigint; edgeHandles: bigint[] }
@@ -296,6 +321,57 @@ type Stage =
 export type OnFollowMeCommit = (objectId: bigint) => void
 export type OnToast = (message: string, code?: string) => void
 export type OnMeasurement = (text: string) => void
+
+/**
+ * Twist, end scale and station options of one Follow Me gesture
+ * (true-curves.md §5.2). Radians, a ratio (1 = none) and a station count
+ * (0 = automatic) — the arguments of the `follow_me_*_with` wasm twins.
+ */
+export interface SweepOpts {
+  twist: number
+  endScale: number
+  stations: number
+}
+
+export const DEFAULT_SWEEP_OPTS: Readonly<SweepOpts> = { twist: 0, endScale: 1, stations: 0 }
+
+export function isDefaultSweepOpts(o: SweepOpts): boolean {
+  return o.twist === 0 && o.endScale === 1 && o.stations === 0
+}
+
+/** The profile stage's offer of the typed options. */
+function twistOffer(): string {
+  return t`Type 30deg to twist it or 40% to shrink its end.`
+}
+/** The profile stage's warning when a typed option meets a closed path. */
+function closedPathWarning(): string {
+  return t`This path is closed, so a full sweep can’t take a twist or an end size. Drag along it for a partial sweep, or press Esc to clear the option.`
+}
+/** A typed `0%` end size: the grammar drops it, so say why. */
+function endSizeZero(): string {
+  return t`End size must be above 0%.`
+}
+
+/** "Twist 30° · End 40% · 8 stations", or '' for the defaults. */
+export function sweepOptsText(o: SweepOpts): string {
+  const parts: string[] = []
+  const twist = formatDegrees(o.twist)
+  const end = formatPercent(o.endScale)
+  if (o.twist !== 0) parts.push(t`Twist ${twist}`)
+  if (o.endScale !== 1) parts.push(t`End ${end}`)
+  if (o.stations !== 0) parts.push(plural(o.stations, { one: '# station', other: '# stations' }))
+  return parts.join(' · ')
+}
+
+/**
+ * The sweep just committed, kept in a `RetypeWindow` so a twist, end scale or
+ * station count typed AFTER the click redoes it. `invoke` replays the exact
+ * wasm call (same profile, same path, same stop length) with new options.
+ */
+interface RetypeSpec {
+  invoke: (opts: SweepOpts) => bigint
+  opts: SweepOpts
+}
 
 /**
  * Path/hover highlight colors. The picked path adopts the SELECTION highlight
@@ -444,6 +520,19 @@ export class FollowMeTool implements Tool {
   private onToast: OnToast
   private onMeasurementCb: OnMeasurement
 
+  /** Twist / end scale / stations of the gesture in progress. Reset at the
+   *  start of every new Follow Me gesture (after a commit, an Esc back to
+   *  the path stage, a cancel). */
+  private opts: SweepOpts = { ...DEFAULT_SWEEP_OPTS }
+  /** A one-line confirmation of a retype ("Twist set to 30°.") shown until
+   *  the next pointer move or key. `noteRay` is the ray it was set under:
+   *  the Viewport re-sends that ray after a key, which is not a move. */
+  private note = ''
+  private noteRay: Ray | null = null
+  private lastMoveRay: Ray | null = null
+  /** The finished sweep, retypeable through its options (see `RetypeSpec`). */
+  private readonly retype: RetypeWindow<RetypeSpec>
+
   /** The picked-path highlight (persists from pick until commit/cancel). A
    *  fat line (`makeFatSegments`) — see `PATH_HOVER_COLORS`. */
   private pathHighlight: LineSegments2 | null = null
@@ -480,6 +569,9 @@ export class FollowMeTool implements Tool {
    *  the hover highlight and status hint. Only ever set while `pathSource`
    *  is `'in-tool'` (see `_hoverProfileFace`'s doc). */
   private hoveredProfileFace: ProfileFaceTarget | null = null
+  /** The "Locked." line when the face under the cursor belongs to a locked
+   *  thing (it is not offered as a profile; the click says the same). */
+  private hoverLockedHint: string | null = null
 
   /** VCB buffer — raw string being typed by the user, live at the profile
    *  stage and while dragging (see `capturesKey`). */
@@ -579,6 +671,7 @@ export class FollowMeTool implements Tool {
     this.onCommit = onCommit
     this.onToast = onToast
     this.onMeasurementCb = onMeasurement
+    this.retype = new RetypeWindow(wasmScene)
 
     const preselected = this._pathFromSelection(initialSelection)
     if (preselected !== null) {
@@ -605,9 +698,31 @@ export class FollowMeTool implements Tool {
     if (this.stage.kind === 'pick-profile') this._highlightPath(this.stage.path)
   }
 
-  /** Live status-bar guidance for the current stage (see Tool.statusHint). */
+  /** Live status-bar guidance for the current stage (see Tool.statusHint),
+   *  with the active sweep options appended once any are set. */
   statusHint(): string {
+    if (this.note !== '') return this.note
+    if (this.stage.kind === 'pick-profile' && this.hoverLockedHint !== null) return this.hoverLockedHint
+    const base = this._stageHint()
+    const opts = sweepOptsText(this.opts)
+    if (opts !== '') {
+      // Said now, not after the click: a full sweep around a closed path
+      // cannot twist or end smaller.
+      const warn =
+        this.stage.kind === 'pick-profile' && this._pathIsClosed(this.stage.path) ? ` ${closedPathWarning()}` : ''
+      return `${base} (${opts})${warn}`
+    }
+    // Typed options are otherwise invisible: name them at the profile stage
+    // (spelled `deg`, which every keyboard can type).
+    const offer = TWIST && this.stage.kind === 'pick-profile' && this.profileVerdict?.kind !== 'refused'
+    return offer ? `${base} ${twistOffer()}` : base
+  }
+
+  private _stageHint(): string {
     if (this.stage.kind === 'pick-path') {
+      if (this.retype.isOpen) {
+        return t`Type a twist (30deg), an end size (40%) or stations (8s) to redo the sweep, or click the next path.`
+      }
       return t`Click the path to follow — a drawn line or curve, or a solid face to run around.`
     }
     if (this.stage.kind === 'dragging') {
@@ -734,6 +849,22 @@ export class FollowMeTool implements Tool {
     return this.stage.kind !== 'pick-path'
   }
 
+  /** Armed for Escape's purposes: a gesture in progress, or a post-commit
+   *  value being typed (see `toolHasArmedGesture` in tools/types.ts). */
+  hasArmedGesture(): boolean {
+    return this.capturingInput() || this.typed !== ''
+  }
+
+  /** Quietly close the retype window — the host calls this before an
+   *  explicit undo/redo/delete (`disarmActivePostCommitWindow`). */
+  disarmRetype(): void {
+    this.retype.close()
+    if (this.stage.kind === 'pick-path' && this.typed !== '') {
+      this.typed = ''
+      this.onMeasurementCb('')
+    }
+  }
+
   /**
    * Per-key VCB capture (see the routing note at MoveTool.capturesKey).
    * `isLengthInputKey` accepts unit-suffix letters (m/c/k/f/t/i/n) so an
@@ -755,9 +886,11 @@ export class FollowMeTool implements Tool {
    * state.
    */
   capturesKey(key: string): boolean {
-    if (this.stage.kind === 'pick-path') return false
+    if (this.stage.kind === 'pick-path') {
+      return this.retype.isOpen && idleRetypeCapturesKey(key, this.typed, isInputKey)
+    }
     if (this.stage.kind === 'dragging' || this.typed !== '') {
-      return key === 'Enter' || isLengthInputKey(key)
+      return key === 'Enter' || isInputKey(key)
     }
     // pick-profile, nothing typed yet: only what can START a fresh entry —
     // the non-letter subset of isLengthInputKey (digits, sign, decimal
@@ -854,6 +987,8 @@ export class FollowMeTool implements Tool {
   }
 
   onPointerMove(_snap: Snap | null, ray: Ray): void {
+    if (!sameRay(this.noteRay, ray)) this.note = ''
+    this.lastMoveRay = ray
     // Mid-drag: the cursor's projection onto the picked path IS the live
     // partial-sweep length (E4) — update the station marker, the brightened
     // "swept so far" overlay, and the VCB readout.
@@ -901,6 +1036,8 @@ export class FollowMeTool implements Tool {
   }
 
   onPointerDown(_snap: Snap | null, ray: Ray): void {
+    // Any pointer action ends the retype window — the next sweep begins.
+    this.disarmRetype()
     if (this.stage.kind === 'pick-path') {
       const pick = this._pickPath(ray)
       if (pick.kind === 'target') {
@@ -945,33 +1082,11 @@ export class FollowMeTool implements Tool {
     // profile drawn there (`begin_sketch_on_plane_in_instance`) is reached
     // through the scoped, pose-mapping `pick_sketch_region_in_instance`
     // sibling instead.
-    const regionPickInstance = this._activeInstance
-    const regionPick = regionPickInstance !== null
-      ? this.wasmScene.pick_sketch_region_in_instance(
-          regionPickInstance,
-          ray.origin[0], ray.origin[1], ray.origin[2],
-          ray.direction[0], ray.direction[1], ray.direction[2],
-        )
-      : this.wasmScene.pick_sketch_region(
-          ray.origin[0], ray.origin[1], ray.origin[2],
-          ray.direction[0], ray.direction[1], ray.direction[2],
-        )
-    if (regionPick === undefined) {
-      const facePick = this.wasmScene.pick_face(
-        ray.origin[0], ray.origin[1], ray.origin[2],
-        ray.direction[0], ray.direction[1], ray.direction[2],
-      )
-      if (facePick === undefined) return
-      let object: bigint
-      let face: bigint
-      let instance: bigint | undefined
-      try {
-        object = facePick.object()
-        face = facePick.face()
-        instance = facePick.instance()
-      } finally {
-        facePick.free()
-      }
+    const regionHit = pickRegionAt(this.wasmScene, ray, this._activeInstance)
+    if (regionHit === null) {
+      const faceHit = pickFaceAt(this.wasmScene, ray)
+      if (faceHit === null) return
+      const { objectHandle: object, faceHandle: face, instance } = faceHit
       if (this.stage.pathSource === 'preselection') {
         // Same frame guard as the path stage: a stale-preselection recovery
         // must not adopt an instanced/in-context face the sweep can't place.
@@ -1003,6 +1118,13 @@ export class FollowMeTool implements Tool {
         this.stage.path.instance !== undefined &&
         (activeInstance === null || this.stage.path.instance !== activeInstance)
       if (pathIsOutsideInstanceFace) return
+      // A face of a locked thing is not swept: the click says so and offers
+      // Unlock (OW-1). The path alone may be locked — it is only read.
+      const lockedProfile = lockHintForPick(this.wasmScene, object, instance, { shape: true })
+      if (lockedProfile !== null) {
+        this.onToast(lockedProfile.message, lockedProfile.code)
+        return
+      }
       if (!this._faceFollowable(object, instance, true)) {
         this._notifyMiss(this._ineligibleFaceHint(instance, true))
         return
@@ -1010,14 +1132,7 @@ export class FollowMeTool implements Tool {
       this._commitFaceProfile(object, face, this.stage.path, this.stage.pathSource)
       return
     }
-    let sketchHandle: bigint
-    let regionHandle: bigint
-    try {
-      sketchHandle = regionPick.sketch()
-      regionHandle = regionPick.region()
-    } finally {
-      regionPick.free()
-    }
+    const { sketchHandle, regionHandle } = regionHit
     this._armOrCommit(this.stage.path, this.stage.pathSource, sketchHandle, regionHandle, ray)
   }
 
@@ -1174,7 +1289,12 @@ export class FollowMeTool implements Tool {
   }
 
   onKey(ev: KeyboardEvent): void {
+    if (!isBareModifier(ev.key)) this.note = ''
     if (ev.key === 'Escape') {
+      if (this.stage.kind === 'pick-path' && this.retype.isOpen) {
+        this.disarmRetype()
+        return
+      }
       if (this.stage.kind === 'dragging') {
         // Cancels back to the PROFILE stage (not the path stage) — the path
         // is still picked and highlighted; only the in-progress drag is
@@ -1186,6 +1306,13 @@ export class FollowMeTool implements Tool {
         this.onMeasurementCb('')
         return
       }
+      if (this.stage.kind === 'pick-profile' && (this.typed !== '' || !isDefaultSweepOpts(this.opts))) {
+        // Clear what was typed first; the picked path stays for another try.
+        this.typed = ''
+        this.opts = { ...DEFAULT_SWEEP_OPTS }
+        this.onMeasurementCb('')
+        return
+      }
       if (this.stage.kind === 'pick-profile') {
         // Step back one stage: drop the picked path, keep the tool.
         this.stage = { kind: 'pick-path' }
@@ -1193,6 +1320,8 @@ export class FollowMeTool implements Tool {
         this.typed = ''
         this.hoveredRegion = null
         this.hoveredProfileFace = null
+        this.hoverLockedHint = null
+        this.opts = { ...DEFAULT_SWEEP_OPTS }
         this._clearPath()
         this._clearHover()
         this.onMeasurementCb('')
@@ -1202,10 +1331,28 @@ export class FollowMeTool implements Tool {
       return
     }
 
-    if (this.stage.kind === 'pick-path') return
+    if (this.stage.kind === 'pick-path') {
+      this._retypeKey(ev)
+      return
+    }
 
     // ── Numeric VCB — live at the profile stage AND while dragging ──
     if (ev.key === 'Enter') {
+      // A twist (30°), end size (40%) or station count (8s) sets an option
+      // and keeps the gesture going; a plain number is a partial-sweep length.
+      const token = parseToken(this.typed)
+      if (token !== null) {
+        this.opts = this._withToken(this.opts, token)
+        this.typed = ''
+        this.onMeasurementCb('')
+        return
+      }
+      if (TWIST && isZeroPercent(this.typed)) {
+        this.onToast(endSizeZero())
+        this.typed = ''
+        this.onMeasurementCb('')
+        return
+      }
       const meters = parseLengthToMeters(this.typed)
       if (meters === null) return
       // K2: typed entry always commits FORWARD. The signed drag-direction
@@ -1245,16 +1392,98 @@ export class FollowMeTool implements Tool {
       return
     }
 
-    if (isLengthInputKey(ev.key)) {
-      this.typed = editLengthBuffer(this.typed, ev.key, getLengthUnit())
+    if (isInputKey(ev.key)) {
+      this.typed = editBuffer(this.typed, ev.key, getLengthUnit())
       this.onMeasurementCb(typedReadout(this.typed))
     }
+  }
+
+  /** `opts` with one typed token applied. */
+  private _withToken(opts: SweepOpts, token: NonNullable<ReturnType<typeof parseShapeToken>>): SweepOpts {
+    switch (token.kind) {
+      case 'angle': return { ...opts, twist: token.radians }
+      case 'percent': return { ...opts, endScale: token.ratio }
+      case 'count': return { ...opts, stations: token.n }
+    }
+  }
+
+  /**
+   * Typing at the idle path stage while the retype window is open: a twist,
+   * end size or station count redoes the sweep just made, exactly as a click
+   * with those options would have. Plain numbers are ignored here (a partial
+   * length needs a profile under the cursor).
+   */
+  private _retypeKey(ev: KeyboardEvent): void {
+    if (!this.retype.isOpen) return
+    if (ev.key === 'Enter') {
+      const buf = this.typed
+      const token = parseToken(buf)
+      this.typed = ''
+      this.onMeasurementCb('')
+      if (token === null) {
+        if (isZeroPercent(buf)) this.onToast(endSizeZero())
+        return
+      }
+      this._retypeApply(token)
+      return
+    }
+    if (isInputKey(ev.key)) {
+      this.typed = editBuffer(this.typed, ev.key, getLengthUnit())
+      this.onMeasurementCb(typedReadout(this.typed))
+    }
+  }
+
+  private _retypeApply(token: NonNullable<ReturnType<typeof parseShapeToken>>): void {
+    const result: { id: bigint | null } = { id: null }
+    const run = (spec: RetypeSpec, opts: SweepOpts): boolean => {
+      try {
+        result.id = spec.invoke(opts)
+        return true
+      } catch (err) {
+        this._toastRefusal(err)
+        return false
+      }
+    }
+    const spec = this.retype.spec
+    if (spec === null) return
+    const nextOpts = this._withToken(spec.opts, token)
+    const outcome = this.retype.apply(
+      (s) => run(s, nextOpts),
+      (s) => run(s, s.opts),
+      (s) => ({ ...s, opts: nextOpts }),
+    )
+    if (outcome === 'stale') {
+      this.onToast(retypeStaleMessage('sweep'))
+      return
+    }
+    if (result.id !== null) {
+      this.onCommit(result.id)
+      // Say what the retype did; the sweep itself looks much the same.
+      const noteTwist = token.kind === 'angle' ? formatDegrees(token.radians) : ''
+      const noteEnd = token.kind === 'percent' ? formatPercent(token.ratio) : ''
+      const noteStations = token.kind === 'count' ? token.n : 0
+      this.note =
+        token.kind === 'angle'
+          ? t`Twist set to ${noteTwist}.`
+          : token.kind === 'percent'
+            ? t`End size set to ${noteEnd}.`
+            : t`Stations set to ${noteStations}.`
+      this.noteRay = this.lastMoveRay
+    }
+  }
+
+  private _toastRefusal(err: unknown): void {
+    const code = parseKernelErrorCode(err)
+    const rawMsg = err instanceof Error ? err.message : String(err)
+    this.onToast(kernelErrorMessage(code ?? 'Unknown', rawMsg), code ?? undefined)
   }
 
   cancel(): void {
     this.stage = { kind: 'pick-path' }
     this.missNotified = false
     this.typed = ''
+    this.opts = { ...DEFAULT_SWEEP_OPTS }
+    this.retype.close()
     this.hoveredRegion = null
     this.hoveredProfileFace = null
     // Route every live overlay through its own proper disposal FIRST — a fat
@@ -1334,29 +1563,8 @@ export class FollowMeTool implements Tool {
    * frame, and so the hover preview never renders on it.
    */
   private _pickPath(ray: Ray): PathPick {
-    const edgePick = this.wasmScene.pick_sketch_edge(
-      ray.origin[0], ray.origin[1], ray.origin[2],
-      ray.direction[0], ray.direction[1], ray.direction[2],
-    )
-    if (edgePick !== undefined) {
-      let sketchHandle: bigint
-      let edgeHandle: bigint
-      try {
-        sketchHandle = edgePick.sketch()
-        edgeHandle = edgePick.edge()
-      } finally {
-        edgePick.free()
-      }
-      try {
-        const island = this.wasmScene.sketch_edge_island(sketchHandle, edgeHandle)
-        const edgeHandles = island !== undefined
-          ? [...this.wasmScene.sketch_island_edges(sketchHandle, island)]
-          : [edgeHandle]
-        return { kind: 'target', path: { kind: 'edges', sketchHandle, edgeHandles } }
-      } catch {
-        return { kind: 'target', path: { kind: 'edges', sketchHandle, edgeHandles: [edgeHandle] } }
-      }
-    }
+    const edgePath = pickEdgePath(this.wasmScene, ray)
+    if (edgePath !== null) return { kind: 'target', path: { kind: 'edges', ...edgePath } }
 
     const facePick = this.wasmScene.pick_face(
       ray.origin[0], ray.origin[1], ray.origin[2],
@@ -1405,9 +1613,20 @@ export class FollowMeTool implements Tool {
       this.stage.kind === 'dragging' || this.stage.kind === 'pick-profile'
         ? { kind: 'pick-profile', path: this.stage.path, pathSource: this.stage.pathSource }
         : { kind: 'pick-path' }
+    const opts = { ...this.opts }
+    // A retype replays the sweep after an undo, which re-keys the profile's
+    // handles: find the same profile again by looking at it, not by handle.
+    const lookRay = this._profileRay(sketchHandle, regionHandle)
+    const replay = (o: SweepOpts, merged: boolean): bigint => {
+      const hit = lookRay === null ? null : pickRegionAt(this.wasmScene, lookRay, null)
+      return this._invokeFollowMe(
+        path, hit?.sketchHandle ?? sketchHandle, hit?.regionHandle ?? regionHandle, stopLen, merged, o,
+      )
+    }
     try {
-      const objectId = this._invokeFollowMe(path, sketchHandle, regionHandle, stopLen, merge)
-      this._finishCommit(objectId)
+      this._guardClosedPath(path, stopLen, opts)
+      const objectId = this._invokeFollowMe(path, sketchHandle, regionHandle, stopLen, merge, opts)
+      this._finishCommit(objectId, { invoke: (o) => replay(o, merge), opts })
     } catch (err) {
       // MERGE FALLBACK (K4): a corner/edge-only contact refuses the MERGE
       // itself (`DegenerateContact` — the boolean step found no real
@@ -1421,14 +1640,34 @@ export class FollowMeTool implements Tool {
       // true is what guarantees this branch is even reachable: a plain
       // commit never calls the merged wasm entry point at all (see
       // `_invokeFollowMe`), so it can never produce this code in the first
-      // place.
+      // place. `ArrangementFailed` (the boolean could not resolve where the
+      // sweep meets the solid, a refusal that arose as `DegenerateContact`
+      // before it had a name of its own) takes the same fallback, with a
+      // note that does not claim the two only touch.
       const code = parseKernelErrorCode(err)
-      if (merge && code === 'DegenerateContact') {
+      // `ResultTooThin` (a sliver the boolean could not merge away, which used to
+      // arrive as `DegenerateContact`) and `OperandFaceNotFlat` (a face of
+      // the solid being merged into is too bent to cut) are both properties
+      // of the merge against the existing solid; the separate sweep never
+      // touches that solid, so the same fallback applies.
+      if (
+        merge &&
+        (code === 'DegenerateContact' ||
+          code === 'ArrangementFailed' ||
+          code === 'ResultTooThin' ||
+          code === 'OperandFaceNotFlat')
+      ) {
         try {
-          const objectId = this._invokeFollowMe(path, sketchHandle, regionHandle, stopLen, false)
-          this._finishCommit(objectId)
+          const objectId = this._invokeFollowMe(path, sketchHandle, regionHandle, stopLen, false, opts)
+          this._finishCommit(objectId, { invoke: (o) => replay(o, false), opts })
           this.onToast(
-            t`The profile only touches the solid at an edge or corner — left as a separate object.`,
+            code === 'DegenerateContact'
+              ? t`The profile only touches the solid at an edge or corner — left as a separate object.`
+              : code === 'ArrangementFailed'
+                ? t`Hew couldn't join the sweep to the solid where they meet — left as a separate object.`
+                : code === 'ResultTooThin'
+                  ? t`Joining the sweep to the solid would leave a piece too thin to keep — left as a separate object.`
+                  : t`The solid has a face that isn't flat enough to join the sweep to — left as a separate object.`,
           )
           return
         } catch (fallbackErr) {
@@ -1444,14 +1683,37 @@ export class FollowMeTool implements Tool {
     }
   }
 
+  /** A ray looking at the profile region from its plane's normal side, kept
+   *  to find the region again after an undo re-keys its handle. Null for a
+   *  stale region or a def-owned one (instance contexts replay by handle). */
+  private _profileRay(sketchHandle: bigint, regionHandle: bigint): Ray | null {
+    if (this._activeInstance !== null) return null
+    try {
+      const ring = regionRing(this.wasmScene, sketchHandle, regionHandle)
+      const pl = this.wasmScene.sketch_plane(sketchHandle)
+      if (ring.length < 3 || pl === undefined || pl.length < 6) return null
+      return rayAtProfile(ring, [pl[3], pl[4], pl[5]])
+    } catch {
+      return null
+    }
+  }
+
   /** Shared success cleanup for every commit path (`_commit`,
    *  `_commitFaceProfile`, and the K4 merge fallback above): drop back to
    *  `pick-path`, clear every live overlay, and fire the caller's commit
    *  callback. */
-  private _finishCommit(objectId: bigint): void {
+  private _finishCommit(objectId: bigint, redo?: RetypeSpec): void {
     this.stage = { kind: 'pick-path' }
     this.missNotified = false
     this.typed = ''
+    this.opts = { ...DEFAULT_SWEEP_OPTS }
+    // The options reset for the next gesture, but the sweep just made stays
+    // retypeable: a twist or end size typed now redoes it.
+    if (TWIST && redo !== undefined && typeof this.wasmScene.history_generation === 'function') {
+      this.retype.arm(redo)
+    } else {
+      this.retype.close()
+    }
     this.hoveredRegion = null
     this.hoveredProfileFace = null
     this._clearPath()
@@ -1483,16 +1745,31 @@ export class FollowMeTool implements Tool {
     regionHandle: bigint,
     stopLen: number | undefined,
     merge: boolean,
+    opts: SweepOpts = this.opts,
   ): bigint {
+    const plain = isDefaultSweepOpts(opts)
+    const { twist, endScale, stations } = opts
     if (path.kind === 'edges') {
-      return this.wasmScene.follow_me_along_edges(
-        sketchHandle,
-        regionHandle,
-        path.sketchHandle,
-        new BigUint64Array(path.edgeHandles),
-        stopLen,
-        this._activeGroup,
-      )
+      return plain
+        ? this.wasmScene.follow_me_along_edges(
+            sketchHandle,
+            regionHandle,
+            path.sketchHandle,
+            new BigUint64Array(path.edgeHandles),
+            stopLen,
+            this._activeGroup,
+          )
+        : this.wasmScene.follow_me_along_edges_with(
+            sketchHandle,
+            regionHandle,
+            path.sketchHandle,
+            new BigUint64Array(path.edgeHandles),
+            stopLen,
+            this._activeGroup,
+            twist,
+            endScale,
+            stations,
+          )
     }
     const activeInstance = this._activeInstance
     if (activeInstance !== null) {
@@ -1502,6 +1779,17 @@ export class FollowMeTool implements Tool {
       // definition member — route through the `_in_instance` family instead
       // of the world one. No group-birth surface here either (mirrors the
       // world variants' merge entry point, which also has none).
+      if (!plain) {
+        return merge
+          ? this.wasmScene.follow_me_merged_around_face_in_instance_with(
+              activeInstance, sketchHandle, regionHandle, path.objectHandle, path.faceHandle, stopLen,
+              twist, endScale, stations,
+            )
+          : this.wasmScene.follow_me_around_face_in_instance_with(
+              activeInstance, sketchHandle, regionHandle, path.objectHandle, path.faceHandle, stopLen,
+              twist, endScale, stations,
+            )
+      }
       return merge
         ? this.wasmScene.follow_me_merged_around_face_in_instance(
             activeInstance, sketchHandle, regionHandle, path.objectHandle, path.faceHandle, stopLen,
@@ -1514,32 +1802,84 @@ export class FollowMeTool implements Tool {
       // No group-birth surface on the instance-face entry point — always
       // top-level, regardless of `_activeGroup` (the kernel scoped it that
       // way; see the field doc).
-      return this.wasmScene.follow_me_around_instance_face(
-        sketchHandle,
-        regionHandle,
-        path.instance,
-        path.objectHandle,
-        path.faceHandle,
-        stopLen,
-      )
+      return plain
+        ? this.wasmScene.follow_me_around_instance_face(
+            sketchHandle,
+            regionHandle,
+            path.instance,
+            path.objectHandle,
+            path.faceHandle,
+            stopLen,
+          )
+        : this.wasmScene.follow_me_around_instance_face_with(
+            sketchHandle,
+            regionHandle,
+            path.instance,
+            path.objectHandle,
+            path.faceHandle,
+            stopLen,
+            twist,
+            endScale,
+            stations,
+          )
     }
     if (merge) {
-      return this.wasmScene.follow_me_merged_around_face(
-        sketchHandle,
-        regionHandle,
-        path.objectHandle,
-        path.faceHandle,
-        stopLen,
-      )
+      return plain
+        ? this.wasmScene.follow_me_merged_around_face(
+            sketchHandle,
+            regionHandle,
+            path.objectHandle,
+            path.faceHandle,
+            stopLen,
+          )
+        : this.wasmScene.follow_me_merged_around_face_with(
+            sketchHandle,
+            regionHandle,
+            path.objectHandle,
+            path.faceHandle,
+            stopLen,
+            twist,
+            endScale,
+            stations,
+          )
     }
-    return this.wasmScene.follow_me_around_face(
-      sketchHandle,
-      regionHandle,
-      path.objectHandle,
-      path.faceHandle,
-      stopLen,
-      this._activeGroup,
-    )
+    return plain
+      ? this.wasmScene.follow_me_around_face(
+          sketchHandle,
+          regionHandle,
+          path.objectHandle,
+          path.faceHandle,
+          stopLen,
+          this._activeGroup,
+        )
+      : this.wasmScene.follow_me_around_face_with(
+          sketchHandle,
+          regionHandle,
+          path.objectHandle,
+          path.faceHandle,
+          stopLen,
+          this._activeGroup,
+          twist,
+          endScale,
+          stations,
+        )
+  }
+
+  /** Whether sweeping `path` in full goes around a loop (a face loop or a
+   *  closed drawn chain). */
+  private _pathIsClosed(path: PathTarget): boolean {
+    return path.kind === 'face' || (this.pathPoly?.closed ?? false)
+  }
+
+  /**
+   * A twist or end size cannot close a loop's seam: a face-loop path (or a
+   * closed drawn chain) swept in full refuses `TwistNeedsOpenPath`. Say so
+   * before calling rather than after, with the same copy the kernel's
+   * refusal gets. A partial sweep (`stopLen`) opens the loop, so it passes.
+   */
+  private _guardClosedPath(path: PathTarget, stopLen: number | undefined, opts: SweepOpts): void {
+    if (isDefaultSweepOpts(opts) || stopLen !== undefined) return
+    if (this._pathIsClosed(path)) throw new Error('TwistNeedsOpenPath: twist and end size need an open path')
   }
 
   /**
@@ -1559,49 +1899,72 @@ export class FollowMeTool implements Tool {
     stopLen?: number,
   ): void {
     const fallback: Stage = { kind: 'pick-profile', path, pathSource }
-    const activeInstance = this._activeInstance
+    const opts = { ...this.opts }
+    const invoke = (o: SweepOpts): bigint =>
+      this._invokeFaceProfile(profileObject, profileFace, path, stopLen, o)
     try {
-      // Editing INSIDE a component instance's own definition (component-
-      // edit-parity.md phase A2): `profileObject` is a definition member
-      // (`_faceFollowable` scoped the profile pick to THIS instance too) —
-      // route through the `_in_instance` family.
-      const objectId = activeInstance !== null
-        ? (path.kind === 'edges'
-            ? this.wasmScene.follow_me_face_along_edges_in_instance(
-                activeInstance,
-                profileObject,
-                profileFace,
-                path.sketchHandle,
-                new BigUint64Array(path.edgeHandles),
-                stopLen,
-              )
-            : this.wasmScene.follow_me_face_around_face_in_instance(
-                activeInstance,
-                profileObject,
-                profileFace,
-                path.objectHandle,
-                path.faceHandle,
-                stopLen,
-              ))
-        : (path.kind === 'edges'
-            ? this.wasmScene.follow_me_face_along_edges(
-                profileObject,
-                profileFace,
-                path.sketchHandle,
-                new BigUint64Array(path.edgeHandles),
-                stopLen,
-              )
-            : this.wasmScene.follow_me_face_around_face(
-                profileObject,
-                profileFace,
-                path.objectHandle,
-                path.faceHandle,
-                stopLen,
-              ))
-      this._finishCommit(objectId)
+      this._guardClosedPath(path, stopLen, opts)
+      this._finishCommit(invoke(opts), { invoke, opts })
     } catch (err) {
       this._refuseCommit(path, fallback, err, stopLen)
     }
+  }
+
+  /** The wasm call for a solid-face profile — plain or with sweep options. */
+  private _invokeFaceProfile(
+    profileObject: bigint,
+    profileFace: bigint,
+    path: PathTarget,
+    stopLen: number | undefined,
+    opts: SweepOpts,
+  ): bigint {
+    const activeInstance = this._activeInstance
+    const plain = isDefaultSweepOpts(opts)
+    const { twist, endScale, stations } = opts
+    // Editing INSIDE a component instance's own definition (component-
+    // edit-parity.md phase A2): `profileObject` is a definition member
+    // (`_faceFollowable` scoped the profile pick to THIS instance too) —
+    // route through the `_in_instance` family.
+    if (activeInstance !== null) {
+      if (path.kind === 'edges') {
+        const edges = new BigUint64Array(path.edgeHandles)
+        return plain
+          ? this.wasmScene.follow_me_face_along_edges_in_instance(
+              activeInstance, profileObject, profileFace, path.sketchHandle, edges, stopLen,
+            )
+          : this.wasmScene.follow_me_face_along_edges_in_instance_with(
+              activeInstance, profileObject, profileFace, path.sketchHandle, edges, stopLen,
+              twist, endScale, stations,
+            )
+      }
+      return plain
+        ? this.wasmScene.follow_me_face_around_face_in_instance(
+            activeInstance, profileObject, profileFace, path.objectHandle, path.faceHandle, stopLen,
+          )
+        : this.wasmScene.follow_me_face_around_face_in_instance_with(
+            activeInstance, profileObject, profileFace, path.objectHandle, path.faceHandle, stopLen,
+            twist, endScale, stations,
+          )
+    }
+    if (path.kind === 'edges') {
+      const edges = new BigUint64Array(path.edgeHandles)
+      return plain
+        ? this.wasmScene.follow_me_face_along_edges(
+            profileObject, profileFace, path.sketchHandle, edges, stopLen,
+          )
+        : this.wasmScene.follow_me_face_along_edges_with(
+            profileObject, profileFace, path.sketchHandle, edges, stopLen,
+            twist, endScale, stations,
+          )
+    }
+    return plain
+      ? this.wasmScene.follow_me_face_around_face(
+          profileObject, profileFace, path.objectHandle, path.faceHandle, stopLen,
+        )
+      : this.wasmScene.follow_me_face_around_face_with(
+          profileObject, profileFace, path.objectHandle, path.faceHandle, stopLen,
+          twist, endScale, stations,
+        )
   }
 
   /**
@@ -1694,18 +2057,8 @@ export class FollowMeTool implements Tool {
       // Same instance-scoped pick as the commit path (`onPointerDown`
       // above) — `pick_sketch_region` alone would never find a def-owned
       // profile region drawn inside the entered instance's own definition.
-      const hoverInstance = this._activeInstance
-      const pick = hoverInstance !== null
-        ? this.wasmScene.pick_sketch_region_in_instance(
-            hoverInstance,
-            ray.origin[0], ray.origin[1], ray.origin[2],
-            ray.direction[0], ray.direction[1], ray.direction[2],
-          )
-        : this.wasmScene.pick_sketch_region(
-            ray.origin[0], ray.origin[1], ray.origin[2],
-            ray.direction[0], ray.direction[1], ray.direction[2],
-          )
-      if (pick === undefined) {
+      const hit = pickRegionAt(this.wasmScene, ray, this._activeInstance)
+      if (hit === null) {
         this.profileHoverKey = null
         this.profileVerdict = null
         this.hoveredRegion = null
@@ -1714,12 +2067,8 @@ export class FollowMeTool implements Tool {
         this._hoverProfileFace(ray)
         return
       }
-      try {
-        sketchHandle = pick.sketch()
-        regionHandle = pick.region()
-      } finally {
-        pick.free()
-      }
+      sketchHandle = hit.sketchHandle
+      regionHandle = hit.regionHandle
     } catch {
       this.profileHoverKey = null
       this.profileVerdict = null
@@ -1739,21 +2088,12 @@ export class FollowMeTool implements Tool {
     // The profile's own boundary — needed for BOTH the outline drawn below
     // AND the corner-seam fold test (design §2b), which needs the actual
     // profile geometry to judge, not just its plane (see followMeStart.ts).
-    const ring: Vec3[] = []
-    try {
-      const loop = this.wasmScene.region_boundary(sketchHandle, regionHandle)
-      for (let i = 0; i < loop.length; i += 3) ring.push([loop[i], loop[i + 1], loop[i + 2]])
-    } catch {
-      // Stale region mid-query: no outline/ring; the verdict below degrades
-      // gracefully (a corner placement reads 'unknown' without ring data).
-    }
+    // A stale region yields no ring; the verdict below degrades gracefully
+    // (a corner placement reads 'unknown' without ring data).
+    const ring: Vec3[] = regionRing(this.wasmScene, sketchHandle, regionHandle)
     this.profileVerdict = this._startVerdict(sketchHandle, ring)
 
-    const points: number[] = []
-    for (let i = 0; i < ring.length; i++) {
-      const j = (i + 1) % ring.length
-      points.push(ring[i][0], ring[i][1], ring[i][2], ring[j][0], ring[j][1], ring[j][2])
-    }
+    const points = ringSegments(ring)
     this._clearHover()
     if (points.length === 0) return
     const verdictColors = cueColors()
@@ -1808,6 +2148,7 @@ export class FollowMeTool implements Tool {
    * IS offered then (see `onPointerDown`'s identical exception).
    */
   private _hoverProfileFace(ray: Ray): void {
+    this.hoverLockedHint = null
     const activeInstance = this._activeInstance
     const pathIsOutsideInstanceFace =
       this.stage.kind === 'pick-profile' &&
@@ -1823,29 +2164,26 @@ export class FollowMeTool implements Tool {
       this._clearHover()
       return
     }
-    let facePick: ReturnType<WasmScene['pick_face']>
+    let faceHit: ReturnType<typeof pickFaceAt>
     try {
-      facePick = this.wasmScene.pick_face(
-        ray.origin[0], ray.origin[1], ray.origin[2],
-        ray.direction[0], ray.direction[1], ray.direction[2],
-      )
+      faceHit = pickFaceAt(this.wasmScene, ray)
     } catch {
-      facePick = undefined
+      faceHit = null
     }
-    if (facePick === undefined) {
+    if (faceHit === null) {
       this.hoveredProfileFace = null
       this._clearHover()
       return
     }
-    let object: bigint
-    let face: bigint
-    let instance: bigint | undefined
-    try {
-      object = facePick.object()
-      face = facePick.face()
-      instance = facePick.instance()
-    } finally {
-      facePick.free()
+    const { objectHandle: object, faceHandle: face, instance } = faceHit
+    // A face of a locked thing is not offered: say so beside the cursor, as
+    // every other tool does (the click's refusal stays the backstop).
+    const locked = lockHintForPick(this.wasmScene, object, instance, { shape: true })
+    if (locked !== null) {
+      this.hoverLockedHint = locked.message
+      this.hoveredProfileFace = null
+      this._clearHover()
+      return
     }
     if (!this._faceFollowable(object, instance, true)) {
       this.hoveredProfileFace = null

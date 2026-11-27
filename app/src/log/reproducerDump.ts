@@ -20,6 +20,7 @@
  * module is unit-testable with a fake scene (see reproducerDump.test.ts).
  */
 
+import { enabledFeatureIds, previewBuild } from '../preview'
 import * as diagnosticLog from './diagnosticLog'
 import { makeReproducerStore, type ReproducerStore } from '../io/reproducerStore'
 import { getPanicCapture } from './panicCapture'
@@ -40,6 +41,10 @@ export interface ReproducerBundle {
     appVersion: string
     stateHash: string
     userAgent: string
+    /** A preview build's stamp (the Preview wall, src/preview): `true` and the
+     *  features switched on. Absent in production. */
+    preview?: true
+    previewFeatures?: string[]
   }
   /** The Recording JSON string (docs/dev/DIAGNOSTICS.md), or null if unavailable. */
   recording: string | null
@@ -146,6 +151,7 @@ function assembleBundle(
       appVersion: typeof __HEW_VERSION__ !== 'undefined' ? __HEW_VERSION__ : '0.0.0',
       stateHash,
       userAgent: typeof navigator !== 'undefined' ? navigator.userAgent : '',
+      ...(previewBuild ? { preview: true as const, previewFeatures: enabledFeatureIds() } : {}),
     },
     recording,
     log,

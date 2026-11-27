@@ -6,6 +6,24 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use kernel::{AttrTarget, Document, EntityRef, NodeId, Object, Point3};
 
+// ── Targets ───────────────────────────────────────────────────────────────
+
+/// Every container and every stream release whose layout carries all of
+/// the content these suites compare (the 2026 container, then releases 5
+/// to 2020). Releases 3 and 4 have no layer or attribute records, and
+/// release 3 neither hidden state nor radial dimensions: they are covered
+/// by `native.rs`'s every-release test, which checks what they do hold.
+pub fn all_targets() -> Vec<skp_export::Target> {
+    std::iter::once(skp_export::Target::Skp2026)
+        .chain(
+            skpwright::Release::ALL
+                .into_iter()
+                .filter(|r| *r >= skpwright::Release::R5)
+                .map(skp_export::Target::Stream),
+        )
+        .collect()
+}
+
 // ── Digest ────────────────────────────────────────────────────────────────
 
 pub type P = [i64; 3];
@@ -61,6 +79,8 @@ pub enum NodeD {
         /// Soft edges, circle-claimed edges, faces on a curved surface.
         claims: [usize; 3],
         attrs: String,
+        /// Its own lock (OW-1).
+        locked: bool,
     },
     Group {
         name: Option<String>,
@@ -68,6 +88,7 @@ pub enum NodeD {
         hidden: bool,
         children: Vec<NodeD>,
         attrs: String,
+        locked: bool,
     },
     Instance {
         def: Box<DefD>,
@@ -85,6 +106,8 @@ pub struct DefD {
     members: Vec<NodeD>,
     sketches: Vec<String>,
     attrs: String,
+    /// The shape's lock, which every placement of it reads (OW-1).
+    locked: bool,
 }
 
 struct Digester<'d> {
@@ -198,6 +221,7 @@ impl Digester<'_> {
                     faces: self.faces(obj),
                     claims: effective_claims(obj),
                     attrs: self.attrs(EntityRef::Object(id)),
+                    locked: self.doc.node_locked(node),
                 }
             }
             NodeId::Group(id) => {
@@ -215,6 +239,7 @@ impl Digester<'_> {
                     hidden,
                     children,
                     attrs: self.attrs(EntityRef::Group(id)),
+                    locked: self.doc.node_locked(node),
                 }
             }
             NodeId::Instance(id) => {
@@ -241,6 +266,7 @@ impl Digester<'_> {
                         members,
                         sketches,
                         attrs: self.attrs(EntityRef::Component(def)),
+                        locked: self.doc.component_locked(def),
                     }),
                     pose: self
                         .doc
@@ -279,7 +305,8 @@ pub struct DocD {
 }
 
 /// A sketch: its plane, its segments (unordered, each end-sorted), the
-/// regions it closes, and each welded curve's members and claim.
+/// regions it closes and how many of them have a face (the rest are
+/// loops of edges alone), and each welded curve's members and claim.
 fn sketch_digest(doc: &Document, id: kernel::SketchId) -> String {
     let sk = doc.sketch(id).unwrap();
     let pl = sk.plane();
@@ -320,10 +347,12 @@ fn sketch_digest(doc: &Document, id: kernel::SketchId) -> String {
         .collect();
     curves.sort();
     format!(
-        "plane {:?} d {} segs {segs:?} regions {} curves {curves:?} tags {:?}",
+        "plane {:?} d {} segs {segs:?} regions {} filled {:?} curves {curves:?} tags {:?}",
         [q(n.x), q(n.y), q(n.z)],
         q(pl.signed_distance(Point3::ORIGIN)),
         sk.regions().len(),
+        // As letters, not a number: `near` lets a number differ by one.
+        "F".repeat(sk.regions().values().filter(|r| !r.faceless).count()),
         doc.sketch_tags(id)
     )
 }
@@ -358,7 +387,10 @@ fn effective_claims(obj: &Object) -> [usize; 3] {
                 axis_point,
                 axis,
                 radius,
-            } = w;
+            } = w
+            else {
+                panic!("expected cylinder")
+            };
             let (pa, pb) = (
                 v[he[e.half_edge].origin].position,
                 v[he[he[e.half_edge].next].origin].position,

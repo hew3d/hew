@@ -12,7 +12,7 @@
 
 use kernel::{Document, KernelOp, LoopImprintPlan, Object, Plane, Point3, Vec3};
 
-mod face_arrangement_support;
+use crate::face_arrangement_support;
 use face_arrangement_support::{draw_loop, face_plane, group_faces, region_face_in};
 
 fn ground() -> Plane {

@@ -198,6 +198,29 @@ describe('ErrorBoundary', () => {
     expect(await screen.findByRole('button', { name: /^copied$/i })).toBeInTheDocument()
   })
 
+  it('drops the pending reset of the copied mark when it unmounts', () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    Object.assign(navigator, { clipboard: { writeText: vi.fn().mockResolvedValue(undefined) } })
+    vi.useFakeTimers()
+    try {
+      function Boom(): never {
+        throw new Error('kaboom')
+      }
+      const { unmount } = render(
+        <ErrorBoundary>
+          <Boom />
+        </ErrorBoundary>,
+      )
+      fireEvent.click(screen.getByRole('button', { name: /copy details/i }))
+      expect(vi.getTimerCount()).toBe(1)
+      unmount()
+      // Nothing is left to fire on a boundary that is gone.
+      expect(vi.getTimerCount()).toBe(0)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   // componentDidCatch prefers the in-memory panic capture (this page session)
   // over the localStorage record when both exist, since only the capture
   // carries a recording a saved reproducer can use.

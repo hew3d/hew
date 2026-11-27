@@ -13,6 +13,9 @@ const learn = defineCollection({
     title: z.string(),
     description: z.string(),
     order: z.number(),
+    // Registry ids (preview-features.json) this chapter is held back for.
+    // See src/lib/published.ts.
+    preview: z.array(z.string()).optional(),
   }),
 });
 

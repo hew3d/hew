@@ -50,7 +50,10 @@ the Tape Measure, and trace over it.
 **Organization.** Nested groups, components that edit once and update
 everywhere, tags with per-tag visibility, saved Scenes, an outliner on
 every platform, and a personal Library of your components, materials,
-and models — each item an ordinary `.hew` file.
+and models — each item an ordinary `.hew` file. The Library also takes
+shared items from sources other people publish on GitHub, GitLab,
+Codeberg, or any website, and tells you when a source has something
+newer.
 
 **Materials.** Flat colors and image textures at real-world scale,
 painted per face or per object, with opacity and drag-the-pins texture
@@ -71,7 +74,7 @@ File ▸ Revert to Saved goes back to the last saved state.
 | Format | Import | Export |
 |---|---|---|
 | `.hew` (native) | yes | yes |
-| SketchUp (`.skp`, 2026 and 2017 formats) | yes | yes |
+| SketchUp (`.skp`, every version: SketchUp 3 through 2027) | yes | yes |
 | glTF / GLB | yes | yes |
 | COLLADA (`.dae`) | yes | — |
 | STL | yes | yes |
@@ -96,7 +99,6 @@ explains in plain language and leaves your geometry untouched.
 - STEP/IGES import and export, for interchange with engineering CAD
 - DWG/DXF for the architectural crowd
 - Chamfer/fillet
-- True toroidal surfaces, so swept bends are exact instead of faceted
 - Push/pull an outer face past its own holes (the one push/pull case
   still refused)
 - A single-file embedded model viewer — one self-contained HTML file

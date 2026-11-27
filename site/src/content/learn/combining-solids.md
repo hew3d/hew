@@ -10,26 +10,41 @@ Combining solids is always a command you issue. [Core concepts](/learn/core-conc
 
 ## Union, Subtract, Intersect
 
-1. With the Select tool, click the first object or group, then **Shift-click** the second.
+1. With the Select tool, click the first object or group, then **Shift-click** each of the others. Select two or more solids.
 2. Choose **Object ▸ Union**, **Object ▸ Subtract**, or **Object ▸ Intersect**.
 
 ![Two overlapping boxes, both selected, ready to combine](/docs/boolean-selection.webp)
 
-**Union** produces one object containing all material from both, and cleans up after itself: where two coplanar faces meet, the seam dissolves and they become a single face. **Subtract** cuts the second selected object away from the first. **Intersect** keeps only the overlapping material.
+**Union** produces one object containing all material from every selected solid, and cleans up after itself: where two coplanar faces meet, the seam dissolves and they become a single face. **Subtract** cuts every other selected object away from the first one in the selection (with Shift-clicks, the first one you clicked), which is the one that stays. **Intersect** keeps only the material all of them share. However many solids you select, the combine is one undo step.
 
 ![The union result: a single watertight object](/docs/boolean-union.webp)
 
-When the result is one connected solid, it's a single new Object. When it comes apart — a Subtract that severs the target, or operands that never touched — each piece is its own watertight solid. The pieces arrive together in a group named after the operands ("Bar − Cutter"), so nothing scatters. Painted materials survive the operation on the faces that survive. Like everything, booleans are undoable in one step.
+When the result is one connected solid, it's a single new Object. When it comes apart — a Subtract that severs the target, or operands that never touched — each piece is its own watertight solid. The pieces arrive together in a group named after all the operands ("Bar − Saw − Saw 2"), so nothing scatters. A Union of two objects that leaves pieces says so: shapes that only touch, like a scanned figure resting on a base, have no shared volume to merge. Undo, move one a little into the other, and Union again. On a large object, such as a dense scan, a card shows while the boolean works, since it can take a while. Painted materials survive the operation on the faces that survive. Like everything, booleans are undoable: the combine is one step, however many solids went in.
 
 If an input isn't solid, the operation is refused and says so. Select the open one (Object Info shows **Open** for it) and choose **Object ▸ Make Solid…** to close it; see [Making imported shapes solid](/learn/import-export/#making-imported-shapes-solid).
 
+A Subtract whose cutter doesn't reach into the first object is refused too: "Nothing was cut away" means the solids only touch or sit apart, so there was nothing to remove. Both stay where they were. Move the cutter so it passes through the solid you're cutting and try again.
+
+With several cutters, one that misses is simply left where it was, as long as another one cuts. Only when none of them reaches the first object is the Subtract refused.
+
 ### Combining groups
 
-Either side of a boolean can be a whole [group](/learn/groups-and-components/) instead of a single object. You can mix, too — subtract a group of cutters from one solid in a single command. Because you asked for volume algebra, Hew first fuses the solids inside each group operand into one composite (grouping alone never merges anything), then applies the command between the two composites. Every solid under a group operand has to be watertight — one that isn't solid anywhere refuses the whole operation.
+Either side of a boolean can be a whole [group](/learn/groups-and-components/) instead of a single object. You can mix, too — subtract a group of cutters from one solid in a single command. Because you asked for volume algebra, Hew first fuses the solids inside each group operand into one composite (grouping alone never merges anything), then applies the command between the composites. Every solid under a group operand has to be watertight — one that isn't solid anywhere refuses the whole operation.
 
-One thing a boolean won't do is quietly consume a component instance — instances share their geometry with every other copy, and a boolean destroys its inputs. If an operand is (or contains) an instance, the command refuses and tells you so. **Explode** the instance first (or **Make Unique**, then Explode) and combine the result.
+One thing a boolean won't do is quietly consume a component instance — instances share their geometry with every other copy, and a boolean destroys its inputs. A selected component is made unique and exploded to plain solids for you first, each of those its own undo step, and the toast says so (a [linked copy](/learn/groups-and-components/#linked-copies) is handled differently, as described next); an instance nested inside a selected group refuses and tells you so. **Explode** it first (or **Make Unique**, then Explode) and combine the result.
 
-Booleans also work between two individual members while a group is open for editing — Union, Subtract, or Intersect them just like top-level objects — and the result folds back in as the group's member when you close it.
+### Cutting a linked copy
+
+**Subtract** with a linked copy as the thing being cut changes the shared shape, so **every copy shows the cut**. Cut a mortise into one of four table legs and all four legs have it. When the part has other copies, a strip above the status bar asks how far the cut reaches:
+
+- **Cut all 4 copies** (the default; press `Enter`) cuts the shared shape.
+- **Only this one** unlinks the selected copy first and cuts just that one. The status line says "Unlinked this copy and cut it", and one undo takes back both the unlink and the cut.
+
+`Esc` cancels the Subtract. The cutters have to be loose solids (one or several): cutting a linked copy with a group, or with another copy, is refused with "Cut with one solid at a time". The result keeps the cut part's name, tags, and attributes.
+
+**Union** and **Intersect** can't be shared across copies, because the result would belong to two shapes at once. Hew unlinks each linked copy you join, joins them, and announces it: "Unlinked 2 copies to join them". The undo step is labeled "Union (unlinked)" or "Intersect (unlinked)", and one undo restores the copies and their links. A Subtract whose *cutter* is a linked copy does the same.
+
+Booleans also work between individual members while a group is open for editing — Union, Subtract, or Intersect them just like top-level objects — and the result folds back in as the group's member when you close it.
 
 ## Slice
 

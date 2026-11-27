@@ -43,7 +43,7 @@ describe('SnapService — fallback tier', () => {
     // actually intersects the SUPPLIED plane rather than z=0.
     const constraintPlane = { point: [2, 0, 0] as [number, number, number], normal: [1, 0, 0] as [number, number, number] }
     const ray: Ray = { origin: [0, 0, 0], direction: [1, 0, 0] }
-    const { snap, fromKernel } = svc.resolve(ray, 800, PERSPECTIVE_45, undefined, undefined, constraintPlane)
+    const { snap, fromKernel } = svc.resolve(ray, 800, PERSPECTIVE_45, undefined, undefined, undefined, constraintPlane)
     expect(fromKernel).toBe(false)
     expect(snap?.kind).toBe('plane')
     expect(snap?.x).toBeCloseTo(2)
@@ -56,9 +56,53 @@ describe('SnapService — fallback tier', () => {
     // Plane normal perpendicular to the ray direction — parallel miss.
     const constraintPlane = { point: [0, 0, 1] as [number, number, number], normal: [0, 0, 1] as [number, number, number] }
     const ray: Ray = { origin: [0, 0, 0], direction: [1, 0, 0] }
-    const { snap, fromKernel } = svc.resolve(ray, 800, PERSPECTIVE_45, undefined, undefined, constraintPlane)
+    const { snap, fromKernel } = svc.resolve(ray, 800, PERSPECTIVE_45, undefined, undefined, undefined, constraintPlane)
     expect(fromKernel).toBe(false)
     expect(snap).toBeNull()
+  })
+
+  it('a fallbackPlane is the miss target (kind "plane") but never reaches the kernel', () => {
+    const scene = fakeScene()
+    const svc = new SnapService(scene)
+    const snapFn = scene.snap as unknown as ReturnType<typeof vi.fn>
+    // The green plane y = 0 seen from the front: a level ray that never
+    // reaches the ground still lands on it.
+    const fallbackPlane = { point: [0, 0, 0] as [number, number, number], normal: [0, 1, 0] as [number, number, number] }
+    const ray: Ray = { origin: [1, -10, 0.5], direction: [0, 1, 0] }
+    const { snap, fromKernel } = svc.resolve(
+      ray, 800, PERSPECTIVE_45, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, fallbackPlane,
+    )
+    expect(fromKernel).toBe(false)
+    expect(snap?.kind).toBe('plane')
+    expect(snap?.x).toBeCloseTo(1, 12)
+    expect(snap?.y).toBeCloseTo(0, 12)
+    expect(snap?.z).toBeCloseTo(0.5, 12)
+    // Argument 9 is the kernel's constraint plane: unset, so geometry
+    // anywhere stays a candidate.
+    expect(snapFn).toHaveBeenCalled()
+    for (const call of snapFn.mock.calls) expect(call[9]).toBeNull()
+  })
+
+  it('without a fallbackPlane the same level ray finds nothing (it never reaches the ground)', () => {
+    const svc = new SnapService(fakeScene())
+    const ray: Ray = { origin: [1, -10, 0.5], direction: [0, 1, 0] }
+    expect(svc.resolve(ray, 800, PERSPECTIVE_45).snap).toBeNull()
+  })
+
+  it('a constraintPlane beats a fallbackPlane, and is the one sent to the kernel', () => {
+    const scene = fakeScene()
+    const svc = new SnapService(scene)
+    const snapFn = scene.snap as unknown as ReturnType<typeof vi.fn>
+    const constraintPlane = { point: [2, 0, 0] as [number, number, number], normal: [1, 0, 0] as [number, number, number] }
+    const fallbackPlane = { point: [0, 3, 0] as [number, number, number], normal: [0, 1, 0] as [number, number, number] }
+    const ray: Ray = { origin: [0, 0, 0], direction: [Math.SQRT1_2, Math.SQRT1_2, 0] }
+    const { snap } = svc.resolve(
+      ray, 800, PERSPECTIVE_45, undefined, undefined, undefined, constraintPlane, undefined, undefined, undefined, undefined, undefined, fallbackPlane,
+    )
+    expect(snap?.kind).toBe('plane')
+    expect(snap?.x).toBeCloseTo(2, 12)
+    expect(snap?.y).toBeCloseTo(2, 12)
+    expect(Array.from(snapFn.mock.calls.at(-1)?.[9] as Float64Array)).toEqual([2, 0, 0, 1, 0, 0])
   })
 
   it('forwards offPlanePoints to Scene.snap as argument 13 (false when omitted)', () => {
@@ -73,7 +117,7 @@ describe('SnapService — fallback tier', () => {
     expect(snapFn.mock.calls.at(-1)?.[13]).toBe(false)
 
     const constraintPlane = { point: [0, 1, 1] as [number, number, number], normal: [0, 1, 0] as [number, number, number] }
-    svc.resolve(DOWN, 800, PERSPECTIVE_45, [1, 1, 1], undefined, constraintPlane, true)
+    svc.resolve(DOWN, 800, PERSPECTIVE_45, [1, 1, 1], undefined, undefined, constraintPlane, true)
     expect(snapFn.mock.calls.at(-1)?.[13]).toBe(true)
   })
 })
@@ -119,6 +163,8 @@ describe('SnapService — precision mode', () => {
       kind: () => 'endpoint',
       direction: () => undefined,
       projected_from: () => undefined,
+      pierces_face: () => false,
+      meeting_line: () => undefined,
       object: () => undefined,
       instance: () => undefined,
       element: () => 7n,
@@ -165,6 +211,8 @@ describe('SnapService — precision mode', () => {
       kind: () => 'center',
       direction: () => undefined,
       projected_from: () => undefined,
+      pierces_face: () => false,
+      meeting_line: () => undefined,
       object: () => undefined,
       instance: () => undefined,
       element: () => undefined,
@@ -209,6 +257,8 @@ describe('SnapService — precision mode', () => {
       kind: () => 'on-axis',
       direction: () => new Float64Array([1, 0, 0]),
       projected_from: () => undefined,
+      pierces_face: () => false,
+      meeting_line: () => undefined,
       object: () => undefined,
       instance: () => undefined,
       element: () => undefined,
@@ -244,6 +294,8 @@ describe('SnapService — precision mode', () => {
       kind: () => 'midpoint',
       direction: () => undefined,
       projected_from: () => undefined,
+      pierces_face: () => false,
+      meeting_line: () => undefined,
       object: () => undefined,
       instance: () => undefined,
       element: () => undefined,
@@ -258,16 +310,16 @@ describe('SnapService — precision mode', () => {
     const svc = new SnapService({ snap: snapFn } as unknown as Scene)
 
     svc.resolve(DOWN, 800, PERSPECTIVE_45)
-    expect(snapFn.mock.calls[0].at(-2)).toBe(false)
+    expect((snapFn.mock.calls[0] as unknown[])[14]).toBe(false)
 
     snapFn.mockClear()
-    svc.resolve(DOWN, 800, PERSPECTIVE_45, undefined, undefined, undefined, undefined, undefined, undefined, true)
-    expect(snapFn.mock.calls[0].at(-2)).toBe(true)
+    svc.resolve(DOWN, 800, PERSPECTIVE_45, undefined, undefined, undefined, undefined, undefined, undefined, undefined, true)
+    expect((snapFn.mock.calls[0] as unknown[])[14]).toBe(true)
     hit = false
     snapFn.mockClear()
-    svc.resolve(DOWN, 800, PERSPECTIVE_45, undefined, undefined, undefined, undefined, undefined, undefined, true)
+    svc.resolve(DOWN, 800, PERSPECTIVE_45, undefined, undefined, undefined, undefined, undefined, undefined, undefined, true)
     expect(snapFn.mock.calls.length).toBe(2)
-    expect(snapFn.mock.calls[1].at(-2)).toBe(true)
+    expect((snapFn.mock.calls[1] as unknown[])[14]).toBe(true)
   })
   it('passes `seeThroughPoints` to both the acquire and the release query, and false by default', () => {
     const held = {
@@ -275,6 +327,8 @@ describe('SnapService — precision mode', () => {
       kind: () => 'midpoint',
       direction: () => undefined,
       projected_from: () => undefined,
+      pierces_face: () => false,
+      meeting_line: () => undefined,
       object: () => undefined,
       instance: () => undefined,
       element: () => undefined,
@@ -289,16 +343,16 @@ describe('SnapService — precision mode', () => {
     const svc = new SnapService({ snap: snapFn } as unknown as Scene)
 
     svc.resolve(DOWN, 800, PERSPECTIVE_45)
-    expect(snapFn.mock.calls[0].at(-1)).toBe(false)
+    expect((snapFn.mock.calls[0] as unknown[])[15]).toBe(false)
 
     snapFn.mockClear()
-    svc.resolve(DOWN, 800, PERSPECTIVE_45, undefined, undefined, undefined, undefined, undefined, undefined, undefined, true)
-    expect(snapFn.mock.calls[0].at(-1)).toBe(true)
+    svc.resolve(DOWN, 800, PERSPECTIVE_45, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, true)
+    expect((snapFn.mock.calls[0] as unknown[])[15]).toBe(true)
     hit = false
     snapFn.mockClear()
-    svc.resolve(DOWN, 800, PERSPECTIVE_45, undefined, undefined, undefined, undefined, undefined, undefined, undefined, true)
+    svc.resolve(DOWN, 800, PERSPECTIVE_45, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, true)
     expect(snapFn.mock.calls.length).toBe(2)
-    expect(snapFn.mock.calls[1].at(-1)).toBe(true)
+    expect((snapFn.mock.calls[1] as unknown[])[15]).toBe(true)
   })
 
 })
@@ -315,6 +369,8 @@ describe('SnapService — ApertureBasis (projection-aware aperture, camera.md §
     kind: () => 'endpoint',
     direction: () => undefined,
     projected_from: () => undefined,
+    pierces_face: () => false,
+    meeting_line: () => undefined,
     object: () => undefined,
     instance: () => undefined,
     element: () => 7n,
@@ -377,6 +433,8 @@ describe('SnapService — clearHold (finding 5a: discrete-tap hysteresis)', () =
       kind: () => 'endpoint',
       direction: () => undefined,
       projected_from: () => undefined,
+      pierces_face: () => false,
+      meeting_line: () => undefined,
       object: () => undefined,
       instance: () => undefined,
       element: () => 7n,
@@ -427,6 +485,8 @@ describe('SnapService — apertureScaleOverride (finding 5b: tap-inspect vs. coa
     kind: () => 'endpoint',
     direction: () => undefined,
     projected_from: () => undefined,
+    pierces_face: () => false,
+    meeting_line: () => undefined,
     object: () => undefined,
     instance: () => undefined,
     element: () => 7n,
@@ -448,9 +508,9 @@ describe('SnapService — apertureScaleOverride (finding 5b: tap-inspect vs. coa
   it('an explicit override of 1 sends the UNSCALED (mouse-tuned) radius regardless of the platform\'s own coarse-pointer scale', () => {
     const snapFn = vi.fn((..._args: unknown[]) => held)
     const svc = new SnapService({ snap: snapFn } as unknown as Scene)
-    // Passed positionally as the 8th argument (after offPlanePoints) —
+    // Passed positionally as the 9th argument (after offPlanePoints) —
     // dispatchSelectPick's own call site.
-    svc.resolve(DOWN, 800, PERSPECTIVE_45, undefined, undefined, undefined, undefined, 1)
+    svc.resolve(DOWN, 800, PERSPECTIVE_45, undefined, undefined, undefined, undefined, undefined, 1)
     const aperture = snapFn.mock.calls[0][6] as number
     // Exactly the SNAP_RADIUS_PX-derived aperture — no COARSE_POINTER_APERTURE_SCALE
     // multiplier applied, whatever isCoarsePointer() would otherwise report.
@@ -460,7 +520,7 @@ describe('SnapService — apertureScaleOverride (finding 5b: tap-inspect vs. coa
   it('a wider explicit override scales the aperture proportionally, same as the coarse-pointer path would', () => {
     const snapFn = vi.fn((..._args: unknown[]) => held)
     const svc = new SnapService({ snap: snapFn } as unknown as Scene)
-    svc.resolve(DOWN, 800, PERSPECTIVE_45, undefined, undefined, undefined, undefined, 3)
+    svc.resolve(DOWN, 800, PERSPECTIVE_45, undefined, undefined, undefined, undefined, undefined, 3)
     const aperture = snapFn.mock.calls[0][6] as number
     expect(aperture).toBeCloseTo(pixelRadiusToAperture(SNAP_RADIUS_PX * 3, 800, 45), 12)
   })
@@ -477,6 +537,8 @@ describe('SnapService — facesOnly (design v1.1 Lane E "Push/Pull face-first")'
       kind: () => kind,
       direction: () => undefined,
       projected_from: () => undefined,
+      pierces_face: () => false,
+      meeting_line: () => undefined,
       object: () => undefined,
       instance: () => undefined,
       element: () => undefined,
@@ -492,7 +554,7 @@ describe('SnapService — facesOnly (design v1.1 Lane E "Push/Pull face-first")'
     const scene = { snap: vi.fn(() => fakeSnap('on-face')) } as unknown as Scene
     const svc = new SnapService(scene)
     const { snap, fromKernel } = svc.resolve(
-      DOWN, 800, PERSPECTIVE_45, undefined, undefined, constraintPlane, undefined, undefined, true,
+      DOWN, 800, PERSPECTIVE_45, undefined, undefined, undefined, constraintPlane, undefined, undefined, true,
     )
     expect(fromKernel).toBe(true)
     expect(snap?.kind).toBe('on-face')
@@ -502,7 +564,7 @@ describe('SnapService — facesOnly (design v1.1 Lane E "Push/Pull face-first")'
     const scene = { snap: vi.fn(() => fakeSnap('endpoint')) } as unknown as Scene
     const svc = new SnapService(scene)
     const { snap, fromKernel } = svc.resolve(
-      DOWN, 800, PERSPECTIVE_45, undefined, undefined, constraintPlane, undefined, undefined, true,
+      DOWN, 800, PERSPECTIVE_45, undefined, undefined, undefined, constraintPlane, undefined, undefined, true,
     )
     expect(fromKernel).toBe(false)
     expect(snap?.kind).toBe('plane')
@@ -516,7 +578,7 @@ describe('SnapService — facesOnly (design v1.1 Lane E "Push/Pull face-first")'
       const scene = { snap: vi.fn(() => fakeSnap(kind)) } as unknown as Scene
       const svc = new SnapService(scene)
       const { snap } = svc.resolve(
-        DOWN, 800, PERSPECTIVE_45, undefined, undefined, constraintPlane, undefined, undefined, true,
+        DOWN, 800, PERSPECTIVE_45, undefined, undefined, undefined, constraintPlane, undefined, undefined, true,
       )
       expect(snap?.kind).toBe('plane')
     }
@@ -539,10 +601,153 @@ describe('SnapService — facesOnly (design v1.1 Lane E "Push/Pull face-first")'
     phase = 'facesOnly'
     snapFn.mockClear()
     const { snap, fromKernel } = svc.resolve(
-      DOWN, 800, PERSPECTIVE_45, undefined, undefined, constraintPlane, undefined, undefined, true,
+      DOWN, 800, PERSPECTIVE_45, undefined, undefined, undefined, constraintPlane, undefined, undefined, true,
     )
     expect(fromKernel).toBe(false)
     expect(snap?.kind).toBe('plane')
     expect(snapFn.mock.calls.length).toBe(1) // only the (missed) acquire query — no hold-resist re-query
+  })
+})
+
+describe('SnapService — direction lock', () => {
+  it('forwards lockDirection to Scene.snap as its last argument (16), beside lockAxis (8)', () => {
+    const scene = fakeScene()
+    const svc = new SnapService(scene)
+    const snapFn = scene.snap as unknown as ReturnType<typeof vi.fn>
+
+    svc.resolve(DOWN, 800, PERSPECTIVE_45, [1, 2, 0])
+    expect(snapFn.mock.calls.at(-1)?.[16]).toBeNull()
+
+    const d = Math.SQRT1_2
+    svc.resolve(DOWN, 800, PERSPECTIVE_45, [1, 2, 0], 0, [d, d, 0])
+    const call = snapFn.mock.calls.at(-1)
+    expect(call?.[8]).toBe(0)
+    const arg = call?.[16] as Float64Array
+    expect(arg).toBeInstanceOf(Float64Array)
+    expect(Array.from(arg)).toEqual([d, d, 0])
+    expect(call).toHaveLength(17)
+  })
+
+  it('keeps the direction lock on the wider release query that holds a sticky snap', () => {
+    const endpoint = {
+      x: () => 1, y: () => 1, z: () => 0,
+      kind: () => 'endpoint',
+      direction: () => undefined,
+      projected_from: () => undefined,
+      pierces_face: () => false,
+      meeting_line: () => undefined,
+      object: () => undefined,
+      instance: () => undefined,
+      element: () => 7n,
+      element_kind: () => 'vertex',
+      sketch: () => undefined,
+      sketch_region: () => undefined,
+      sketch_curve: () => undefined,
+      free: () => {},
+    }
+    let calls = 0
+    const scene = { snap: vi.fn(() => (calls++ === 0 ? endpoint : undefined)) } as unknown as Scene
+    const svc = new SnapService(scene)
+    const snapFn = scene.snap as unknown as ReturnType<typeof vi.fn>
+    svc.resolve(DOWN, 800, PERSPECTIVE_45, [0, 0, 0], undefined, [0, 1, 0])
+    svc.resolve(DOWN, 800, PERSPECTIVE_45, [0, 0, 0], undefined, [0, 1, 0])
+    // The acquire query, then the acquire + release pair of the second resolve.
+    expect(snapFn.mock.calls).toHaveLength(3)
+    for (const c of snapFn.mock.calls) {
+      expect(Array.from(c[16] as Float64Array)).toEqual([0, 1, 0])
+    }
+  })
+})
+
+describe('snapJsToSnap — pierces_face', () => {
+  const snapJs = (pierces: boolean) => ({
+    x: () => 1, y: () => 0.9, z: () => 0.6,
+    kind: () => 'intersection',
+    direction: () => undefined,
+    projected_from: () => undefined,
+    pierces_face: () => pierces,
+    meeting_line: () => undefined,
+    object: () => 7n,
+    instance: () => undefined,
+    element: () => 3n,
+    element_kind: () => 'edge',
+    sketch: () => undefined,
+    sketch_region: () => undefined,
+    sketch_curve: () => undefined,
+    free: () => {},
+  })
+
+  it('carries the kernel’s pierced-face flag onto the snap, true and false alike', () => {
+    const pierced = new SnapService({ snap: vi.fn(() => snapJs(true)) } as unknown as Scene)
+    const snap = pierced.resolve(DOWN, 800, PERSPECTIVE_45).snap
+    expect(snap?.kind).toBe('intersection')
+    expect(snap?.piercesFace).toBe(true)
+
+    const crossing = new SnapService({ snap: vi.fn(() => snapJs(false)) } as unknown as Scene)
+    expect(crossing.resolve(DOWN, 800, PERSPECTIVE_45).snap?.piercesFace).toBe(false)
+  })
+})
+
+describe('snapJsToSnap — meeting_line', () => {
+  const snapJs = (line: number[] | undefined) => ({
+    x: () => 1, y: () => 0.8, z: () => 0.5,
+    kind: () => (line !== undefined ? 'on-intersection-line' : 'on-face'),
+    direction: () => undefined,
+    projected_from: () => undefined,
+    pierces_face: () => false,
+    meeting_line: () => line,
+    object: () => 7n,
+    instance: () => undefined,
+    element: () => 3n,
+    // The kernel never reports a snap on a meeting line as a face pick.
+    element_kind: () => (line !== undefined ? 'meeting-line' : 'face'),
+    sketch: () => undefined,
+    sketch_region: () => undefined,
+    sketch_curve: () => undefined,
+    free: () => {},
+  })
+
+  it('splits the kernel’s six numbers into the line’s two ends, and leaves a plain face without one', () => {
+    const onLine = new SnapService({ snap: vi.fn(() => snapJs([1, 0.6, 0.5, 1, 1.4, 0.5])) } as unknown as Scene)
+    const snap = onLine.resolve(DOWN, 800, PERSPECTIVE_45).snap
+    expect(snap?.kind).toBe('on-intersection-line')
+    expect(snap?.meetingLine).toEqual([[1, 0.6, 0.5], [1, 1.4, 0.5]])
+    // Edge-class, not a face pick; the first face stays the owner of record.
+    expect(snap?.elementKind).toBe('meeting-line')
+    expect(snap?.object).toBe(7n)
+    expect(snap?.element).toBe(3n)
+
+    const onFace = new SnapService({ snap: vi.fn(() => snapJs(undefined)) } as unknown as Scene)
+    const face = onFace.resolve(DOWN, 800, PERSPECTIVE_45).snap
+    expect(face?.meetingLine).toBeUndefined()
+    expect(face?.elementKind).toBe('face')
+  })
+
+  it('holds a meeting line only while the release query still finds that same line, not another on the same face', () => {
+    // A slab through a wall: its top and bottom lines both name the wall's
+    // face as the first face, and only their ends tell them apart.
+    const top = [1, 0.6, 0.5, 1, 1.4, 0.5]
+    const bottom = [1, 0.6, 0.4, 1, 1.4, 0.4]
+    let acquire: number[] | undefined = top
+    let release: number[] | undefined = top
+    const snapFn = vi.fn((...args: unknown[]) => {
+      // The release query is the one that passes a soft-axis scale.
+      const line = args[12] === null || args[12] === undefined ? acquire : release
+      return snapJs(line)
+    })
+    const svc = new SnapService({ snap: snapFn } as unknown as Scene)
+    expect(svc.resolve(DOWN, 800, PERSPECTIVE_45).snap?.meetingLine).toEqual([[1, 0.6, 0.5], [1, 1.4, 0.5]])
+
+    // The cursor drifts off the top line onto the wall: the acquire query
+    // finds only the face, the release query still the top line. Held.
+    acquire = undefined
+    expect(svc.resolve(DOWN, 800, PERSPECTIVE_45).snap?.kind).toBe('on-intersection-line')
+
+    // The release query now finds the bottom line instead: a different
+    // target, so the hold lets go to the face.
+    release = bottom
+    const snap = svc.resolve(DOWN, 800, PERSPECTIVE_45).snap
+    expect(snap?.kind).toBe('on-face')
+    expect(snap?.meetingLine).toBeUndefined()
   })
 })

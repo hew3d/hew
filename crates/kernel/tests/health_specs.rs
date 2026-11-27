@@ -21,6 +21,7 @@ fn scene(roots: Vec<ImportNode>, defs: Vec<DefRecipe>) -> ImportScene {
         section: None,
         view_style: None,
         extra: Default::default(),
+        geo: None,
     }
 }
 
@@ -191,6 +192,7 @@ fn rims_in_different_coordinate_spaces_never_join_a_family() {
         vec![DefRecipe {
             name: Some("Right".into()),
             children: vec![ImportNode::Mesh(half("Right", 1.0, 2.0, 5))],
+            locked: false,
         }],
     );
     doc.ingest(s, Vec::new()).unwrap();
@@ -212,6 +214,7 @@ fn a_definition_member_is_one_row_however_often_it_is_placed() {
         vec![DefRecipe {
             name: Some("Tray".into()),
             children: vec![ImportNode::Mesh(half("Tray", 0.0, 1.0, 1))],
+            locked: false,
         }],
     );
     let mut doc = Document::new();

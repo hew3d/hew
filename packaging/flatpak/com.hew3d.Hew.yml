@@ -34,6 +34,11 @@ modules:
     build-commands:
       - ar x hew.deb data.tar.gz
       - tar -xf data.tar.gz -C /app --strip-components=1 usr
+      # Tell the app how it was installed (shells/tauri/src-tauri/src/
+      # install_channel.rs): the .deb's binary carries the Deb marker, which
+      # would otherwise send it to `dpkg`. Inside the sandbox the app updates
+      # through `flatpak update`, never by installing a package itself.
+      - mkdir -p /app/share/hew && printf 'flatpak\n' > /app/share/hew/install-channel
       - install -Dm644 com.hew3d.Hew.metainfo.xml /app/share/metainfo/com.hew3d.Hew.metainfo.xml
       # Flatpak wants the desktop entry and icons under the app id.
       - mv /app/share/applications/Hew.desktop /app/share/applications/com.hew3d.Hew.desktop

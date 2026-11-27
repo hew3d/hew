@@ -1,8 +1,8 @@
 ---
-import { getCollection } from 'astro:content';
+import { getPublishedLearn } from '../../lib/published';
 import BaseLayout from '../../layouts/BaseLayout.astro';
 
-const entries = (await getCollection('learn')).sort(
+const entries = (await getPublishedLearn()).sort(
   (a, b) => a.data.order - b.data.order
 );
 ---

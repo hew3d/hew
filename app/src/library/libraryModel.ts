@@ -22,13 +22,14 @@ import type {
   LibraryItemMeta,
   LibraryItemSummary,
   LibraryMaterialSummary,
+  LibraryRemoteNote,
 } from './types'
 
 // ---------------------------------------------------------------------------
 // Meta parsing (type guards over an untrusted doc_attrs blob)
 // ---------------------------------------------------------------------------
 
-const VALID_CATEGORIES: readonly LibraryCategory[] = ['component', 'material', 'model']
+const VALID_CATEGORIES: readonly LibraryCategory[] = ['component', 'material', 'model', 'profile']
 
 function isValidCategory(v: unknown): v is LibraryCategory {
   return typeof v === 'string' && (VALID_CATEGORIES as readonly string[]).includes(v)
@@ -36,6 +37,32 @@ function isValidCategory(v: unknown): v is LibraryCategory {
 
 function isStringArray(v: unknown): v is string[] {
   return Array.isArray(v) && v.every((e) => typeof e === 'string')
+}
+
+/** Reads the remote note (design 6.5) out of a `remote` value. Only an
+ * object with string `source` and `sha256` is a note; the other fields
+ * default when absent (`edited` to false, the strings to empty). Mirrors
+ * `remote_note_of` in `crates/api`, so the two readers agree. */
+function isRemoteNote(v: unknown): v is Record<string, unknown> & { source: string; sha256: string } {
+  if (v === null || typeof v !== 'object' || Array.isArray(v)) return false
+  const o = v as Record<string, unknown>
+  return typeof o.source === 'string' && typeof o.sha256 === 'string'
+}
+
+function parseRemoteNote(v: unknown): LibraryRemoteNote | undefined {
+  if (!isRemoteNote(v)) return undefined
+  const o = v
+  const note: LibraryRemoteNote = {
+    source: o.source,
+    name: typeof o.name === 'string' ? o.name : '',
+    path: typeof o.path === 'string' ? o.path : '',
+    sha256: o.sha256,
+    fetchedAt: typeof o.fetchedAt === 'string' ? o.fetchedAt : '',
+    edited: o.edited === true,
+  }
+  if (typeof o.commit === 'string') note.commit = o.commit
+  if (typeof o.license === 'string') note.license = o.license
+  return note
 }
 
 /** Parses a `hew.library` attribute-dictionary value into a `LibraryItemMeta`.
@@ -53,11 +80,68 @@ export function parseLibraryMeta(raw: unknown): LibraryItemMeta {
   if (typeof obj.collection === 'string') meta.collection = obj.collection
   if (typeof obj.savedAt === 'string') meta.savedAt = obj.savedAt
   if (typeof obj.sourceDoc === 'string') meta.sourceDoc = obj.sourceDoc
+  const remote = parseRemoteNote(obj.remote)
+  if (remote !== undefined) meta.remote = remote
   return meta
 }
 
+/** The metadata an edit-save stamps into the item: the Library's CURRENT
+ * `hew.library` keys (name, keywords, collection, category, sourceDoc, id)
+ * with a fresh `savedAt`, so a rename or keyword change made in the Library
+ * while the edit window was open survives the save. Only the geometry comes
+ * from the edit window. `prints` are left out (the kernel restamps them) and
+ * so are `null` values (they cannot be written back). */
+export function metaForEditSave(currentRaw: unknown, savedAt: string): Record<string, unknown> {
+  const out: Record<string, unknown> = {}
+  if (currentRaw !== null && typeof currentRaw === 'object' && !Array.isArray(currentRaw)) {
+    for (const [key, value] of Object.entries(currentRaw as Record<string, unknown>)) {
+      if (key === 'prints' || key === 'remote' || value === null || value === undefined) continue
+      out[key] = value
+    }
+  }
+  const note = withEditedNote(currentRaw)
+  if (note !== undefined) out.remote = note
+  out.savedAt = savedAt
+  return out
+}
+
+/** The item's remote note with `edited` set, as a fresh object (the input
+ * is not touched); `undefined` when the item carries no note. An edit
+ * makes the item no longer match its source (design 7.2). */
+function withEditedNote(currentRaw: unknown): Record<string, unknown> | undefined {
+  const raw = currentRaw !== null && typeof currentRaw === 'object' ? (currentRaw as Record<string, unknown>).remote : undefined
+  return isRemoteNote(raw) ? { ...raw, edited: true } : undefined
+}
+
+/** The metadata a save to the Library writes (design 7.2): `fresh` (id,
+ * name, category, savedAt, sourceDoc) over `updating`, the Library's
+ * current meta of the item being written over (absent for a new item).
+ * The remote note is kept only when there is an item to write over, and
+ * then it is marked edited; a new item carries none, whatever `fresh`
+ * held. */
+export function metaForLibrarySave(
+  fresh: Record<string, unknown>,
+  updating?: Record<string, unknown> | LibraryItemMeta,
+): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...(updating ?? {}), ...fresh }
+  delete out.remote
+  const note = updating === undefined ? undefined : withEditedNote(updating)
+  if (note !== undefined) out.remote = note
+  return out
+}
+
+/** The metadata a profile Replace writes: `fresh` plus ONLY the replaced
+ * item's remote note, taken from `current`, the item's `hew.library` as the
+ * Library holds it when the write happens. Whatever collection, keywords or
+ * note the window captured when the profile was opened is not used, so a
+ * change made in the Library meanwhile is not written over. */
+export function metaForProfileReplace(fresh: Record<string, unknown>, current: unknown): Record<string, unknown> {
+  const raw = current !== null && typeof current === 'object' ? (current as Record<string, unknown>).remote : undefined
+  return metaForLibrarySave(fresh, isRemoteNote(raw) ? { remote: raw } : undefined)
+}
+
 /** The bare file name minus any category subfolder (`Components/`,
- * `Materials/`, `Models/`) and its `.hew` extension — the last-resort
+ * `Materials/`, `Models/`, `Profiles/`) and its `.hew` extension — the last-resort
  * display name for an item with no metadata and no named definition/root.
  * `fileName` is otherwise treated as an opaque id throughout this module;
  * this is the one place that peels off its directory shape, purely for
@@ -76,6 +160,10 @@ function fileStem(fileName: string): string {
  * exactly one component definition and no top-level groups is a component;
  * everything else is a model. */
 function deriveCategory(summary: LibraryItemSummary): LibraryCategory {
+  // A profile: one open drawn chain and nothing else.
+  if (summary.objects === 0 && summary.components === 0 && summary.materials === 0 && summary.profile_chain_only === true) {
+    return 'profile'
+  }
   const materialOnly = summary.objects === 0 && summary.components === 0 && summary.materials > 0
   if (materialOnly) return 'material'
   const singleDefinition = summary.components === 1 && summary.groups === 0
@@ -117,6 +205,7 @@ const EMPTY_SUMMARY: LibraryItemSummary = {
   first_root_name: null,
   doc_attrs: {},
   material_entries: [],
+  profile_chain_only: false,
 }
 
 /** Builds the error-state tile for a file that failed to parse (a truncated
@@ -343,6 +432,8 @@ export function categoryTypeLabel(category: LibraryCategory): string {
       return t`Material`
     case 'model':
       return t({ context: 'library item type', message: 'Model' })
+    case 'profile':
+      return t`Profile`
   }
 }
 
@@ -364,6 +455,9 @@ function listSortKey(item: LibraryItem, column: ListSortColumn): string | number
 export function sortListItems(items: LibraryItem[], column: ListSortColumn, direction: ListSortDirection): LibraryItem[] {
   const sign = direction === 'asc' ? 1 : -1
   return [...items].sort((a, b) => {
+    // A built-in has no file, hence no size: it sorts after every real file
+    // either way rather than as the smallest.
+    if (column === 'size' && isBuiltInItem(a) !== isBuiltInItem(b)) return isBuiltInItem(a) ? 1 : -1
     const av = listSortKey(a, column)
     const bv = listSortKey(b, column)
     if (av < bv) return -1 * sign
@@ -455,4 +549,30 @@ export function savedLine(item: LibraryItem, nowMs: number): string {
   if (diffDays <= 30) return plural(diffDays, { one: 'Saved # day ago', other: 'Saved # days ago' })
   const date = formatAbsoluteDate(ts)
   return t`Saved ${date}`
+}
+
+// ---------------------------------------------------------------------------
+// Built-in profiles (bundled with the kernel, not files in the folder)
+// ---------------------------------------------------------------------------
+
+/** Prefix of a built-in profile's id and pseudo file name. */
+export const BUILT_IN_PREFIX = 'builtin:'
+
+/** True for a built-in profile row: bundled with the app, read-only (no
+ * rename, delete or move), usable and copyable. */
+export function isBuiltInItem(item: Pick<LibraryItem, 'file'>): boolean {
+  return item.file.fileName.startsWith(BUILT_IN_PREFIX)
+}
+
+/** The Library row for a built-in profile. `bytes` hash is the profile id
+ * (stable, so thumbnails cache under it). */
+export function builtInProfileItem(id: string, name: string): LibraryItem {
+  return {
+    file: { fileName: id, size: 0, mtimeMs: 0 },
+    summary: { ...EMPTY_SUMMARY, profile_chain_only: true },
+    meta: { id, name, category: 'profile' },
+    displayName: name,
+    category: 'profile',
+    contentHash: id,
+  }
 }

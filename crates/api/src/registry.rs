@@ -10,7 +10,10 @@
 //! are refined in the change that lands its conformance tests; until it
 //! is implemented, dispatch answers it with the `unimplemented` refusal.
 
+use crate::host::DocFormat;
 use std::collections::BTreeMap;
+
+use crate::grant::Permission;
 
 /// What a command does to the document — governs envelope placement
 /// (docs/agents/HEW_API.md §6.4).
@@ -44,18 +47,48 @@ pub enum Tier {
     Standard,
 }
 
+/// Who provides a command: the kernel or a host for every protocol-1
+/// command (by where it is served), or a plugin, by id, for a command a
+/// plugin's manifest contributes (docs/agents/PLUGINS.md "Commands").
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Provider {
+    Kernel,
+    Host,
+    Plugin(String),
+}
+
 /// One command's declaration.
 #[derive(Debug, Clone)]
 pub struct CommandDecl {
-    /// Dot-separated, lower snake_case: `hew.<area>.<command>` (§4.1).
-    pub name: &'static str,
+    /// Dot-separated, lower snake_case: `hew.<area>.<command>` (§4.1) for a
+    /// first-party command, `<plugin-id>.<local>` for a plugin's.
+    pub name: String,
     /// Per-command version, starting at 1; evolution is additive (§9).
     pub version: u32,
     pub class: CommandClass,
     pub served: Served,
     pub tier: Tier,
+    /// What a connection must hold to call it (docs/agents/HEW_API.md §10;
+    /// [`permission_table`]).
+    pub permission: Permission,
+    /// `Kernel` or `Host` (by `served`) for every protocol-1 command;
+    /// `Plugin(id)` for a plugin-provided one, which dispatch forwards
+    /// instead of executing.
+    pub provider: Provider,
     /// One-line summary for `hew.meta.capabilities` and generated docs.
-    pub summary: &'static str,
+    pub summary: String,
+    /// The undo label of a plugin command, in English; `None` for every
+    /// first-party command.
+    pub label: Option<String>,
+    /// How long the forwarding host waits for a plugin command's reply,
+    /// at most 50 000 ms; 0 for first-party commands.
+    pub timeout_ms: u32,
+    /// Whether the forwarding host may run several of this plugin
+    /// command at once; `Parallel` for first-party commands.
+    pub concurrency: plugin_manifest::Concurrency,
+    /// A deprecation notice (docs/agents/HEW_API.md §9); always `None` for
+    /// now.
+    pub deprecated: Option<String>,
     /// JSON Schema for `params`. Scaffold declarations start at the
     /// permissive object schema and are tightened with each command's
     /// conformance tests.
@@ -65,7 +98,7 @@ pub struct CommandDecl {
     /// The machine names of the refusals this command can answer (§4.4).
     /// Empty is honest for a command whose failures are all protocol
     /// errors; every unimplemented command carries `["unimplemented"]`.
-    pub refusals: Vec<&'static str>,
+    pub refusals: Vec<String>,
     /// Whether dispatch executes it yet. `false` answers the
     /// `unimplemented` refusal — the burn-down list (§14).
     pub implemented: bool,
@@ -83,47 +116,293 @@ pub struct CommandDecl {
     pub mutates_document: bool,
 }
 
-/// A named subset of the registry a host grants a connection (§10) — a
-/// maximum a host may narrow, never a protocol change.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Profile {
-    /// Everything headless-safe: the full surface except `hew.view.*`,
-    /// with one deliberate exception — `hew.view.snapshot` has a headless
-    /// render path (docs/design/headless-snapshot.md's software
-    /// rasterizer) and is granted here too.
-    Core,
-    /// `core` plus live-application-only commands (future `hew.view.*`
-    /// additions: selection, camera control).
-    App,
-}
+impl CommandDecl {
+    /// Whether a plugin provides this command.
+    pub fn is_plugin(&self) -> bool {
+        matches!(self.provider, Provider::Plugin(_))
+    }
 
-impl Profile {
-    /// Whether this profile grants `command`.
-    pub fn grants(&self, command: &CommandDecl) -> bool {
-        match self {
-            Profile::App => true,
-            Profile::Core => {
-                // Closing or raising a window is a live-application effect
-                // with nothing to act on headlessly, like `hew.view.*`.
-                !matches!(command.name, "hew.doc.close" | "hew.doc.focus")
-                    && (command.name == "hew.view.snapshot"
-                        || command.name == "hew.view.line_drawing"
-                        || !command.name.starts_with("hew.view."))
-            }
+    /// The providing plugin's id, for a plugin command.
+    pub fn plugin_id(&self) -> Option<&str> {
+        match &self.provider {
+            Provider::Plugin(id) => Some(id),
+            _ => None,
         }
     }
 }
 
-/// The protocol-1 registry.
-#[derive(Debug)]
+/// A protocol-1 declaration while [`Registry::protocol_1`] builds it: the
+/// same fields as [`CommandDecl`] with static text, so the inventory below
+/// reads as literals.
+struct Draft {
+    name: &'static str,
+    version: u32,
+    class: CommandClass,
+    served: Served,
+    tier: Tier,
+    permission: Permission,
+    summary: &'static str,
+    params_schema: serde_json::Value,
+    result_schema: serde_json::Value,
+    refusals: Vec<&'static str>,
+    implemented: bool,
+    mutates_document: bool,
+}
+
+impl Draft {
+    fn finish(self) -> CommandDecl {
+        CommandDecl {
+            name: self.name.to_string(),
+            version: self.version,
+            class: self.class,
+            served: self.served,
+            tier: self.tier,
+            permission: self.permission,
+            provider: match self.served {
+                Served::Kernel => Provider::Kernel,
+                Served::Host => Provider::Host,
+            },
+            summary: self.summary.to_string(),
+            label: None,
+            timeout_ms: 0,
+            concurrency: plugin_manifest::Concurrency::Parallel,
+            deprecated: None,
+            params_schema: self.params_schema,
+            result_schema: self.result_schema,
+            refusals: self.refusals.into_iter().map(str::to_string).collect(),
+            implemented: self.implemented,
+            mutates_document: self.mutates_document,
+        }
+    }
+}
+
+/// Why [`Registry::register_plugin`] refused a plugin's commands.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RegisterError {
+    /// The plugin id fails the plugin id grammar or is reserved, or a
+    /// command id fails the command id grammar (the full name is given).
+    NameOutsidePluginNamespace(String),
+    /// The full command name is already registered.
+    DuplicateCommand(String),
+    /// A params or result schema the dispatcher's checker cannot enforce.
+    InvalidSchema { command: String, why: String },
+    /// More than [`plugin_manifest::MAX_COMMANDS`] commands.
+    TooManyCommands(usize),
+}
+
+impl RegisterError {
+    /// The snake_case refusal name.
+    pub fn name(&self) -> &'static str {
+        match self {
+            RegisterError::NameOutsidePluginNamespace(_) => "name_outside_plugin_namespace",
+            RegisterError::DuplicateCommand(_) => "duplicate_command",
+            RegisterError::InvalidSchema { .. } => "invalid_schema",
+            RegisterError::TooManyCommands(_) => "too_many_commands",
+        }
+    }
+}
+
+impl std::fmt::Display for RegisterError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RegisterError::NameOutsidePluginNamespace(name) => write!(
+                f,
+                "\"{name}\" is not a plugin id, or not a command name under one"
+            ),
+            RegisterError::DuplicateCommand(name) => {
+                write!(f, "the command \"{name}\" is already registered")
+            }
+            RegisterError::InvalidSchema { command, why } => {
+                write!(f, "the schema of \"{command}\" cannot be enforced: {why}")
+            }
+            RegisterError::TooManyCommands(n) => write!(
+                f,
+                "{n} commands is more than the {} a plugin may contribute",
+                plugin_manifest::MAX_COMMANDS
+            ),
+        }
+    }
+}
+
+/// The longest a plugin command may run, in milliseconds: below the live
+/// transports' 60 s reply timeout, so a socket caller never times out
+/// first. A larger manifest value is clamped.
+pub const MAX_PLUGIN_TIMEOUT_MS: u32 = 50_000;
+
+/// The command registry: protocol 1 plus whatever plugins registered.
+#[derive(Debug, Clone)]
 pub struct Registry {
-    commands: BTreeMap<&'static str, CommandDecl>,
+    commands: BTreeMap<String, CommandDecl>,
 }
 
 /// Shorthand for a permissive object schema — the scaffold placeholder
 /// each command tightens when its conformance tests land.
 fn obj() -> serde_json::Value {
     serde_json::json!({ "type": "object" })
+}
+
+/// An occurrence locator: a world node's public id, or
+/// `{ "path": [instance, …, leaf] }` (HEW_API.md §5.2).
+fn occurrence_locator_schema() -> serde_json::Value {
+    serde_json::json!({
+        "oneOf": [
+            { "type": "string" },
+            {
+                "type": "object",
+                "properties": {
+                    "path": { "type": "array", "items": { "type": "string" }, "minItems": 1 }
+                },
+                "required": ["path"],
+                "additionalProperties": false
+            }
+        ]
+    })
+}
+
+/// An attribute target (HEW_API.md §8): an entity's public id or
+/// `"document"`, or `{ "face": <face locator> }` / `{ "edge": <edge
+/// locator> }` for a solid's face or edge (§5.2 locator forms).
+fn attr_target_schema() -> serde_json::Value {
+    serde_json::json!({
+        "oneOf": [
+            { "type": "string", "description": "an entity's public id, or \"document\"" },
+            {
+                "type": "object",
+                "properties": {
+                    "face": { "description": "a face locator: {object | path, at}, {object | path, ray}, or {\"$face\": \"label#key\"}; path is an occurrence path ending at the object, at and ray in the object's own frame: world coordinates for an object with no placement above it, the definition's coordinates for one reached through a placement" }
+                },
+                "required": ["face"],
+                "additionalProperties": false
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "edge": { "description": "a solid edge locator: {object | path, at}, at in the object's own frame: world coordinates for an object with no placement above it, the definition's coordinates for one reached through a placement" }
+                },
+                "required": ["edge"],
+                "additionalProperties": false
+            }
+        ]
+    })
+}
+
+/// A list of `{ outer, edges }` loops in a plane's xy (the
+/// `hew.compute.outline` shape), for the reserved `hew.compute.project`.
+fn loops_result_items(xy: &serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "type": "array",
+        "items": {
+            "type": "object",
+            "properties": {
+                "outer": { "type": "boolean" },
+                "edges": { "type": "array", "items": { "type": "object", "properties": { "kind": { "type": "string" }, "a": xy, "b": xy } } }
+            },
+            "required": ["outer", "edges"]
+        }
+    })
+}
+
+/// `{ id?, path? }` (exactly one), with `space` for the buffer reads.
+fn occurrence_target_schema(with_space: bool) -> serde_json::Value {
+    let mut properties = serde_json::json!({
+        "id": { "type": "string", "description": "a world node's public id" },
+        "path": { "type": "array", "items": { "type": "string" }, "minItems": 1, "description": "an occurrence path, instances first and the node last" }
+    });
+    if with_space {
+        properties["space"] = serde_json::json!({
+            "type": "string",
+            "enum": ["world", "local"],
+            "description": "defaults to world; local is the node's own frame (an instance's definition coordinates)"
+        });
+    }
+    serde_json::json!({
+        "type": "object",
+        "properties": properties,
+        "additionalProperties": false
+    })
+}
+
+/// `exclude` on the part reads (HEW_API.md "exclude").
+fn exclude_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "array",
+        "items": { "type": "string" },
+        "description": "Object ids, each one of the target's own members, left out of the frame and the measures (needs scope \"own\"); an id that is not an own member is -32602"
+    })
+}
+
+/// `solids_only` on the part reads.
+fn solids_only_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "boolean",
+        "default": false,
+        "description": "true leaves out Objects that are not closed solids (stray faces, imported surfaces; the ones hew.query.occurrences reports as solid: false) from the frame and the measures. Works with any scope and composes with exclude; when nothing is left it answers as exclude does when it leaves nothing"
+    })
+}
+
+/// `scope` on the part reads and the render commands (docs/agents/PLUGINS.md
+/// "Reading a container's own Objects").
+fn scope_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "string",
+        "enum": ["own", "all"],
+        "default": "all",
+        "description": "all (the default) takes every leaf under the target; own takes a container's direct objects and its groups' objects, never a nested instance's members. On an object both are the same"
+    })
+}
+
+/// One `hew.query.occurrences` row.
+fn occurrence_json_schema() -> serde_json::Value {
+    let nullable_string = serde_json::json!({ "type": ["string", "null"] });
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "path": { "type": "array", "items": { "type": "string" }, "description": "the instances above this node, outermost first; {path: [...path, id]} locates it" },
+            "id": { "type": "string" },
+            "kind": { "type": "string", "enum": ["object", "group", "instance"] },
+            "definition": nullable_string,
+            "parent": nullable_string,
+            "world_pose": { "type": "array", "items": { "type": "number" }, "minItems": 12, "maxItems": 12, "description": "row-major 3×4" },
+            "mirrored": { "type": "boolean" },
+            "hidden": { "type": "boolean", "description": "effective: the node's own flag and tags, its groups', and every instance on the path" },
+            "user_hidden": { "type": "boolean" },
+            "material": { "type": ["string", "null"], "description": "an object's base material, an instance's own; null for a group" },
+            "material_effective": { "type": ["string", "null"], "description": "what the node's unpainted faces show: an object's base, else the nearest painted instance on the path; an instance's own, else the nearest painted instance above it; null for a group" },
+            "tags": { "type": "array", "items": { "type": "array", "items": { "type": "string" } } },
+            "name": nullable_string,
+            "definition_name": nullable_string,
+            "depth": { "type": "integer", "minimum": 0 },
+            "locked": { "type": "boolean", "description": "locked itself: an object's or group's own lock, an instance's component's (shared by every copy)" },
+            "frozen": { "type": "boolean", "description": "a lock keeps the node from changing: its own, a locked group above it, or a locked shape it is part of (through any placement). Edits to it refuse locked_node" },
+            "members": {
+                "type": "object",
+                "description": "the node's direct members by kind, in member order: a group's members, an instance's definition's members, three empty lists for an object. Hidden members are left out unless include_hidden",
+                "properties": {
+                    "objects": { "type": "array", "items": { "type": "string" } },
+                    "groups": { "type": "array", "items": { "type": "string" } },
+                    "instances": { "type": "array", "items": { "type": "string" } }
+                },
+                "required": ["objects", "groups", "instances"],
+                "additionalProperties": false
+            },
+            "solid": { "type": "boolean", "description": "object rows only: the health verdict is solid (closed and manifold)" },
+            "family": { "type": ["integer", "null"], "description": "object rows only: the seam family index in hew.doc.health's families, valid for the same document state; null when the object is in no family" },
+            "family_closed": { "type": ["boolean", "null"], "description": "object rows only: every shared rim of the family can take a cap; null exactly when family is null" },
+            "linked": { "type": "boolean", "description": "instance rows only: the definition is a set of linked copies (hew / linked)" }
+        },
+        "required": ["path", "id", "kind", "definition", "parent", "world_pose", "mirrored", "hidden", "user_hidden", "material", "material_effective", "tags", "name", "definition_name", "depth", "locked", "frozen", "members"],
+        "additionalProperties": false
+    })
+}
+
+/// `selection` on export and line drawings.
+fn render_selection_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "array",
+        "minItems": 1,
+        "items": occurrence_locator_schema(),
+        "description": "draw only these: node ids, occurrence locators {path}, or a definition's cmp_ id (its leaves at the identity pose)"
+    })
 }
 
 /// One entry of `hew.meta.documents` / the `hello` response
@@ -136,11 +415,12 @@ fn document_info_schema() -> serde_json::Value {
             "title": { "type": "string" },
             "path": { "type": ["string", "null"], "description": "the file last opened from or saved to; null while unsaved" },
             "dirty": { "type": "boolean" },
+            "document_id": { "type": ["string", "null"], "description": "the persistent UUID the document's file carries (lowercase, hyphenated); null until the document is first saved" },
             "label": { "type": "string", "description": "the client-chosen label given at hew.doc.new/open, if any" },
             "front": { "type": "boolean", "description": "this is the user's front-most document window" },
             "attached": { "type": "boolean", "description": "this is the connection's current document" }
         },
-        "required": ["id", "title", "path", "dirty"]
+        "required": ["id", "title", "path", "dirty", "document_id"]
     })
 }
 
@@ -172,10 +452,11 @@ fn library_item_meta_schema() -> serde_json::Value {
         "properties": {
             "id": { "type": "string" },
             "name": { "type": "string" },
-            "category": { "type": "string", "enum": ["component", "material", "model"] },
+            "category": { "type": "string", "enum": ["component", "material", "model", "profile"] },
             "keywords": { "type": "array", "items": { "type": "string" } },
             "collection": { "type": "string" },
-            "saved_at": { "type": "string" }
+            "saved_at": { "type": "string" },
+            "remote": { "type": "object", "description": "the remote note of an item fetched from a source (source, name, path, sha256, commit?, license?, fetchedAt, edited); absent when the item has none" }
         },
         "required": ["name", "category", "keywords"]
     })
@@ -190,10 +471,11 @@ fn library_item_schema() -> serde_json::Value {
             "path": { "type": "string" },
             "id": { "type": "string" },
             "name": { "type": "string" },
-            "category": { "type": "string", "enum": ["component", "material", "model"] },
+            "category": { "type": "string", "enum": ["component", "material", "model", "profile"] },
             "keywords": { "type": "array", "items": { "type": "string" } },
             "collection": { "type": "string" },
             "saved_at": { "type": "string" },
+            "remote": { "type": "object", "description": "the remote note of an item fetched from a source (source, name, path, sha256, commit?, license?, fetchedAt, edited); absent when the item has none" },
             "size": { "type": "integer" },
             "mtime_ms": { "type": "integer" },
             "summary": { "type": "object", "description": "manifest counts (objects, materials, components, ...); absent when error is present" },
@@ -204,8 +486,27 @@ fn library_item_schema() -> serde_json::Value {
 }
 
 impl Registry {
-    /// Builds the protocol-1 inventory (docs/agents/HEW_API.md §7).
+    /// The protocol-1 inventory THIS build serves (docs/agents/HEW_API.md
+    /// §7): every host dispatches through it. In a preview build it is the
+    /// whole [`Registry::reference`] inventory. In a production build the
+    /// commands of every `preview-features.json` entry are left out, and
+    /// each preview parameter is left out of its command's params schema
+    /// ([`crate::preview`]): what is not declared is not listed anywhere.
     pub fn protocol_1() -> Registry {
+        let mut registry = Registry::reference();
+        if !crate::preview::PREVIEW_BUILD {
+            crate::preview::wall_off(&mut registry.commands);
+        }
+        registry
+    }
+
+    /// The whole protocol-1 inventory, preview commands included, in every
+    /// build: the published contract the generated API reference and
+    /// TypeScript SDK are built from (they mark what is preview). Not for
+    /// dispatch: a host serves [`Registry::protocol_1`]. A production build
+    /// dispatching through this one still refuses every preview command,
+    /// because the dispatcher checks [`crate::preview`] itself.
+    pub fn reference() -> Registry {
         let mut commands = BTreeMap::new();
         let mut add = |name: &'static str,
                        class: CommandClass,
@@ -214,12 +515,15 @@ impl Registry {
                        summary: &'static str| {
             commands.insert(
                 name,
-                CommandDecl {
+                Draft {
                     name,
                     version: 1,
                     class,
                     served,
                     tier,
+                    // Fail closed until `permission_table` assigns it;
+                    // `every_command_has_a_permission` pins that it does.
+                    permission: Permission::FirstParty,
                     summary,
                     params_schema: obj(),
                     result_schema: obj(),
@@ -249,6 +553,21 @@ impl Registry {
             Kernel,
             Req,
             "The registry as data: every granted command's schemas, summary, and refusal inventory.",
+        );
+        // hew.event (§4.5) — server-originated notifications.
+        add(
+            "hew.event.subscribe",
+            R,
+            Kernel,
+            Std,
+            "Receive the named events on this connection as notification frames. Names the grant may not receive come back in `denied`.",
+        );
+        add(
+            "hew.event.unsubscribe",
+            R,
+            Kernel,
+            Std,
+            "Stop receiving the named events on this connection.",
         );
         add(
             "hew.meta.documents",
@@ -313,7 +632,7 @@ impl Registry {
             S,
             Host,
             Req,
-            "Export the attached document (STL/3MF/glTF/USDZ, or SketchUp skp/skp2017); bytes base64, or a path on hosts with filesystem access.",
+            "Export the attached document (STL/3MF/glTF/USDZ, or SketchUp skp, skp3 to skp8, skp2013 to skp2020); bytes base64, or a path on hosts with filesystem access.",
         );
         add(
             "hew.doc.import",
@@ -357,14 +676,14 @@ impl Registry {
             R,
             Kernel,
             Req,
-            "First hit along a ray — the programmatic form of clicking.",
+            "First hit along a ray, or every crossing, through any depth of nesting — the programmatic form of clicking.",
         );
         add(
             "hew.query.measure",
             R,
             Kernel,
             Req,
-            "Distances and angles between points, edges, and faces.",
+            "Distances between points, edges, and faces; or the volume, area, and bounding box of a part, group, or instance.",
         );
         add(
             "hew.query.resolve",
@@ -378,7 +697,49 @@ impl Registry {
             R,
             Kernel,
             Req,
-            "The open editing-context frame stack.",
+            "The open editing-context frame stack, with the app's fallback entries and whether a gesture is armed.",
+        );
+        add(
+            "hew.query.occurrences",
+            R,
+            Kernel,
+            Std,
+            "Every placement in the model with its path and world pose: objects, groups, and instances, nested definitions expanded through each instance.",
+        );
+        add(
+            "hew.query.part_frame",
+            R,
+            Kernel,
+            Std,
+            "A part measured along its own axes: origin, axes, and extents of one placement.",
+        );
+        add(
+            "hew.query.signature",
+            R,
+            Kernel,
+            Std,
+            "Whether two objects are the same part or mirrored twins: one object's shape and mirror hashes, and its part frame.",
+        );
+        add(
+            "hew.query.mesh",
+            R,
+            Kernel,
+            Std,
+            "One placement's triangle mesh: positions, normals, indices, and per-triangle face indices, base64.",
+        );
+        add(
+            "hew.query.topology",
+            R,
+            Kernel,
+            Std,
+            "One object's vertices, faces, and edges with their adjacency, planes, and analytic curves.",
+        );
+        add(
+            "hew.query.changes_since",
+            R,
+            Kernel,
+            Std,
+            "What changed since a history generation: the union of the change sets since then, or `full` when the history no longer reaches back that far.",
         );
         // hew.sketch — drawing at tool altitude.
         add(
@@ -386,35 +747,35 @@ impl Registry {
             M,
             Kernel,
             Req,
-            "Draw a line (chain) on a plane spec.",
+            "Draw a line (chain) on a plane spec. On a face of a locked Object the shape is drawn detached, as if `detached: true`.",
         );
         add(
             "hew.sketch.draw_rect",
             M,
             Kernel,
             Req,
-            "Draw an axis-aligned rectangle on a plane spec.",
+            "Draw an axis-aligned rectangle on a plane spec. On a face of a locked Object the shape is drawn detached, as if `detached: true`.",
         );
         add(
             "hew.sketch.draw_circle",
             M,
             Kernel,
             Req,
-            "Draw a circle on a plane spec.",
+            "Draw a circle on a plane spec. On a face of a locked Object the shape is drawn detached, as if `detached: true`.",
         );
         add(
             "hew.sketch.draw_arc",
             M,
             Kernel,
             Req,
-            "Draw an arc on a plane spec.",
+            "Draw an arc on a plane spec. On a face of a locked Object the shape is drawn detached, as if `detached: true`.",
         );
         add(
             "hew.sketch.draw_polygon",
             M,
             Kernel,
             Req,
-            "Draw a regular N-gon on a plane spec.",
+            "Draw a regular N-gon on a plane spec. On a face of a locked Object the shape is drawn detached, as if `detached: true`.",
         );
         add(
             "hew.sketch.offset",
@@ -488,6 +849,20 @@ impl Registry {
             "Close an open object's flat openings with faces; an object closed all round becomes a solid.",
         );
         add(
+            "hew.solid.mend",
+            M,
+            Kernel,
+            Std,
+            "Mend an open object: merge nearby points, remove zero-width folds, separate pinched parts and fill small gaps, as one undo step.",
+        );
+        add(
+            "hew.solid.remove_degenerate_faces",
+            M,
+            Kernel,
+            Std,
+            "Remove an object's zero-width and sub-tolerance faces, keeping it closed.",
+        );
+        add(
             "hew.solid.delete_faces",
             M,
             Kernel,
@@ -509,32 +884,104 @@ impl Registry {
             "Pull a flat surface into a solid of the given thickness.",
         );
         add(
+            "hew.solid.rejoin",
+            M,
+            Kernel,
+            Std,
+            "Rejoin one seam family of split pieces as a single solid (Model Health's Rejoin as one solid); one undo entry.",
+        );
+        add(
+            "hew.solid.from_faces",
+            M,
+            Kernel,
+            Std,
+            "Make a solid from drawn faces that enclose a space (Make Solid on sketches), first filling the faces the named sketches' lines can close; a shape closed against a solid grows it.",
+        );
+        add(
             "hew.solid.union",
             M,
             Kernel,
             Req,
-            "Boolean union of two solids.",
+            "Boolean union of two or more solids: the material in any of them.",
         );
         add(
             "hew.solid.subtract",
             M,
             Kernel,
             Req,
-            "Boolean subtraction of two solids.",
+            "Boolean subtraction: the first solid minus every other one; a may be a path to a definition member, cut through that placement so every placement shows the cut, by a world object or a transient prism or box.",
         );
         add(
             "hew.solid.intersect",
             M,
             Kernel,
             Req,
-            "Boolean intersection of two solids.",
+            "Boolean intersection of two or more solids: the material in all of them.",
         );
         add(
             "hew.solid.slice",
             M,
             Kernel,
             Req,
-            "Slice a solid by a plane into two solids.",
+            "Slice a solid by a plane into two solids; the object may be a path to a definition member, sliced in the definition.",
+        );
+        // hew.compute — pure computations on transient solids (HEW_API.md
+        // §7 "Compute"): the document is read, never changed.
+        add(
+            "hew.compute.boolean",
+            R,
+            Kernel,
+            Std,
+            "Union, subtract, or intersect two solids without touching the document; answers the result's measure, mesh, topology, or shell count.",
+        );
+        add(
+            "hew.compute.slice",
+            R,
+            Kernel,
+            Std,
+            "Cut a solid by a plane without touching the document; answers both pieces.",
+        );
+        add(
+            "hew.compute.shells",
+            R,
+            Kernel,
+            Std,
+            "Split a solid into its connected pieces without touching the document.",
+        );
+        add(
+            "hew.compute.measure",
+            R,
+            Kernel,
+            Std,
+            "Volume, surface area, bounding box, and centroid of a solid.",
+        );
+        add(
+            "hew.compute.outline",
+            R,
+            Kernel,
+            Std,
+            "A part's outline in a frame's xy plane: its largest face, or its silhouette, with arcs and circles kept analytic.",
+        );
+        add(
+            "hew.compute.offset",
+            R,
+            Kernel,
+            Std,
+            "Offset closed 2D loops outward or inward by a distance.",
+        );
+        add(
+            "hew.compute.project",
+            R,
+            Kernel,
+            Std,
+            "A single part's flat drawing on a plane, its faces grouped by depth into layers (not available yet).",
+        );
+        add(
+            "hew.compute.stretch",
+            R,
+            Kernel,
+            Std,
+            "Preview a section stretch of parts along one axis of a frame (not available yet).",
         );
         add(
             "hew.solid.follow_me",
@@ -572,7 +1019,7 @@ impl Registry {
             M,
             Kernel,
             Std,
-            "Kept for compatibility: uniformly scale a drawn shape about an anchor in its plane; hew.sketch.scale is the general form.",
+            "Kept for compatibility: uniformly scale a drawn shape about an anchor in its plane (a negative factor turns it 180 degrees about the anchor and scales it by |factor|); hew.sketch.scale is the general form, and a mirror about a world axis of an axis-aligned drawing plane is hew.sketch.scale with a negative per-axis factor.",
         );
         add(
             "hew.solid.delete_imprint",
@@ -589,21 +1036,49 @@ impl Registry {
             M,
             Kernel,
             Req,
-            "Translate (with copy/array forms) by vector or from→to points.",
+            "Translate (with copy/array forms) by vector or from→to points; ids may be paths to members of one definition, moved in world terms with every placement following.",
         );
         add(
             "hew.entity.rotate",
             M,
             Kernel,
             Req,
-            "Rotate about a pivot and axis by an angle.",
+            "Rotate about a pivot and axis by an angle; ids may be paths to members of one definition, turned in world terms with every placement following.",
+        );
+        add(
+            "hew.entity.flip",
+            M,
+            Kernel,
+            Std,
+            "Mirror a selection across a plane (Flip Along an axis through its center, the origin, or a point; or a given plane), in place or as one mirrored copy that links by default.",
         );
         add(
             "hew.entity.scale",
             M,
             Kernel,
             Req,
-            "Scale about an anchor with per-axis factors.",
+            "Scale about an anchor with per-axis factors; a negative factor mirrors. ids may be paths to members of one definition, scaled in world terms with every placement following.",
+        );
+        add(
+            "hew.entity.set_frame",
+            M,
+            Kernel,
+            Std,
+            "Set or clear the part frame override (hew.part / frame) of an object or group.",
+        );
+        add(
+            "hew.entity.lock",
+            M,
+            Kernel,
+            Std,
+            "Lock objects, groups, and component copies so nothing about them changes until they are unlocked; locking one copy of a component or linked set locks every copy.",
+        );
+        add(
+            "hew.entity.unlock",
+            M,
+            Kernel,
+            Std,
+            "Unlock objects, groups, and component copies (every copy of a shared shape with them), or everything with all: true.",
         );
         // hew.context — the shared editing-context stack (§6.3).
         add(
@@ -657,11 +1132,25 @@ impl Registry {
             "Place an instance of a definition at a pose.",
         );
         add(
+            "hew.component.import_definition",
+            S,
+            Host,
+            Std,
+            "Turn a file's bytes (hew, skp, glb, gltf, stl, dae) into one unplaced component definition, reusing the definition an earlier import of the same bytes made. Place it with hew.component.place.",
+        );
+        add(
             "hew.component.make_unique",
             M,
             Kernel,
             Std,
-            "Deep-copy an instance's definition into a private one.",
+            "Give one placement its own private definition (through an occurrence path at any depth), with the old-to-new id map.",
+        );
+        add(
+            "hew.component.promote",
+            M,
+            Kernel,
+            Std,
+            "Make a set of linked copies a named component: removes its linked mark and names its definition.",
         );
         add(
             "hew.component.explode",
@@ -669,6 +1158,20 @@ impl Registry {
             Kernel,
             Std,
             "Bake an instance into world geometry.",
+        );
+        add(
+            "hew.component.rebase",
+            M,
+            Kernel,
+            Std,
+            "Re-express a definition in a new frame; every placement is compensated, so nothing moves on screen.",
+        );
+        add(
+            "hew.component.flip_instance",
+            M,
+            Kernel,
+            Std,
+            "Mirror one world instance across one of its definition's local axes.",
         );
         // hew.material / hew.tag / hew.guide — appearance and organization.
         add(
@@ -683,7 +1186,7 @@ impl Registry {
             M,
             Kernel,
             Std,
-            "Paint a face or entity.",
+            "Paint a face (by default its whole logical face: a fillet, a cylinder wall; `logical: false` paints one facet) or an entity.",
         );
         add(
             "hew.material.set_default",
@@ -698,6 +1201,13 @@ impl Registry {
             Kernel,
             Std,
             "Set a material's opacity.",
+        );
+        add(
+            "hew.material.set_pbr",
+            M,
+            Kernel,
+            Std,
+            "Set a material's metallic and roughness factors (0 to 1); its maps and strengths are kept.",
         );
         add(
             "hew.material.position_texture",
@@ -790,7 +1300,7 @@ impl Registry {
             M,
             Kernel,
             Std,
-            "Re-capture a Scene's properties from the document's current state. Records no undo entry (§6.4).",
+            "Re-capture a Scene's properties from the document's current state, and/or set its own transition and delay times. Records no undo entry (§6.4).",
         );
         add(
             "hew.scenes.rename",
@@ -843,6 +1353,21 @@ impl Registry {
             Req,
             "Delete one attribute key or a whole namespace.",
         );
+        // hew.geo — the document's coordinate reference system.
+        add(
+            "hew.geo.get",
+            R,
+            Kernel,
+            Std,
+            "The document's geo-reference (coordinate reference system), or null when it has none.",
+        );
+        add(
+            "hew.geo.set",
+            M,
+            Kernel,
+            Std,
+            "Set the document's geo-reference to the given record, or clear it with null. One undo step.",
+        );
         // hew.history — the shared undo history (§7 semantics notes).
         add(
             "hew.history.undo",
@@ -894,6 +1419,147 @@ impl Registry {
             Host,
             Std,
             "Set the app's displayed length-unit format — a display preference, not document state.",
+        );
+        // Selection and view state (docs/agents/HEW_API.md §7): ReadOnly, so
+        // they ride a transaction and roll back with it, and record no undo
+        // entry.
+        add(
+            "hew.selection.get",
+            R,
+            Host,
+            Std,
+            "The app's selection: public ids in pick order, the primary first.",
+        );
+        add(
+            "hew.selection.set",
+            R,
+            Host,
+            Std,
+            "Change the app's selection: replace it, or add, subtract, or toggle the named entities.",
+        );
+        add(
+            "hew.selection.clear",
+            R,
+            Host,
+            Std,
+            "Clear the app's selection.",
+        );
+        add(
+            "hew.view.hide",
+            R,
+            Kernel,
+            Std,
+            "Hide objects, groups, and component instances (view state, never undoable).",
+        );
+        add(
+            "hew.view.show",
+            R,
+            Kernel,
+            Std,
+            "Show hidden objects, groups, and component instances again.",
+        );
+        add(
+            "hew.view.show_all",
+            R,
+            Kernel,
+            Std,
+            "Show every hidden object, group, and component instance.",
+        );
+        add(
+            "hew.view.hidden",
+            R,
+            Kernel,
+            Std,
+            "What is hidden: the hidden nodes, the hidden tags, and the live viewport's isolation.",
+        );
+        add(
+            "hew.view.isolate",
+            R,
+            Host,
+            Std,
+            "Show only the named nodes or definition members in the live viewport, and frame them.",
+        );
+        add(
+            "hew.view.clear_isolation",
+            R,
+            Host,
+            Std,
+            "End the live viewport's isolation.",
+        );
+        add(
+            "hew.view.zoom_to",
+            R,
+            Host,
+            Std,
+            "Frame the named entities in the live viewport, with a margin.",
+        );
+        // The user's editing context (docs/agents/HEW_API.md §6.3): host
+        // effects on the user's window, outside transactions. Solitary, so
+        // a multi-command transaction refuses them -32602; `mutates_document`
+        // is corrected below because opening or closing a session is a
+        // history step the live app resyncs after.
+        add(
+            "hew.view.enter",
+            S,
+            Host,
+            Std,
+            "Put the user's window inside a node for editing, the way a double click in the Outliner does.",
+        );
+        add(
+            "hew.view.exit",
+            S,
+            Host,
+            Std,
+            "Step the user's window out of its innermost editing context.",
+        );
+        add(
+            "hew.view.exit_all",
+            S,
+            Host,
+            Std,
+            "Step the user's window all the way out to the top level.",
+        );
+        // hew.plugin.* (docs/agents/PLUGINS.md "Developer mode"): the two
+        // commands the desktop app answers about plugins. Both are Preview
+        // commands (`preview-features.json`), First-party only, and the app
+        // answers them itself; neither installs, loads or changes a plugin.
+        add(
+            "hew.plugin.list",
+            S,
+            Host,
+            Std,
+            "The plugins installed in the app, with their state.",
+        );
+        add(
+            "hew.plugin.dev",
+            S,
+            Host,
+            Std,
+            "Ask the app to show a request to load a plugin from a folder.",
+        );
+        add(
+            "hew.plugin.activity",
+            S,
+            Host,
+            Std,
+            "What a plugin did in the app: when it started, stopped or was unloaded, and why.",
+        );
+        add(
+            "hew.plugin.reload",
+            S,
+            Host,
+            Std,
+            "Ask the app to reload a plugin loaded from a developer folder.",
+        );
+        // A plugin asking, from its own connection, for optional permissions
+        // its manifest declares: a Preview command the page's plugin host
+        // answers before a request reaches a dispatcher.
+        add(
+            "hew.permissions.request",
+            S,
+            Host,
+            Std,
+            "Ask the person to grant this plugin optional permissions its manifest declares.",
         );
         // Printing (docs/design/printing.md §9b): headless-renderable like
         // hew.view.snapshot (the same core-profile carve-out below).
@@ -959,6 +1625,129 @@ impl Registry {
             Std,
             "Edit a library item's name, keywords, or collection in place.",
         );
+        add(
+            "hew.library.status",
+            R,
+            Kernel,
+            Std,
+            "Every definition linked to a Library item, and where it stands against the item: in step, newer in the Library, changed here, changed on both sides, different, or the item missing.",
+        );
+        add(
+            "hew.library.update",
+            M,
+            Kernel,
+            Std,
+            "Replace linked definitions' contents with their Library items' (Update from Library): named ones, or every one the Library has newer, as one undo entry; placements keep their poses, refused parts are skipped and named.",
+        );
+
+        // ==== true-curves: blend ====
+        add(
+            "hew.solid.fillet",
+            M,
+            Kernel,
+            Std,
+            "Round, cove, bullnose or profile the edges of a solid, or round a 2D corner, as the Fillet tool does.",
+        );
+        add(
+            "hew.solid.chamfer",
+            M,
+            Kernel,
+            Std,
+            "Chamfer the edges of a solid, or chamfer a 2D corner, as the Fillet tool's Chamfer mode does.",
+        );
+        add(
+            "hew.solid.resize_blend",
+            M,
+            Kernel,
+            Std,
+            "Resize a fillet or chamfer (or switch it between round and chamfer) by naming any face of it.",
+        );
+        add(
+            "hew.solid.remove_blend",
+            M,
+            Kernel,
+            Std,
+            "Remove a fillet or chamfer, restoring the sharp edges, by naming any face of it.",
+        );
+        // ==== end true-curves: blend ====
+        // ==== true-curves: shapes ====
+        add(
+            "hew.solid.revolve",
+            M,
+            Kernel,
+            Std,
+            "Turn a profile about an axis in its plane into a solid, as the Revolve tool does.",
+        );
+        add(
+            "hew.solid.deform",
+            M,
+            Kernel,
+            Std,
+            "Twist, bend or taper a solid along its bounding box, or bend it along a path, as the Deform tool does.",
+        );
+        add(
+            "hew.solid.loft",
+            M,
+            Kernel,
+            Std,
+            "Skin a new solid through closed shapes in order, optionally to an apex and along rails, as the Loft tool does.",
+        );
+        add(
+            "hew.array.path",
+            M,
+            Kernel,
+            Std,
+            "Copy nodes along a sketch curve or face loop, with an optional scale ramp.",
+        );
+        // ==== end true-curves: shapes ====
+        // ==== true-curves: smooth ====
+        // ==== true-curves: offset ====
+        add(
+            "hew.solid.shell",
+            M,
+            Kernel,
+            Std,
+            "Hollow a solid to a wall of one thickness, leaving chosen faces open.",
+        );
+        add(
+            "hew.solid.project",
+            M,
+            Kernel,
+            Std,
+            "Drape a sketch's shape onto an object's faces, then engrave or emboss it.",
+        );
+        // ==== end true-curves: offset ====
+        add(
+            "hew.object.smooth",
+            M,
+            Kernel,
+            Std,
+            "Set an object's Smooth level (0 = Off, 1–3): its faces become the cage of a subdivision surface.",
+        );
+        add(
+            "hew.object.crease",
+            M,
+            Kernel,
+            Std,
+            "Set or clear the crease on edges, which keeps them sharp under Smooth.",
+        );
+        add(
+            "hew.solid.bake",
+            M,
+            Kernel,
+            Std,
+            "Replace a smoothed object's cage with its Smooth surface and clear the level.",
+        );
+        // ==== end true-curves: smooth ====
+        // ==== true-curves: imports ====
+        add(
+            "hew.solid.soften",
+            M,
+            Kernel,
+            Std,
+            "Soften the edges of an object that bend less than an angle, so faceted walls read as smooth.",
+        );
+        // ==== end true-curves: imports ====
 
         // The connection-lifecycle commands the dispatcher already
         // implements: the burn-down flag must tell the truth, and their
@@ -967,6 +1756,106 @@ impl Registry {
         for name in ["hew.meta.hello", "hew.meta.capabilities", "hew.doc.attach"] {
             let cmd = commands.get_mut(name).expect("declared above");
             cmd.implemented = true;
+            cmd.refusals = Vec::new();
+        }
+        for name in ["hew.event.subscribe", "hew.event.unsubscribe"] {
+            let cmd = commands.get_mut(name).expect("declared above");
+            cmd.implemented = true;
+            cmd.refusals = Vec::new();
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "events": {
+                        "type": "array",
+                        "items": { "type": "string", "enum": crate::events::EVENT_NAMES },
+                        "minItems": 1,
+                        "maxItems": 32
+                    }
+                },
+                "required": ["events"],
+                "additionalProperties": false
+            });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "subscribed": { "type": "array", "items": { "type": "string" } },
+                    "denied": { "type": "array", "items": { "type": "string" } }
+                },
+                "required": ["subscribed", "denied"],
+                "additionalProperties": false
+            });
+        }
+        {
+            let cmd = commands
+                .get_mut("hew.query.changes_since")
+                .expect("declared above");
+            cmd.implemented = true;
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": { "generation": { "type": "integer", "minimum": 0 } },
+                "required": ["generation"],
+                "additionalProperties": false
+            });
+            let ids = serde_json::json!({ "type": "array", "items": { "type": "string" } });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "generation": { "type": "integer" },
+                    "epoch": { "type": "integer" },
+                    "from": { "type": "integer" },
+                    "changes": {
+                        "type": "object",
+                        "properties": {
+                            "added": ids.clone(),
+                            "removed": ids.clone(),
+                            "modified": ids,
+                            "attrs": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "id": { "type": "string" },
+                                        "ns": { "type": "string" },
+                                        "scope": { "enum": ["entity", "face", "edge"] }
+                                    },
+                                    "required": ["id", "ns", "scope"],
+                                    "additionalProperties": false
+                                }
+                            },
+                            "document": { "type": "boolean" },
+                            "full": { "type": "boolean" },
+                            "linked": {
+                                "type": "array",
+                                "description": "linked-copy wraps made in the range: the source, the placement that now stands for it, and the shared definition",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "source": { "type": "string" },
+                                        "instance": { "type": "string" },
+                                        "definition": { "type": "string" }
+                                    },
+                                    "required": ["source", "instance", "definition"],
+                                    "additionalProperties": false
+                                }
+                            },
+                            "copied_from": {
+                                "type": "array",
+                                "description": "[new, source] pairs of public ids for entities copied in the range",
+                                "items": {
+                                    "type": "array",
+                                    "items": { "type": "string" },
+                                    "minItems": 2,
+                                    "maxItems": 2
+                                }
+                            }
+                        },
+                        "required": ["added", "removed", "modified", "attrs", "document", "full", "linked", "copied_from"],
+                        "additionalProperties": false
+                    }
+                },
+                "required": ["generation", "epoch", "from", "changes"],
+                "additionalProperties": false
+            });
             cmd.refusals = Vec::new();
         }
         {
@@ -999,7 +1888,8 @@ impl Registry {
                         },
                         "required": ["name", "version"]
                     },
-                    "profile": { "type": "string", "enum": ["core", "app"] },
+                    "profile": { "type": "string", "enum": ["core", "app", "plugin"] },
+                    "grant": { "type": "object" },
                     "encoding": { "type": "string" },
                     "documents": { "type": "array", "items": document_info_schema() }
                 },
@@ -1064,21 +1954,49 @@ impl Registry {
                 "type": "object",
                 "properties": { "document": document_info_schema() }
             });
-            cmd.refusals = vec!["unknown_document", "ambiguous_document"];
+            cmd.refusals = vec![
+                "unknown_document",
+                "ambiguous_document",
+                "document_not_granted",
+            ];
         }
         // The transaction container itself (dispatch-inline, §6): its own
         // refusals are the runtime $ref failure plus whatever its inner
         // commands refuse (reported per command in the canonical shape).
+        // `plugin_command_in_transaction` is not declared here: like an
+        // inner command's refusal it is attributed to a command, the plugin
+        // command's index, and declaring it would change first-party
+        // capabilities and the published reference (HEW_API.md §6.4).
         {
             let cmd = commands
                 .get_mut("hew.doc.transact")
                 .expect("declared above");
             cmd.implemented = true;
-            cmd.refusals = vec!["ref_resolution_failed"];
+            cmd.refusals = vec![
+                "ref_resolution_failed",
+                "generation_moved",
+                "dry_run_host_command",
+                "compute_busy",
+            ];
             cmd.params_schema = serde_json::json!({
                 "type": "object",
                 "properties": {
                     "label": { "type": "string" },
+                    "dry_run": {
+                        "type": "boolean",
+                        "description": "rehearse: run the envelope on a copy of the document and answer what a commit would, changing nothing (docs/agents/HEW_API.md §6.6); needs only read permissions; no coalesce"
+                    },
+                    "expect_generation": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": "refuse with generation_moved, before any command runs, unless the document's history generation is this value (docs/agents/HEW_API.md §6.5)"
+                    },
+                    "coalesce": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 64,
+                        "description": "merge into the top undo entry when it was committed under the same key by a connection with this connection's identity (docs/agents/HEW_API.md §6.5)"
+                    },
                     "commands": {
                         "type": "array",
                         "minItems": 1,
@@ -1099,7 +2017,8 @@ impl Registry {
                 "type": "object",
                 "properties": {
                     "results": { "type": "array" },
-                    "label": { "type": "string" }
+                    "label": { "type": "string" },
+                    "dry_run": { "type": "boolean", "description": "true on a rehearsal's answer" }
                 },
                 "required": ["results", "label"]
             });
@@ -1126,7 +2045,7 @@ impl Registry {
                 },
                 "required": ["documents"]
             });
-            cmd.refusals = Vec::new();
+            cmd.refusals = vec!["dry_run_host_command"];
         }
         {
             let cmd = commands.get_mut("hew.query.scene").expect("declared above");
@@ -1141,7 +2060,7 @@ impl Registry {
                 "properties": {
                     "document": { "type": "object" },
                     "tree": { "type": "array" },
-                    "sketches": { "type": "array" },
+                    "sketches": { "type": "array", "description": "each sketch's id, plane, regions, curves and edges; a detached sketch (a shape drawn with `detached`, in no plane's arrangement) also carries \"detached\": true" },
                     "guides": { "type": "array" },
                     "materials": { "type": "array" },
                     "tags": { "type": "array" },
@@ -1169,7 +2088,12 @@ impl Registry {
             });
             cmd.result_schema = serde_json::json!({
                 "type": "object",
-                "properties": { "kind": { "type": "string" }, "id": { "type": "string" } },
+                "properties": {
+                    "kind": { "type": "string" },
+                    "id": { "type": "string" },
+                    "locked": { "type": "boolean", "description": "objects, groups, instances, and components: locked itself (an instance by its component's lock, shared by every copy)" },
+                    "frozen": { "type": "boolean", "description": "objects, groups, and instances: whether a lock keeps it from changing — its own, a locked group above it, or a locked shape it is part of. Edits to a frozen entity refuse locked_node" }
+                },
                 "required": ["kind", "id"]
             });
             cmd.refusals = vec!["unknown_entity"];
@@ -1179,16 +2103,45 @@ impl Registry {
             cmd.implemented = true;
             cmd.params_schema = serde_json::json!({
                 "type": "object",
-                "properties": { "object": { "type": "string" } },
-                "required": ["object"],
+                "properties": {
+                    "object": { "type": "string", "description": "an object id; give this or path" },
+                    "path": { "type": "array", "items": { "type": "string" }, "minItems": 1, "description": "an occurrence path ending at an object ([...instances, object]); each face then also reports material_effective through it" }
+                },
                 "additionalProperties": false
             });
             cmd.result_schema = serde_json::json!({
                 "type": "object",
-                "properties": { "object": { "type": "string" }, "faces": { "type": "array" } },
+                "properties": {
+                    "object": { "type": "string" },
+                    "faces": { "type": "array", "description": "per face: object, plane, area, centroid, outer, holes, material, surface, texture_pins, attrs (the face's attribute dictionary, namespace -> key -> value, {} for none), and material_effective when asked through a path",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "blend": {
+                                    "type": "object",
+                                    "description": "present on a face of a fillet, chamfer or profile blend: `id` (per object), `kind` (\"fillet\", \"chamfer\" or \"profile\") and `role` (\"strip\", \"corner\" or \"runout\")",
+                                    "properties": {
+                                        "id": { "type": "integer" },
+                                        "kind": { "type": "string", "enum": ["fillet", "chamfer", "profile"] },
+                                        "role": { "type": "string", "enum": ["strip", "corner", "runout"] }
+                                    },
+                                    "required": ["id", "kind", "role"]
+                                },
+                                "surface": {
+                                    "type": ["object", "null"],
+                                    "description": "the analytic surface the face is a chord facet of, or null. `kind` is \"cylinder\" (axis_point, axis, radius), \"sphere\" (center, radius), \"torus\" (center, axis, major_radius, minor_radius) or \"cone\" (apex, axis, half_angle in radians); lengths in meters",
+                                    "properties": {
+                                        "kind": { "type": "string", "enum": ["cylinder", "sphere", "torus", "cone"] }
+                                    },
+                                    "required": ["kind"]
+                                }
+                            }
+                        }
+                    }
+                },
                 "required": ["object", "faces"]
             });
-            cmd.refusals = vec!["unknown_entity"];
+            cmd.refusals = vec!["unknown_entity", "unknown_occurrence"];
         }
         {
             let cmd = commands
@@ -1199,23 +2152,66 @@ impl Registry {
                 "type": "object",
                 "properties": {
                     "origin": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 },
-                    "dir": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 }
+                    "dir": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 },
+                    "all": { "type": "boolean", "description": "list every face crossing along the ray, nearest first (front and back faces both), instead of only the nearest; an empty list is a success" },
+                    "max_distance": { "type": "number", "exclusiveMinimum": 0, "description": "meters along the ray; farther crossings are dropped" },
+                    "exclude": {
+                        "type": "array",
+                        "maxItems": 64,
+                        "items": {
+                            "oneOf": [
+                                { "type": "string" },
+                                {
+                                    "type": "object",
+                                    "properties": { "path": { "type": "array", "items": { "type": "string" }, "minItems": 1 } },
+                                    "required": ["path"],
+                                    "additionalProperties": false
+                                }
+                            ]
+                        },
+                        "description": "world node ids or occurrence locators {path}; each entry and everything under it is ignored by the ray"
+                    },
+                    "include_hidden": { "type": "boolean", "description": "let the ray hit parts that are effectively hidden (user-hidden or on a hidden tag); each hit reports hidden. Default false: hidden parts fall through, as rendering does" }
                 },
                 "required": ["origin", "dir"],
                 "additionalProperties": false
             });
-            cmd.result_schema = serde_json::json!({
+            let hit = serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "object": { "type": "string", "description": "the world object's or, for an instance hit, the instance's public id" },
+                    "object": { "type": "string", "description": "the world object's or, for a hit inside an instance, the outermost instance's public id" },
                     "kind": { "type": "string", "enum": ["object", "instance"] },
                     "point": { "type": "array" },
                     "distance": { "type": "number" },
-                    "normal": { "type": "array" }
+                    "normal": { "type": "array" },
+                    "path": { "type": "array", "items": { "type": "string" }, "description": "the hit part's occurrence path without the part itself (the form hew.query.occurrences uses); [] for a world object" },
+                    "leaf": { "type": "string", "description": "the hit Object's public id" },
+                    "face": { "type": "object", "description": "a face locator {object, at} with at in the object's own frame: world coordinates for an object with no placement above it, the definition's coordinates for one reached through a placement; feed it to hew.query.resolve, hew.material.paint, or hew.solid.push_pull" },
+                    "hidden": { "type": "boolean", "description": "effective visibility including tags; false unless include_hidden" }
                 },
-                "required": ["object", "kind", "point", "distance", "normal"]
+                "required": ["object", "kind", "point", "distance", "normal", "path", "leaf", "face", "hidden"]
             });
-            cmd.refusals = vec!["locator_missed", "ambiguous_locator"];
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "oneOf": [
+                    hit.clone(),
+                    {
+                        "type": "object",
+                        "properties": {
+                            "hits": { "type": "array", "items": hit, "maxItems": 1000 },
+                            "raycast_hits_capped": { "type": "boolean", "description": "present and true when more than 1,000 crossings were found and the farthest were dropped" }
+                        },
+                        "required": ["hits"]
+                    }
+                ]
+            });
+            cmd.refusals = vec![
+                "locator_missed",
+                "ambiguous_locator",
+                "unknown_entity",
+                "unknown_occurrence",
+                "too_many_occurrences",
+            ];
         }
         {
             let cmd = commands
@@ -1224,20 +2220,61 @@ impl Registry {
             cmd.implemented = true;
             cmd.params_schema = serde_json::json!({
                 "type": "object",
-                "properties": { "from": {}, "to": {} },
-                "required": ["from", "to"],
-                "additionalProperties": false
+                "oneOf": [
+                    {
+                        "type": "object",
+                        "properties": { "from": {}, "to": {} },
+                        "required": ["from", "to"],
+                        "additionalProperties": false
+                    },
+                    {
+                        "type": "object",
+                        "properties": { "id": { "type": "string", "description": "a world object, group, or instance; a definition member needs path" }, "scope": scope_schema(), "exclude": exclude_schema(), "solids_only": solids_only_schema() },
+                        "required": ["id"],
+                        "additionalProperties": false
+                    },
+                    {
+                        "type": "object",
+                        "properties": { "path": { "type": "array", "items": { "type": "string" }, "minItems": 1, "description": "an occurrence path [...instances, node]" }, "scope": scope_schema(), "exclude": exclude_schema(), "solids_only": solids_only_schema() },
+                        "required": ["path"],
+                        "additionalProperties": false
+                    }
+                ]
             });
             cmd.result_schema = serde_json::json!({
                 "type": "object",
-                "properties": { "distance": { "type": "number" }, "delta": { "type": "array" } },
-                "required": ["distance", "delta"]
+                "oneOf": [
+                    {
+                        "type": "object",
+                        "properties": { "distance": { "type": "number" }, "delta": { "type": "array" } },
+                        "required": ["distance", "delta"]
+                    },
+                    {
+                        "type": "object",
+                        "description": "meters, square meters, cubic meters; groups and instances sum their parts. extents are the sizes of the world-axis-aligned bbox (part-frame extents are hew.query.part_frame's). volume is null when no part is watertight; open parts add nothing to it and are counted in open_leaves",
+                        "properties": {
+                            "volume": { "type": ["number", "null"] },
+                            "area": { "type": "number" },
+                            "bbox": {
+                                "type": "object",
+                                "properties": { "min": { "type": "array" }, "max": { "type": "array" } },
+                                "required": ["min", "max"]
+                            },
+                            "extents": { "type": "array" },
+                            "leaf_count": { "type": "integer" },
+                            "open_leaves": { "type": "integer" }
+                        },
+                        "required": ["volume", "area", "bbox", "extents", "leaf_count", "open_leaves"]
+                    }
+                ]
             });
             cmd.refusals = vec![
                 "unknown_entity",
+                "unknown_occurrence",
                 "locator_missed",
                 "ambiguous_locator",
                 "no_such_point",
+                "too_many_occurrences",
             ];
         }
         {
@@ -1252,6 +2289,10 @@ impl Registry {
                     "face": {},
                     "edge": {
                         "description": "HEW_API.md §5.2's edge locator: a solid edge by {object,at}, a sketch edge's own public id (\"edg_…\") as a bare string, or a sketch edge by {sketch,at} / {sketch,from,to}"
+                    },
+                    "occurrence": {
+                        "type": "object",
+                        "description": "an occurrence locator {path: [instance, …, leaf]}; answers {occurrence: OccurrenceJson without members, solid, family, or linked}"
                     }
                 },
                 "additionalProperties": false
@@ -1267,6 +2308,7 @@ impl Registry {
                 "no_such_point",
                 "face_token_unknown",
                 "face_token_stale",
+                "unknown_occurrence",
             ];
         }
         {
@@ -1281,10 +2323,187 @@ impl Registry {
             });
             cmd.result_schema = serde_json::json!({
                 "type": "object",
-                "properties": { "stack": { "type": "array" }, "direct_members": {} },
-                "required": ["stack"]
+                "properties": {
+                    "stack": { "type": "array" },
+                    "direct_members": {},
+                    "fallback": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "kind": { "type": "string", "enum": ["object", "instance"] },
+                                "id": { "type": "string" }
+                            },
+                            "required": ["kind", "id"],
+                            "additionalProperties": false
+                        },
+                        "description": "the app's in-context entries inside the innermost open frame, outermost first; empty headless"
+                    },
+                    "armed": { "type": "boolean", "description": "a tool gesture is armed in the user's window; false headless" }
+                },
+                "required": ["stack", "fallback", "armed"]
             });
             cmd.refusals = Vec::new();
+        }
+
+        {
+            let cmd = commands
+                .get_mut("hew.query.occurrences")
+                .expect("declared above");
+            cmd.implemented = true;
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "roots": {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": occurrence_locator_schema(),
+                        "description": "where to start: node ids (world nodes) or occurrence locators {path}; absent is the whole world. Rows come in root order, each root's subtree depth-first, a placement listed once even when two roots reach it"
+                    },
+                    "kinds": {
+                        "type": "array",
+                        "items": { "type": "string", "enum": ["object", "group", "instance"] },
+                        "description": "which rows to return (never what is traversed); defaults to all three"
+                    },
+                    "include_hidden": { "type": "boolean", "description": "defaults to false: hidden placements are skipped and hidden instances are not descended" }
+                },
+                "additionalProperties": false
+            });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "occurrences": { "type": "array", "items": occurrence_json_schema() }
+                },
+                "required": ["occurrences"],
+                "additionalProperties": false
+            });
+            cmd.refusals = vec![
+                "unknown_entity",
+                "unknown_occurrence",
+                "too_many_occurrences",
+            ];
+        }
+        {
+            let cmd = commands
+                .get_mut("hew.query.part_frame")
+                .expect("declared above");
+            cmd.implemented = true;
+            let mut params = occurrence_target_schema(false);
+            params["properties"]["scope"] = scope_schema();
+            params["properties"]["exclude"] = exclude_schema();
+            params["properties"]["solids_only"] = solids_only_schema();
+            cmd.params_schema = params;
+            let vec3 = serde_json::json!({ "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "origin": vec3,
+                    "x": vec3,
+                    "y": vec3,
+                    "z": vec3,
+                    "extents": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3, "description": "along x, y, z: [length, width, thickness] for a face frame; the definition's own axis order for an instance" },
+                    "source": { "type": "string", "enum": ["attribute", "definition", "face"] },
+                    "mirrored": { "type": "boolean" }
+                },
+                "required": ["origin", "x", "y", "z", "extents", "source", "mirrored"],
+                "additionalProperties": false
+            });
+            cmd.refusals = vec![
+                "unknown_entity",
+                "unknown_occurrence",
+                "no_part_frame",
+                "too_many_occurrences",
+            ];
+        }
+        {
+            let cmd = commands
+                .get_mut("hew.query.signature")
+                .expect("declared above");
+            cmd.implemented = true;
+            cmd.params_schema = occurrence_target_schema(false);
+            let vec3 = serde_json::json!({ "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 });
+            let hash = serde_json::json!({ "type": "string", "pattern": "^[0-9a-f]{64}$", "description": "SHA-256, lowercase hex" });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "shape": hash.clone(),
+                    "mirror": { "type": "string", "pattern": "^[0-9a-f]{64}$", "description": "the shape hash of the object's mirror image: a.shape == b.mirror means a and b are mirrored twins" },
+                    "symmetric": { "type": "boolean", "description": "shape == mirror: the part is its own mirror image" },
+                    "frame": {
+                        "type": "object",
+                        "description": "the part's face frame (l ≥ w ≥ t, right-handed), as hew.query.part_frame reports it without a hew.part / frame override; origin is the part's minimum corner in that frame and extents its size along x, y, z, so the frame's center is origin + extents / 2 along the axes",
+                        "properties": { "origin": vec3.clone(), "x": vec3.clone(), "y": vec3.clone(), "z": vec3.clone(), "extents": vec3 },
+                        "required": ["origin", "x", "y", "z", "extents"],
+                        "additionalProperties": false
+                    }
+                },
+                "required": ["shape", "mirror", "symmetric", "frame"],
+                "additionalProperties": false
+            });
+            cmd.refusals = vec![
+                "unknown_entity",
+                "unknown_occurrence",
+                "not_an_object",
+                "no_part_frame",
+                "too_many_occurrences",
+            ];
+        }
+        {
+            let cmd = commands.get_mut("hew.query.mesh").expect("declared above");
+            cmd.implemented = true;
+            cmd.params_schema = occurrence_target_schema(true);
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "vertex_count": { "type": "integer", "minimum": 0 },
+                    "triangle_count": { "type": "integer", "minimum": 0 },
+                    "positions_base64": { "type": "string", "description": "f32 little-endian xyz per vertex" },
+                    "normals_base64": { "type": "string", "description": "f32 little-endian xyz per vertex, unit length" },
+                    "indices_base64": { "type": "string", "description": "u32 little-endian, three per triangle, counter-clockwise from outside" },
+                    "face_indices_base64": { "type": "string", "description": "u32 little-endian per triangle: the face's index in hew.query.topology's faces, plus its part's face_index_base" },
+                    "parts": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": { "type": "string" },
+                                "face_index_base": { "type": "integer", "minimum": 0 },
+                                "index_base": { "type": "integer", "minimum": 0 },
+                                "index_count": { "type": "integer", "minimum": 0 }
+                            },
+                            "required": ["id", "face_index_base", "index_base", "index_count"],
+                            "additionalProperties": false
+                        }
+                    }
+                },
+                "required": ["vertex_count", "triangle_count", "positions_base64", "normals_base64", "indices_base64", "face_indices_base64", "parts"],
+                "additionalProperties": false
+            });
+            cmd.refusals = vec![
+                "unknown_entity",
+                "unknown_occurrence",
+                "mesh_too_large",
+                "too_many_occurrences",
+            ];
+        }
+        {
+            let cmd = commands
+                .get_mut("hew.query.topology")
+                .expect("declared above");
+            cmd.implemented = true;
+            cmd.params_schema = occurrence_target_schema(true);
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "object": { "type": "string" },
+                    "vertices": { "type": "array", "items": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 } },
+                    "faces": { "type": "array", "items": { "type": "object", "description": "{index, plane: {point, normal}, outer: [vertex indices], holes: [[...]], material, back_material, surface: {kind: \"cylinder\", axis_point, axis, radius} | null, area, attrs: the face's attribute dictionary, {} for none}" } },
+                    "edges": { "type": "array", "items": { "type": "object", "description": "{index, a, b (vertex indices), faces: [face indices, 1 or 2], curve: {kind: \"circle\", center, axis, radius} | null, attrs: the edge's attribute dictionary, {} for none}" } }
+                },
+                "required": ["object", "vertices", "faces", "edges"],
+                "additionalProperties": false
+            });
+            cmd.refusals = vec!["unknown_entity", "unknown_occurrence", "not_an_object"];
         }
 
         // hew.doc.* (host-implemented lifecycle) and hew.view.snapshot —
@@ -1308,7 +2527,11 @@ impl Registry {
                 "type": "object",
                 "properties": { "document": document_info_schema() }
             });
-            cmd.refusals = vec!["host_capability_missing", "window_not_ready"];
+            cmd.refusals = vec![
+                "host_capability_missing",
+                "window_not_ready",
+                "dry_run_host_command",
+            ];
         }
         {
             let cmd = commands.get_mut("hew.doc.open").expect("declared above");
@@ -1336,7 +2559,12 @@ impl Registry {
                     }
                 }
             });
-            cmd.refusals = vec!["host_capability_missing", "load_failed", "window_not_ready"];
+            cmd.refusals = vec![
+                "host_capability_missing",
+                "load_failed",
+                "window_not_ready",
+                "dry_run_host_command",
+            ];
         }
         {
             let cmd = commands.get_mut("hew.doc.close").expect("declared above");
@@ -1362,6 +2590,7 @@ impl Registry {
                 "ambiguous_document",
                 "unsaved_changes",
                 "last_document",
+                "dry_run_host_command",
             ];
         }
         {
@@ -1380,6 +2609,7 @@ impl Registry {
                 "host_capability_missing",
                 "unknown_document",
                 "ambiguous_document",
+                "dry_run_host_command",
             ];
         }
         {
@@ -1400,8 +2630,12 @@ impl Registry {
                     },
                     "format": {
                         "type": "string",
-                        "enum": ["hew", "skp", "skp2017"],
-                        "description": "\"skp\" is the 2026 container (what current SketchUp saves), \"skp2017\" the 2017 format (opens in SketchUp Make 2017 and later). Absent: a .skp path keeps the working file's own .skp container (the 2026 one for a document that did not come from a .skp), any other path writes .hew, and no path uses the working file's own format. A format that contradicts the path's extension is refused (format_mismatch)."
+                        "enum": DocFormat::wire_names(),
+                        "description": "\"skp\" is the SketchUp 2021-and-later container (what current SketchUp saves); \"skp3\" to \"skp8\" and \"skp2013\" to \"skp2020\" are those releases' own formats (SketchUp opens a file of its own release or later). Absent: a .skp path keeps the working file's own .skp container (the 2026 one for a document that did not come from a .skp), any other path writes .hew, and no path uses the working file's own format. A format that contradicts the path's extension is refused (format_mismatch)."
+                    },
+                    "compat": {
+                        "type": "boolean",
+                        "description": "For the 2021-and-later container (\"skp\") only: write its revision 17, which every SketchUp since 2021 opens, leaving out what only newer versions hold (layer folders, hatch patterns, PBR materials, environments, snaps, procedures, page extras, CRS), each kind itemised in `writer_notes`. Absent or false: the lowest revision that holds the content. A save back over a revision-17 file keeps revision 17 either way. Refused for any other format."
                     },
                     "units": {
                         "type": "string",
@@ -1415,9 +2649,9 @@ impl Registry {
                 "type": "object",
                 "properties": {
                     "bytes_base64": { "type": "string" },
-                    "format": { "type": "string", "enum": ["hew", "skp", "skp2017"], "description": "the format the document was saved in" },
+                    "format": { "type": "string", "enum": DocFormat::wire_names(), "description": "the format the document was saved in" },
                     "simplified": { "type": "array", "items": { "type": "string" }, "description": "present for a .skp: what the file could not hold exactly" },
-                    "writer_notes": { "type": "array", "items": { "type": "string" }, "description": "present for a .skp: what the 2017 writer dropped" }
+                    "writer_notes": { "type": "array", "items": { "type": "string" }, "description": "present for a .skp: what a stream release or revision-17 (`compat`) save dropped, one entry per kind" }
                 },
                 "additionalProperties": false
             });
@@ -1427,6 +2661,7 @@ impl Registry {
                 "host_capability_missing",
                 "path_required",
                 "save_failed",
+                "dry_run_host_command",
             ];
         }
         {
@@ -1450,19 +2685,25 @@ impl Registry {
                 "nothing_to_revert",
                 "unknown_document",
                 "ambiguous_document",
+                "dry_run_host_command",
             ];
         }
         {
             let cmd = commands.get_mut("hew.doc.export").expect("declared above");
             cmd.implemented = true;
-            cmd.summary = "Export the attached document — STL, 3MF, glTF/GLB, USDZ (solids only), or a SketchUp .skp (\"skp\", 2026 container; \"skp2017\") — bytes base64, or a path on hosts with filesystem access.";
+            let export_formats: Vec<String> = ["stl", "3mf", "glb", "gltf", "usdz"]
+                .into_iter()
+                .map(String::from)
+                .chain(DocFormat::skp_wire_names())
+                .collect();
+            cmd.summary = "Export the attached document — STL, 3MF, glTF/GLB, USDZ (solids only), or a SketchUp .skp (\"skp\", the 2021-and-later container; \"skp3\" to \"skp8\", \"skp2013\" to \"skp2020\") — bytes base64, or a path on hosts with filesystem access.";
             cmd.params_schema = serde_json::json!({
                 "type": "object",
                 "properties": {
                     "format": {
                         "type": "string",
-                        "enum": ["stl", "3mf", "glb", "gltf", "usdz", "skp", "skp2017"],
-                        "description": "\"gltf\" is an alias for \"glb\" — every host that implements one implements both. \"skp\" is the SketchUp 2026 container, \"skp2017\" the 2017 format; exporting never changes the document's own file"
+                        "enum": export_formats,
+                        "description": "\"gltf\" is an alias for \"glb\" — every host that implements one implements both. \"skp\" is the SketchUp 2021-and-later container, \"skp3\" to \"skp8\" and \"skp2013\" to \"skp2020\" those releases' formats; exporting never changes the document's own file"
                     },
                     "path": { "type": "string" },
                     "segments_per_turn": { "type": "integer", "minimum": 8, "maximum": 512 },
@@ -1470,6 +2711,16 @@ impl Registry {
                         "type": "string",
                         "enum": ["m", "cm", "mm", "arch", "frac_in", "dec_in"],
                         "description": "SketchUp formats only: the display units the file opens in (hew.view.units's formats). Absent: the host's display units (the app's preference live; meters headless)."
+                    },
+                    "selection": render_selection_schema(),
+                    "compat": {
+                        "type": "boolean",
+                        "description": "Format \"skp\" only: write revision 17 of the container, leaving out what only newer SketchUp versions hold (see hew.doc.save). Absent or false: the lowest revision that holds the content."
+                    },
+                    "cages": {
+                        "type": "boolean",
+                        "default": false,
+                        "description": "Mesh formats: export smoothed objects' cages instead of their Smooth surfaces."
                     }
                 },
                 "required": ["format"],
@@ -1488,6 +2739,9 @@ impl Registry {
                 "host_capability_missing",
                 "nothing_to_export",
                 "save_failed",
+                "unknown_entity",
+                "unknown_occurrence",
+                "too_many_occurrences",
             ];
         }
         {
@@ -1597,6 +2851,7 @@ impl Registry {
                                 },
                                 "branching_vertices": { "type": "integer" },
                                 "islands": { "type": "integer" },
+                                "degenerate_faces": { "type": "integer", "description": "zero-width or sub-tolerance faces on the solid; a solid is listed only when it has some" },
                                 "faces": { "type": "integer", "description": "how many faces the object has" }
                             },
                             "required": ["object", "verdict", "rims", "accepted", "placements"]
@@ -1660,6 +2915,129 @@ impl Registry {
                 "caps_overlap",
             ]);
 
+            let cmd = commands.get_mut("hew.solid.mend").expect("declared above");
+            cmd.implemented = true;
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "object": { "type": "string", "description": "obj_ id (a world object or a component member)" },
+                    "weld": { "type": ["number", "boolean", "null"], "description": "merge points closer than this many meters; omitted or true = the object's default distance, false or null = no merge" },
+                    "folds": { "type": "boolean", "description": "remove zero-width folds at open edges (default true)" },
+                    "split": { "type": "boolean", "description": "separate pinched parts; islands become objects of their own (default true)" },
+                    "fill": { "description": "\"holes\" (default) fills every gap that is a hole; an array of hew.doc.health rim indices fills those; false or null fills none", "oneOf": [ { "type": "string", "enum": ["holes"] }, { "type": "array", "items": { "type": "integer", "minimum": 0 } }, { "type": "boolean", "enum": [false] }, { "type": "null" } ] },
+                    "require_solid": { "type": "boolean", "description": "refuse still_open instead of committing a result that is not watertight (default false)" }
+                },
+                "required": ["object"],
+                "additionalProperties": false
+            });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "object_id": { "type": "string" },
+                    "welded_vertices": { "type": "integer", "description": "points merged away" },
+                    "weld_max_move": { "type": "number", "description": "farthest a merged point moved (m)" },
+                    "collapsed_faces": { "type": "integer", "description": "faces the merge collapsed, dropped" },
+                    "folds_removed": { "type": "integer", "description": "zero-width folds removed" },
+                    "seam_folds": { "type": "integer", "description": "zero-width doublings-back cut out of faces while stitching seams" },
+                    "soft_seams": { "type": "integer", "description": "edges the Mend left between faces on one plane, made soft so it adds no drawing" },
+                    "split_vertices": { "type": "integer" },
+                    "split_edges": { "type": "integer" },
+                    "pieces": { "type": "array", "items": { "type": "string" }, "description": "obj_ ids of the parts cut loose" },
+                    "filled_rims": { "type": "integer" },
+                    "stitched_rims": { "type": "integer", "description": "of filled_rims, seams closed by stitching" },
+                    "fill_triangles": { "type": "integer" },
+                    "skipped_rims": { "type": "array", "items": { "type": "object", "properties": { "object": { "type": "integer", "description": "0 the mended object, i+1 piece i" }, "rim": { "type": ["integer", "null"], "description": "that object's hew.doc.health rim index after the Mend; null when no open rim passes there" }, "reason": { "type": "string", "description": "why the rim was left open: a refusal code such as fill_crosses_faces" } } } },
+                    "reversed": { "type": "boolean" },
+                    "closed": { "type": "boolean", "description": "the object is now a solid" },
+                    "pieces_closed": { "type": "integer" }
+                },
+                "required": ["object_id", "welded_vertices", "pieces", "filled_rims", "skipped_rims", "closed"]
+            });
+            cmd.refusals = vec![
+                "unknown_component",
+                "unknown_entity",
+                "explode_session_scope",
+                "invalid",
+                "unknown_rim",
+                "nothing_to_mend",
+                "weld_distance_out_of_range",
+                "weld_folds_faces",
+                "weld_collapses_object",
+                "fill_crosses_faces",
+                "fill_rim_too_small",
+                "cap_would_be_coplanar",
+                "still_open",
+                "fold_removal_pinches",
+                "weld_flips_faces",
+                "mend_opens_object",
+                "weld_flattens_object",
+                "non_manifold_rim",
+                "rim_not_planar",
+            ];
+
+            let cmd = commands
+                .get_mut("hew.solid.remove_degenerate_faces")
+                .expect("declared above");
+            cmd.implemented = true;
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "object": { "type": "string", "description": "obj_ id (a world object or a component member)" }
+                },
+                "required": ["object"],
+                "additionalProperties": false
+            });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "removed": { "type": "integer", "description": "faces removed" }
+                },
+                "required": ["removed"]
+            });
+            cmd.refusals = repair_refusals(&["nothing_to_remove"]);
+
+            let cmd = commands
+                .get_mut("hew.solid.rejoin")
+                .expect("declared above");
+            cmd.implemented = true;
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "family": { "type": "integer", "minimum": 0, "description": "index into the families of hew.doc.health over the whole model (the family a hew.query.occurrences row reports), resolved when the call runs; an index read from a hew.doc.health call with an objects scope may name a different family" },
+                    "as": { "type": "string", "enum": ["one_solid"] }
+                },
+                "required": ["family", "as"],
+                "additionalProperties": false
+            });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "object": { "type": "string", "description": "obj_ id of the joined solid; it keeps the largest piece's name, tags, and attributes" },
+                    "tidied": tidied_schema()
+                },
+                "required": ["object"]
+            });
+            cmd.refusals = vec![
+                "unknown_family",
+                "not_cappable",
+                "rejoin_not_possible",
+                "rim_not_planar",
+                "rim_self_intersecting",
+                "cap_would_be_coplanar",
+                "non_manifold_rim",
+                "caps_overlap",
+                "invalid",
+                "degenerate_contact",
+                "operand_face_not_flat",
+                "arrangement_failed",
+                "result_too_thin",
+                "boolean_operand_not_solid",
+                "boolean_operand_empty",
+                "unknown_object",
+                "unknown_component",
+                "explode_session_scope",
+            ];
+
             let cmd = commands
                 .get_mut("hew.solid.delete_faces")
                 .expect("declared above");
@@ -1670,7 +3048,7 @@ impl Registry {
                     "object": { "type": "string" },
                     "faces": {
                         "type": "array",
-                        "items": { "type": "object", "description": "HEW_API.md §5.2 face locator: {object,at} | {object,ray} | {\"$face\":\"label#key\"}" },
+                        "items": { "type": "object", "description": "HEW_API.md §5.2 face locator: {object,at} | {object,ray} | {\"$face\":\"label#key\"}; with a path through a placement, at and ray are read in the leaf's frame (the definition's coordinates), not world coordinates" },
                         "minItems": 1,
                         "description": "faces of that object; omitted = every face, which deletes the object (a component member too, unless it is its component's last object: last_definition_member)"
                     }
@@ -1744,6 +3122,65 @@ impl Registry {
             cmd.refusals = repair_refusals(&["not_a_flat_sheet", "thickness_too_small"]);
         }
         {
+            let geo_schema = serde_json::json!({
+                "type": ["object", "null"],
+                "description": "the coordinate reference system, or null when the document has none; positions are in the system's own map unit",
+                "properties": {
+                    "name": { "type": "string" },
+                    "description": { "type": "string" },
+                    "easting": { "type": "number", "description": "model origin easting, in the map unit" },
+                    "northing": { "type": "number", "description": "model origin northing, in the map unit" },
+                    "height": { "type": "number", "description": "model origin height, in the map unit" },
+                    "x_axis": {
+                        "type": "array",
+                        "items": { "type": "number" },
+                        "minItems": 2,
+                        "maxItems": 2,
+                        "description": "the model's x axis in the map plane, a 2D vector (not an angle)"
+                    },
+                    "scale": { "type": "number", "description": "map scale factor" },
+                    "geodetic_datum": { "type": "string" },
+                    "vertical_datum": { "type": "string" },
+                    "map_projection": { "type": "string" },
+                    "map_zone": { "type": "string" },
+                    "map_unit": { "type": "string", "description": "the unit's name as the file holds it, e.g. METRE" },
+                    "map_unit_metres": { "type": "number", "exclusiveMinimum": 0, "description": "meters per map unit, when known" },
+                    "tgl_id": { "type": "string" },
+                    "calibration_file_name": { "type": "string" }
+                },
+                "additionalProperties": false
+            });
+            let cmd = commands.get_mut("hew.geo.get").expect("declared above");
+            cmd.implemented = true;
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": { "geo": geo_schema.clone() },
+                "required": ["geo"],
+                "additionalProperties": false
+            });
+            cmd.refusals = vec![];
+
+            let cmd = commands.get_mut("hew.geo.set").expect("declared above");
+            cmd.implemented = true;
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": { "geo": geo_schema },
+                "required": ["geo"],
+                "additionalProperties": false
+            });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            });
+            cmd.refusals = vec!["invalid_geo_reference"];
+        }
+        {
             let cmd = commands
                 .get_mut("hew.doc.purge_unused")
                 .expect("declared above");
@@ -1769,7 +3206,7 @@ impl Registry {
                 .get_mut("hew.view.snapshot")
                 .expect("declared above");
             cmd.implemented = true;
-            cmd.summary = "Render the attached document to PNG, headless-rendered via a software rasterizer (a live host may render through its viewport instead) — bytes base64 by default, or a path on hosts with filesystem access.";
+            cmd.summary = "Render the attached document to PNG, rendered by the host's software rasterizer, identically in the app and in hew-cli, optionally of a selection on a transparent background — bytes base64 by default, or a path on hosts with filesystem access.";
             cmd.params_schema = serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -1803,6 +3240,23 @@ impl Registry {
                         "type": "string",
                         "enum": ["iso", "front", "back", "left", "right", "top", "bottom"],
                         "description": "a named standard view fitted to the scene bounding box; mutually exclusive with camera and scene"
+                    },
+                    "selection": {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": occurrence_locator_schema(),
+                        "description": "render only these: node ids, occurrence locators {path}, or a definition's cmp_ id (its members at the identity pose, one picture however many times it is placed). With no camera or view the camera is a fitted isometric over the selection, never the document's saved camera; view fits that standard view to the selection. Mutually exclusive with scene."
+                    },
+                    "background": {
+                        "type": "string",
+                        "description": "\"transparent\", #rrggbb, or #rrggbbaa; the fill of pixels no surface touches (defaults to the rasterizer's light gray). The id, depth, and normals passes are unaffected."
+                    },
+                    "scope": scope_schema(),
+                    "orient": {
+                        "type": "string",
+                        "enum": ["world", "part"],
+                        "default": "world",
+                        "description": "part renders the one selection root in its part frame: the named view (iso when none) means the frame's axes, front looking along the frame's +y, top along -z, right along -x. Needs a selection of exactly one entity and no camera"
                     },
                     "scene": {
                         "type": "string",
@@ -1885,7 +3339,11 @@ impl Registry {
                 "host_capability_missing",
                 "nothing_to_render",
                 "save_failed",
+                "unknown_entity",
+                "unknown_occurrence",
                 "unknown_scene",
+                "too_many_occurrences",
+                "no_part_frame",
             ];
         }
         {
@@ -1893,7 +3351,7 @@ impl Registry {
                 .get_mut("hew.view.line_drawing")
                 .expect("declared above");
             cmd.implemented = true;
-            cmd.summary = "Hidden-line drawing of the visible document from a camera (crates/hlr): hard edges, curved-wall silhouettes, section-cut outlines, optionally dashed hidden lines — as a true-size SVG at a drawing scale (inline or written to path), or as raw segments in view-plane meters.";
+            cmd.summary = "Hidden-line drawing of the visible document, or of a selection, from a camera (crates/hlr), served identically in the app and in hew-cli: hard edges, curved-wall silhouettes, section-cut outlines, optionally dashed hidden lines — as a true-size SVG at a drawing scale (inline or written to path), or as raw segments in view-plane meters.";
             cmd.params_schema = serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -1904,7 +3362,9 @@ impl Registry {
                     "include_soft": { "type": "boolean", "description": "defaults to false; when true, non-silhouette curved-wall facet seams are returned (kind \"soft\")" },
                     "format": { "type": "string", "enum": ["svg", "segments"], "description": "defaults to svg" },
                     "scale": { "type": "number", "description": "svg only: paper/model drawing scale, defaults to 1 (full size); the SVG's width/height are millimeters at that scale" },
-                    "path": { "type": "string", "description": "svg only: write the file here instead of returning it inline (hosts with filesystem access)" }
+                    "path": { "type": "string", "description": "svg only: write the file here instead of returning it inline (hosts with filesystem access)" },
+                    "selection": render_selection_schema(),
+                    "scope": scope_schema()
                 },
                 "additionalProperties": false
             });
@@ -1927,6 +3387,9 @@ impl Registry {
                 "too_complex",
                 "save_failed",
                 "unknown_scene",
+                "unknown_entity",
+                "unknown_occurrence",
+                "too_many_occurrences",
             ];
         }
         {
@@ -1985,7 +3448,7 @@ impl Registry {
             cmd.params_schema = serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "category": { "type": "string", "enum": ["component", "material", "model"] },
+                    "category": { "type": "string", "enum": ["component", "material", "model", "profile"] },
                     "query": { "type": "string", "description": "case-insensitive substring match against name and keywords" },
                     "collection": { "type": "string", "description": "matches this collection path and its subtree" }
                 },
@@ -2066,8 +3529,9 @@ impl Registry {
                 "component_expansion_exceeded",
                 "singular",
                 "degenerate_axis",
-                "reflection",
                 "explode_session_scope",
+                "profile_not_insertable",
+                "face_not_flat",
             ];
         }
         {
@@ -2082,7 +3546,9 @@ impl Registry {
                     "selection": { "type": "array", "items": { "type": "string" }, "description": "node ids to save as a component item; omitted saves the whole document as a model item" },
                     "name": { "type": "string" },
                     "material": { "type": "string", "description": "one palette material to save alone as a material item, as the palette's Save to Library does — not with selection" },
-                    "category": { "type": "string", "enum": ["component", "material", "model"], "description": "defaults to component (a selection), material (a material), or model (the whole document)" },
+                    "profile_chain": { "type": "object", "description": "an open drawn chain saved as a profile item (category profile, implied): {sketch, edges: [<sketch edge id or locator>, …]}, edges in order from the profile's start on the bearing face to its end — not with selection or material", "properties": { "sketch": { "type": "string" }, "edges": { "type": "array", "items": {} } }, "required": ["sketch", "edges"] },
+                    "replace": { "type": "string", "description": "the id or path of an existing item to overwrite in place, keeping its id" },
+                    "category": { "type": "string", "enum": ["component", "material", "model", "profile"], "description": "defaults to component (a selection), material (a material), or model (the whole document)" },
                     "keywords": { "type": "array", "items": { "type": "string" } },
                     "collection": { "type": "string" },
                     "return_bytes": { "type": "boolean", "description": "also return the saved item's bytes base64" },
@@ -2109,7 +3575,12 @@ impl Registry {
                 "unknown_group",
                 "unknown_instance",
                 "explode_session_scope",
+                "face_not_flat",
                 "save_failed",
+                "unknown_library_item",
+                "invalid_profile",
+                "locator_missed",
+                "ambiguous_locator",
             ];
         }
         {
@@ -2155,6 +3626,97 @@ impl Registry {
                 "host_capability_missing",
                 "unknown_library_item",
                 "save_failed",
+            ];
+        }
+        {
+            let cmd = commands
+                .get_mut("hew.library.status")
+                .expect("declared above");
+            cmd.implemented = true;
+            cmd.summary = "Every definition linked to a Library item, and where it stands against the item: in step, newer in the Library, changed here, changed on both sides, different, or the item missing.";
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "links": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "definition": { "type": "string", "description": "the linked definition's id" },
+                                "name": { "type": "string", "description": "the definition's name, when it has one" },
+                                "item": { "type": "string", "description": "the Library item's id" },
+                                "state": { "type": "string", "enum": ["in_step", "library_newer", "edited_here", "both_changed", "different", "item_missing"], "description": "in_step: the definition holds what the item holds; library_newer: unchanged here, changed in the Library; edited_here: changed here, unchanged in the Library; both_changed: changed on both sides; different: the two differ and nothing says which side moved (a link made before 1.5, or another print scheme); item_missing: the Library no longer holds the item or the item no longer holds this definition (the part keeps working)" },
+                                "copies": { "type": "integer", "description": "how many live placements the definition has" },
+                                "locked": { "type": "boolean", "description": "a lock would make an update skip it: the definition or something its contents hold is locked (the same check hew.library.update makes)" },
+                                "mine": { "type": "string", "description": "the definition's content print now (p1:<hex>)" },
+                                "base": { "type": "string", "description": "the content print it had when last in step with the item; absent for a link made before 1.5" },
+                                "theirs": { "type": "string", "description": "the item's content print of the definition now; absent when the item is missing" }
+                            },
+                            "required": ["definition", "item", "state", "copies", "locked", "mine"]
+                        }
+                    }
+                },
+                "required": ["links"]
+            });
+            cmd.refusals = vec!["host_capability_missing"];
+        }
+        {
+            let cmd = commands
+                .get_mut("hew.library.update")
+                .expect("declared above");
+            cmd.implemented = true;
+            cmd.summary = "Replace linked definitions' contents with their Library items' (Update from Library): named ones, or every one the Library has newer, as one undo entry; placements keep their poses, refused parts are skipped and named.";
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "definitions": { "type": "array", "items": { "type": "string" }, "description": "linked definition ids to update, whatever their state — exactly one of definitions/all" },
+                    "all": { "type": "boolean", "description": "true updates every linked definition whose state is library_newer (a part also changed here is updated only when named) — exactly one of definitions/all" }
+                },
+                "additionalProperties": false
+            });
+            let ids = serde_json::json!({ "type": "array", "items": { "type": "string" } });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "updated": { "type": "array", "items": { "type": "string" }, "description": "requested definitions whose contents were replaced" },
+                    "also_updated": { "type": "array", "items": { "type": "string" }, "description": "nested definitions from the same item replaced in the same step" },
+                    "unchanged": ids,
+                    "kept": { "type": "array", "items": { "type": "string" }, "description": "definitions from the same item as a nested part of an updated one, left exactly as they were because they were changed here or a lock holds them; the updated part got a fresh copy of the item's definition instead" },
+                    "skipped": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "definition": { "type": "string" },
+                                "name": { "type": "string" },
+                                "refusal": { "type": "string", "description": "why it was left as it was, a refusal name: locked_node, explode_session_scope, component_cycle, component_depth_exceeded, component_expansion_exceeded, unknown_library_item, load_failed, unknown_component" },
+                                "explanation": { "type": "string" },
+                                "detail": { "type": "object", "description": "the refusal's detail; for locked_node, node is the locked node (inside the part, or the copy that locks it)" }
+                            },
+                            "required": ["definition", "refusal", "explanation", "detail"]
+                        }
+                    },
+                    "definitions_added": { "type": "integer", "description": "definitions the items carried that the model did not hold, copied in" },
+                    "materials_added": { "type": "integer" }
+                },
+                "required": ["updated", "also_updated", "unchanged", "kept", "skipped", "definitions_added", "materials_added"]
+            });
+            cmd.refusals = vec![
+                "host_capability_missing",
+                "unknown_entity",
+                "unknown_library_item",
+                "load_failed",
+                "locked_node",
+                "explode_session_scope",
+                "component_cycle",
+                "component_depth_exceeded",
+                "component_expansion_exceeded",
+                "unknown_component",
             ];
         }
         {
@@ -2258,6 +3820,457 @@ impl Registry {
             });
             cmd.refusals = vec!["host_capability_missing"];
         }
+        // Selection and view state (docs/agents/HEW_API.md §7, "Selection
+        // and view state"): `crates/api/src/commands/{selection,view}.rs`.
+        {
+            let ids = || serde_json::json!({ "type": "array", "items": { "type": "string" } });
+            let selection_result = || {
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "ids": { "type": "array", "items": { "type": "string" }, "description": "public ids in pick order; index 0 is the primary" },
+                        "primary": { "type": ["string", "null"] },
+                        "generation": { "type": "integer", "minimum": 0 },
+                        "epoch": { "type": "integer", "minimum": 0 }
+                    },
+                    "required": ["ids", "primary", "generation", "epoch"],
+                    "additionalProperties": false
+                })
+            };
+            let empty = || {
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {},
+                    "additionalProperties": false
+                })
+            };
+            let isolation_entry = || {
+                serde_json::json!({
+                    "oneOf": [
+                        { "type": "string", "description": "an object, group, or instance id" },
+                        {
+                            "type": "object",
+                            "properties": {
+                                "object": { "type": "string", "description": "a definition member object" },
+                                "instance": { "type": "string", "description": "an instance that places it" }
+                            },
+                            "required": ["object", "instance"],
+                            "additionalProperties": false
+                        }
+                    ]
+                })
+            };
+            let hidden_result = || {
+                serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "hidden": { "type": "array", "items": { "type": "string" }, "description": "every hidden object, group, and instance" }
+                    },
+                    "required": ["hidden"],
+                    "additionalProperties": false
+                })
+            };
+            for (name, summary, params, result, refusals) in [
+                (
+                    "hew.selection.get",
+                    "The app's selection: public ids in pick order, the primary first. A drafting selection reads as empty.",
+                    empty(),
+                    selection_result(),
+                    vec!["host_capability_missing"],
+                ),
+                (
+                    "hew.selection.set",
+                    "Change the app's selection: replace it (the default), or add, subtract, or toggle the named entities. Objects, groups, instances, sketches, guides, and annotations mix in any count. Hidden entities refuse.",
+                    serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "ids": { "type": "array", "items": { "type": "string" }, "maxItems": 10000, "description": "objects, groups, instances, sketches, guides, and annotations, in pick order" },
+                            "mode": { "type": "string", "enum": ["replace", "add", "subtract", "toggle"], "description": "defaults to replace" }
+                        },
+                        "required": ["ids"],
+                        "additionalProperties": false
+                    }),
+                    selection_result(),
+                    vec![
+                        "unknown_entity",
+                        "selection_target_not_visible",
+                        "host_capability_missing",
+                    ],
+                ),
+                (
+                    "hew.selection.clear",
+                    "Clear the app's selection.",
+                    empty(),
+                    selection_result(),
+                    vec!["host_capability_missing"],
+                ),
+                (
+                    "hew.view.hide",
+                    "Hide objects, groups, and component instances. View state: saved with the document, never undoable. Tags hide through hew.tag.set_visible.",
+                    serde_json::json!({
+                        "type": "object",
+                        "properties": { "ids": ids() },
+                        "required": ["ids"],
+                        "additionalProperties": false
+                    }),
+                    hidden_result(),
+                    vec!["unknown_entity", "not_a_node"],
+                ),
+                (
+                    "hew.view.show",
+                    "Show hidden objects, groups, and component instances again.",
+                    serde_json::json!({
+                        "type": "object",
+                        "properties": { "ids": ids() },
+                        "required": ["ids"],
+                        "additionalProperties": false
+                    }),
+                    hidden_result(),
+                    vec!["unknown_entity", "not_a_node"],
+                ),
+                (
+                    "hew.view.show_all",
+                    "Show every hidden object, group, and component instance. Hidden tags stay hidden.",
+                    empty(),
+                    serde_json::json!({
+                        "type": "object",
+                        "properties": { "hidden": { "type": "array", "items": { "type": "string" }, "maxItems": 0 } },
+                        "required": ["hidden"],
+                        "additionalProperties": false
+                    }),
+                    vec![],
+                ),
+                (
+                    "hew.view.hidden",
+                    "What is hidden: the hidden objects, groups, and instances, the hidden tags, and the live viewport's isolation (null when nothing is isolated or the host has no viewport).",
+                    empty(),
+                    serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "hidden": { "type": "array", "items": { "type": "string" } },
+                            "tags_hidden": { "type": "array", "items": { "type": "string" } },
+                            "isolated": {
+                                "oneOf": [
+                                    { "type": "array", "items": isolation_entry() },
+                                    { "type": "null" }
+                                ]
+                            }
+                        },
+                        "required": ["hidden", "tags_hidden", "isolated"],
+                        "additionalProperties": false
+                    }),
+                    vec![],
+                ),
+                (
+                    "hew.view.isolate",
+                    "Show only the named objects, groups, instances, or definition members (each with an instance that places it) in the live viewport, and frame them. View-only: nothing in the document changes.",
+                    serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "ids": { "type": "array", "items": isolation_entry(), "minItems": 1, "maxItems": 10000 }
+                        },
+                        "required": ["ids"],
+                        "additionalProperties": false
+                    }),
+                    serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "isolated": { "type": "array", "items": isolation_entry() }
+                        },
+                        "required": ["isolated"],
+                        "additionalProperties": false
+                    }),
+                    vec!["unknown_entity", "host_capability_missing"],
+                ),
+                (
+                    "hew.view.clear_isolation",
+                    "End the live viewport's isolation; a no-op when nothing is isolated.",
+                    empty(),
+                    empty(),
+                    vec!["host_capability_missing"],
+                ),
+                (
+                    "hew.view.zoom_to",
+                    "Frame the named entities in the live viewport. padding widens the box on every side by that fraction of its largest extent (default 0.1). Answers the box before padding.",
+                    serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "ids": ids(),
+                            "padding": { "type": "number", "minimum": 0, "maximum": 2, "description": "defaults to 0.1" }
+                        },
+                        "required": ["ids"],
+                        "additionalProperties": false
+                    }),
+                    serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "min": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 },
+                            "max": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 }
+                        },
+                        "required": ["min", "max"],
+                        "additionalProperties": false
+                    }),
+                    vec![
+                        "unknown_entity",
+                        "nothing_to_frame",
+                        "host_capability_missing",
+                    ],
+                ),
+                (
+                    "hew.view.enter",
+                    "Converge the user's window onto a node, opening group and component sessions level by level and falling back to the in-context entry for an instance a session cannot take (unevenly scaled, or placed in a group elsewhere; a mirrored instance opens a session like any other), then select it. Give exactly one of id (an object, group, or instance in the world) or path (instances outermost first, ending at the leaf). The call answers after the window has acted on it: an empty result when it entered (the outcome arrives as context_changed, and hew.query.context reports the stack and fallback afterward), or a refusal naming why when the window declined, with the window put back where it was. Acts on the user's window, so it is solitary: it runs alone or as the only command of a transaction. Distinct from hew.context.enter, which scopes a plugin's own edits.",
+                    serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "id": { "type": "string", "description": "a world object, group, or instance" },
+                            "path": { "type": "array", "items": { "type": "string" }, "minItems": 1, "description": "an occurrence path: instances outermost first, the last element the node to enter" }
+                        },
+                        "additionalProperties": false
+                    }),
+                    serde_json::json!({
+                        "type": "object",
+                        "properties": {},
+                        "additionalProperties": false
+                    }),
+                    vec![
+                        "unknown_entity",
+                        "unknown_occurrence",
+                        "gesture_in_progress",
+                        "nested_component_in_context",
+                        "locked_node",
+                        "enter_refused",
+                        "host_capability_missing",
+                    ],
+                ),
+                (
+                    "hew.view.exit",
+                    "Pop the user's innermost editing context, a fallback entry or a session frame. The outcome arrives as context_changed.",
+                    empty(),
+                    empty(),
+                    vec![
+                        "gesture_in_progress",
+                        "nothing_to_exit",
+                        "host_capability_missing",
+                    ],
+                ),
+                (
+                    "hew.view.exit_all",
+                    "Close every editing context in the user's window, back to the top level. The outcome arrives as context_changed.",
+                    empty(),
+                    empty(),
+                    vec!["gesture_in_progress", "host_capability_missing"],
+                ),
+            ] {
+                let cmd = commands.get_mut(name).expect("declared above");
+                cmd.implemented = true;
+                cmd.summary = summary;
+                cmd.params_schema = params;
+                cmd.result_schema = result;
+                cmd.refusals = refusals;
+            }
+        }
+
+        // hew.plugin.*: what the desktop app answers (`served: Host`). The
+        // refusal names are the ones its router gives; a bad `path` is the
+        // ordinary -32602.
+        {
+            let cmd = commands.get_mut("hew.plugin.list").expect("declared above");
+            cmd.implemented = true;
+            cmd.summary = "List the plugins installed in the app: id, display name, version, where each came from (file, dir, index, git or url), whether it is turned on, and its state. A folder plugin is needs_developer_mode while developer mode is off, needs_review while the person has not yet read a change to what it asks for, checking until its folder has been compared since it started being watched (nothing of it is read before), plugins_off for the same while no window runs a plugin host (nothing will compare it), and unreadable when its record cannot be read. The list says whether a request to load a folder (hew.plugin.dev) is still waiting for the person, including while they are reading what the plugin asks for, and carries no folder path and does not say whether a plugin is running. Reads only.";
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "plugins": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": { "type": "string" },
+                                "name": { "type": "string" },
+                                "version": { "type": ["string", "null"], "description": "null when the record is unreadable" },
+                                "source": { "type": ["string", "null"], "enum": ["file", "dir", "index", "git", "url", null], "description": "null when the record is unreadable" },
+                                "enabled": { "type": "boolean" },
+                                "state": { "type": "string", "enum": ["installed", "needs_developer_mode", "needs_review", "checking", "plugins_off", "unreadable"] }
+                            },
+                            "required": ["id", "name", "version", "source", "enabled", "state"]
+                        }
+                    },
+                    "developer_mode": { "type": "boolean" },
+                    "request_waiting": { "type": "boolean", "description": "true while a request to load a plugin is waiting for the person, including while they are reading what the plugin asks for; no path, no id" }
+                },
+                "required": ["plugins", "developer_mode", "request_waiting"]
+            });
+            cmd.refusals = vec![
+                "host_capability_missing",
+                "plugins_disabled",
+                "no_plugin_dir",
+                "dry_run_host_command",
+            ];
+        }
+        {
+            let cmd = commands.get_mut("hew.plugin.dev").expect("declared above");
+            cmd.implemented = true;
+            cmd.summary = "Ask the app to show the person a request to load a plugin from a folder. Nothing is loaded, staged or read: the person picks the folder in the app's own folder picker, which opens at `path`, and reads what the plugin asks for before anything runs. The answer only says the request is waiting. Refused while developer mode is off, while another request waits, and for a while after the person dismisses one.";
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "minLength": 1, "description": "the plugin's folder; shown to the person and used as a starting point for the picker, never read" }
+                },
+                "required": ["path"],
+                "additionalProperties": false
+            });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "status": { "type": "string", "enum": ["awaiting_user"] }
+                },
+                "required": ["status"]
+            });
+            cmd.refusals = vec![
+                "host_capability_missing",
+                "plugins_disabled",
+                "no_plugin_dir",
+                "plugins_off",
+                "developer_mode_off",
+                "confirmation_open",
+                "request_waiting",
+                "request_dismissed",
+                "dry_run_host_command",
+                "io",
+            ];
+        }
+
+        {
+            let cmd = commands
+                .get_mut("hew.plugin.activity")
+                .expect("declared above");
+            cmd.implemented = true;
+            cmd.summary = "What a plugin did in the app, newest first, at most 500 entries: each state a window reported for it (enabled, activating, activated, crashed, blocked, idle, unloaded), when, in which window, and why. Reads only; the log is kept by the app and goes with the plugin when it is uninstalled.";
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "minLength": 1, "maxLength": 128, "description": "an installed plugin's id" }
+                },
+                "required": ["id"],
+                "additionalProperties": false
+            });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "entries": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "at": { "type": "integer", "description": "milliseconds since the Unix epoch" },
+                                "window": { "type": "string", "description": "the label of the window that reported it" },
+                                "state": { "type": "string", "enum": ["enabled", "activating", "activated", "crashed", "blocked", "idle", "unloaded"] },
+                                "reason": { "type": ["string", "null"], "description": "cleaned, at most 160 characters" }
+                            },
+                            "required": ["at", "window", "state", "reason"]
+                        }
+                    }
+                },
+                "required": ["entries"]
+            });
+            cmd.refusals = vec![
+                "host_capability_missing",
+                "plugins_disabled",
+                "no_plugin_dir",
+                "invalid_params",
+                "not_installed",
+                "installed_unreadable",
+                "storage_unreadable",
+                "dry_run_host_command",
+                "io",
+            ];
+        }
+        {
+            let cmd = commands
+                .get_mut("hew.plugin.reload")
+                .expect("declared above");
+            cmd.implemented = true;
+            cmd.summary = "Ask every window running plugins to reload a plugin loaded from a developer folder, as when its files change: its running copy stops and starts again from the folder. Only while developer mode is on, never for a plugin installed from a package, one waiting for the person to review a change, or one that stopped (that one starts again only when the person turns it off and on). At most once every two seconds per plugin. The answer only says the reload was asked for.";
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "minLength": 1, "maxLength": 128, "description": "an installed plugin's id" }
+                },
+                "required": ["id"],
+                "additionalProperties": false
+            });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "status": { "type": "string", "enum": ["reloading"] }
+                },
+                "required": ["status"]
+            });
+            cmd.refusals = vec![
+                "host_capability_missing",
+                "plugins_disabled",
+                "no_plugin_dir",
+                "invalid_params",
+                "plugins_off",
+                "developer_mode_off",
+                "not_installed",
+                "installed_unreadable",
+                "not_a_developer_folder",
+                "plugin_blocked",
+                "plugin_stopped",
+                "plugin_turned_off",
+                "reload_too_soon",
+                "dry_run_host_command",
+                "storage_unreadable",
+                "io",
+            ];
+        }
+        {
+            let cmd = commands
+                .get_mut("hew.permissions.request")
+                .expect("declared above");
+            cmd.implemented = true;
+            cmd.summary = "Ask the person using Hew to grant this plugin some of the optional permissions its manifest declares (optionalPermissions). Only a plugin can ask, from its own connection, and only right after the person acted in that plugin's own window or panel; Hew shows what the plugin would be able to do and the person decides. Names the plugin already holds are granted without asking. The grant applies at once to the running plugin, which receives a grant message and keeps running. After a no, the same plugin is refused for a minute. Not available in Shop Mode. Any other caller is refused host_capability_missing.";
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "permissions": {
+                        "type": "array",
+                        "items": { "type": "string", "minLength": 1, "maxLength": 256 },
+                        "minItems": 1,
+                        "maxItems": 64,
+                        "description": "names from the manifest's optionalPermissions"
+                    },
+                    "reason": { "type": "string", "maxLength": 200, "description": "shown to the person; plain text" }
+                },
+                "required": ["permissions"],
+                "additionalProperties": false
+            });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "granted": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "the names asked for that the plugin now holds"
+                    }
+                },
+                "required": ["granted"]
+            });
+            cmd.refusals = vec![
+                "host_capability_missing",
+                "permission_not_requestable",
+                "no_user_activation",
+                "request_pending",
+                "request_declined",
+                "not_available_in_shop",
+            ];
+        }
 
         // hew.entity.*, hew.context.*, hew.group.*, hew.component.*,
         // hew.material.*, hew.tag.*, hew.guide.*, hew.attr.*,
@@ -2333,19 +4346,66 @@ impl Registry {
                 "explode_session_scope",
             ];
         }
+        // `copy.linked` and the copy result's `linked` (docs/agents/PLUGINS.md
+        // "Linked copies").
+        let copy_linked_schema = serde_json::json!({
+            "type": "boolean",
+            "default": true,
+            "description": "true (the default on the bus, whatever the app's preference): each object or group copied becomes a set of linked copies, its copies placements of one shared solid; false: independent geometry"
+        });
+        let copy_wraps_schema = serde_json::json!({
+            "type": "array",
+            "description": "present whenever copy was given: each object or group the copy wrapped as a linked set (it keeps its id, now inside definition, placed by instance in its old spot); empty for linked: false or when every root already was a placement",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "source": { "type": "string" },
+                    "instance": { "type": "string" },
+                    "definition": { "type": "string" }
+                },
+                "required": ["source", "instance", "definition"],
+                "additionalProperties": false
+            }
+        });
+        // `ids` of move/rotate/scale: world ids, or occurrence paths to
+        // members of ONE definition by ONE path (HEW_API.md §7).
+        let transform_ids_schema = serde_json::json!({
+            "type": "array",
+            "minItems": 1,
+            "items": occurrence_locator_schema(),
+            "description": "world node and sketch ids, or occurrence locators {path: [instance, …, member]} that all reach members of one definition by the same path (the gesture is world space; every placement of the definition follows). One call is one scope: a mix refuses -32602"
+        });
         {
             let cmd = commands.get_mut("hew.entity.move").expect("declared above");
             cmd.implemented = true;
             cmd.params_schema = serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "ids": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+                    "ids": transform_ids_schema.clone(),
                     "translation": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 },
                     "from": {},
                     "to": {},
                     "copy": {
                         "type": "object",
-                        "properties": { "count": { "type": "integer", "minimum": 1, "maximum": 1000 } },
+                        "properties": {
+                            "count": { "type": "integer", "minimum": 1, "maximum": 1000, "description": "copies at step, 2·step, …, count·step along the translation" },
+                            "grid": {
+                                "type": "array",
+                                "minItems": 1,
+                                "maxItems": 3,
+                                "description": "a grid copy: one entry per axis; count is the number of slots along it, the original's included, so [{count: 4, step}] makes three copies. Takes the place of translation/from/to and of copy.count; the product of counts is at most 1000",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "count": { "type": "integer", "minimum": 1 },
+                                        "step": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 }
+                                    },
+                                    "required": ["count", "step"],
+                                    "additionalProperties": false
+                                }
+                            },
+                            "linked": copy_linked_schema.clone()
+                        },
                         "additionalProperties": false
                     }
                 },
@@ -2354,7 +4414,10 @@ impl Registry {
             });
             cmd.result_schema = serde_json::json!({
                 "type": "object",
-                "properties": { "ids": { "type": "array", "items": { "type": "string" } } }
+                "properties": {
+                    "ids": { "type": "array", "items": { "type": "string" }, "description": "the copies, placement-major, each placement's block in ids order; a linked copy's are placements (ins_)" },
+                    "linked": copy_wraps_schema.clone()
+                }
             });
             cmd.refusals = vec![
                 "unknown_entity",
@@ -2367,6 +4430,11 @@ impl Registry {
                 "unknown_group",
                 "unknown_instance",
                 "unknown_sketch",
+                "unknown_occurrence",
+                "unknown_component",
+                "explode_session_scope",
+                "component_expansion_exceeded",
+                "face_not_flat",
             ];
         }
         {
@@ -2377,13 +4445,16 @@ impl Registry {
             cmd.params_schema = serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "ids": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+                    "ids": transform_ids_schema.clone(),
                     "pivot": {},
                     "axis": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 },
-                    "angle": { "type": "number" },
+                    "angle": { "type": "number", "description": "radians, right-handed about axis" },
                     "copy": {
                         "type": "object",
-                        "properties": { "count": { "type": "integer", "minimum": 1, "maximum": 1000 } },
+                        "properties": {
+                            "count": { "type": "integer", "minimum": 1, "maximum": 1000 },
+                            "linked": copy_linked_schema.clone()
+                        },
                         "additionalProperties": false
                     }
                 },
@@ -2392,7 +4463,10 @@ impl Registry {
             });
             cmd.result_schema = serde_json::json!({
                 "type": "object",
-                "properties": { "ids": { "type": "array", "items": { "type": "string" } } }
+                "properties": {
+                    "ids": { "type": "array", "items": { "type": "string" } },
+                    "linked": copy_wraps_schema.clone()
+                }
             });
             cmd.refusals = vec![
                 "unknown_entity",
@@ -2405,6 +4479,75 @@ impl Registry {
                 "unknown_group",
                 "unknown_instance",
                 "unknown_sketch",
+                "unknown_occurrence",
+                "unknown_component",
+                "explode_session_scope",
+                "component_expansion_exceeded",
+                "face_not_flat",
+            ];
+        }
+        {
+            let cmd = commands.get_mut("hew.entity.flip").expect("declared above");
+            cmd.implemented = true;
+            let xyz = serde_json::json!({ "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 });
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "ids": transform_ids_schema.clone(),
+                    "axis": { "type": "string", "enum": ["x", "y", "z"], "description": "the mirror plane's world normal (SketchUp's Flip Along); exactly one of axis and plane" },
+                    "plane": {
+                        "type": "object",
+                        "properties": {
+                            "point": { "description": "a point on the plane: [x, y, z] or a derived-point locator (§5.3)" },
+                            "normal": xyz.clone()
+                        },
+                        "required": ["point", "normal"],
+                        "additionalProperties": false,
+                        "description": "the mirror plane in world coordinates; takes no about"
+                    },
+                    "about": {
+                        "oneOf": [
+                            { "type": "string", "enum": ["center", "origin"] },
+                            xyz
+                        ],
+                        "description": "where an axis plane passes: center (the default, the selection's world bounding-box center), origin, or a point"
+                    },
+                    "copy": {
+                        "type": "object",
+                        "properties": { "linked": copy_linked_schema.clone() },
+                        "additionalProperties": false,
+                        "description": "one mirrored copy instead of flipping in place; a linked copy is another placement at a mirrored pose"
+                    }
+                },
+                "required": ["ids"],
+                "additionalProperties": false
+            });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "ids": { "type": "array", "items": { "type": "string" }, "description": "with copy: the mirrored copies (placements for a linked copy)" },
+                    "linked": copy_wraps_schema.clone()
+                },
+                "description": "{} for a flip in place"
+            });
+            cmd.refusals = vec![
+                "unknown_entity",
+                "sketch_copy_unsupported",
+                "empty_selection",
+                "duplicate_member",
+                "unknown_object",
+                "unknown_group",
+                "unknown_instance",
+                "unknown_sketch",
+                "unknown_occurrence",
+                "unknown_component",
+                "explode_session_scope",
+                "component_expansion_exceeded",
+                "too_many_occurrences",
+                "singular",
+                "degenerate_axis",
+                "degenerate_texture_frame",
+                "face_not_flat",
             ];
         }
         {
@@ -2415,7 +4558,7 @@ impl Registry {
             cmd.params_schema = serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "ids": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+                    "ids": transform_ids_schema.clone(),
                     "anchor": {},
                     "factors": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 }
                 },
@@ -2435,6 +4578,10 @@ impl Registry {
                 "unknown_group",
                 "unknown_instance",
                 "unknown_sketch",
+                "unknown_occurrence",
+                "unknown_component",
+                "explode_session_scope",
+                "face_not_flat",
             ];
         }
         {
@@ -2461,6 +4608,7 @@ impl Registry {
                 "explode_session_grouped_instance",
                 "unknown_group",
                 "unknown_instance",
+                "face_not_flat",
             ];
         }
         {
@@ -2478,7 +4626,7 @@ impl Registry {
                 "properties": {},
                 "additionalProperties": false
             });
-            cmd.refusals = vec!["explode_session_not_open"];
+            cmd.refusals = vec!["explode_session_not_open", "face_not_flat"];
         }
         {
             let cmd = commands
@@ -2598,7 +4746,74 @@ impl Registry {
                 "properties": { "instance": { "type": "string" } },
                 "required": ["instance"]
             });
-            cmd.refusals = vec!["unknown_entity", "unknown_component", "singular"];
+            cmd.refusals = vec![
+                "unknown_entity",
+                "unknown_component",
+                "singular",
+                "face_not_flat",
+            ];
+        }
+        {
+            let cmd = commands
+                .get_mut("hew.component.import_definition")
+                .expect("declared above");
+            cmd.implemented = true;
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "bytes_base64": {
+                        "type": "string",
+                        "description": "the file's bytes; at most 64 MiB together with all images"
+                    },
+                    "format": {
+                        "type": "string",
+                        "enum": ["hew", "skp", "glb", "gltf", "stl", "dae"],
+                        "description": "the file's format; a picture format is refused"
+                    },
+                    "name": {
+                        "type": "string",
+                        "description": "the definition's name when this import creates it (a later import of the same bytes keeps the first name); at most 128 bytes, no control characters; default \"Imported\""
+                    },
+                    "units": {
+                        "type": "string", "enum": ["m", "mm", "cm", "in"],
+                        "description": "meters-per-source-unit hint; STL requires it, other formats ignore it"
+                    },
+                    "images": {
+                        "type": "object",
+                        "description": "COLLADA texture images by the uri the file uses: {bytes_base64, format: png|jpeg}",
+                        "additionalProperties": { "type": "object" }
+                    }
+                },
+                "required": ["bytes_base64", "format"],
+                "additionalProperties": false
+            });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "definition": { "type": "string", "description": "the definition's cmp_ id, ready for hew.component.place" },
+                    "reused": { "type": "boolean", "description": "true when an earlier import of the same bytes already made it; nothing changed" },
+                    "report": {
+                        "type": "object",
+                        "properties": {
+                            "objects": { "type": "integer", "description": "the definition's direct member objects" },
+                            "members": { "type": "integer", "description": "all direct members: objects, groups, and nested instances" }
+                        },
+                        "required": ["objects", "members"]
+                    }
+                },
+                "required": ["definition", "reused", "report"]
+            });
+            cmd.refusals = vec![
+                "host_capability_missing",
+                "units_required",
+                "load_failed",
+                "unsupported_format",
+                "unsupported_for_definition",
+                "import_too_large",
+                "empty_group",
+                "explode_session_scope",
+                "component_expansion_exceeded",
+            ];
         }
         {
             let cmd = commands
@@ -2607,16 +4822,56 @@ impl Registry {
             cmd.implemented = true;
             cmd.params_schema = serde_json::json!({
                 "type": "object",
-                "properties": { "instance": { "type": "string" } },
-                "required": ["instance"],
+                "properties": {
+                    "instance": { "type": "string", "description": "a world placement: the same as path [instance]" },
+                    "path": { "type": "array", "items": { "type": "string" }, "minItems": 1, "description": "instance ids, outermost first; the last is the placement to fork" },
+                    "cascade": { "type": "boolean", "default": true, "description": "true: every instance on the path is made unique in turn, so only the placement at the end diverges; false: only the last definition is forked, in place inside its owner, so every placement of the owners changes" },
+                    "deep": { "type": "boolean", "default": false, "description": "also give every nested definition of the fork a private copy" }
+                },
+                "additionalProperties": false
+            });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "component": { "type": "string", "description": "the forked definition" },
+                    "instance": { "type": "string", "description": "the placement at the end of the path after the call: the leaf itself for a one-element path, its divergent twin (a value in remap) for a deeper one" },
+                    "remap": {
+                        "type": "object",
+                        "additionalProperties": { "type": "string" },
+                        "description": "every id the call minted, keyed by the id it copies, over every kind (objects, groups, instances, definitions); only new ids are values"
+                    }
+                },
+                "required": ["component", "instance", "remap"]
+            });
+            cmd.refusals = vec![
+                "unknown_entity",
+                "unknown_occurrence",
+                "unknown_instance",
+                "unknown_component",
+                "explode_session_scope",
+            ];
+        }
+        {
+            let cmd = commands
+                .get_mut("hew.component.promote")
+                .expect("declared above");
+            cmd.implemented = true;
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "component": { "type": "string", "description": "the linked set's definition (cmp_)" },
+                    "name": { "type": "string", "description": "the component's name: not blank, at most 128 bytes, no control characters" }
+                },
+                "required": ["component", "name"],
                 "additionalProperties": false
             });
             cmd.result_schema = serde_json::json!({
                 "type": "object",
                 "properties": { "component": { "type": "string" } },
-                "required": ["component"]
+                "required": ["component"],
+                "additionalProperties": false
             });
-            cmd.refusals = vec!["unknown_entity", "unknown_instance", "unknown_component"];
+            cmd.refusals = vec!["unknown_entity", "not_linked"];
         }
         {
             let cmd = commands
@@ -2638,6 +4893,154 @@ impl Registry {
                 "unknown_entity",
                 "unknown_instance",
                 "cannot_explode_reflected",
+                "face_not_flat",
+            ];
+        }
+        {
+            let vec3 = serde_json::json!({ "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 });
+            let cmd = commands
+                .get_mut("hew.component.rebase")
+                .expect("declared above");
+            cmd.implemented = true;
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "description": "a definition (\"cmp_…\"), or an instance (\"ins_…\") meaning its definition" },
+                    "origin": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3, "description": "the new origin, in the definition's current local coordinates" },
+                    "x": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3, "description": "the new x axis, unit length, in the definition's current local coordinates" },
+                    "y": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3, "description": "the new y axis, unit length and perpendicular to x; z is x × y" }
+                },
+                "required": ["id", "origin", "x", "y"],
+                "additionalProperties": false
+            });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "component": { "type": "string" },
+                    "instances_updated": { "type": "integer", "minimum": 0, "description": "how many instances place the definition, world or nested in another definition; each pose was compensated" }
+                },
+                "required": ["component", "instances_updated"],
+                "additionalProperties": false
+            });
+            cmd.refusals = vec![
+                "unknown_entity",
+                "invalid_frame",
+                "rebase_during_session",
+                "face_not_flat",
+            ];
+
+            let cmd = commands
+                .get_mut("hew.component.flip_instance")
+                .expect("declared above");
+            cmd.implemented = true;
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "instance": { "type": "string", "description": "a world instance (\"ins_…\")" },
+                    "axis": { "type": "string", "enum": ["x", "y", "z"], "description": "the definition-local axis to mirror across (the plane normal to it, through the local origin)" }
+                },
+                "required": ["instance", "axis"],
+                "additionalProperties": false
+            });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "instance": { "type": "string" },
+                    "pose": { "type": "array", "items": { "type": "number" }, "minItems": 12, "maxItems": 12, "description": "the new pose, row-major 3×4" },
+                    "mirrored": { "type": "boolean", "description": "whether the new pose's determinant is negative" }
+                },
+                "required": ["instance", "pose", "mirrored"],
+                "additionalProperties": false
+            });
+            cmd.refusals = vec!["unknown_entity", "face_not_flat"];
+
+            let cmd = commands
+                .get_mut("hew.entity.set_frame")
+                .expect("declared above");
+            cmd.implemented = true;
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "description": "an object (\"obj_…\") or group (\"grp_…\")" },
+                    "origin": vec3.clone(),
+                    "x": vec3.clone(),
+                    "y": vec3,
+                    "clear": { "type": "boolean", "description": "true removes the override; give it alone" }
+                },
+                "required": ["id"],
+                "additionalProperties": false,
+                "description": "origin, x, and y are coordinates in the face frame hew.query.part_frame reports for the part without an override (after its [length, width, thickness] swap): origin an offset along that frame's axes, x and y unit, perpendicular directions in it. Give all three, or clear: true."
+            });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string" },
+                    "source": { "type": "string", "enum": ["attribute", "face"], "description": "where hew.query.part_frame now takes the frame from" }
+                },
+                "required": ["id", "source"],
+                "additionalProperties": false
+            });
+            cmd.refusals = vec!["unknown_entity", "not_a_part", "invalid_frame"];
+        }
+        // hew.entity.lock / unlock (OW-1): a lock belongs to a shape, so a
+        // component instance stands for its definition.
+        {
+            let targets = serde_json::json!({
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 10000,
+                "items": { "type": "string" },
+                "description": "objects (\"obj_…\"), groups (\"grp_…\"), and component instances (\"ins_…\"); an instance stands for its definition, so every copy of it changes together"
+            });
+            let lock_result = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "changed": { "type": "integer", "minimum": 0, "description": "how many objects, groups, and shapes changed state; 0 when all were already as asked (and no undo entry was made)" }
+                },
+                "required": ["changed"],
+                "additionalProperties": false
+            });
+            let cmd = commands.get_mut("hew.entity.lock").expect("declared above");
+            cmd.implemented = true;
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": { "targets": targets.clone() },
+                "required": ["targets"],
+                "additionalProperties": false,
+                "description": "One undo step labeled Lock. Hiding, selecting, measuring, and copying a locked thing still work; edits to it refuse locked_node. Refused explode_session_scope while a component is open for editing, or when the lock would freeze an open group."
+            });
+            cmd.result_schema = lock_result.clone();
+            cmd.refusals = vec![
+                "unknown_entity",
+                "not_a_node",
+                "unknown_object",
+                "unknown_group",
+                "unknown_instance",
+                "unknown_component",
+                "explode_session_scope",
+            ];
+
+            let cmd = commands
+                .get_mut("hew.entity.unlock")
+                .expect("declared above");
+            cmd.implemented = true;
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "targets": targets,
+                    "all": { "type": "boolean", "description": "true unlocks every locked object, group, and shape in the document; give it alone" }
+                },
+                "additionalProperties": false,
+                "description": "Give targets, or all: true. One undo step labeled Unlock."
+            });
+            cmd.result_schema = lock_result;
+            cmd.refusals = vec![
+                "unknown_entity",
+                "not_a_node",
+                "unknown_object",
+                "unknown_group",
+                "unknown_instance",
+                "unknown_component",
             ];
         }
         {
@@ -2697,9 +5100,11 @@ impl Registry {
             cmd.params_schema = serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "face": {},
-                    "id": { "type": "string" },
-                    "material": { "type": ["string", "null"] }
+                    "face": { "description": "a face locator {object | path, at} | {object | path, ray} | {\"$face\"}; through a path the definition's face is painted, so every copy shows it" },
+                    "id": { "type": "string", "description": "an object (its base material), an instance (the placement's own material), or a definition (every object it owns)" },
+                    "material": { "type": ["string", "null"] },
+                    "scope": { "type": "string", "enum": ["instance", "definition"], "description": "for an instance id: the placement (default) or its definition; a definition id takes only \"definition\"" },
+                    "logical": { "type": "boolean" }
                 },
                 "required": ["material"],
                 "additionalProperties": false
@@ -2712,10 +5117,15 @@ impl Registry {
             cmd.refusals = vec![
                 "unknown_entity",
                 "unknown_object",
+                "unknown_instance",
+                "unknown_component",
                 "unknown_face",
                 "unknown_material",
                 "locator_missed",
                 "ambiguous_locator",
+                "unknown_occurrence",
+                "not_an_object",
+                "explode_session_scope",
             ];
         }
         {
@@ -2751,6 +5161,28 @@ impl Registry {
                     "alpha": { "type": "integer", "minimum": 0, "maximum": 255 }
                 },
                 "required": ["material", "alpha"],
+                "additionalProperties": false
+            });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            });
+            cmd.refusals = vec!["unknown_entity", "unknown_material"];
+        }
+        {
+            let cmd = commands
+                .get_mut("hew.material.set_pbr")
+                .expect("declared above");
+            cmd.implemented = true;
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "material": { "type": "string" },
+                    "metallic": { "type": "number", "minimum": 0, "maximum": 1, "description": "0 dielectric to 1 metal" },
+                    "roughness": { "type": "number", "minimum": 0, "maximum": 1, "description": "0 mirror to 1 fully diffuse" }
+                },
+                "required": ["material", "metallic", "roughness"],
                 "additionalProperties": false
             });
             cmd.result_schema = serde_json::json!({
@@ -2813,7 +5245,7 @@ impl Registry {
                 "properties": {
                     "from": { "type": ["string", "null"], "description": "the material to replace; null: unpainted object bases" },
                     "to": { "type": ["string", "null"], "description": "the material it becomes; null: unpaint" },
-                    "object": { "type": "string", "description": "only within this object; omitted: the whole document" }
+                    "object": { "type": "string", "description": "only within this object; omitted: the whole document, instance materials included" }
                 },
                 "required": ["from", "to"],
                 "additionalProperties": false
@@ -3093,6 +5525,8 @@ impl Registry {
                     "sid": { "type": "integer" },
                     "name": { "type": "string" },
                     "description": { "type": "string" },
+                    "transition_s": { "type": ["number", "null"], "description": "the Scene's own transition time in seconds; null is the document's own" },
+                    "delay_s": { "type": ["number", "null"], "description": "the Scene's own delay in seconds; null is the document's own" },
                     "props": {
                         "type": "object",
                         "properties": {
@@ -3172,11 +5606,13 @@ impl Registry {
                     "id": { "type": "string" },
                     "properties": properties_schema.clone(),
                     "camera": camera_schema,
-                    "display": display_schema.clone()
+                    "display": display_schema.clone(),
+                    "transition_s": { "type": ["number", "null"], "minimum": 0, "description": "the Scene's own transition time in seconds; null returns it to the document's own" },
+                    "delay_s": { "type": ["number", "null"], "minimum": 0, "description": "the Scene's own delay in seconds; null returns it to the document's own" }
                 },
                 "required": ["id"],
                 "additionalProperties": false,
-                "description": "properties defaults to the Scene's currently captured set (re-capture, never widen) when omitted"
+                "description": "properties defaults to the Scene's currently captured set (re-capture, never widen) when omitted; with only transition_s/delay_s given, nothing is re-captured"
             });
             cmd.result_schema = serde_json::json!({
                 "type": "object",
@@ -3284,7 +5720,7 @@ impl Registry {
             cmd.params_schema = serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "target": { "type": "string" },
+                    "target": attr_target_schema(),
                     "ns": { "type": "string" }
                 },
                 "required": ["target"],
@@ -3293,6 +5729,16 @@ impl Registry {
             cmd.result_schema = serde_json::json!({ "type": "object" });
             cmd.refusals = vec![
                 "unknown_entity",
+                "unknown_face",
+                "unknown_edge",
+                "not_a_solid_edge",
+                "locator_missed",
+                "ambiguous_locator",
+                "face_token_unknown",
+                "face_token_stale",
+                "unknown_occurrence",
+                "not_an_object",
+                "explode_session_scope",
                 "unknown_object",
                 "unknown_group",
                 "unknown_instance",
@@ -3309,7 +5755,7 @@ impl Registry {
             cmd.params_schema = serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "target": { "type": "string" },
+                    "target": attr_target_schema(),
                     "ns": { "type": "string" },
                     "key": { "type": "string" },
                     "value": {}
@@ -3324,8 +5770,19 @@ impl Registry {
             });
             cmd.refusals = vec![
                 "unknown_entity",
+                "unknown_face",
+                "unknown_edge",
+                "not_a_solid_edge",
+                "locator_missed",
+                "ambiguous_locator",
+                "face_token_unknown",
+                "face_token_stale",
+                "unknown_occurrence",
+                "not_an_object",
+                "explode_session_scope",
                 "invalid_attr_name",
                 "reserved_attr_namespace",
+                "attr_namespace_not_granted",
                 "non_finite_attr_value",
                 "attr_value_too_deep",
                 "unrepresentable_attr_value",
@@ -3345,7 +5802,7 @@ impl Registry {
             cmd.params_schema = serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "target": { "type": "string" },
+                    "target": attr_target_schema(),
                     "ns": { "type": "string" },
                     "key": { "type": "string" }
                 },
@@ -3359,8 +5816,19 @@ impl Registry {
             });
             cmd.refusals = vec![
                 "unknown_entity",
+                "unknown_face",
+                "unknown_edge",
+                "not_a_solid_edge",
+                "locator_missed",
+                "ambiguous_locator",
+                "face_token_unknown",
+                "face_token_stale",
+                "unknown_occurrence",
+                "not_an_object",
+                "explode_session_scope",
                 "invalid_attr_name",
                 "reserved_attr_namespace",
+                "attr_namespace_not_granted",
                 "unknown_attr",
                 "unknown_object",
                 "unknown_group",
@@ -3466,13 +5934,37 @@ impl Registry {
                 "type": "object",
                 "description": "HEW_API.md §7 plane spec: {ground:true} | {origin,normal[,x_axis]} | {face:<locator>} | {sketch:<id>}"
             });
+            let detached_schema = serde_json::json!({
+                "type": "boolean",
+                "description": "keep the shape detached: it joins no face or drawing on its plane, and extruding it always makes a new Object; default false. Refused (invalid params) with a {sketch} plane spec, whose own flag decides"
+            });
+            // What a drawing edit closed (wireframe faces): a loop on one
+            // plane is a face whichever sketches hold its lines, and faces
+            // that enclose a space become a solid in the same undo step.
+            let faces_closed_schema = serde_json::json!({
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "present when the edit closed a face on another plane (a loop on one plane is a face, whichever sketches hold its lines): the sketches that now hold such a face; a face a solid consumed in the same step is not listed"
+            });
+            let solid_schema = serde_json::json!({
+                "type": "object",
+                "description": "present when the edit's faces enclosed a space and became a solid in the same undo step: the first such solid; `grew` when the shape closed against an existing solid and that solid grew (its new id is `object_id`, carrying the old one's name and tags)",
+                "properties": {
+                    "object_id": { "type": "string" },
+                    "grew": { "type": "boolean" }
+                },
+                "required": ["object_id", "grew"]
+            });
             let sketch_result_schema = serde_json::json!({
                 "type": "object",
+                "description": "drawing on the ground, a new plane, or into a sketch; also every `detached: true` draw, which makes one new detached sketch whatever the plane spec, and every draw on a face of a locked Object",
                 "properties": {
                     "sketch": { "type": "string" },
                     "region_ids": { "type": "array", "items": { "type": "string" } },
                     "region_id": { "type": "string", "description": "present when exactly one region resulted (HEW_API.md §6.1's example)" },
-                    "curve_id": { "type": "string", "description": "present when this command began a curve chain" }
+                    "curve_id": { "type": "string", "description": "present when this command began a curve chain" },
+                    "faces_closed": faces_closed_schema.clone(),
+                    "solid": solid_schema.clone()
                 },
                 "required": ["sketch", "region_ids"]
             });
@@ -3494,7 +5986,8 @@ impl Registry {
                         "key": { "type": "string", "description": "edg_<hex16> or rgn_<hex16>, as hew.sketch.units lists them" },
                         "store": { "type": "string", "enum": ["topology", "owned", "free"], "description": "topology: the solid's own face structure; owned: drawing kept on the solid's face; free: drawing over no face" },
                         "object_id": { "type": "string", "description": "the owning solid, for topology and owned" },
-                        "sketch_id": { "type": "string", "description": "the sketch holding the drawing, for owned and free when it has one" }
+                        "sketch_id": { "type": "string", "description": "the sketch holding the drawing, for owned and free when it has one" },
+                        "detached": { "type": "boolean", "description": "true on a free store that is a detached sketch; absent otherwise" }
                     },
                     "required": ["kind", "key", "store"]
                 }
@@ -3504,7 +5997,9 @@ impl Registry {
                     "type": "object",
                     "properties": {
                         "object_id": { "type": "string" },
-                        "units": touched_units_schema.clone()
+                        "units": touched_units_schema.clone(),
+                        "faces_closed": faces_closed_schema.clone(),
+                        "solid": solid_schema.clone()
                     },
                     "required": ["object_id", "units"],
                     "description": format!(
@@ -3538,7 +6033,8 @@ impl Registry {
                 "type": "object",
                 "properties": {
                     "plane": plane_schema,
-                    "points": { "type": "array", "items": point_schema, "minItems": 2 }
+                    "points": { "type": "array", "items": point_schema, "minItems": 2 },
+                    "detached": detached_schema.clone()
                 },
                 "required": ["plane", "points"]
             });
@@ -3550,6 +6046,7 @@ impl Registry {
                     "point_off_plane",
                     "degenerate_segment",
                     "unknown_sketch",
+                    "endpoint_near_miss",
                     "unknown_entity",
                     "locator_missed",
                     "ambiguous_locator",
@@ -3567,7 +6064,8 @@ impl Registry {
                 "properties": {
                     "plane": plane_schema,
                     "corner_a": point_schema,
-                    "corner_b": point_schema
+                    "corner_b": point_schema,
+                    "detached": detached_schema.clone()
                 },
                 "required": ["plane", "corner_a", "corner_b"]
             });
@@ -3600,7 +6098,8 @@ impl Registry {
                     "segments": {
                         "type": "integer",
                         "description": "facet count; defaults to 48, must fall in [MIN_CIRCLE_SEGMENTS, MAX_CIRCLE_SEGMENTS] = [24, 1024]"
-                    }
+                    },
+                    "detached": detached_schema.clone()
                 },
                 "required": ["plane", "center", "radius"]
             });
@@ -3644,7 +6143,8 @@ impl Registry {
                         "type": "string",
                         "enum": ["open", "pie", "segment"],
                         "description": "how the arc's ends are closed: \"open\" (default, a bare arc), \"pie\" (closed wedge — two radii to the center), or \"segment\" (closed circular segment — the chord). \"pie\"/\"segment\" commit a closed profile (a region in plane/sketch mode, a SplitFaceInner loop in face mode) like draw_rect/draw_circle, and need at least 2 segments (see \"segments\"). Must be \"open\" when the sweep is a full turn (already closed)."
-                    }
+                    },
+                    "detached": detached_schema.clone()
                 },
                 "required": ["plane", "center", "radius", "start_angle", "end_angle"]
             });
@@ -3662,6 +6162,7 @@ impl Registry {
                     "degenerate_curve",
                     "degenerate_segment",
                     "unknown_sketch",
+                    "endpoint_near_miss",
                     "segments_above_cap",
                     "unknown_entity",
                     "locator_missed",
@@ -3686,7 +6187,8 @@ impl Registry {
                     "plane": plane_schema,
                     "center": point_schema,
                     "radius": { "type": "number", "exclusiveMinimum": 0 },
-                    "sides": { "type": "integer", "minimum": 3, "maximum": 120 }
+                    "sides": { "type": "integer", "minimum": 3, "maximum": 120 },
+                    "detached": detached_schema.clone()
                 },
                 "required": ["plane", "center", "radius", "sides"]
             });
@@ -3762,6 +6264,17 @@ impl Registry {
             });
             let edit_result = serde_json::json!({
                 "type": "object",
+                "properties": {
+                    "units": touched_units_schema.clone(),
+                    "faces_closed": faces_closed_schema.clone(),
+                    "solid": solid_schema.clone()
+                },
+                "required": ["units"],
+                "description": "the plane units the edit made (new keys after the edit); empty for delete"
+            });
+            // Delete removes drawing and so closes nothing.
+            let delete_result = serde_json::json!({
+                "type": "object",
                 "properties": { "units": touched_units_schema.clone() },
                 "required": ["units"],
                 "description": "the plane units the edit made (new keys after the edit); empty for delete"
@@ -3785,7 +6298,12 @@ impl Registry {
             cmd.implemented = true;
             cmd.params_schema = serde_json::json!({
                 "type": "object",
-                "properties": { "plane": plane_schema.clone() },
+                "properties": {
+                    "plane": {
+                        "type": "object",
+                        "description": "HEW_API.md §7 plane spec: {ground:true} | {origin,normal[,x_axis]} | {face:<locator>} | {sketch:<id>}. A plane or face spec lists the plane's arrangement, which no detached sketch joins; {sketch:<id>} on a detached sketch lists exactly that sketch"
+                    }
+                },
                 "required": ["plane"]
             });
             let point_array = serde_json::json!({ "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 });
@@ -3809,6 +6327,7 @@ impl Registry {
                                             "store": { "type": "string", "enum": ["topology", "owned", "free"] },
                                             "object_id": { "type": "string" },
                                             "sketch_id": { "type": "string" },
+                                            "detached": { "type": "boolean", "description": "true on a free store that is a detached sketch (listed only by a {sketch} plane spec naming it); absent otherwise" },
                                             "curve": {
                                                 "type": "object",
                                                 "description": "present when the edge is a facet of an analytic circle",
@@ -3926,8 +6445,41 @@ impl Registry {
                 },
                 "required": ["plane", "units"]
             });
-            cmd.result_schema = edit_result.clone();
+            cmd.result_schema = delete_result;
             cmd.refusals = edit_refusals();
+
+            let cmd = commands
+                .get_mut("hew.solid.from_faces")
+                .expect("declared above");
+            cmd.implemented = true;
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "sketches": {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": { "type": "string" },
+                        "description": "skt_ ids of free sketches; their lines first fill every face they can close (as a draw would), then every face (faced region) they hold, and every face so filled, seeds the search, which gathers every face connected to one through shared edges (two faces with the same loop on one plane are one face: the ordinary one, else the earlier drawn)"
+                    }
+                },
+                "required": ["sketches"],
+                "additionalProperties": false
+            });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "description": "the faces enclosed a space and became a solid, one undo step; the faces' sketches lose the consumed edges (an emptied sketch is deleted)",
+                "properties": {
+                    "object_id": { "type": "string", "description": "the first solid made" },
+                    "grew": { "type": "boolean", "description": "the shape closed against an existing solid, which grew into object_id (carrying its name and tags)" }
+                },
+                "required": ["object_id", "grew"]
+            });
+            cmd.refusals = vec![
+                "faces_not_closed",
+                "loop_not_planar",
+                "faces_not_solid",
+                "unknown_entity",
+            ];
         }
         {
             let face_locator_schema = serde_json::json!({
@@ -3977,10 +6529,14 @@ impl Registry {
                 .get_mut("hew.solid.push_pull")
                 .expect("declared above");
             cmd.implemented = true;
+            let mut push_face = face_locator_schema.clone();
+            push_face["description"] = serde_json::json!(
+                "HEW_API.md §5.2 face locator: {object | path, at} | {object | path, ray} | {\"$face\":\"label#key\"}; path (or object as {path: [...]}) is an occurrence path [instance, …, object] that reaches a definition member through a placement, every placement following (at and ray stay in the leaf's frame, the definition's coordinates, not world coordinates)"
+            );
             cmd.params_schema = serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "face": face_locator_schema,
+                    "face": push_face,
                     "distance": { "type": "number" }
                 },
                 "required": ["face", "distance"]
@@ -3989,9 +6545,10 @@ impl Registry {
                 "type": "object",
                 "properties": {
                     "object_id": { "type": "string", "description": "the pushed/pulled object, still standing (in-place or sub-face case)" },
-                    "object_ids": { "type": "array", "items": { "type": "string" }, "description": "a through-cut's resulting pieces, replacing the source object" }
+                    "object_ids": { "type": "array", "items": { "type": "string" }, "description": "a through-cut's resulting pieces, replacing the source object" },
+                    "tidied": tidied_schema()
                 },
-                "description": "exactly one of object_id / object_ids is present, depending on the tool's three-way branch (HEW_API.md §7 semantics notes)"
+                "description": "exactly one of object_id / object_ids is present, depending on the tool's three-way branch (HEW_API.md §7 semantics notes); a through push or pull is a boolean, so it can carry tidied"
             });
             cmd.refusals = vec![
                 "object_not_solid",
@@ -4001,6 +6558,16 @@ impl Registry {
                 "not_a_sub_face",
                 "radius_vanishes",
                 "wall_neighbor_non_planar",
+                // A blend face resizes its blend (re-blending can refuse).
+                "blend_modified",
+                "dependent_blend",
+                "radius_too_large",
+                "profile_too_wide",
+                "unsupported_edge",
+                "unsupported_vertex",
+                "blend_faces_flush",
+                "obstructed",
+                "blend_degenerate",
                 "unknown_face",
                 "unknown_object",
                 "unknown_component",
@@ -4010,74 +6577,170 @@ impl Registry {
                 "ambiguous_locator",
                 "face_token_unknown",
                 "face_token_stale",
+                "unknown_occurrence",
+                "explode_session_scope",
+                "not_an_object",
             ];
 
+            let mut operand_a = occurrence_locator_schema();
+            operand_a["description"] = serde_json::json!(
+                "a world node id (obj_/grp_/ins_), or {path: [instance, …, object]}: a definition member through one placement, edited in the definition so every placement follows"
+            );
+            let mut operand_b = occurrence_locator_schema();
+            operand_b["description"] = serde_json::json!(
+                "a world node id; with a by path, a world object (subtract only, consumed) or {path} to a member of the same definition by the same path"
+            );
+            // Subtract alone takes a transient cutter beside a path `a`
+            // (Addendum B6): a SolidSpec prism or box, world coordinates.
+            let mut subtract_b = operand_b.clone();
+            subtract_b["oneOf"]
+                .as_array_mut()
+                .expect("a oneOf")
+                .extend([
+                    serde_json::json!({
+                        "type": "object",
+                        "properties": { "prism": { "type": "object", "description": "{plane: {origin, normal}, loops: [[[x,y,z], ...], ...], distance}: the first loop outer, the rest holes" } },
+                        "required": ["prism"],
+                        "additionalProperties": false
+                    }),
+                    serde_json::json!({
+                        "type": "object",
+                        "properties": { "box": { "type": "object", "description": "{min, max, pose?}" } },
+                        "required": ["box"],
+                        "additionalProperties": false
+                    }),
+                ]);
+            subtract_b["description"] = serde_json::json!(
+                "a world node id; with a by path, a world object (consumed), {path} to a member of the same definition by the same path, or a transient cutter {prism} | {box} in world coordinates (no object is created)"
+            );
             let boolean_params = serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "a": { "type": "string", "description": "a node id: obj_/grp_/ins_" },
-                    "b": { "type": "string", "description": "a node id: obj_/grp_/ins_" }
+                    "a": operand_a,
+                    "b": operand_b,
+                    "operands": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "minItems": 2,
+                        "description": "every node in order, two or more world node ids, instead of a and b: a union of all of them, the first minus the union of the rest, or the intersection of all, as one undo step. Two operands are the a and b call; a path operand, a transient cutter and unlink take a and b"
+                    }
+                }
+            });
+            // Union and intersect with a placement operand split it from
+            // its copies, so they ask first (Addendum D §5).
+            let mut join_params = boolean_params.clone();
+            join_params["properties"]["unlink"] = serde_json::json!({
+                "type": "boolean",
+                "description": "true: a placement operand (an instance, a member by path, or a group holding one) is unlinked and exploded into plain solids, then joined; its other copies keep the shared solid. Without it such an operand refuses would_unlink. Ignored when no operand is a placement, and in a call with three or more operands, where a placement refuses boolean_operand_has_instance"
+            });
+            let join_result = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "result": { "type": "string", "description": "the result node: one object, or a group when the result is several pieces (a Union of operands that only touch, an Intersect of several overlaps)" },
+                    "pieces": { "type": "integer", "description": "present when the result is a group of pieces: how many" },
+                    "note": { "type": "string", "description": "present with pieces: why the result is several, in words for this operation" },
+                    "unlinked": { "type": "array", "items": { "type": "string" }, "description": "present when unlink: true split placements off: the placements exploded" },
+                    "tidied": tidied_schema()
                 },
-                "required": ["a", "b"]
+                "required": ["result"]
             });
             let boolean_result = serde_json::json!({
                 "type": "object",
-                "properties": { "result": { "type": "string" } },
+                "properties": {
+                    "result": { "type": "string", "description": "the result node: one object, or a group when the result is several pieces (a Union of operands that only touch, a Subtract that severs, an Intersect of several overlaps)" },
+                    "pieces": { "type": "integer", "description": "present when the result is a group of pieces: how many" },
+                    "note": { "type": "string", "description": "present with pieces: why the result is several, in words for this operation" },
+                    "tidied": tidied_schema()
+                },
                 "required": ["result"]
             });
             let boolean_refusals = || {
                 vec![
+                    "boolean_needs_two",
                     "boolean_operand_has_instance",
                     "boolean_operand_not_solid",
                     "boolean_operand_empty",
                     "grouped_operand",
                     "degenerate_contact",
+                    "non_planar_input",
+                    "degenerate_input",
+                    "operand_face_not_flat",
+                    "arrangement_failed",
+                    "result_too_thin",
                     "unknown_object",
                     "unknown_group",
                     "unknown_instance",
                     "unknown_entity",
+                    "unknown_occurrence",
+                    "unknown_component",
+                    "explode_session_scope",
+                    "face_not_flat",
                 ]
             };
 
             let cmd = commands.get_mut("hew.solid.union").expect("declared above");
             cmd.implemented = true;
-            cmd.params_schema = boolean_params.clone();
-            cmd.result_schema = boolean_result.clone();
+            cmd.params_schema = join_params.clone();
+            cmd.result_schema = join_result.clone();
             cmd.refusals = boolean_refusals();
+            cmd.refusals.push("would_unlink");
 
             let cmd = commands
                 .get_mut("hew.solid.subtract")
                 .expect("declared above");
             cmd.implemented = true;
-            cmd.params_schema = boolean_params.clone();
+            let mut subtract_params = boolean_params.clone();
+            subtract_params["properties"]["b"] = subtract_b;
+            cmd.params_schema = subtract_params;
             cmd.result_schema = boolean_result.clone();
             cmd.refusals = boolean_refusals();
+            // Subtract alone refuses when its cutter is disjoint from, or
+            // only touches, the target: union and intersect have an honest
+            // answer there (two shells; an empty result).
+            cmd.refusals.push("nothing_removed");
+            // A transient cutter's own refusals.
+            cmd.refusals.extend(["mirrored_pose", "compute_too_large"]);
 
             let cmd = commands
                 .get_mut("hew.solid.intersect")
                 .expect("declared above");
             cmd.implemented = true;
-            cmd.params_schema = boolean_params;
-            cmd.result_schema = boolean_result;
+            cmd.params_schema = join_params;
+            cmd.result_schema = join_result;
             cmd.refusals = boolean_refusals();
+            cmd.refusals.push("would_unlink");
 
             let cmd = commands.get_mut("hew.solid.slice").expect("declared above");
             cmd.implemented = true;
             cmd.params_schema = serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "object": { "type": "string" },
+                    "object": {
+                        "oneOf": [
+                            { "type": "string" },
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "path": { "type": "array", "items": { "type": "string" }, "minItems": 1 }
+                                },
+                                "required": ["path"],
+                                "additionalProperties": false
+                            }
+                        ],
+                        "description": "a world object id, or {path: [instance, …, object]}: a definition member through one placement; the pieces stay in the definition and every placement follows"
+                    },
                     "plane": {
                         "type": "object",
                         "properties": { "origin": point_schema.clone(), "normal": point_schema.clone() },
-                        "required": ["origin", "normal"]
+                        "required": ["origin", "normal"],
+                        "description": "world coordinates, also through a path"
                     }
                 },
                 "required": ["object", "plane"]
             });
             cmd.result_schema = serde_json::json!({
                 "type": "object",
-                "properties": { "positive": { "type": "string" }, "negative": { "type": "string" } },
+                "properties": { "positive": { "type": "string" }, "negative": { "type": "string" }, "tidied": tidied_schema() },
                 "required": ["positive", "negative"]
             });
             cmd.refusals = vec![
@@ -4086,6 +6749,11 @@ impl Registry {
                 "degenerate",
                 "unknown_object",
                 "unknown_entity",
+                "unknown_occurrence",
+                "unknown_instance",
+                "unknown_component",
+                "grouped_operand",
+                "explode_session_scope",
             ];
 
             let cmd = commands
@@ -4107,7 +6775,10 @@ impl Registry {
                             { "type": "object", "properties": { "face": face_locator_schema }, "required": ["face"] },
                             { "type": "object", "properties": { "curve": { "type": "string" } }, "required": ["curve"] }
                         ]
-                    }
+                    },
+                    "twist": { "type": "number", "description": "total twist over the swept length, radians (right-hand rule about the path); open paths only" },
+                    "end_scale": { "type": "number", "exclusiveMinimum": 0, "description": "scale of the end profile relative to the start (1 = none); open paths only" },
+                    "stations": { "type": "integer", "minimum": 1, "description": "stations per path segment; default one per 15° of twist" }
                 },
                 "required": ["profile", "path"]
             });
@@ -4127,10 +6798,12 @@ impl Registry {
                 "path_detached_from_profile",
                 "path_reverses",
                 "path_too_tight",
+                "profile_too_wide_for_corner",
                 "profile_crosses_axis",
                 "partial_sweep_on_pole",
                 "sweep_self_intersects",
                 "sweep_degenerate",
+                "twist_needs_open_path",
                 "unknown_region",
                 "unknown_object",
                 "unknown_face",
@@ -4266,7 +6939,7 @@ impl Registry {
                 "type": "object",
                 "properties": {
                     "imprint": imprint_locator_schema.clone(),
-                    "factor": { "type": "number", "exclusiveMinimum": 0, "description": "uniform scale factor" },
+                    "factor": { "type": "number", "description": "uniform scale factor, finite and nonzero; a negative factor turns the shape 180 degrees about `about` and scales it by |factor| (a mirror about a world axis of an axis-aligned drawing plane is hew.sketch.scale with a negative per-axis factor)" },
                     "about": point_or_derived_schema.clone()
                 },
                 "required": ["imprint", "factor", "about"]
@@ -4295,6 +6968,578 @@ impl Registry {
             cmd.refusals = imprint_refusals();
         }
 
+        // ==== true-curves: blend ====
+        {
+            let edge_locator_schema = serde_json::json!({
+                "description": "HEW_API.md §5.2 edge-set locator: {object, at}, {object, from, to}, {face: <face locator>}, {face, loop_near}, or {object, all: true}",
+                "type": "object"
+            });
+            let edges_schema = serde_json::json!({
+                "type": "array",
+                "minItems": 1,
+                "items": edge_locator_schema,
+                "description": "solid edges to blend, all on one object"
+            });
+            let corner_schema = serde_json::json!({
+                "type": "object",
+                "description": "a 2D corner instead of solid edges: {sketch: <sketch id>, at: [x,y,z]} for a drawn corner, or {face: <face locator>, at: [x,y,z]} for a corner of a shape drawn on a face",
+                "properties": {
+                    "sketch": { "type": "string" },
+                    "face": { "type": "object" },
+                    "at": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 }
+                },
+                "required": ["at"]
+            });
+            let propagate_schema = serde_json::json!({
+                "type": "string",
+                "enum": ["tangent", "none"],
+                "description": "default \"tangent\": each located edge extends along the smooth chain a click on it would take"
+            });
+            let stops_schema = serde_json::json!({
+                "type": "object",
+                "properties": { "start": { "type": "number" }, "end": { "type": "number" } },
+                "description": "meters left sharp at the start and end of the chain"
+            });
+            let blend_result_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "object_id": { "type": "string" },
+                    "blend_ids": { "type": "array", "items": { "type": "integer" } },
+                    "faces": { "type": "integer", "description": "new blend faces" },
+                    "sketch_id": { "type": "string", "description": "a corner of a world sketch: the sketch" }
+                },
+                "description": "an edge blend answers object_id, blend_ids, faces and size (meters; null for a bullnose); a 2D corner answers sketch_id or object_id"
+            });
+            let common_refusals = vec![
+                "radius_too_large",
+                "profile_too_wide",
+                "edge_is_smooth",
+                "blend_needs_solid",
+                "unsupported_vertex",
+                "blend_faces_flush",
+                "unsupported_edge",
+                "obstructed",
+                "segments_out_of_range",
+                "non_uniform_instance",
+                "stop_out_of_range",
+                "corner_not_blendable",
+                "corner_is_straight",
+                "corner_radius_too_large",
+                "corner_leaves_face",
+                "edges_span_objects",
+                "unknown_object",
+                "unknown_face",
+                "unknown_entity",
+                "locator_missed",
+                "ambiguous_locator",
+            ];
+
+            let cmd = commands
+                .get_mut("hew.solid.fillet")
+                .expect("declared above");
+            cmd.implemented = true;
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "edges": edges_schema.clone(),
+                    "corner": corner_schema.clone(),
+                    "radius": { "type": "number", "exclusiveMinimum": 0, "description": "meters; required except for a bullnose or a profile" },
+                    "segments": { "type": "integer", "minimum": 1, "maximum": 1024, "description": "facets across the arc: 2 to 96 for an edge round, cove or bullnose, 1 to 96 for a profile, up to 1024 for a 2D corner; default the drawing tools' count for the edge's turn at this radius" },
+                    "profile": { "type": "string", "description": "\"round\" (default), \"cove\", \"bullnose\", a built-in id such as \"builtin:ogee\", or a Library profile's id" },
+                    "width": { "type": "number", "exclusiveMinimum": 0, "description": "profiles only, meters on the bearing face (replaces radius)" },
+                    "propagate": propagate_schema.clone(),
+                    "stops": stops_schema.clone(),
+                    "handles": {
+                        "type": "array",
+                        "items": { "type": "object", "properties": { "at": { "type": "number" }, "radius": { "type": "number" } }, "required": ["at", "radius"] },
+                        "description": "round only: a radius at an arc length along the chain (variable radius)"
+                    },
+                    "corners": { "type": "string", "enum": ["rolled", "mitered"], "description": "three-way corners; default \"rolled\"" }
+                },
+                "description": "give edges or corner"
+            });
+            cmd.result_schema = blend_result_schema.clone();
+            cmd.refusals = [
+                common_refusals.clone(),
+                vec![
+                    "profile_needs_convex_edge",
+                    "bullnose_needs_parallel_sides",
+                    "invalid_profile",
+                    "unknown_profile",
+                    "load_failed",
+                    "host_capability_missing",
+                ],
+            ]
+            .concat();
+
+            let cmd = commands
+                .get_mut("hew.solid.chamfer")
+                .expect("declared above");
+            cmd.implemented = true;
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "edges": edges_schema,
+                    "corner": corner_schema,
+                    "distance": { "type": "number", "exclusiveMinimum": 0, "description": "meters on both faces, or on the primary face when `angle` is given" },
+                    "distances": { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2, "description": "[a, b] meters: a on the primary face, b on the other" },
+                    "primary": { "type": "object", "description": "face locator of the face that takes `distances[0]` (or `distance` with `angle`)" },
+                    "angle": { "type": "number", "description": "radians measured from the primary face; with `distance`" },
+                    "propagate": propagate_schema,
+                    "stops": stops_schema,
+                    "corners": { "type": "string", "enum": ["mitered", "flat"], "description": "three-way corners; default \"mitered\"" }
+                },
+                "description": "give edges or corner, and distance, distances, or distance with angle"
+            });
+            cmd.result_schema = blend_result_schema.clone();
+            cmd.refusals = [common_refusals, vec!["angle_does_not_fit"]].concat();
+
+            let blend_face = serde_json::json!({
+                "type": "object",
+                "description": "HEW_API.md §5.2 face locator of any face of the blend"
+            });
+            let cmd = commands
+                .get_mut("hew.solid.resize_blend")
+                .expect("declared above");
+            cmd.implemented = true;
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "face": blend_face.clone(),
+                    "radius": { "type": "number", "exclusiveMinimum": 0 },
+                    "distance": { "type": "number", "exclusiveMinimum": 0 },
+                    "distances": { "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2 },
+                    "width": { "type": "number", "exclusiveMinimum": 0 },
+                    "profile": { "type": "string" },
+                    "segments": { "type": "integer", "minimum": 1, "maximum": 96, "description": "facets across the arc: 2 to 96 for a round, cove or bullnose, 1 to 96 for a profile" }
+                },
+                "required": ["face"]
+            });
+            cmd.result_schema = blend_result_schema;
+            cmd.refusals = vec![
+                "blend_modified",
+                "dependent_blend",
+                "unknown_blend",
+                "radius_too_large",
+                "blend_degenerate",
+                "profile_too_wide",
+                "segments_out_of_range",
+                "unsupported_edge",
+                "unsupported_vertex",
+                "blend_faces_flush",
+                "obstructed",
+                "invalid_profile",
+                "unknown_profile",
+                "unknown_object",
+                "unknown_face",
+                "unknown_entity",
+                "locator_missed",
+                "ambiguous_locator",
+            ];
+
+            let cmd = commands
+                .get_mut("hew.solid.remove_blend")
+                .expect("declared above");
+            cmd.implemented = true;
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": { "face": blend_face },
+                "required": ["face"]
+            });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": { "object_id": { "type": "string" } },
+                "required": ["object_id"]
+            });
+            cmd.refusals = vec![
+                "blend_modified",
+                "dependent_blend",
+                "unknown_blend",
+                "unknown_object",
+                "unknown_face",
+                "unknown_entity",
+                "locator_missed",
+                "ambiguous_locator",
+            ];
+        }
+        // ==== end true-curves: blend ====
+        // ==== true-curves: shapes ====
+        {
+            let cmd = commands
+                .get_mut("hew.solid.revolve")
+                .expect("declared above");
+            cmd.implemented = true;
+            let point_schema = serde_json::json!({
+                "description": "[x, y, z] or a derived-point locator (HEW_API.md §5.3)"
+            });
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "profile": {
+                        "oneOf": [
+                            { "type": "string", "description": "a sketch region id" },
+                            { "type": "object", "properties": { "face": { "type": "object", "description": "HEW_API.md §5.2 face locator of a world object's face" } }, "required": ["face"] }
+                        ]
+                    },
+                    "axis": {
+                        "oneOf": [
+                            { "type": "object", "properties": { "from": point_schema.clone(), "to": point_schema }, "required": ["from", "to"] },
+                            { "type": "object", "properties": { "edge": { "description": "a solid or sketch edge locator; the axis is its line" } }, "required": ["edge"] }
+                        ],
+                        "description": "a line lying in the profile's plane"
+                    },
+                    "angle": { "type": "number", "description": "radians, 0 < |angle| ≤ 2π, right-hand rule about from→to; default 2π (a closed solid)" },
+                    "segments": { "type": "integer", "minimum": 3, "maximum": 1024, "description": "facets per full turn; default the drawing tools' count at the profile's largest distance from the axis" }
+                },
+                "required": ["profile", "axis"]
+            });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": { "object_id": { "type": "string" } },
+                "required": ["object_id"]
+            });
+            cmd.refusals = vec![
+                "axis_not_in_profile_plane",
+                "amount_out_of_range",
+                "profile_crosses_axis",
+                "partial_sweep_on_pole",
+                "sweep_self_intersects",
+                "sweep_degenerate",
+                "follow_me_in_component_unsupported",
+                "unknown_region",
+                "unknown_object",
+                "unknown_face",
+                "unknown_entity",
+                "locator_missed",
+                "ambiguous_locator",
+            ];
+        }
+        {
+            let cmd = commands
+                .get_mut("hew.solid.deform")
+                .expect("declared above");
+            cmd.implemented = true;
+            let axis_names = serde_json::json!({ "type": "string", "enum": ["+x", "-x", "+y", "-y", "+z", "-z"] });
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "object": { "type": "string", "description": "a world object id" },
+                    "mode": { "type": "string", "enum": ["twist", "bend", "taper", "bend_to_path"] },
+                    "end": { "description": "the moving end of the object's world bounding box (twist, bend, taper); the opposite face stays fixed", "allOf": [axis_names.clone()] },
+                    "toward": { "description": "bend only: the cross axis it bends toward; default the one closest to -z, or +x for a vertical axis", "allOf": [axis_names] },
+                    "angle": { "type": "number", "description": "twist or bend, radians: |twist| ≤ 4π, |bend| ≤ 2π" },
+                    "ratio": { "type": "number", "exclusiveMinimum": 0, "description": "taper: the moving end's scale" },
+                    "stations": { "type": "integer", "minimum": 1, "description": "bands along the axis (twist/bend default one per 15°, at least 4; taper 1); the object is also cut through every vertex so no face spans one; for bend_to_path, bands per path segment (default 4)" },
+                    "base": { "type": "object", "properties": { "from": {}, "to": {} }, "required": ["from", "to"], "description": "bend_to_path: the straight line mapped onto the path" },
+                    "path": { "description": "bend_to_path: {\"curve\": <sketch curve id>} or {\"face\": <face locator>} (its boundary loop)" }
+                },
+                "required": ["object", "mode"]
+            });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": { "object_id": { "type": "string" } },
+                "required": ["object_id"]
+            });
+            cmd.refusals = vec![
+                "self_intersecting",
+                "shape_needs_solid",
+                "amount_out_of_range",
+                "shape_degenerate",
+                "unknown_object",
+                "unknown_entity",
+                "unknown_face",
+                "locator_missed",
+                "ambiguous_locator",
+                "follow_me_in_component_unsupported",
+                "unimplemented",
+            ];
+        }
+        {
+            let cmd = commands.get_mut("hew.solid.loft").expect("declared above");
+            cmd.implemented = true;
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "profiles": {
+                        "type": "array",
+                        "items": {
+                            "oneOf": [
+                                { "type": "string", "description": "a sketch region id" },
+                                { "type": "object", "properties": { "face": { "type": "object", "description": "HEW_API.md §5.2 face locator of a world object's face" } }, "required": ["face"] }
+                            ]
+                        },
+                        "description": "closed shapes without holes, in loft order"
+                    },
+                    "apex": { "description": "[x, y, z] or a derived-point locator: the point the loft ends in" },
+                    "rails": { "type": "array", "maxItems": 2, "items": { "description": "{\"curve\": <sketch curve id>} or {\"face\": <face locator>} (its boundary loop)" }, "description": "up to two paths touching every profile at a vertex or a start marker" },
+                    "start_offsets": { "type": "array", "items": { "type": "integer" }, "description": "per profile: move its correspondence start by this many start candidates: corners where every profile has the same number of corners, else vertices" },
+                    "stations": { "type": "integer", "minimum": 1, "description": "stations between consecutive profiles (1 = ruled); default 1 for two shapes without rails, else 8" }
+                },
+                "required": ["profiles"]
+            });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": { "object_id": { "type": "string" } },
+                "required": ["object_id"]
+            });
+            cmd.refusals = vec![
+                "open_profile",
+                "loft_profile_has_hole",
+                "loft_needs_two_profiles",
+                "loft_too_many_rails",
+                "rail_misses_profile",
+                "self_intersecting",
+                "amount_out_of_range",
+                "shape_degenerate",
+                "unknown_region",
+                "unknown_object",
+                "unknown_face",
+                "unknown_entity",
+                "locator_missed",
+                "ambiguous_locator",
+                "follow_me_in_component_unsupported",
+                "unimplemented",
+            ];
+        }
+        {
+            let cmd = commands.get_mut("hew.array.path").expect("declared above");
+            cmd.implemented = true;
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "nodes": { "type": "array", "items": { "type": "string" }, "description": "ids of the objects, groups or instances to copy" },
+                    "path": {
+                        "oneOf": [
+                            { "type": "object", "properties": { "curve": { "type": "string" } }, "required": ["curve"] },
+                            { "type": "object", "properties": { "face": { "type": "object", "description": "a face locator; its outer loop is a closed path" } }, "required": ["face"] },
+                            { "type": "object", "properties": { "edges": { "type": "array" } }, "required": ["edges"], "description": "Reserved: no kernel mapping yet, refuses unimplemented" }
+                        ]
+                    },
+                    "count": { "type": "integer", "minimum": 2, "description": "total instances including the original" },
+                    "scale": {
+                        "type": "object",
+                        "properties": { "from": { "type": "number" }, "to": { "type": "number" } },
+                        "required": ["from", "to"],
+                        "description": "uniform scale at the first and last copy, linear between; default 1 to 1"
+                    },
+                    "align": { "type": "boolean", "description": "turn copies to follow the path tangent (default true)" }
+                },
+                "required": ["nodes", "path", "count"]
+            });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": { "node_ids": { "type": "array", "items": { "type": "string" } } },
+                "required": ["node_ids"]
+            });
+            cmd.refusals = vec![
+                "amount_out_of_range",
+                "path_too_short_for_count",
+                "array_count_too_large",
+                "empty_path",
+                "unknown_path_edge",
+                "path_branches",
+                "path_disconnected",
+                "path_segment_too_short",
+                "empty_selection",
+                "duplicate_member",
+                "unknown_object",
+                "unknown_group",
+                "unknown_instance",
+                "unknown_face",
+                "unknown_entity",
+                "locator_missed",
+                "ambiguous_locator",
+                "reflection",
+                "unimplemented",
+            ];
+        }
+        // ==== end true-curves: shapes ====
+        // ==== true-curves: smooth ====
+        // ==== true-curves: offset ====
+        {
+            let cmd = commands.get_mut("hew.solid.shell").expect("declared above");
+            cmd.implemented = true;
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "object": { "type": "string", "description": "an object id" },
+                    "open": {
+                        "type": "array",
+                        "items": { "type": "object", "description": "HEW_API.md §5.2 face locator of a face of `object` to leave open" }
+                    },
+                    "thickness": { "type": "number", "description": "wall thickness in meters; negative grows the wall outward" }
+                },
+                "required": ["object", "thickness"]
+            });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": { "object_id": { "type": "string" } },
+                "required": ["object_id"]
+            });
+            cmd.refusals = vec![
+                "wall_too_thick",
+                "self_intersecting",
+                "unsupported_shell_corner",
+                "shape_needs_solid",
+                "amount_out_of_range",
+                "shape_degenerate",
+                "unknown_object",
+                "unknown_component",
+                "unknown_entity",
+                "locator_missed",
+                "ambiguous_locator",
+            ];
+            let cmd = commands
+                .get_mut("hew.solid.project")
+                .expect("declared above");
+            cmd.implemented = true;
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "object": { "type": "string", "description": "the target object id" },
+                    "sketch": { "type": "string", "description": "the sketch whose shape is projected along its normal, toward the object" },
+                    "regions": { "type": "array", "items": { "type": "string" }, "description": "region ids of that sketch; default every region" },
+                    "depth": { "type": "number", "description": "meters; > 0 engraves, < 0 embosses; absent imprints only" },
+                    "mode": { "enum": ["straight", "follow"], "description": "straight (default) cuts along the projection and can go through a wall; follow offsets along the surface" }
+                },
+                "required": ["object", "sketch"]
+            });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "object_id": { "type": "string" },
+                    "faces": { "type": "integer", "description": "how many faces the imprinted region has" }
+                },
+                "required": ["object_id", "faces"]
+            });
+            cmd.refusals = vec![
+                "project_misses",
+                "project_needs_closed_shape",
+                "would_sever",
+                "self_intersecting",
+                "unsupported_shell_corner",
+                "wall_too_thick",
+                "shape_needs_solid",
+                "amount_out_of_range",
+                "shape_degenerate",
+                "degenerate_contact",
+                "non_planar_input",
+                "degenerate_input",
+                "unknown_object",
+                "unknown_sketch",
+                "unknown_component",
+                "unknown_entity",
+            ];
+        }
+        // ==== end true-curves: offset ====
+        {
+            let object_id = serde_json::json!({ "type": "string", "description": "an object id" });
+            let cmd = commands
+                .get_mut("hew.object.smooth")
+                .expect("declared above");
+            cmd.implemented = true;
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "object": object_id.clone(),
+                    "level": { "type": "integer", "minimum": 0, "maximum": 3, "description": "0 = Off" }
+                },
+                "required": ["object", "level"]
+            });
+            cmd.result_schema = serde_json::json!({ "type": "object" });
+            cmd.refusals = vec![
+                "amount_out_of_range",
+                "smooth_too_dense",
+                "unknown_object",
+                "unknown_component",
+                "unknown_entity",
+            ];
+
+            let cmd = commands
+                .get_mut("hew.object.crease")
+                .expect("declared above");
+            cmd.implemented = true;
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "edges": {
+                        "type": "array",
+                        "items": { "type": "object", "description": "an edge locator {object, at}; all on one object" },
+                        "minItems": 1
+                    },
+                    "crease": { "type": "boolean", "default": true },
+                    "propagate": { "enum": ["none", "tangent"], "default": "none", "description": "tangent: also follow each edge's tangent continuations" }
+                },
+                "required": ["edges"]
+            });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": { "edges": { "type": "integer", "description": "how many kernel edges changed" } },
+                "required": ["edges"]
+            });
+            cmd.refusals = vec![
+                "crease_on_soft_edge",
+                "crease_on_boundary",
+                "edges_span_objects",
+                "shape_degenerate",
+                "unknown_object",
+                "unknown_component",
+                "unknown_entity",
+                "locator_missed",
+                "ambiguous_locator",
+            ];
+
+            let cmd = commands.get_mut("hew.solid.bake").expect("declared above");
+            cmd.implemented = true;
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": { "object": object_id },
+                "required": ["object"]
+            });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": { "object_id": { "type": "string" } },
+                "required": ["object_id"]
+            });
+            cmd.refusals = vec![
+                "amount_out_of_range",
+                "smooth_too_dense",
+                "shape_degenerate",
+                "unknown_object",
+                "unknown_component",
+                "unknown_entity",
+            ];
+        }
+        // ==== end true-curves: smooth ====
+        // ==== true-curves: imports ====
+        {
+            let cmd = commands
+                .get_mut("hew.solid.soften")
+                .expect("declared above");
+            cmd.implemented = true;
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "object": { "type": "string", "description": "an object id" },
+                    "max_angle": { "type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": std::f64::consts::PI, "description": "radians: edges bending less than this are softened (coplanar and creased edges are left alone)" }
+                },
+                "required": ["object", "max_angle"]
+            });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": { "softened": { "type": "integer" } },
+                "required": ["softened"]
+            });
+            cmd.refusals = vec![
+                "amount_out_of_range",
+                "shape_degenerate",
+                "unknown_object",
+                "unknown_component",
+                "unknown_entity",
+            ];
+        }
+        // ==== end true-curves: imports ====
+
         // The solitary commands that nevertheless change the document
         // (see `CommandDecl::mutates_document`). Everything else solitary
         // — attach, save, export, snapshot — leaves the document exactly
@@ -4307,6 +7552,9 @@ impl Registry {
             // Additive, but a real mutation: it merges a file's objects in
             // (an `Imported` undo entry) — a live host must resync after it.
             "hew.doc.import",
+            // Makes (or finds) an unplaced definition: one undo entry when
+            // it is new, none when an earlier import's definition is reused.
+            "hew.component.import_definition",
             // ReadOnly class (no undo bracket, no `$ref`-blocking transact
             // requirement) but a real mutation: it stamps `hew.library`
             // source provenance on the saved selection's nodes
@@ -4314,6 +7562,11 @@ impl Registry {
             // registry and `hew.scenes.*` above — is bookkeeping the
             // kernel never records as an undo step.
             "hew.library.save",
+            // Host effects on the user's window; opening or closing a
+            // session is a history step, so a live host resyncs after.
+            "hew.view.enter",
+            "hew.view.exit",
+            "hew.view.exit_all",
         ] {
             commands
                 .get_mut(name)
@@ -4321,7 +7574,534 @@ impl Registry {
                 .mutates_document = true;
         }
 
-        Registry { commands }
+        // hew.compute.* (HEW_API.md §7 "Compute"): pure computations on
+        // `SolidSpec` operands (`crate::solid_spec`), served on every host.
+        {
+            let xyz = serde_json::json!({ "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 });
+            let xy = serde_json::json!({ "type": "array", "items": { "type": "number" }, "minItems": 2, "maxItems": 2 });
+            let pose = serde_json::json!({
+                "type": "array", "items": { "type": "number" }, "minItems": 12, "maxItems": 12,
+                "description": "row-major 3×4; replaces the world pose; a mirroring pose refuses mirrored_pose"
+            });
+            let plane = serde_json::json!({
+                "type": "object",
+                "properties": { "origin": xyz.clone(), "normal": xyz.clone() },
+                "required": ["origin", "normal"],
+                "additionalProperties": false,
+                "description": "world coordinates"
+            });
+            let solid_spec = serde_json::json!({
+                "description": "SolidSpec: {id|path, pose?} (exactly one object), {prism: {plane, loops, distance}} (first loop outer, the rest holes), or {box: {min, max, pose?}}",
+                "oneOf": [
+                    {
+                        "type": "object",
+                        "properties": { "id": { "type": "string" }, "pose": pose.clone() },
+                        "required": ["id"],
+                        "additionalProperties": false
+                    },
+                    {
+                        "type": "object",
+                        "properties": {
+                            "path": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+                            "pose": pose.clone()
+                        },
+                        "required": ["path"],
+                        "additionalProperties": false
+                    },
+                    {
+                        "type": "object",
+                        "properties": {
+                            "prism": {
+                                "type": "object",
+                                "properties": {
+                                    "plane": plane.clone(),
+                                    "loops": { "type": "array", "minItems": 1, "items": { "type": "array", "minItems": 3, "items": xyz.clone() } },
+                                    "distance": { "type": "number" }
+                                },
+                                "required": ["plane", "loops", "distance"],
+                                "additionalProperties": false
+                            }
+                        },
+                        "required": ["prism"],
+                        "additionalProperties": false
+                    },
+                    {
+                        "type": "object",
+                        "properties": {
+                            "box": {
+                                "type": "object",
+                                "properties": { "min": xyz.clone(), "max": xyz.clone(), "pose": pose.clone() },
+                                "required": ["min", "max"],
+                                "additionalProperties": false
+                            }
+                        },
+                        "required": ["box"],
+                        "additionalProperties": false
+                    }
+                ]
+            });
+            let want = serde_json::json!({
+                "type": "array",
+                "items": { "type": "string", "enum": ["mesh", "topology", "measure", "shells"] },
+                "description": "the result blocks to answer; defaults to [\"measure\"]"
+            });
+            let bbox = serde_json::json!({
+                "type": ["object", "null"],
+                "properties": { "min": xyz.clone(), "max": xyz.clone() },
+                "required": ["min", "max"]
+            });
+            let measure = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "volume": { "type": ["number", "null"], "description": "cubic meters; null for an object that is not watertight" },
+                    "area": { "type": "number", "description": "square meters, holes subtracted" },
+                    "bbox": bbox.clone()
+                },
+                "required": ["volume", "area", "bbox"]
+            });
+            // The query shapes, with the ids a transient result does not
+            // have made nullable.
+            let mut mesh = commands
+                .get("hew.query.mesh")
+                .expect("declared above")
+                .result_schema
+                .clone();
+            mesh["properties"]["parts"]["items"]["properties"]["id"] = serde_json::json!({ "type": ["string", "null"], "description": "null on a computed mesh" });
+            let mut topology = commands
+                .get("hew.query.topology")
+                .expect("declared above")
+                .result_schema
+                .clone();
+            topology["properties"]["object"] = serde_json::json!({ "type": ["string", "null"], "description": "null on a computed solid" });
+            let blocks = |solid: bool| {
+                let mut properties = serde_json::json!({
+                    "mesh": mesh.clone(),
+                    "topology": topology.clone(),
+                    "measure": measure.clone(),
+                    "shells": { "type": "integer", "minimum": 0, "description": "connected pieces in the result" }
+                });
+                let mut required = serde_json::json!([]);
+                if solid {
+                    properties["solid"] = serde_json::json!({ "type": "boolean", "description": "false when nothing is left (no other block then)" });
+                    required = serde_json::json!(["solid"]);
+                }
+                serde_json::json!({ "type": "object", "properties": properties, "required": required })
+            };
+            let solid_refusals = || {
+                vec![
+                    "unknown_entity",
+                    "unknown_occurrence",
+                    "not_an_object",
+                    "mirrored_pose",
+                    "compute_busy",
+                    "compute_too_large",
+                    "mesh_too_large",
+                    "face_not_flat",
+                ]
+            };
+            let edge = serde_json::json!({
+                "oneOf": [
+                    { "type": "object", "properties": { "kind": { "const": "line" }, "a": xy.clone(), "b": xy.clone() }, "required": ["kind", "a", "b"] },
+                    { "type": "object", "properties": { "kind": { "const": "arc" }, "center": xy.clone(), "radius": { "type": "number" }, "start": xy.clone(), "end": xy.clone(), "ccw": { "type": "boolean" } }, "required": ["kind", "center", "radius", "start", "end", "ccw"] },
+                    { "type": "object", "properties": { "kind": { "const": "circle" }, "center": xy.clone(), "radius": { "type": "number" } }, "required": ["kind", "center", "radius"] }
+                ]
+            });
+            let loops_result = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "loops": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "outer": { "type": "boolean", "description": "an outer boundary (counter-clockwise), else a hole (clockwise)" },
+                                "edges": { "type": "array", "items": edge }
+                            },
+                            "required": ["outer", "edges"]
+                        }
+                    }
+                },
+                "required": ["loops"]
+            });
+
+            let cmd = commands
+                .get_mut("hew.compute.boolean")
+                .expect("declared above");
+            cmd.implemented = true;
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "op": { "type": "string", "enum": ["union", "subtract", "intersect"] },
+                    "a": solid_spec.clone(),
+                    "b": solid_spec.clone(),
+                    "want": want.clone()
+                },
+                "required": ["op", "a", "b"],
+                "additionalProperties": false
+            });
+            cmd.result_schema = blocks(true);
+            cmd.result_schema["properties"]["tidied"] = tidied_schema();
+            cmd.refusals = solid_refusals();
+            cmd.refusals.extend([
+                "operand_not_solid",
+                "degenerate_contact",
+                "operand_face_not_flat",
+                "arrangement_failed",
+                "result_too_thin",
+                "nothing_removed",
+                "singular_transform",
+            ]);
+
+            let cmd = commands
+                .get_mut("hew.compute.slice")
+                .expect("declared above");
+            cmd.implemented = true;
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": { "solid": solid_spec.clone(), "plane": plane.clone(), "want": want.clone() },
+                "required": ["solid", "plane"],
+                "additionalProperties": false
+            });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "positive": blocks(false),
+                    "negative": blocks(false),
+                    "tidied": tidied_schema()
+                },
+                "required": ["positive", "negative"],
+                "description": "positive is the piece on the side the plane normal points to"
+            });
+            cmd.refusals = solid_refusals();
+            cmd.refusals
+                .extend(["not_solid", "plane_misses_solid", "degenerate"]);
+
+            let cmd = commands
+                .get_mut("hew.compute.shells")
+                .expect("declared above");
+            cmd.implemented = true;
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "solid": solid_spec.clone(),
+                    "want_mesh": { "type": "boolean", "description": "answer each piece's mesh too; defaults to false" }
+                },
+                "required": ["solid"],
+                "additionalProperties": false
+            });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "count": { "type": "integer", "minimum": 0 },
+                    "shells": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": { "measure": measure.clone(), "mesh": mesh.clone() },
+                            "required": ["measure"]
+                        }
+                    }
+                },
+                "required": ["count", "shells"]
+            });
+            cmd.refusals = solid_refusals();
+
+            let cmd = commands
+                .get_mut("hew.compute.measure")
+                .expect("declared above");
+            cmd.implemented = true;
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": { "solid": solid_spec.clone() },
+                "required": ["solid"],
+                "additionalProperties": false
+            });
+            let mut with_centroid = measure.clone();
+            with_centroid["properties"]["centroid"] = serde_json::json!({
+                "type": ["array", "null"], "items": { "type": "number" }, "minItems": 3, "maxItems": 3,
+                "description": "the volume centroid; null for an object that is not watertight"
+            });
+            with_centroid["required"] = serde_json::json!(["volume", "area", "bbox", "centroid"]);
+            cmd.result_schema = with_centroid;
+            cmd.refusals = solid_refusals();
+            cmd.refusals.retain(|r| *r != "mesh_too_large");
+
+            let cmd = commands
+                .get_mut("hew.compute.outline")
+                .expect("declared above");
+            cmd.implemented = true;
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "id": { "type": "string", "description": "a world node's public id" },
+                    "path": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+                    "frame": {
+                        "description": "\"part\" (the default: hew.query.part_frame's frame) or {origin, x, y, z}, orthonormal and right-handed",
+                        "oneOf": [
+                            { "type": "string", "enum": ["part"] },
+                            {
+                                "type": "object",
+                                "properties": { "origin": xyz.clone(), "x": xyz.clone(), "y": xyz.clone(), "z": xyz.clone() },
+                                "required": ["origin", "x", "y", "z"],
+                                "additionalProperties": false
+                            }
+                        ]
+                    },
+                    "which": {
+                        "type": "string",
+                        "enum": ["largest_face", "projection"],
+                        "description": "largest_face: the loops of the part's largest face; projection: the silhouette seen along the frame's z"
+                    }
+                },
+                "required": ["which"],
+                "additionalProperties": false
+            });
+            cmd.result_schema = loops_result.clone();
+            cmd.refusals = vec![
+                "unknown_entity",
+                "unknown_occurrence",
+                "invalid_frame",
+                "no_part_frame",
+                "compute_busy",
+                "compute_too_large",
+                "too_many_occurrences",
+            ];
+
+            let cmd = commands
+                .get_mut("hew.compute.offset")
+                .expect("declared above");
+            cmd.implemented = true;
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "loops": {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": { "type": "array", "minItems": 3, "items": xy.clone() },
+                        "description": "closed 2D loops, the first the outer boundary, the rest holes, in either winding"
+                    },
+                    "distance": { "type": "number", "description": "positive grows the material, negative shrinks it" },
+                    "join": { "type": "string", "enum": ["miter", "round"], "description": "miter (the default); round is reserved and not available yet" }
+                },
+                "required": ["loops", "distance"],
+                "additionalProperties": false
+            });
+            cmd.result_schema = loops_result;
+            cmd.refusals = vec!["offset_too_small", "offset_collapsed", "compute_busy"];
+
+            // Reserved rows (core C6 and C7): the shapes are pinned now and
+            // may change with their bodies.
+            let cmd = commands
+                .get_mut("hew.compute.project")
+                .expect("declared above");
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "solid": solid_spec.clone(),
+                    "plane": plane.clone(),
+                    "want": { "type": "array", "items": { "type": "string", "enum": ["outline", "layers"] } }
+                },
+                "required": ["solid", "plane"],
+                "additionalProperties": false
+            });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "outline": loops_result_items(&xy),
+                    "layers": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": { "depth": { "type": "number" }, "loops": loops_result_items(&xy) },
+                            "required": ["depth", "loops"]
+                        }
+                    }
+                }
+            });
+            let cmd = commands
+                .get_mut("hew.compute.stretch")
+                .expect("declared above");
+            cmd.params_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "paths": { "type": "array", "items": occurrence_locator_schema() },
+                    "frame": {
+                        "oneOf": [
+                            { "type": "string", "enum": ["active", "context", "entity"] },
+                            {
+                                "type": "object",
+                                "properties": { "origin": xyz.clone(), "x": xyz.clone(), "y": xyz.clone(), "z": xyz.clone() },
+                                "required": ["origin", "x", "y", "z"],
+                                "additionalProperties": false
+                            }
+                        ]
+                    },
+                    "axis": { "type": "integer", "enum": [0, 1, 2] },
+                    "cutters": {
+                        "oneOf": [
+                            { "type": "array", "items": { "type": "number" } },
+                            {
+                                "type": "object",
+                                "properties": { "positions": { "type": "array", "items": { "type": "number" } } },
+                                "required": ["positions"],
+                                "additionalProperties": false
+                            }
+                        ]
+                    },
+                    "mode": {
+                        "oneOf": [
+                            { "type": "string", "enum": ["end", "centered"] },
+                            {
+                                "type": "object",
+                                "properties": { "interior": { "type": "integer", "minimum": 0 } },
+                                "required": ["interior"],
+                                "additionalProperties": false
+                            }
+                        ]
+                    },
+                    "distance": { "type": "number" },
+                    "dimension": { "type": "number" }
+                },
+                "required": ["paths", "axis"],
+                "additionalProperties": false
+            });
+            cmd.result_schema = serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "applied": { "type": "number" },
+                    "max_compression": { "type": "number" },
+                    "cutters": { "type": "array", "items": { "type": "number" } }
+                }
+            });
+        }
+
+        // The document's clock on every read of the model and of its
+        // history (docs/agents/HEW_API.md §7): what `expect_generation`
+        // compares, and the epoch that never runs backwards.
+        for name in [
+            "hew.query.scene",
+            "hew.query.entity",
+            "hew.query.faces",
+            "hew.query.measure",
+            "hew.query.raycast",
+            "hew.query.resolve",
+            "hew.query.context",
+            "hew.query.occurrences",
+            "hew.query.part_frame",
+            "hew.query.signature",
+            "hew.query.mesh",
+            "hew.query.topology",
+            "hew.history.status",
+        ] {
+            let root = commands
+                .get_mut(name)
+                .expect("declared above")
+                .result_schema
+                .as_object_mut()
+                .expect("an object schema");
+            // A `oneOf` result carries the clock in every branch (the
+            // generated client types render only the branches).
+            let mut targets: Vec<&mut serde_json::Map<String, serde_json::Value>> =
+                match root.get_mut("oneOf").and_then(|v| v.as_array_mut()) {
+                    Some(branches) => branches
+                        .iter_mut()
+                        .map(|b| b.as_object_mut().expect("a branch is an object schema"))
+                        .collect(),
+                    None => vec![root],
+                };
+            for schema in targets.iter_mut() {
+                let properties = schema
+                    .entry("properties")
+                    .or_insert_with(|| serde_json::json!({}))
+                    .as_object_mut()
+                    .expect("properties is an object");
+                properties.insert(
+                    "generation".into(),
+                    serde_json::json!({ "type": "integer", "minimum": 0 }),
+                );
+                properties.insert(
+                    "epoch".into(),
+                    serde_json::json!({ "type": "integer", "minimum": 0 }),
+                );
+                let required = schema
+                    .entry("required")
+                    .or_insert_with(|| serde_json::json!([]));
+                let required = required.as_array_mut().expect("required is a list");
+                required.push("generation".into());
+                required.push("epoch".into());
+            }
+        }
+
+        // A document replacement cannot be undone by a compound abort, so
+        // it is refused while one is open (docs/agents/PLUGINS.md
+        // "Compounds").
+        for name in [
+            "hew.doc.new",
+            "hew.doc.open",
+            "hew.doc.revert",
+            "hew.doc.close",
+        ] {
+            commands
+                .get_mut(name)
+                .expect("declared above")
+                .refusals
+                .push("document_busy");
+        }
+
+        // Lock (OW-1): every implemented command that can edit a node can
+        // be refused by a lock, so each one lists `locked_node`. The
+        // mutating commands that never reach a node's contents, placement,
+        // name, tags, attributes, material or structure are left out:
+        // locking itself, view state (scenes, tag visibility), guides,
+        // geo-location, palette edits, additions that make something new
+        // (a library insert, a new placement, a new tag or material), a
+        // purge (it leaves a definition holding a lock in place), and
+        // closing an editing context. Opening one (`hew.view.enter`) can
+        // be refused.
+        const CANNOT_MEET_A_LOCK: &[&str] = &[
+            "hew.entity.lock",
+            "hew.entity.unlock",
+            "hew.doc.transact",
+            "hew.context.exit",
+            "hew.geo.set",
+            "hew.guide.angular",
+            "hew.guide.clear",
+            "hew.guide.line",
+            "hew.guide.point",
+            "hew.library.insert",
+            "hew.component.place",
+            "hew.doc.purge_unused",
+            "hew.material.create",
+            "hew.material.set_opacity",
+            "hew.material.set_pbr",
+            "hew.tag.create",
+            "hew.tag.set_visible",
+        ];
+        for (name, draft) in commands.iter_mut() {
+            let edits = matches!(draft.class, CommandClass::ModelMutating)
+                && !name.starts_with("hew.scenes.")
+                && !CANNOT_MEET_A_LOCK.contains(name);
+            if (edits || *name == "hew.view.enter")
+                && draft.implemented
+                && !draft.refusals.contains(&"locked_node")
+            {
+                draft.refusals.push("locked_node");
+            }
+        }
+
+        for (name, permission) in permission_table() {
+            commands
+                .get_mut(name)
+                .expect("permission_table names a declared command")
+                .permission = permission;
+        }
+
+        Registry {
+            commands: commands
+                .into_iter()
+                .map(|(name, draft)| (name.to_string(), draft.finish()))
+                .collect(),
+        }
     }
 
     /// Look up a command by its exact method name.
@@ -4329,36 +8109,536 @@ impl Registry {
         self.commands.get(name)
     }
 
-    /// Every declaration, in name order (deterministic).
+    /// Every declaration, in name order (deterministic; PLUGINS.md
+    /// invariant 9).
     pub fn commands(&self) -> impl Iterator<Item = &CommandDecl> {
         self.commands.values()
     }
+
+    /// Adds a plugin's manifest commands as `<id>.<local>` entries that
+    /// dispatch forwards rather than executes (docs/agents/PLUGINS.md
+    /// "Commands"). Atomic: everything is validated first, so on any error
+    /// nothing of this plugin is inserted.
+    pub fn register_plugin(
+        &mut self,
+        id: &str,
+        decls: &[plugin_manifest::CommandContribution],
+    ) -> Result<(), RegisterError> {
+        if plugin_manifest::validate_plugin_id(id).is_err() {
+            return Err(RegisterError::NameOutsidePluginNamespace(id.to_string()));
+        }
+        if decls.len() > plugin_manifest::MAX_COMMANDS {
+            return Err(RegisterError::TooManyCommands(decls.len()));
+        }
+        let mut staged: BTreeMap<String, CommandDecl> = BTreeMap::new();
+        for decl in decls {
+            let name = format!("{id}.{}", decl.id);
+            if !plugin_manifest::is_command_id(&decl.id) {
+                return Err(RegisterError::NameOutsidePluginNamespace(name));
+            }
+            if self.commands.contains_key(&name) || staged.contains_key(&name) {
+                return Err(RegisterError::DuplicateCommand(name));
+            }
+            // A refusal reaches the wire as `<plugin-id>.<name>`; a name
+            // outside the refusal grammar would be a name outside the
+            // plugin's namespace.
+            if let Some(bad) = decl
+                .refusals
+                .iter()
+                .find(|r| !plugin_manifest::is_refusal_name(r))
+            {
+                return Err(RegisterError::NameOutsidePluginNamespace(format!(
+                    "{id}.{bad}"
+                )));
+            }
+            for schema in [&decl.params, &decl.result] {
+                crate::schema_check::validate_schema(schema).map_err(|why| {
+                    RegisterError::InvalidSchema {
+                        command: name.clone(),
+                        why,
+                    }
+                })?;
+            }
+            let mutating = decl.class == plugin_manifest::CommandContributionClass::Mutating;
+            let permission = match &decl.permission {
+                None if mutating => Permission::ModelWrite,
+                None => Permission::ModelRead,
+                // `plugin_manifest::parse` refuses a permission a command may
+                // not demand, but declarations handed to the registry
+                // directly (the wasm boundary) skip it: anything outside
+                // that set fails closed, reachable by first-party
+                // connections only.
+                Some(p) if plugin_manifest::is_command_permission(p.as_str()) => {
+                    Permission::parse(p.as_str()).unwrap_or(Permission::FirstParty)
+                }
+                Some(_) => Permission::FirstParty,
+            };
+            staged.insert(
+                name.clone(),
+                CommandDecl {
+                    name,
+                    version: 1,
+                    class: if mutating {
+                        CommandClass::Solitary
+                    } else {
+                        CommandClass::ReadOnly
+                    },
+                    served: Served::Host,
+                    tier: Tier::Standard,
+                    permission,
+                    provider: Provider::Plugin(id.to_string()),
+                    summary: decl.summary.clone(),
+                    label: decl.label.as_ref().map(english),
+                    timeout_ms: decl.timeout_ms.min(MAX_PLUGIN_TIMEOUT_MS),
+                    concurrency: decl.concurrency,
+                    deprecated: None,
+                    params_schema: decl.params.clone(),
+                    result_schema: decl.result.clone(),
+                    refusals: decl.refusals.clone(),
+                    implemented: true,
+                    mutates_document: mutating,
+                },
+            );
+        }
+        self.commands.extend(staged);
+        Ok(())
+    }
+
+    /// Removes every command `id` provides.
+    pub fn unregister_plugin(&mut self, id: &str) {
+        self.commands
+            .retain(|_, c| c.plugin_id().is_none_or(|p| p != id));
+    }
+
+    /// The commands `id` provides, in name order.
+    pub fn plugin_commands<'a>(
+        &'a self,
+        id: &'a str,
+    ) -> impl Iterator<Item = &'a CommandDecl> + 'a {
+        self.commands
+            .values()
+            .filter(move |c| c.plugin_id() == Some(id))
+    }
+
+    /// Protocol 1 plus every plugin-provided entry a
+    /// `hew.meta.capabilities` result lists (entries carrying
+    /// `provider: { plugin }`); used by MCP in `--live` mode. Unknown or
+    /// malformed entries are skipped, never fatal, and never displace a
+    /// protocol-1 entry.
+    pub fn from_capabilities(result: &serde_json::Value) -> Registry {
+        let mut registry = Registry::protocol_1();
+        let entries = result
+            .get("commands")
+            .and_then(serde_json::Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        for entry in entries {
+            if let Some(decl) = plugin_decl_from_capability(entry)
+                && !registry.commands.contains_key(&decl.name)
+            {
+                registry.commands.insert(decl.name.clone(), decl);
+            }
+        }
+        registry
+    }
+}
+
+/// The English form of a manifest string: the plain text, the `en` text
+/// (else the first locale's), or the catalog key.
+fn english(text: &plugin_manifest::LocalizableString) -> String {
+    match text {
+        plugin_manifest::LocalizableString::Plain(s) => s.clone(),
+        plugin_manifest::LocalizableString::ByLocale(map) => map
+            .get("en")
+            .or_else(|| map.values().next())
+            .cloned()
+            .unwrap_or_default(),
+        plugin_manifest::LocalizableString::Key { key } => key.clone(),
+    }
+}
+
+/// One plugin entry of a capabilities result back into a declaration, or
+/// `None` when it is not a well-formed plugin entry.
+fn plugin_decl_from_capability(entry: &serde_json::Value) -> Option<CommandDecl> {
+    use serde_json::Value;
+    let plugin = entry.pointer("/provider/plugin")?.as_str()?;
+    plugin_manifest::validate_plugin_id(plugin).ok()?;
+    let name = entry.get("name")?.as_str()?;
+    let local = name.strip_prefix(plugin)?.strip_prefix('.')?;
+    if !plugin_manifest::is_command_id(local) {
+        return None;
+    }
+    let (class, mutating) = match entry.get("class")?.as_str()? {
+        "read_only" => (CommandClass::ReadOnly, false),
+        "solitary" => (CommandClass::Solitary, true),
+        _ => return None,
+    };
+    let params_schema = entry.get("params")?.clone();
+    let result_schema = entry.get("result")?.clone();
+    crate::schema_check::validate_schema(&params_schema).ok()?;
+    crate::schema_check::validate_schema(&result_schema).ok()?;
+    let refusals = entry
+        .get("refusals")?
+        .as_array()?
+        .iter()
+        .map(|r| r.as_str().map(str::to_string))
+        .collect::<Option<Vec<_>>>()?;
+    let label = match entry.get("label") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(s)) => Some(s.clone()),
+        Some(_) => return None,
+    };
+    let concurrency = match entry.get("concurrency")?.as_str()? {
+        "parallel" => plugin_manifest::Concurrency::Parallel,
+        "serial" => plugin_manifest::Concurrency::Serial,
+        _ => return None,
+    };
+    let timeout_ms = u32::try_from(entry.get("timeout_ms")?.as_u64()?).ok()?;
+    Some(CommandDecl {
+        name: name.to_string(),
+        version: u32::try_from(entry.get("version")?.as_u64()?).ok()?,
+        class,
+        served: Served::Host,
+        tier: Tier::Standard,
+        // `first_party` is how capabilities shows the fail-closed permission
+        // of a declaration that named none a command may demand; it has no
+        // parse form, so it is read back here.
+        permission: match entry.get("permission")?.as_str()? {
+            "first_party" => Permission::FirstParty,
+            other => Permission::parse(other).ok()?,
+        },
+        provider: Provider::Plugin(plugin.to_string()),
+        summary: entry.get("summary")?.as_str()?.to_string(),
+        label,
+        timeout_ms: timeout_ms.min(MAX_PLUGIN_TIMEOUT_MS),
+        concurrency,
+        deprecated: None,
+        params_schema,
+        result_schema,
+        refusals,
+        implemented: entry.get("implemented")?.as_bool()?,
+        mutates_document: mutating,
+    })
+}
+
+/// The optional `tidied` block on a boolean's result
+/// (docs/agents/HEW_API.md §7): present only when the boolean merged away,
+/// or kept, pieces of its own cut narrower than `kernel::tol::FEATURE_MIN`.
+fn tidied_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "description": "present only when the boolean's cut left faces narrower than feature_min (0.1 µm): it merged them into their neighbors, moving no point farther than twice feature_min, or kept them when merging could not give a valid solid. Several booleans in one command sum",
+        "properties": {
+            "slivers_merged": { "type": "integer", "minimum": 0, "description": "faces under feature_min the merge removed" },
+            "slivers_kept": { "type": "integer", "minimum": 0, "description": "faces under feature_min the result still holds" },
+            "points_moved": { "type": "integer", "minimum": 0 },
+            "max_move": { "type": "number", "minimum": 0, "description": "meters, at most twice feature_min" },
+            "faces_split": { "type": "integer", "minimum": 0, "description": "faces split into flat triangles because a moved point bent them" },
+            "sites": { "type": "array", "items": { "type": "array", "items": { "type": "number" }, "minItems": 3, "maxItems": 3 }, "maxItems": 16, "description": "one point per place something was merged, the first 16: world coordinates, except where the boolean ran in a definition's own geometry (a push_pull on a definition member, a rejoin of a definition's pieces), which reports the definition's coordinates" },
+            "sites_total": { "type": "integer", "minimum": 0 },
+            "feature_min": { "type": "number", "description": "meters: 1e-7" }
+        },
+        "required": ["slivers_merged", "slivers_kept", "points_moved", "max_move", "faces_split", "sites", "sites_total", "feature_min"]
+    })
+}
+
+/// Every protocol-1 command's permission (docs/agents/HEW_API.md §10).
+/// Declared per command, not derived from its class: the classes do not
+/// line up with what a person grants (`hew.scenes.describe` is
+/// model-mutating, `hew.library.save` read-only).
+pub fn permission_table() -> Vec<(&'static str, Permission)> {
+    use Permission::*;
+    let rows: [(Permission, &[&'static str]); 10] = [
+        (
+            Always,
+            &[
+                "hew.meta.hello",
+                "hew.meta.capabilities",
+                "hew.doc.attach",
+                "hew.doc.transact",
+                "hew.event.subscribe",
+                "hew.event.unsubscribe",
+                "hew.permissions.request",
+            ],
+        ),
+        (
+            ModelRead,
+            &[
+                "hew.query.changes_since",
+                "hew.query.context",
+                "hew.query.entity",
+                "hew.geo.get",
+                "hew.query.faces",
+                "hew.query.measure",
+                "hew.query.mesh",
+                "hew.query.occurrences",
+                "hew.query.part_frame",
+                "hew.query.raycast",
+                "hew.query.signature",
+                "hew.query.resolve",
+                "hew.query.scene",
+                "hew.query.topology",
+                "hew.attr.get",
+                "hew.meta.documents",
+                "hew.history.status",
+                "hew.scenes.list",
+                "hew.scenes.describe",
+                "hew.library.list",
+                "hew.library.describe",
+                "hew.library.status",
+                "hew.doc.health",
+                "hew.solid.imprints",
+                "hew.sketch.units",
+                "hew.view.snapshot",
+                "hew.view.line_drawing",
+                "hew.print.pdf",
+                "hew.compute.boolean",
+                "hew.compute.slice",
+                "hew.compute.shells",
+                "hew.compute.measure",
+                "hew.compute.outline",
+                "hew.compute.offset",
+                "hew.compute.project",
+                "hew.compute.stretch",
+            ],
+        ),
+        (
+            ModelWrite,
+            &[
+                "hew.sketch.copy",
+                "hew.sketch.delete",
+                "hew.sketch.draw_arc",
+                "hew.sketch.draw_circle",
+                "hew.sketch.draw_line",
+                "hew.sketch.draw_polygon",
+                "hew.sketch.draw_rect",
+                "hew.sketch.move",
+                "hew.sketch.offset",
+                "hew.sketch.rotate",
+                "hew.sketch.scale",
+                "hew.solid.cap",
+                "hew.solid.mend",
+                "hew.solid.delete_faces",
+                "hew.solid.delete_imprint",
+                "hew.solid.extrude",
+                "hew.solid.follow_me",
+                "hew.solid.from_faces",
+                "hew.solid.intersect",
+                "hew.solid.mark_surface",
+                "hew.solid.move_imprint",
+                "hew.solid.push_pull",
+                "hew.solid.rejoin",
+                "hew.solid.rotate_imprint",
+                "hew.solid.scale_imprint",
+                "hew.solid.slice",
+                "hew.solid.subtract",
+                "hew.solid.thicken",
+                "hew.solid.union",
+                "hew.entity.delete",
+                "hew.entity.flip",
+                "hew.entity.move",
+                "hew.entity.rename",
+                "hew.entity.rotate",
+                "hew.entity.scale",
+                "hew.entity.set_frame",
+                "hew.entity.lock",
+                "hew.entity.unlock",
+                "hew.context.enter",
+                "hew.context.exit",
+                "hew.group.create",
+                "hew.group.explode",
+                "hew.group.reparent",
+                "hew.component.create",
+                "hew.component.explode",
+                "hew.component.make_unique",
+                "hew.component.place",
+                "hew.component.promote",
+                "hew.component.import_definition",
+                "hew.component.rebase",
+                "hew.component.flip_instance",
+                "hew.material.create",
+                "hew.material.paint",
+                "hew.material.position_texture",
+                "hew.material.replace",
+                "hew.material.set_default",
+                "hew.material.set_opacity",
+                "hew.material.set_pbr",
+                "hew.geo.set",
+                "hew.tag.assign",
+                "hew.tag.create",
+                "hew.tag.delete",
+                "hew.tag.rename",
+                "hew.tag.set_visible",
+                "hew.guide.angular",
+                "hew.guide.clear",
+                "hew.guide.line",
+                "hew.guide.point",
+                "hew.scenes.add",
+                "hew.scenes.update",
+                "hew.scenes.rename",
+                "hew.scenes.remove",
+                "hew.scenes.reorder",
+                "hew.scenes.apply",
+                "hew.history.undo",
+                "hew.history.redo",
+                "hew.doc.purge_unused",
+                // True Curves: blends, generated shapes, Smooth, repairs.
+                "hew.solid.fillet",
+                "hew.solid.chamfer",
+                "hew.solid.remove_blend",
+                "hew.solid.resize_blend",
+                "hew.solid.revolve",
+                "hew.solid.loft",
+                "hew.solid.deform",
+                "hew.solid.shell",
+                "hew.solid.project",
+                "hew.solid.bake",
+                "hew.solid.soften",
+                "hew.solid.remove_degenerate_faces",
+                "hew.object.smooth",
+                "hew.object.crease",
+                "hew.array.path",
+            ],
+        ),
+        (AttributesWrite, &["hew.attr.set", "hew.attr.delete"]),
+        (
+            View,
+            &[
+                "hew.view.camera",
+                "hew.view.zoom_extents",
+                "hew.view.units",
+                "hew.selection.get",
+                "hew.selection.set",
+                "hew.selection.clear",
+                "hew.view.hide",
+                "hew.view.show",
+                "hew.view.show_all",
+                "hew.view.hidden",
+                "hew.view.isolate",
+                "hew.view.clear_isolation",
+                "hew.view.zoom_to",
+                "hew.view.enter",
+                "hew.view.exit",
+                "hew.view.exit_all",
+            ],
+        ),
+        (
+            DocumentsSave,
+            &["hew.doc.save", "hew.doc.export", "hew.doc.import"],
+        ),
+        (DocumentsDiscard, &["hew.doc.close", "hew.doc.revert"]),
+        (
+            DocumentsOther,
+            &["hew.doc.new", "hew.doc.open", "hew.doc.focus"],
+        ),
+        (
+            Library,
+            &[
+                "hew.library.insert",
+                "hew.library.save",
+                "hew.library.remove",
+                "hew.library.update_meta",
+                "hew.library.update",
+            ],
+        ),
+        // Declaration-only: held by no profile a plugin or an app grant
+        // can name, so only a first-party (`all`) connection may call
+        // these. They manage plugins, which a plugin may not.
+        (
+            FirstParty,
+            &[
+                "hew.plugin.list",
+                "hew.plugin.dev",
+                "hew.plugin.activity",
+                "hew.plugin.reload",
+            ],
+        ),
+    ];
+    rows.into_iter()
+        .flat_map(|(p, names)| names.iter().map(move |n| (*n, p.clone())))
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    #[test]
+    fn rotate_angle_says_radians() {
+        let reg = Registry::protocol_1();
+        let rotate = reg.get("hew.entity.rotate").expect("declared");
+        let description = rotate.params_schema["properties"]["angle"]["description"]
+            .as_str()
+            .expect("angle is described");
+        assert!(description.contains("radians"), "{description}");
+    }
+
+    /// Two plugin commands under `com.example.lib`: a read-only `sum` and a
+    /// mutating `shelf.add`.
+    pub(crate) fn sample_plugin() -> Vec<plugin_manifest::CommandContribution> {
+        serde_json::from_value(serde_json::json!([
+            {
+                "id": "sum",
+                "class": "read_only",
+                "summary": "Adds.",
+                "params": {
+                    "type": "object",
+                    "properties": { "a": { "type": "number" }, "b": { "type": "number" } },
+                    "required": ["a", "b"],
+                    "additionalProperties": false
+                },
+                "refusals": ["too_big"]
+            },
+            {
+                "id": "shelf.add",
+                "class": "mutating",
+                "summary": "Adds a shelf.",
+                "label": { "ja": "棚", "en": "Add shelf" },
+                "timeout_ms": 900000,
+                "concurrency": "serial"
+            }
+        ]))
+        .expect("sample declarations parse")
+    }
+
     /// Registry completeness (docs/agents/HEW_API.md §14): every declared command
     /// carries schemas, a summary, and a non-empty refusal inventory; names
-    /// are namespaced and well-formed; versions start at 1.
+    /// are namespaced and well-formed; versions start at 1. A plugin is
+    /// registered first so both naming arms run.
     #[test]
     fn every_declaration_is_complete() {
-        let reg = Registry::protocol_1();
+        let mut reg = Registry::protocol_1();
+        reg.register_plugin("com.example.lib", &sample_plugin())
+            .expect("the sample registers");
         assert!(reg.commands().count() >= 50);
+        let mut plugin_entries = 0;
         for cmd in reg.commands() {
-            assert!(
-                cmd.name.starts_with("hew.") && cmd.name.split('.').count() == 3,
-                "malformed name {}",
-                cmd.name
-            );
-            assert!(
-                cmd.name
-                    .chars()
-                    .all(|c| c.is_ascii_lowercase() || c == '.' || c == '_'),
-                "name not lower snake_case: {}",
-                cmd.name
-            );
+            if let Some(plugin) = cmd.plugin_id() {
+                plugin_entries += 1;
+                let local = cmd
+                    .name
+                    .strip_prefix(plugin)
+                    .and_then(|rest| rest.strip_prefix('.'))
+                    .unwrap_or_else(|| panic!("{} is not under {plugin}", cmd.name));
+                assert_eq!(cmd.name, format!("{plugin}.{local}"));
+                assert!(
+                    plugin_manifest::is_command_id(local),
+                    "local name {local} breaks the command id grammar"
+                );
+            } else {
+                assert!(
+                    cmd.name.starts_with("hew.") && cmd.name.split('.').count() == 3,
+                    "malformed name {}",
+                    cmd.name
+                );
+                assert!(
+                    cmd.name
+                        .chars()
+                        .all(|c| c.is_ascii_lowercase() || c == '.' || c == '_'),
+                    "name not lower snake_case: {}",
+                    cmd.name
+                );
+            }
             assert!(!cmd.summary.is_empty(), "{} lacks a summary", cmd.name);
             assert!(
                 cmd.params_schema.is_object(),
@@ -4373,12 +8653,243 @@ mod tests {
             assert!(cmd.version >= 1);
             if !cmd.implemented {
                 assert!(
-                    cmd.refusals.contains(&"unimplemented"),
+                    cmd.refusals.iter().any(|r| r == "unimplemented"),
                     "{} is unimplemented but does not declare the unimplemented refusal",
                     cmd.name
                 );
             }
         }
+        assert_eq!(plugin_entries, 2);
+    }
+
+    #[test]
+    fn first_party_entries_carry_their_provider_and_defaults() {
+        for cmd in Registry::protocol_1().commands() {
+            let expected = match cmd.served {
+                Served::Kernel => Provider::Kernel,
+                Served::Host => Provider::Host,
+            };
+            assert_eq!(cmd.provider, expected, "{}", cmd.name);
+            assert_eq!(cmd.label, None);
+            assert_eq!(cmd.timeout_ms, 0);
+            assert_eq!(cmd.concurrency, plugin_manifest::Concurrency::Parallel);
+            assert_eq!(cmd.deprecated, None);
+        }
+    }
+
+    #[test]
+    fn register_plugin_is_atomic_and_refuses_duplicates() {
+        let mut reg = Registry::protocol_1();
+        let before = reg.commands().count();
+        reg.register_plugin("com.example.lib", &sample_plugin())
+            .expect("registers");
+        let sum = reg.get("com.example.lib.sum").expect("sum registered");
+        assert_eq!(sum.class, CommandClass::ReadOnly);
+        assert!(!sum.mutates_document);
+        assert_eq!(sum.permission, Permission::ModelRead);
+        assert_eq!(sum.served, Served::Host);
+        assert_eq!(sum.tier, Tier::Standard);
+        assert_eq!(sum.provider, Provider::Plugin("com.example.lib".into()));
+        assert_eq!(sum.refusals, vec!["too_big".to_string()]);
+        assert!(sum.implemented);
+        let add = reg
+            .get("com.example.lib.shelf.add")
+            .expect("shelf.add registered");
+        assert_eq!(add.class, CommandClass::Solitary);
+        assert!(add.mutates_document);
+        assert_eq!(add.permission, Permission::ModelWrite);
+        assert_eq!(add.label.as_deref(), Some("Add shelf"));
+        assert_eq!(add.concurrency, plugin_manifest::Concurrency::Serial);
+        assert_eq!(reg.plugin_commands("com.example.lib").count(), 2);
+
+        // Registering the same plugin again collides on its first name and
+        // leaves the registry as it was.
+        let snapshot: Vec<String> = reg.commands().map(|c| c.name.clone()).collect();
+        assert_eq!(
+            reg.register_plugin("com.example.lib", &sample_plugin()),
+            Err(RegisterError::DuplicateCommand(
+                "com.example.lib.sum".into()
+            ))
+        );
+        // A batch whose LAST command is bad inserts none of the good ones.
+        let mut partly_bad = sample_plugin();
+        partly_bad[1].result = serde_json::json!({ "type": "object", "properties": {} });
+        let err = reg
+            .register_plugin("com.other.lib", &partly_bad)
+            .unwrap_err();
+        assert_eq!(err.name(), "invalid_schema");
+        // Two decls naming the same command inside one batch.
+        let twice = vec![sample_plugin()[0].clone(), sample_plugin()[0].clone()];
+        assert_eq!(
+            reg.register_plugin("com.twice.lib", &twice),
+            Err(RegisterError::DuplicateCommand("com.twice.lib.sum".into()))
+        );
+        for bad_id in [
+            "hew.evil",
+            "nodot",
+            "Com.Example",
+            "con.example",
+            "com1.tools",
+            "lpt9.a",
+        ] {
+            assert_eq!(
+                reg.register_plugin(bad_id, &sample_plugin()),
+                Err(RegisterError::NameOutsidePluginNamespace(bad_id.into()))
+            );
+        }
+        assert!(reg.register_plugin("com10.lib", &sample_plugin()).is_ok());
+        reg.unregister_plugin("com10.lib");
+        let mut bad_local = sample_plugin();
+        bad_local[0].id = "Bad Name".into();
+        assert_eq!(
+            reg.register_plugin("com.local.lib", &bad_local)
+                .unwrap_err()
+                .name(),
+            "name_outside_plugin_namespace"
+        );
+        let mut bad_refusal = sample_plugin();
+        bad_refusal[0].refusals = vec!["Too Big".into()];
+        assert_eq!(
+            reg.register_plugin("com.refusal.lib", &bad_refusal),
+            Err(RegisterError::NameOutsidePluginNamespace(
+                "com.refusal.lib.Too Big".into()
+            ))
+        );
+        let many = vec![sample_plugin()[0].clone(); plugin_manifest::MAX_COMMANDS + 1];
+        assert_eq!(
+            reg.register_plugin("com.many.lib", &many),
+            Err(RegisterError::TooManyCommands(
+                plugin_manifest::MAX_COMMANDS + 1
+            ))
+        );
+        let after: Vec<String> = reg.commands().map(|c| c.name.clone()).collect();
+        assert_eq!(after, snapshot, "a refused registration inserts nothing");
+
+        reg.unregister_plugin("com.example.lib");
+        assert_eq!(reg.commands().count(), before);
+        assert_eq!(reg.plugin_commands("com.example.lib").count(), 0);
+    }
+
+    #[test]
+    fn register_plugin_clamps_timeout() {
+        let mut reg = Registry::protocol_1();
+        reg.register_plugin("com.example.lib", &sample_plugin())
+            .expect("registers");
+        assert_eq!(reg.get("com.example.lib.sum").unwrap().timeout_ms, 50_000);
+        assert_eq!(
+            reg.get("com.example.lib.shelf.add").unwrap().timeout_ms,
+            MAX_PLUGIN_TIMEOUT_MS,
+            "900 s in the manifest is clamped, not refused"
+        );
+        let mut short = sample_plugin();
+        short[0].timeout_ms = 1200;
+        reg.register_plugin("com.short.lib", &short[..1]).unwrap();
+        assert_eq!(reg.get("com.short.lib.sum").unwrap().timeout_ms, 1200);
+    }
+
+    #[test]
+    fn from_capabilities_round_trips() {
+        let mut reg = Registry::protocol_1();
+        reg.register_plugin("com.example.lib", &sample_plugin())
+            .unwrap();
+        let mut other = sample_plugin();
+        other[0].permission =
+            Some(plugin_manifest::PermissionName::parse("attributes.write").unwrap());
+        other[0].label = Some(plugin_manifest::LocalizableString::Plain("Total".into()));
+        reg.register_plugin("org.other.tool", &other).unwrap();
+        // A permission a command may not demand, handed over directly,
+        // fails closed and still round-trips.
+        let mut closed = sample_plugin();
+        closed[0].permission =
+            Some(serde_json::from_value(serde_json::json!("documents.save")).unwrap());
+        reg.register_plugin("net.closed.tool", &closed[..1])
+            .unwrap();
+        assert_eq!(
+            reg.get("net.closed.tool.sum").unwrap().permission,
+            Permission::FirstParty
+        );
+
+        let mut conn = crate::dispatch::Connection::new(crate::grant::Grant::core(), "t");
+        let mut doc = kernel::Document::new();
+        let request = |id: i64, method: &str| crate::envelope::Request {
+            jsonrpc: "2.0".into(),
+            id: Some(crate::envelope::RequestId::Number(id)),
+            method: method.into(),
+            params: Some(serde_json::json!({ "protocol": 1 })),
+            document: None,
+        };
+        conn.dispatch(
+            &reg,
+            &mut doc,
+            &mut crate::host::NoHost,
+            request(0, "hew.meta.hello"),
+        );
+        let crate::dispatch::DispatchOutcome::Reply(caps) = conn.dispatch(
+            &reg,
+            &mut doc,
+            &mut crate::host::NoHost,
+            request(1, "hew.meta.capabilities"),
+        ) else {
+            panic!("capabilities replies")
+        };
+        let mut result = caps.result.expect("capabilities succeeds");
+        // A malformed plugin entry, one under the reserved `hew` id claiming
+        // a first-party name, and a second entry for a name already read
+        // are skipped without dropping the valid ones; the first entry for
+        // a name wins.
+        let commands = result["commands"].as_array_mut().unwrap();
+        commands
+            .push(serde_json::json!({ "name": "com.bad.x", "provider": { "plugin": "com.bad" } }));
+        let mut impostor = commands
+            .iter()
+            .find(|c| c["name"] == "com.example.lib.sum")
+            .unwrap()
+            .clone();
+        impostor["name"] = "hew.query.scene".into();
+        impostor["provider"] = serde_json::json!({ "plugin": "hew" });
+        commands.push(impostor);
+        let mut repeat = commands
+            .iter()
+            .find(|c| c["name"] == "com.example.lib.sum")
+            .unwrap()
+            .clone();
+        repeat["summary"] = "A second, later entry.".into();
+        commands.push(repeat);
+
+        let rebuilt = Registry::from_capabilities(&result);
+        assert!(rebuilt.get("com.bad.x").is_none());
+        assert!(!rebuilt.get("hew.query.scene").unwrap().is_plugin());
+        let names = |r: &Registry| -> Vec<String> {
+            r.commands()
+                .filter(|c| c.is_plugin())
+                .map(|c| c.name.clone())
+                .collect()
+        };
+        assert_eq!(names(&rebuilt), names(&reg));
+        for original in reg.commands().filter(|c| c.is_plugin()) {
+            let copy = rebuilt.get(&original.name).unwrap();
+            assert_eq!(copy.name, original.name);
+            assert_eq!(copy.version, original.version);
+            assert_eq!(copy.class, original.class);
+            assert_eq!(copy.served, original.served);
+            assert_eq!(copy.tier, original.tier);
+            assert_eq!(copy.permission, original.permission);
+            assert_eq!(copy.provider, original.provider);
+            assert_eq!(copy.summary, original.summary);
+            assert_eq!(copy.label, original.label);
+            assert_eq!(copy.timeout_ms, original.timeout_ms);
+            assert_eq!(copy.concurrency, original.concurrency);
+            assert_eq!(copy.deprecated, original.deprecated);
+            assert_eq!(copy.params_schema, original.params_schema);
+            assert_eq!(copy.result_schema, original.result_schema);
+            assert_eq!(copy.refusals, original.refusals);
+            assert_eq!(copy.implemented, original.implemented);
+            assert_eq!(copy.mutates_document, original.mutates_document);
+        }
+        assert_eq!(
+            rebuilt.commands().filter(|c| !c.is_plugin()).count(),
+            Registry::protocol_1().commands().count()
+        );
     }
 
     /// The §7 tier table's Required set is present.
@@ -4402,38 +8913,73 @@ mod tests {
         }
     }
 
-    /// Core is App minus `hew.view.*`, except the view commands with a
-    /// headless render path (§10) — `hew.view.snapshot` and
-    /// `hew.view.line_drawing` — which core grants too, and minus the
-    /// window commands (`hew.doc.close`/`focus`), which have no headless
-    /// meaning. A narrowable maximum, not a different protocol.
+    /// Every table row names a registered command, every registered
+    /// command appears exactly once, and the always-granted set is exactly
+    /// the handshake, introspection, attaching to the bound document, the
+    /// transaction container, the event subscriptions, and a plugin's
+    /// request for optional permissions (a Preview command). The set this
+    /// build serves leaves the Preview one out of a production build, so a
+    /// production capability listing is what it was before it existed.
     #[test]
-    fn core_profile_grants_snapshot_but_withholds_other_view_commands() {
-        let reg = Registry::protocol_1();
+    fn every_command_has_a_permission() {
+        // The table covers the whole inventory, Preview commands included,
+        // whichever build this is.
+        let reg = Registry::reference();
+        let table = permission_table();
+        let mut seen = std::collections::BTreeSet::new();
+        for (name, permission) in &table {
+            let decl = reg
+                .get(name)
+                .unwrap_or_else(|| panic!("{name} is not a registered command"));
+            assert!(seen.insert(name.to_string()), "{name} appears twice");
+            assert_eq!(&decl.permission, permission, "{name}");
+        }
         for cmd in reg.commands() {
-            assert!(Profile::App.grants(cmd));
-            let expected = (cmd.name == "hew.view.snapshot"
-                || cmd.name == "hew.view.line_drawing"
-                || !cmd.name.starts_with("hew.view."))
-                && !matches!(cmd.name, "hew.doc.close" | "hew.doc.focus");
-            assert_eq!(
-                Profile::Core.grants(cmd),
-                expected,
-                "core grant wrong for {}",
+            assert!(
+                seen.contains(&cmd.name),
+                "{} has no permission row",
                 cmd.name
             );
         }
-    }
-
-    /// Pins the specific carve-out directly: today's registry has only one
-    /// `hew.view.*` command, so this is the one live example until a
-    /// future app-only view command exists to demonstrate the withheld
-    /// side too.
-    #[test]
-    fn core_grants_snapshot_specifically() {
-        let reg = Registry::protocol_1();
-        let snapshot = reg.get("hew.view.snapshot").expect("declared above");
-        assert!(Profile::Core.grants(snapshot));
-        assert!(Profile::App.grants(snapshot));
+        assert_eq!(table.len(), reg.commands().count());
+        let always: std::collections::BTreeSet<&str> = table
+            .iter()
+            .filter(|(_, p)| *p == Permission::Always)
+            .map(|(n, _)| *n)
+            .collect();
+        assert_eq!(
+            always,
+            [
+                "hew.meta.hello",
+                "hew.meta.capabilities",
+                "hew.doc.attach",
+                "hew.doc.transact",
+                "hew.event.subscribe",
+                "hew.event.unsubscribe",
+                "hew.permissions.request",
+            ]
+            .into_iter()
+            .collect()
+        );
+        let served: std::collections::BTreeSet<String> = Registry::protocol_1()
+            .commands()
+            .filter(|c| c.permission == Permission::Always)
+            .map(|c| c.name.clone())
+            .collect();
+        let mut expected: std::collections::BTreeSet<String> = [
+            "hew.meta.hello",
+            "hew.meta.capabilities",
+            "hew.doc.attach",
+            "hew.doc.transact",
+            "hew.event.subscribe",
+            "hew.event.unsubscribe",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+        if crate::preview::PREVIEW_BUILD {
+            expected.insert("hew.permissions.request".into());
+        }
+        assert_eq!(served, expected);
     }
 }

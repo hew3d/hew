@@ -11,7 +11,8 @@
  * only, erased at runtime — the same convention ComponentsPanel.test.tsx /
  * scenePanels.test.tsx use), so no wasm/loader mock is required.
  */
-import { render, screen, fireEvent, within } from '@testing-library/react'
+import { kernelErrorMessage } from '../kernelErrors'
+import { render, screen, fireEvent, within, act } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 import { ObjectInfoPanel } from './ObjectInfoPanel'
 import type { Scene as WasmScene } from '../wasm/loader'
@@ -394,7 +395,7 @@ describe('ObjectInfoPanel — annotation selection', () => {
       annotation_text: () => 'Check clearance',
       annotation_tags: () => ['Notes/Review'],
     })
-    render(<ObjectInfoPanel {...baseProps} scene={scene} selectedIds={[]} selectedAnnotation={7n} />)
+    render(<ObjectInfoPanel {...baseProps} scene={scene} selectedIds={[]} selectedAnnotations={[7n]} />)
     expect(screen.getByText('Check clearance')).toBeTruthy()
     expect(screen.getByText('Text')).toBeTruthy()
     expect(screen.getByText('Notes / Review')).toBeTruthy()
@@ -405,7 +406,7 @@ describe('ObjectInfoPanel — annotation selection', () => {
 describe('ObjectInfoPanel — guide selection', () => {
   it('shows a selected guide point read-only', () => {
     const scene = makeScene({ guide_kind: () => 'point', guide_tags: () => [] })
-    render(<ObjectInfoPanel {...baseProps} scene={scene} selectedIds={[]} selectedGuide={7n} />)
+    render(<ObjectInfoPanel {...baseProps} scene={scene} selectedIds={[]} selectedGuides={[7n]} />)
     expect(screen.getByText('Guide point')).toBeTruthy()
     expect(screen.getByText('Guide')).toBeTruthy()
     expect(screen.queryByLabelText('Add tag')).toBeNull()
@@ -415,13 +416,40 @@ describe('ObjectInfoPanel — guide selection', () => {
 
   it('names a selected guide line', () => {
     const scene = makeScene({ guide_kind: () => 'line', guide_tags: () => [] })
-    render(<ObjectInfoPanel {...baseProps} scene={scene} selectedIds={[]} selectedGuide={7n} />)
+    render(<ObjectInfoPanel {...baseProps} scene={scene} selectedIds={[]} selectedGuides={[7n]} />)
     expect(screen.getByText('Guide line')).toBeTruthy()
+  })
+
+  it('counts several guides and annotations per kind instead of showing one', () => {
+    const scene = makeScene({ guide_kind: () => 'point', guide_tags: () => [], annotation_kind: () => 'linear' })
+    render(<ObjectInfoPanel {...baseProps} scene={scene} selectedIds={[]} selectedGuides={[7n, 8n]} selectedAnnotations={[9n]} />)
+    expect(screen.getByText('2 guides · 1 annotation')).toBeTruthy()
+    expect(screen.queryByText('Guide point')).toBeNull()
+  })
+
+  it('switches to the per-kind count when a guide joins a one-object selection, and back', () => {
+    const scene = makeScene({
+      guide_kind: () => 'point',
+      guide_tags: () => [],
+      node_tags: () => [],
+      node_parent: () => undefined,
+      object_materials: () => [],
+      object_solid: () => true,
+      object_name: () => 'Door',
+    })
+    // The same selectedIds array across renders: only the guide changes.
+    const ids = [{ kind: 'object' as const, id: 10n }]
+    const view = render(<ObjectInfoPanel {...baseProps} scene={scene} selectedIds={ids} />)
+    expect(screen.queryByText('1 object · 1 guide')).toBeNull()
+    view.rerender(<ObjectInfoPanel {...baseProps} scene={scene} selectedIds={ids} selectedGuides={[7n]} />)
+    expect(screen.getByText('1 object · 1 guide')).toBeTruthy()
+    view.rerender(<ObjectInfoPanel {...baseProps} scene={scene} selectedIds={ids} />)
+    expect(screen.queryByText('1 object · 1 guide')).toBeNull()
   })
 
   it('shows the tags of a tagged guide read-only', () => {
     const scene = makeScene({ guide_kind: () => 'line', guide_tags: () => ['Rig', 'Cameras/Wide'] })
-    render(<ObjectInfoPanel {...baseProps} scene={scene} selectedIds={[]} selectedGuide={7n} />)
+    render(<ObjectInfoPanel {...baseProps} scene={scene} selectedIds={[]} selectedGuides={[7n]} />)
     expect(screen.getByText('Tags')).toBeTruthy()
     expect(screen.getByText('Rig')).toBeTruthy()
     expect(screen.getByText('Cameras / Wide')).toBeTruthy()
@@ -578,9 +606,11 @@ describe('ObjectInfoPanel — Materials row', () => {
       group_name: () => 'Grp',
       instance_name: () => undefined,
       instance_def: () => 7n,
+      is_linked: () => false,
       component_name: () => 'Def',
       instances_of: () => [5n],
       instance_expanded_members: () => [1n, 4n],
+      instance_expanded_inherited: () => [0xffff_ffff_ffff_ffffn, 0xffff_ffff_ffff_ffffn],
       instance_pose: () => undefined,
       object_materials: (id: bigint) => objectMats[String(id)] ?? [],
       material_info: (id: bigint) => {
@@ -655,5 +685,374 @@ describe('ObjectInfoPanel — Materials row', () => {
     rerender(<ObjectInfoPanel {...baseProps} scene={scene} selectedIds={[{ kind: 'object', id: 2n }]} />)
     expect(names()).toHaveLength(12)
     expect(screen.getByText('+3 more')).toBeTruthy()
+  })
+})
+
+describe('ObjectInfoPanel — Volume, Surface area, and Size rows', () => {
+  const measureJson = (volume: number | null, area: number, ext: [number, number, number]) =>
+    JSON.stringify({ volume, area, bbox: { min: [0, 0, 0], max: ext }, extents: ext, leaf_count: 1, open_leaves: volume === null ? 1 : 0 })
+
+  function measureScene(opts: {
+    volume: number | null
+    frame?: { extents: number[]; source: string }
+    received?: Array<[number, bigint]>
+  }) {
+    return makeScene({
+      node_tags: () => [],
+      object_materials: () => [],
+      node_parent: () => undefined,
+      // The dash comes from the measure alone; the Model Health row is separate.
+      object_solid: () => true,
+      object_name: () => 'Board',
+      group_name: () => 'Board',
+      group_members: () => [],
+      history_generation: () => 1,
+      document_epoch: () => 0,
+      measure_json: (kind: number, id: bigint) => {
+        opts.received?.push([kind, id])
+        return measureJson(opts.volume, 1.6, [1, 0.5, 0.2])
+      },
+      part_frame_json: () => {
+        if (opts.frame === undefined) throw new Error('NoPartFrame')
+        return JSON.stringify(opts.frame)
+      },
+    })
+  }
+  const sel = [{ kind: 'object', id: 1n } as NodeRef]
+
+  it('shows_volume_area_and_size_for_a_solid', () => {
+    setLengthUnit('m')
+    render(<ObjectInfoPanel {...baseProps} scene={measureScene({ volume: 0.1 })} selectedIds={sel} />)
+    expect(screen.getByTestId('measure-volume')).toHaveTextContent('100000 cm³')
+    expect(screen.getByTestId('measure-area')).toHaveTextContent('1.6 m²')
+    expect(screen.getByTestId('measure-size')).toHaveTextContent('1 m × 0.5 m × 0.2 m')
+  })
+
+  it('measures_the_selected_node_by_kind_and_id', () => {
+    setLengthUnit('m')
+    const received: Array<[number, bigint]> = []
+    render(
+      <ObjectInfoPanel
+        {...baseProps}
+        scene={measureScene({ volume: 0.1, received })}
+        selectedIds={[{ kind: 'group', id: 7n } as NodeRef]}
+      />,
+    )
+    expect(received).toContainEqual([1, 7n])
+    expect(received.every(([k, i]) => k === 1 && i === 7n)).toBe(true)
+  })
+
+  it('size_uses_the_part_frame_when_it_answers', () => {
+    setLengthUnit('m')
+    const scene = measureScene({ volume: 0.1, frame: { extents: [1, 0.5, 0.2], source: 'attribute' } })
+    render(<ObjectInfoPanel {...baseProps} scene={scene} selectedIds={sel} />)
+    expect(screen.getByTestId('measure-size')).toHaveAttribute('title', 'Size along the part axes (set on this part)')
+  })
+
+  it('size_falls_back_to_the_world_box', () => {
+    setLengthUnit('m')
+    render(<ObjectInfoPanel {...baseProps} scene={measureScene({ volume: 0.1 })} selectedIds={sel} />)
+    expect(screen.getByTestId('measure-size')).toHaveAttribute('title', 'Size along the world axes')
+  })
+
+  it('open_objects_show_a_dash_and_not_closed', () => {
+    setLengthUnit('m')
+    render(<ObjectInfoPanel {...baseProps} scene={measureScene({ volume: null })} selectedIds={sel} />)
+    expect(screen.getByTestId('measure-volume')).toHaveTextContent('— Not closed')
+    expect(screen.getByTestId('measure-area')).toHaveTextContent('1.6 m²')
+  })
+
+  it('rows_follow_the_unit_setting', () => {
+    setLengthUnit('m')
+    render(<ObjectInfoPanel {...baseProps} scene={measureScene({ volume: 0.1 })} selectedIds={sel} />)
+    expect(screen.getByTestId('measure-volume')).toHaveTextContent('100000 cm³')
+    act(() => setLengthUnit('dec_in'))
+    try {
+      expect(screen.getByTestId('measure-volume')).toHaveTextContent('3.531 ft³')
+      expect(screen.getByTestId('measure-area')).toHaveTextContent('17.222 ft²')
+    } finally {
+      setLengthUnit('m')
+    }
+  })
+
+  it('a multi-selection shows summed rows', () => {
+    setLengthUnit('m')
+    const scene = measureScene({ volume: 0.1 })
+    render(
+      <ObjectInfoPanel
+        {...baseProps}
+        scene={scene}
+        selectedIds={[{ kind: 'object', id: 1n }, { kind: 'object', id: 2n }]}
+      />,
+    )
+    expect(screen.getByTestId('measure-area')).toHaveTextContent('3.2 m²')
+    expect(screen.getByTestId('measure-volume')).toHaveTextContent('200000 cm³')
+  })
+})
+
+describe('ObjectInfoPanel — Locked checkbox and read-only fields (OW-1)', () => {
+  /** Objects 1 (free) and 2 (locked), and 3 inside a locked group 9. */
+  function lockScene(set: ReturnType<typeof vi.fn>) {
+    const locked = new Set<string>(['0:2', '1:9'])
+    const frozenBy = (kind: number, id: bigint) => {
+      if (locked.has(`${kind}:${id}`)) return { kind: kind === 1 ? 'group' : 'object', id }
+      if (kind === 0 && id === 3n) return { kind: 'group', id: 9n }
+      return undefined
+    }
+    return makeScene({
+      top_level_nodes: () => [{ kind: 'object', id: 1n }, { kind: 'object', id: 2n }, { kind: 'group', id: 9n }],
+      group_members: (id: bigint) => (id === 9n ? [{ kind: 'object', id: 3n }] : []),
+      node_tags: (_k: number, id: bigint) => (id === 2n || id === 3n ? ['Walls'] : []),
+      node_parent: (_k: number, id: bigint) => (id === 3n ? 9n : undefined),
+      object_solid: () => true,
+      object_name: (id: bigint) => `Obj${id}`,
+      group_name: () => undefined,
+      object_materials: () => [],
+      node_locked: (kind: number, id: bigint) => locked.has(`${kind}:${id}`),
+      node_frozen: frozenBy,
+      set_nodes_locked: set,
+    })
+  }
+  const obj = (id: bigint): NodeRef => ({ kind: 'object', id })
+
+  it('a free object shows an unchecked Locked box; ticking it locks the selection and tells the app', () => {
+    const set = vi.fn()
+    const onLockChanged = vi.fn()
+    render(<ObjectInfoPanel {...baseProps} onLockChanged={onLockChanged} scene={lockScene(set)} selectedIds={[obj(1n)]} />)
+    const box = within(screen.getByTestId('object-info-locked')).getByRole('checkbox') as HTMLInputElement
+    expect(box.checked).toBe(false)
+    fireEvent.click(box)
+    expect(set).toHaveBeenCalledTimes(1)
+    const [kinds, ids, locked] = set.mock.calls[0]
+    expect(Array.from(kinds)).toEqual([0])
+    expect(Array.from(ids)).toEqual([1n])
+    expect(locked).toBe(true)
+    expect(onLockChanged).toHaveBeenCalledTimes(1)
+  })
+
+  it('a locked object shows the box ticked, with its name and tags read-only', () => {
+    const set = vi.fn()
+    render(<ObjectInfoPanel {...baseProps} scene={lockScene(set)} selectedIds={[obj(2n)]} />)
+    const box = within(screen.getByTestId('object-info-locked')).getByRole('checkbox') as HTMLInputElement
+    expect(box.checked).toBe(true)
+    expect((screen.getAllByRole('textbox')[0] as HTMLInputElement).readOnly).toBe(true)
+    // The tag chip stays, with no × and no +.
+    expect(screen.getByText('Walls')).toBeTruthy()
+    expect(screen.queryByLabelText(/Remove tag/)).toBeNull()
+    expect(screen.queryByLabelText('Add tag')).toBeNull()
+    fireEvent.click(box)
+    expect(set.mock.calls[0][2]).toBe(false)
+  })
+
+  it('a rename attempt on a locked object never reaches the kernel', () => {
+    const rename = vi.fn()
+    const scene = { ...lockScene(vi.fn()), set_node_name: rename } as unknown as WasmScene
+    render(<ObjectInfoPanel {...baseProps} scene={scene} selectedIds={[obj(2n)]} />)
+    const input = screen.getAllByRole('textbox')[0]
+    fireEvent.blur(input)
+    expect(rename).not.toHaveBeenCalled()
+  })
+
+  it('an object inside a locked group is read-only too, and says why', () => {
+    render(<ObjectInfoPanel {...baseProps} scene={lockScene(vi.fn())} selectedIds={[obj(3n)]} />)
+    const row = screen.getByTestId('object-info-locked')
+    expect((within(row).getByRole('checkbox') as HTMLInputElement).checked).toBe(false)
+    expect(within(row).getByText('Part of something that is locked.')).toBeTruthy()
+    expect(screen.queryByLabelText('Add tag')).toBeNull()
+  })
+
+  it('a free object keeps its fields editable', () => {
+    render(<ObjectInfoPanel {...baseProps} scene={lockScene(vi.fn())} selectedIds={[obj(1n)]} />)
+    expect((screen.getAllByRole('textbox')[0] as HTMLInputElement).readOnly).toBe(false)
+    expect(screen.getByLabelText('Add tag')).toBeTruthy()
+  })
+
+  it('a mixed multi-selection shows the box mixed; ticking locks everything', () => {
+    const set = vi.fn()
+    render(<ObjectInfoPanel {...baseProps} scene={lockScene(set)} selectedIds={[obj(1n), obj(2n)]} />)
+    const box = within(screen.getByTestId('object-info-locked')).getByRole('checkbox') as HTMLInputElement
+    expect(box.indeterminate).toBe(true)
+    fireEvent.click(box)
+    const [kinds, ids, locked] = set.mock.calls[0]
+    expect(Array.from(kinds)).toEqual([0, 0])
+    expect(Array.from(ids)).toEqual([1n, 2n])
+    expect(locked).toBe(true)
+  })
+
+  it('a kernel refusal of the lock is toasted, not swallowed', () => {
+    const onToast = vi.fn()
+    const set = vi.fn(() => {
+      throw new Error('ExplodeSessionScope: close the component first')
+    })
+    render(<ObjectInfoPanel {...baseProps} onToast={onToast} scene={lockScene(set)} selectedIds={[obj(1n)]} />)
+    fireEvent.click(within(screen.getByTestId('object-info-locked')).getByRole('checkbox'))
+    expect(onToast).toHaveBeenCalledTimes(1)
+    expect(onToast.mock.calls[0][1]).toBe('ExplodeSessionScope')
+  })
+
+  it('tagging a multi-selection leaves the locked item behind and says so once', () => {
+    const add = vi.fn()
+    const onToast = vi.fn()
+    const scene = { ...lockScene(vi.fn()), add_node_tag_many: add } as unknown as WasmScene
+    render(<ObjectInfoPanel {...baseProps} onToast={onToast} scene={scene} selectedIds={[obj(1n), obj(2n)]} />)
+    fireEvent.click(screen.getByLabelText('Add tag to all selected'))
+    const input = screen.getByLabelText('New tag for all selected')
+    fireEvent.change(input, { target: { value: 'Roof' } })
+    fireEvent.keyDown(input, { key: 'Enter' })
+    expect(add).toHaveBeenCalledTimes(1)
+    expect(Array.from(add.mock.calls[0][1])).toEqual([1n])
+    expect(onToast).toHaveBeenCalledWith('1 locked item was left alone.')
+  })
+
+  /** Instance 5 (free, shape 7) and instance 6 of the same shape inside locked group 9. */
+  function sharedScene(rename: ReturnType<typeof vi.fn>, usedInLockedGroup: boolean) {
+    return makeScene({
+      top_level_nodes: () => [{ kind: 'instance', id: 5n }, { kind: 'group', id: 9n }],
+      group_members: (id: bigint) => (id === 9n && usedInLockedGroup ? [{ kind: 'instance', id: 6n }] : []),
+      node_tags: () => [],
+      node_parent: (_k: number, id: bigint) => (id === 6n ? 9n : undefined),
+      group_name: () => undefined,
+      instance_name: () => undefined,
+      instance_def: () => 7n,
+      is_linked: () => false,
+      component_name: () => 'Window',
+      instances_of: () => (usedInLockedGroup ? [5n, 6n] : [5n]),
+      instance_expanded_members: () => [],
+      instance_expanded_inherited: () => [],
+      instance_pose: () => undefined,
+      object_materials: () => [],
+      node_locked: (kind: number, id: bigint) => kind === 1 && id === 9n,
+      node_frozen: (kind: number, id: bigint) =>
+        kind === 1 && id === 9n ? { kind: 'group', id: 9n } : kind === 2 && id === 6n && usedInLockedGroup ? { kind: 'group', id: 9n } : undefined,
+      set_component_name: rename,
+    })
+  }
+  const defNameInput = () => screen.getByLabelText('Definition Name') as HTMLInputElement
+
+  it('the Definition Name of an outside copy is read-only when its shape is used inside a locked group', () => {
+    const rename = vi.fn()
+    const onToast = vi.fn()
+    render(<ObjectInfoPanel {...baseProps} onToast={onToast} scene={sharedScene(rename, true)} selectedIds={[{ kind: 'instance', id: 5n }]} />)
+    expect(defNameInput().readOnly).toBe(true)
+    fireEvent.blur(defNameInput())
+    expect(rename).not.toHaveBeenCalled()
+  })
+
+  it('the Definition Name stays editable when the shape is used nowhere locked', () => {
+    const rename = vi.fn()
+    render(<ObjectInfoPanel {...baseProps} scene={sharedScene(rename, false)} selectedIds={[{ kind: 'instance', id: 5n }]} />)
+    expect(defNameInput().readOnly).toBe(false)
+  })
+
+  it("a kernel lock refusal from a rename is toasted with its code, not thrown", () => {
+    const rename = vi.fn(() => {
+      throw new Error('LockedNodeViaSharedShape: the shape is used inside a locked group')
+    })
+    const onToast = vi.fn()
+    render(<ObjectInfoPanel {...baseProps} onToast={onToast} scene={sharedScene(rename, false)} selectedIds={[{ kind: 'instance', id: 5n }]} />)
+    fireEvent.change(defNameInput(), { target: { value: 'Door' } })
+    expect(() => fireEvent.blur(defNameInput())).not.toThrow()
+    expect(onToast).toHaveBeenCalledTimes(1)
+    expect(onToast.mock.calls[0][0]).toBe(kernelErrorMessage('LockedNodeViaSharedShape', ''))
+    expect(onToast.mock.calls[0][1]).toBe('LockedNodeViaSharedShape')
+  })
+})
+
+describe('ObjectInfoPanel — a linked Object reads as a plain Object', () => {
+  /** Instance 5 places definition 7 (one Object, 1); `placements` share it. */
+  function linkedScene(placements: bigint[], over: Record<string, unknown> = {}) {
+    return makeScene({
+      top_level_nodes: () => [{ kind: 'object', id: 2n }, ...placements.map((id) => ({ kind: 'instance', id }))],
+      node_tags: () => [],
+      node_parent: () => undefined,
+      object_solid: () => true,
+      object_name: () => undefined,
+      group_name: () => undefined,
+      instance_name: () => undefined,
+      instance_def: () => 7n,
+      is_linked: (id: bigint) => placements.includes(id),
+      component_name: () => undefined,
+      component_member_objects: () => [1n],
+      component_has_nested_members: () => false,
+      owner_definition: () => undefined,
+      instances_of: () => placements,
+      definition_usage: () => placements.length,
+      instance_expanded_members: () => [],
+      instance_expanded_inherited: () => [],
+      instance_pose: () => undefined,
+      object_materials: () => [],
+      smooth_level: () => 0,
+      node_locked: () => false,
+      node_frozen: () => undefined,
+      ...over,
+    })
+  }
+  const sel5: NodeRef[] = [{ kind: 'instance', id: 5n }]
+
+  it('Type reads Object with a clickable (N linked) that selects every copy', () => {
+    const onSelectMany = vi.fn()
+    render(<ObjectInfoPanel {...baseProps} onSelectMany={onSelectMany} scene={linkedScene([5n, 6n, 8n])} selectedIds={sel5} />)
+    expect(screen.queryByText(/Linked cop/i)).toBeNull()
+    expect(screen.queryByText('Copies')).toBeNull()
+    const count = screen.getByTestId('object-info-linked-count')
+    expect(count.textContent).toBe('(3 linked)')
+    fireEvent.click(count)
+    expect(onSelectMany).toHaveBeenCalledWith([
+      { kind: 'instance', id: 5n },
+      { kind: 'instance', id: 6n },
+      { kind: 'instance', id: 8n },
+    ])
+  })
+
+  it('the count includes a copy nested in a component, but the click selects only the top-level ones', () => {
+    const onSelectMany = vi.fn()
+    const scene = linkedScene([5n, 6n, 8n], { owner_definition: (_k: number, id: bigint) => (id === 8n ? 99n : undefined) })
+    render(<ObjectInfoPanel {...baseProps} onSelectMany={onSelectMany} scene={scene} selectedIds={sel5} />)
+    const count = screen.getByTestId('object-info-linked-count')
+    expect(count.textContent).toBe('(3 linked)')
+    fireEvent.click(count)
+    expect(onSelectMany).toHaveBeenCalledWith([
+      { kind: 'instance', id: 5n },
+      { kind: 'instance', id: 6n },
+    ])
+  })
+
+  it('a set that is down to one shows nothing extra', () => {
+    render(<ObjectInfoPanel {...baseProps} scene={linkedScene([5n])} selectedIds={sel5} />)
+    expect(screen.queryByTestId('object-info-linked-count')).toBeNull()
+    expect(screen.queryByText(/linked/i)).toBeNull()
+  })
+
+  it('a linked set of Groups reads Group', () => {
+    const scene = linkedScene([5n, 6n], { component_has_nested_members: () => true, component_member_objects: () => [] })
+    render(<ObjectInfoPanel {...baseProps} scene={scene} selectedIds={sel5} />)
+    expect(screen.getByText('Group')).toBeTruthy()
+    expect(screen.getByTestId('object-info-linked-count').textContent).toBe('(2 linked)')
+  })
+
+  it('has no Unlink or Make component button, no Copies row, and one Name field', () => {
+    render(<ObjectInfoPanel {...baseProps} scene={linkedScene([5n, 6n])} selectedIds={sel5} />)
+    expect(screen.queryByRole('button', { name: 'Unlink' })).toBeNull()
+    expect(screen.queryByRole('button', { name: /Make component/i })).toBeNull()
+    expect(screen.queryByTestId('object-info-copies')).toBeNull()
+    expect(screen.queryByLabelText('Definition Name')).toBeNull()
+    expect(screen.queryByLabelText('Name (all copies)')).toBeNull()
+  })
+
+  it('offers every row a plain Object gets: Type, Locked, Tags, Materials, Geometry, and Smooth/Soften as the plain Object does', () => {
+    const plain = render(<ObjectInfoPanel {...baseProps} scene={linkedScene([5n, 6n])} selectedIds={[{ kind: 'object', id: 1n }]} />)
+    const rows = (c: HTMLElement) => ({
+      locked: c.querySelector('[data-testid="object-info-locked"]') !== null,
+      materials: c.querySelector('[data-testid="object-info-materials"]') !== null,
+      geometry: c.textContent!.includes('Solid'),
+      smooth: c.querySelector('[data-smooth-section]') !== null,
+      soften: c.querySelector('[data-soften-section]') !== null,
+      tags: c.textContent!.includes('Tags'),
+    })
+    const plainRows = rows(plain.container)
+    plain.unmount()
+    const linked = render(<ObjectInfoPanel {...baseProps} scene={linkedScene([5n, 6n])} selectedIds={sel5} />)
+    expect(rows(linked.container)).toEqual(plainRows)
+    expect(plainRows.locked && plainRows.materials && plainRows.geometry && plainRows.tags).toBe(true)
   })
 })

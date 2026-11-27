@@ -37,6 +37,21 @@ export interface LibraryInsertResult {
   definitionsReused: number
   worldSketchesSkipped: number
   annotationsSkipped: number
+  /** A clipboard paste's drawing, one entry per pasted sketch (empty for a
+   *  Library insert): where `pastedDrawingRefs` finds the pasted shapes. */
+  drawn: DrawnInsert[]
+  /** Every draw drew nothing new (Paste In Place over the original). */
+  drawingUnchanged: boolean
+}
+
+/** One sketch a paste drew (`insert_item`'s `drawn`, world coordinates). */
+export interface DrawnInsert {
+  /** `[px,py,pz,nx,ny,nz]`: the plane it was drawn on. */
+  plane: number[]
+  /** The new detached sketch, for a detached shape. */
+  detached: bigint | null
+  /** Every pasted segment. */
+  anchors: [V3, V3][]
 }
 
 /** Everything the browser hands the tool. The ghost group's ownership
@@ -46,12 +61,26 @@ export interface LibraryPlacement {
   /** `hew.library` provenance; both or neither. */
   sourceId: string | null
   contentHash: string | null
+  /** The clipboard origin (the app's per-window nonce) of a PASTE — the
+   *  same nonce `extract_item` was given at Copy — so the kernel links a
+   *  pasted component instance to the definition it was copied from when
+   *  the paste lands in the same document. Library placements leave it
+   *  unset: a library item has no original to link to. */
+  origin?: string | null
   displayName: string
   /** Ghost meshes in ITEM coordinates (origin = the item's own origin). */
   ghost: THREE.Group
   /** Item-space bounds (origin-marker scale + status). */
   bboxMin: V3
   bboxMax: V3
+  /**
+   * A linked paste: given the item→world affine the click resolved, place
+   * linked copies and report them (the tool then skips `insert_item`).
+   * Returns `null` when the copy can no longer link (a source was deleted
+   * while the ghost was up), and the tool places an independent copy as
+   * usual. Throws like the kernel on a refusal.
+   */
+  linkedCommit?: (affine: Float64Array) => LibraryInsertResult | null
 }
 
 export type OnPlaced = (result: LibraryInsertResult) => void
@@ -178,14 +207,22 @@ export class LibraryPlaceTool implements Tool {
       0, 1, 0, point[1],
       0, 0, 1, point[2],
     ])
-    let raw: unknown
+    let result: LibraryInsertResult
     try {
-      raw = this.wasmScene.insert_item(
-        this.placement.bytes,
-        affine,
-        this.placement.sourceId ?? undefined,
-        this.placement.contentHash ?? undefined,
-      )
+      const linked = this.placement.linkedCommit?.(affine) ?? null
+      if (linked !== null) {
+        result = linked
+      } else {
+        result = parseInsertResult(
+          this.wasmScene.insert_item(
+            this.placement.bytes,
+            affine,
+            this.placement.sourceId ?? undefined,
+            this.placement.contentHash ?? undefined,
+            this.placement.origin ?? undefined,
+          ),
+        )
+      }
     } catch (err) {
       // A refusal (open component session, unloadable item) leaves the
       // document untouched; report it and stay armed so the user can Esc
@@ -195,7 +232,6 @@ export class LibraryPlaceTool implements Tool {
       this.onToast(kernelErrorMessage(code ?? 'Unknown', rawMsg), code ?? undefined)
       return
     }
-    const result = parseInsertResult(raw)
     this._teardown()
     this.finished = true
     this.onPlaced(result)
@@ -243,5 +279,28 @@ export function parseInsertResult(raw: unknown): LibraryInsertResult {
     definitionsReused: num(obj.definitionsReused),
     worldSketchesSkipped: num(obj.worldSketchesSkipped),
     annotationsSkipped: num(obj.annotationsSkipped),
+    drawn: parseDrawn(obj.drawn),
+    drawingUnchanged: obj.drawingUnchanged === true,
   }
+}
+
+/** `insert_item`'s `drawn` entries, parsed. Exported for tests. */
+export function parseDrawn(raw: unknown): DrawnInsert[] {
+  if (!Array.isArray(raw)) return []
+  const out: DrawnInsert[] = []
+  for (const d of raw as unknown[]) {
+    const o = (d ?? {}) as Record<string, unknown>
+    const plane = Array.isArray(o.plane) ? (o.plane as unknown[]).map((x) => (typeof x === 'number' ? x : 0)) : []
+    if (plane.length !== 6) continue
+    const detached = typeof o.detached === 'string' ? BigInt(o.detached) : null
+    const anchors: [V3, V3][] = []
+    for (const seg of Array.isArray(o.anchors) ? (o.anchors as unknown[]) : []) {
+      if (!Array.isArray(seg) || seg.length !== 2) continue
+      const [a, b] = seg as unknown[]
+      if (!Array.isArray(a) || !Array.isArray(b) || a.length !== 3 || b.length !== 3) continue
+      anchors.push([a as V3, b as V3])
+    }
+    out.push({ plane, detached, anchors })
+  }
+  return out
 }
