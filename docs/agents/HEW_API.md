@@ -22,8 +22,10 @@
 > headless or live. The rest of the host-implemented commands
 > (`hew.doc.new/open/import`) still refuse typed: document lifecycle stays
 > user-driven, so a remote connection cannot silently replace or overwrite
-> what the user has open. `hew.view.snapshot` likewise refuses live (no
-> viewport handle reaches `crates/api` for it to render through yet), but
+> what the user has open. `hew.view.snapshot` and `hew.view.line_drawing` are
+> rendered by the app itself, through the same `crates/headless-render`
+> code `hew-cli` runs (§7.2), so both hosts return the same bytes for the
+> same inputs; only a `path` write still needs a filesystem, which `hew-cli --live` does client-side: it asks the app for the bytes once, without `path`, writes the file and the companion pass files itself, and prints the headless result shape. And
 > `hew.view.camera`, `hew.view.zoom_extents`, and `hew.view.units` — which
 > need no bytes back, only an effect — ARE wired end to end: `LiveHost`
 > records the requested effect and answers success, `crates/wasm-api`
@@ -35,7 +37,7 @@
 > for the kernel-served command surface (sketch/solid/structure/entity/
 > style/attrs/history/scenes — the bulk of the protocol), for
 > `save`/`export`, for these three view/display effects, and honestly
-> refuses the remaining host-effect commands that need filesystem or
+> refuses the remaining host-effect commands that need filesystem
 > rendering access this sandbox does not have. `hew.scenes.apply`
 > additionally leaves a `ViewDirective::ActivateScene` for the live
 > bridge (§7.1) — real on the Rust/WASM side, though the app-side
@@ -141,10 +143,10 @@ written from this document and the registry declarations and lands
 making its pre-written tests pass unmodified; "done" has a mechanical
 definition.
 
-**Profiles are views, not protocols.** A profile is a named subset of the
-command registry a host grants a connection (§10). Every profile speaks
-the identical envelope; granting more capability never changes the
-protocol, only the answer to "which methods may this connection call."
+**Grants are views, not protocols.** A grant is the part of the command
+registry a host lets a connection use (§10). Every grant speaks the
+identical envelope; granting more capability never changes the protocol,
+only the answer to "which methods may this connection call."
 
 **Transport neutrality.** `crates/api` follows the same purity rule as the
 kernel (DEVELOPMENT.md rule 1): no UI, no I/O, no network. Sockets, stdio,
@@ -162,7 +164,7 @@ regression test, byte-for-byte.
 
 | Layer | Responsibility | Depends on |
 |---|---|---|
-| `crates/api` | Command registry, envelope types, dispatch onto the kernel, transaction execution, profile enforcement, schema publication | `kernel`, `inference`, `tessellate` |
+| `crates/api` | Command registry, envelope types, dispatch onto the kernel, transaction execution, grant enforcement, schema publication | `kernel`, `inference`, `tessellate` |
 | `crates/wasm-api` | Existing WASM boundary; additionally exposes `dispatch` to the host page | `api` (among existing deps) |
 | `shells/tauri` | Local socket endpoint (§11.2): accepts connections, authenticates, forwards envelopes to the webview's dispatcher | `app/` |
 | `hew-cli` | Standalone binary: MCP adapter, script runner, one-shot dispatch; embeds `api` + kernel directly (headless, the default) or attaches to a running instance (live mode, `--live`) | `api`, importers as needed |
@@ -231,7 +233,9 @@ The first request on any connection is `hew.meta.hello`:
 ```
 
 The response reports the host's protocol version, application identity,
-the granted profile, the negotiated encoding, and the open documents:
+the granted profile (`core` or `app`, or `plugin` with a `grant` member
+for a restricted connection, §10), the negotiated encoding, and the open
+documents:
 
 ```json
 {"jsonrpc": "2.0", "id": 0, "result":
@@ -239,6 +243,10 @@ the granted profile, the negotiated encoding, and the open documents:
   "profile": "app", "encoding": "json",
   "documents": [{"id": "doc_1", "title": "Bird feeder", "path": "…"}]}}
 ```
+
+`app.version` is the version of the build that answers: a release or
+preview build reports its tag's version (`1.5.0-pre.2`), a build made
+from source reports the version in the source tree.
 
 Any request before a successful `hello` is rejected with `-32004` (not
 ready). A host that cannot serve the client's requested protocol version
@@ -264,9 +272,11 @@ connection is attached to the resulting document automatically — no
 separate `attach` round-trip.
 
 `hew.meta.documents` (and `hello`'s `documents`) list the open documents,
-oldest window first. Each entry is `{id, title, path, dirty}` — `path` is
-`null` until the document has a file, `dirty` is unsaved changes — and a
-multi-window host adds `front` (the user's front-most window), `attached`
+oldest window first. Each entry is `{id, title, path, dirty, document_id}`
+— `path` is `null` until the document has a file, `dirty` is unsaved
+changes, `document_id` is the persistent UUID the document's file carries
+(lowercase, hyphenated; `null` until the document is first saved, see
+HEW_FILE_FORMAT.md §2) — and a multi-window host adds `front` (the user's front-most window), `attached`
 (this connection's current document), and `label` (the name given at
 `hew.doc.new`/`open`, if any). It is host-wide: it needs no attached
 document and works however the connection is bound.
@@ -275,7 +285,10 @@ Addressing is also available **per request**: any envelope may carry a
 top-level `"document"` member naming a document, and that one request runs
 there. The connection's attachment does not change, and the request
 needs no prior attach. Where a host has one document (headless), the
-member is accepted only if it names that document (`doc_1`). Reaching a
+member is accepted only if it names that document (`doc_1`). A restricted
+connection (a plugin or a connected app, §10) without `documents.other`
+may not use the member at all: it is refused `-32001`
+`document_not_granted` whatever document it names. Reaching a
 background document this way — or by attaching to it — never raises it:
 nothing in the protocol moves the user's window order except the explicit
 `hew.doc.focus`, and `hew.doc.new`/`open` place their new window behind
@@ -356,15 +369,130 @@ Three classes, distinguished by JSON-RPC error code:
   always-on validator caught a would-be corruption and rolled back). The
   document is untouched; the condition is a bug to report, not to handle.
 
-### 4.5 Notifications (Reserved)
+### 4.5 Notifications and events
 
-Server→client notifications share the envelope (no `id`) and are reserved
-at protocol 1: the frame shape is fixed now so no transport ever needs a
-second channel, but no subscription commands ship in the first release.
-The planned inventory — `hew.event.document_changed`,
-`hew.event.selection_changed`, `hew.event.context_changed`,
-`hew.event.document_saved`, with a `hew.meta.subscribe` command — is
-non-normative until specified.
+A host sends **notifications**: frames with no `id`, whose `method` is
+`hew.event.<name>`, and which answer nothing. They share the envelope,
+so no transport needs a second channel; on a socket they arrive between
+replies, never inside one, and an event a request caused arrives after
+that request's reply. A client sets any frame without an `id` aside as
+an event rather than taking it for a reply. §4.1's rule still
+holds the other way: a notification a client sends is dropped
+unexecuted.
+
+```json
+{"jsonrpc": "2.0", "method": "hew.event.document_changed",
+ "params": {"document": "doc_1", "generation": 2, "epoch": 2,
+            "origin": {"connection": "live:0"}, "label": "Profile",
+            "kind": "commit", "bookkeeping": false,
+            "changes": {"added": ["skt_0"], "removed": [], "modified": [],
+                        "attrs": [], "document": false, "full": false}}}
+```
+
+**Subscribing.** A connection receives nothing until it subscribes.
+`hew.event.subscribe {"events": [<name>, ...]}` (1 to 32 names) needs a
+successful `hello` but no attached document, and every grant may call it.
+It subscribes each name the grant may receive and lists the rest in
+`denied` (denied, not refused); an unknown name is `-32602` `unknown
+event name: <name>` and changes nothing. The result is `{"subscribed":
+[...], "denied": [...]}`, `subscribed` being every name the connection
+is subscribed to afterwards, in name order. `hew.event.unsubscribe` takes
+the same params and answers the same shape (`denied` empty). The grant
+is checked again whenever a frame goes out, so a narrowed grant takes
+effect without a reconnect.
+
+| Event | Needs | Params | Sent when |
+|---|---|---|---|
+| `document_changed` | `model.read` | below | after every history entry, undo, redo, aborted transaction or plugin command, and document replacement |
+| `context_changed` | `model.read` | `{document, stack, fallback}`, both as `hew.query.context` answers them | the session stack, or the app's in-context entries, changed |
+| `scenes_changed` | `model.read` | `{document, scenes, active}`: `hew.scenes.list`'s entries, and the last activated Scene's id or `null` | a Scene was added, removed, renamed, reordered, updated, or activated |
+| `units_changed` | `model.read` | `{document, units}`, a display length format (`m`, `cm`, `mm`, `arch`, `frac_in`, `dec_in`) | the app's display units changed |
+| `document_will_save` | `model.read` | `{document, title, format}` | before a save |
+| `document_saved` | `model.read` | `{document, title, path?, format, document_id}` | after a save landed |
+| `document_opened` | `model.read` | `{document, title, path?, document_id}` | a document was opened into a window |
+| `document_closed` | `model.read` | `{document, title, path?}` | a document was closed or replaced in a window |
+| `selection_changed` | `view` | `{document, ids, primary, generation, epoch}`: the selection as `hew.selection.get` answers it (§7.3) | the selection changed, in the app or over the bus |
+| `tool_changed` | `view` | `{tool}`, the tool's name as the toolbar names it (`"Select"`, `"Line"`, ...) | the active tool changed |
+| `plugin_state` | nothing | `{plugin, state, detail?}` | a plugin loaded, unloaded, crashed, or its grant changed |
+| `slot_changed`, `settings_changed`, `ui_cancel`, `window_closed`, `surface_closed` | nothing | per their surfaces | plugin surfaces |
+
+`plugin_state` and the surface events can be subscribed to today and
+arrive once the features that send them exist. `selection_changed` and
+`tool_changed` are sent by the desktop app (§7.3). The document lifecycle events go only to a connection bound
+to the event's document, unless its grant holds `documents.other`, and
+carry `path` only under `documents.save` (first-party connections hold
+both). On the desktop a first-party socket connection hears these events
+for every window, not only the one it is attached to: the app offers each
+window's lifecycle frame to every connection subscribed to it that holds
+no session in that window (a window nobody is attached to still reports
+`document_opened`). `document_closed` is sent as the page goes away (not
+when the browser only keeps it for going back to) and can be lost when
+the window is destroyed before the frame is written.
+Every event names its `document`: the window's id on the desktop
+(`doc_N`), `doc_1` elsewhere. `document_will_save` waits for nobody.
+
+**`document_changed`.** `generation` and `epoch` are the document's
+clock right after the change (§7: `hew.history.status`). `origin` is
+`"user"` or `{"connection": "<identity>"}`, as `hew.history.status`
+reports it, and `label` is the entry's label as the history lists it
+(`""` for an abort or a replacement). `kind` is `commit` (an entry
+pushed, or a `coalesce` commit extending one), `undo`, `redo`, `abort`
+(a transaction refused partway, or a plugin command aborted: the
+document went back to how it was when the bracket began), or `reset`
+(the document was replaced: opened, created, reverted). `bookkeeping`
+marks entering or leaving a group or component edit, which carries no
+changes.
+
+`changes` names what the change touched, by public id: `added` (created
+or placed), `removed` (deleted, consumed by a boolean or a sweep,
+exploded, ungrouped), `modified` (everything else it touched, groups
+whose membership changed included), and `attrs` (`{id, ns, scope}`
+entries whose attribute dictionaries changed: `scope` `"entity"` with
+`id` the entity, or `"document"` for the document's own; `scope`
+`"face"` or `"edge"` when a solid face's or edge's dictionary changed,
+with `id` the owning object, §8). An undo's lists are already the undo's: `added` names
+what it brought back, `removed` what it took away. `document: true`
+means document-level state changed (the drawing axes). `full: true`
+means the lists are empty and anything may have changed: an import, a
+whole-model rescale, an abort, a reset; a subscriber re-reads what it
+cares about. A transaction or a plugin command is one event however
+many commands it ran: while a plugin command runs, the envelopes it
+commits produce no events, and when it ends its one entry does (or, if
+it is aborted, one `abort` and nothing of what it did).
+
+Two more lists are always present. `linked` names every Object or Group
+the change wrapped as a set of linked copies, as `{source, instance,
+definition}`: `source` keeps its id and is now the definition's member,
+and `instance` is the placement that took its spot, so a client holding
+`source` selects `instance`. `copied_from` lists `[new, source]` pairs for
+every entity the change copied: an independent copy's nodes, a linked
+copy's new placement and the placement it was copied from (the wrap's
+own placement for a node the same change wrapped), every placement a
+Link identical copies join made, paired with the set's placement it
+joined, and every id an unlink (`hew.component.make_unique`) minted. Both describe the forward
+change only: an undo's lists are empty (what it took away is in
+`removed`), and a `full` set keeps them empty.
+
+The host emits one `document_changed` per change since it last sent
+events. More than 64 at once, or a gap its history no longer reaches,
+collapse into one `commit` with `full: true` at the current clock.
+
+**Catching up.** `hew.query.changes_since {"generation": n}` answers
+`{"generation", "epoch", "from": n, "changes"}`: the union of every
+change since the client saw generation `n`, undo lists swapped as above,
+`full` sticky. A generation the session's history no longer covers (the
+host keeps the last 256 changes), or never had, answers `full: true`. An
+abort rewinds the generation, so after one a generation can name two
+states; a client that saw the abort's `document_changed` re-reads.
+
+**Transports.** On the desktop's Unix socket (macOS, Linux) and its
+named pipe (Windows) each connection has one writer that sends replies
+and events alike, whole lines in order; the pipe is overlapped, so a
+read waiting on the client's next frame never holds up a reply or an
+event. A client that stops reading, so that a write to it waits 10
+seconds, has its connection closed on either transport. `hew-cli` keeps
+the events it reads while waiting for a reply (§12). An in-page plugin
+receives its frames on its port.
 
 ## 5. Identity and addressing
 
@@ -428,13 +556,44 @@ or edge take a **locator** instead — the API's equivalent of pointing:
   face (or edge) of that object containing, or nearest within tolerance
   to, the point. Ambiguity (a point on a shared edge of two candidate
   faces, when a face was required) is refused typed, never guessed.
+  `{"path": ["ins_…", …, "obj_…"], "at": …}` names the object by an
+  occurrence path instead (exactly one of `object` and `path`): the path
+  must end at an object (a group or instance refuses `not_an_object`),
+  `at` and `ray` stay in that object's own frame as `hew.query.raycast`
+  reports them (for a member reached through a placement that is the
+  definition's coordinates, not world coordinates; for an object with no
+  placement above it the two are the same), a miss through a placement
+  refuses `locator_missed` and names the frame, and the locator reaches the same face the `object` form
+  does, the definition's, so an edit through it shows on every
+  placement. A path through a definition open for editing refuses
+  `explode_session_scope`. The path form works wherever a face or edge
+  locator does: `hew.solid.push_pull`, `hew.material.paint`, the
+  `hew.attr.*` face and edge targets, and `hew.query.resolve`.
 - **By ray** — `{"object": "obj_5f3a", "ray": {"origin": …, "dir": …}}`:
   first hit on the object, the programmatic form of clicking.
+  (`hew.query.raycast` returns a by-point locator for what it hit: `at` is
+  in the hit Object's own frame, §7.4.)
 - **By transaction handle** — `{"$face": "cut#top"}`: a face token
   returned by an earlier command *in the same transaction* (§6.2); the
   key after `#` names one of the faces that command's registry entry
   documents (§5.4). Tokens are transaction-scoped and expire with it;
   they are ergonomics, not identity.
+
+**Edge sets.** Commands that blend edges (`hew.solid.fillet`,
+`hew.solid.chamfer`) take `edges`, an array of edge-set locators, all on
+one object (else `edges_span_objects`). Besides `{object, at}` (the
+nearest solid edge) each entry may be:
+
+- `{"object": "obj_5f3a", "from": [x, y, z], "to": [x, y, z]}`: the edge
+  whose endpoints match the two points, in either order;
+- `{"face": <face locator>}`: every sharp edge of that face's outer
+  loop; add `"loop_near": [x, y, z]` to take the loop (outer, or a
+  hole) nearest the point instead;
+- `{"object": "obj_5f3a", "all": true}`: every sharp edge of the object.
+
+Each located edge is then extended along the chain a click on it would
+take, unless the command says `"propagate": "none"` (the default is
+`"tangent"`).
 
 Additional predicate locators (e.g. "the face with normal +Z of greatest
 area") are *Reserved*: the shapes above are sufficient for the first
@@ -479,6 +638,22 @@ Wherever this spec says "edge locator" (here and in §5.3), all three
 forms are legal: a solid's `{object, at|ray}`, a sketch edge's own
 public id as a bare string, or a sketch edge's `{sketch, at|from+to}`.
 
+**Occurrence paths.** A component definition's members have one public
+id each, but they are placed once per instance, so an id alone cannot say
+which placement is meant. An occurrence locator names one:
+`{"path": ["ins_a", "ins_b", "obj_c"]}` lists the instances from the world
+down, then the node itself. The first instance is a world instance; each
+later element is a member (directly or inside the definition's groups) of
+the previous instance's definition. A one-element path is a world node,
+the same placement its bare id names. `hew.query.occurrences` lists every
+current path (its rows carry `path` without the node, and `id`, so
+`{"path": [...row.path, row.id]}` locates a row). A path that leads
+nowhere refuses `unknown_occurrence`; a bare id naming a definition
+member refuses it too, since only a path says which placement is meant.
+Paths are stable within a session while the instances on them stay
+live. They are not promised across a save and reload: list again after
+one.
+
 ### 5.3 Derived points
 
 A UI user rarely types coordinates — the inference engine's magnetic
@@ -502,6 +677,8 @@ a **derived-point locator** naming a point of existing geometry:
 - `{"point": "quadrant", "of": <curve id>, "toward": [x, y, z]}` — the
   quadrant point of a circle or arc in the given direction
 - `{"point": "bbox", "of": <entity id>, "anchor": "center" | "min" | "max"}`
+  — on the entity's extent, the lines drawn inside a component included
+  (§7.4)
 - `{"point": "position", "of": <guide id>}` — a guide *point*'s location
 
 Guides are addressable entities but not box-shaped: a guide *line* is an
@@ -604,6 +781,25 @@ open-ended transactions across envelopes**: a held-open transaction would
 either block the user's live editing or interleave into it, and both are
 unacceptable. Clients plan, then submit.
 
+**Compounds.** The one exception is a forwarded plugin command (§10.2)
+that can change the document: a plugin command is a critical section on
+the document, and the kernel brackets it. The host opens a **compound**
+around the forward before the plugin runs: every envelope the plugin
+issues while serving it commits as a child of that compound, and when
+the command ends the children become **one undo entry**, labeled with
+the command's declared label (or its name) and attributed to the
+provider plugin (origin `plugin:<id>`). A plugin command that calls
+another plugin's command nests: the inner compound lands as one child of
+the outer. A refusal, a timeout, or the user's Cancel **aborts** the
+compound, which restores the whole document to what it was before the
+command began: model, both history stacks, the saved mark, and view
+state alike. While a compound is open nothing else commits: every other
+client's frame waits, in arrival order, until it ends (the desktop app
+queues it, §11.2), and the document-replacing commands (`hew.doc.open`,
+`new`, `revert`, `close`) are refused `-32000` `document_busy` from any
+connection that does reach the dispatcher, because an abort cannot undo
+them. docs/agents/PLUGINS.md "Compounds" is the plugin-side account.
+
 ### 6.2 References between commands
 
 A command may be labeled with `"as"`. Any parameter value in a later
@@ -659,6 +855,68 @@ a mode the API does not model yet. The gap is registry-documented; an
 agent's recourse is `make_unique` or `explode`, and fallback-mode
 editing can arrive additively later (§9).
 
+Moving, turning, scaling, copying, or cutting a definition member does
+not need a session at all: the path forms of §7 edit the definition
+directly, in world terms, with every placement following.
+
+**The user's own context.** `hew.view.enter`, `hew.view.exit`, and
+`hew.view.exit_all` (§7.3) are the other side of this: they act on the
+person's window outside any transaction, the way their click would. They
+are not `hew.context.enter` and `exit`: those stay balanced and scope a
+plugin's own edits; these leave the window inside the node when they
+return, and the frame they open is the person's, visible in the
+breadcrumb and closed the way the person closes frames. `hew.view.enter`
+takes an `id` (an object, group, or instance in the world) or a `path` (an
+occurrence path of instances outermost first; the last element is the
+node to enter and may be a member object inside the last instance), opens
+group and component sessions level by level, falls back to the in-context
+entry for an instance a session cannot take (unevenly scaled, or placed in
+a group elsewhere; a mirrored instance opens a session like any other),
+and selects the target. `hew.view.exit` pops the innermost entry, a
+fallback entry or a session frame; `hew.view.exit_all`
+goes back to the top level. When the window takes the call each answers
+`{}`, and the outcome is the `context_changed` event, which carries the new
+`stack` and the `fallback` entries (`{kind: "object" | "instance", id}`,
+outermost first, inside the innermost frame). Entering through N session
+frames sends N events, and `exit_all` one per frame closed; `exit` at the
+top level refuses `nothing_to_exit` while `exit_all` there answers `{}`
+with no event.
+
+`hew.view.enter` answers after the window has acted on it, so an entry the
+window declines after the kernel accepted it is the call's own refusal, not
+`{}`. The same holds when the call is the one command of a
+`hew.doc.transact`, which is the form `hew_transact` sends:
+
+- `nested_component_in_context`: the definition nests other groups or
+  components and sits on an unevenly scaled or group-placed instance.
+- `gesture_in_progress`: a tool gesture was armed by the time the window
+  acted.
+- `locked_node`: the node is locked, itself or through a group above it,
+  and the window does not open it for editing. The explanation is the
+  lock's own: "Locked. Unlock it to change it." When the lock is on a
+  group that holds a shape this node shares (`detail.indirect: true`), it
+  is "This shape is also used inside a locked group. Make this copy unique
+  to change it."
+- `enter_refused`: any other entry the window declines. `detail.code` is
+  the kernel's code when the kernel refused to open a session, and one of
+  the window's own codes otherwise: `window_not_ready` (no window to enter
+  in) or `window_error` (applying the entry failed).
+
+A declined entry leaves the window as it was. Steps of a path taken before
+the declined one are taken back with the window's own Undo, so the undo
+depth is what it was; the frames they opened may each send a
+`context_changed` event, and the last event shows where the window is. A
+Redo would reopen what was taken back, and any redo history the person had
+before is gone. If the window could not be put back, `detail.restored` is
+`false` and the explanation says so; `hew.query.context` reports where it
+is. While a tool gesture is armed in the window (a Move drag in flight)
+all three refuse `gesture_in_progress`. A call inside a multi-command
+transaction is `-32602`. Each is `mutates_document: true`, because opening
+or closing a session is a history step the window resyncs after, but none
+is a replayable kernel call. Opening and closing a session each push an
+undo entry; an exit that pops just a fallback entry changes the window's
+context and nothing in the history.
+
 ### 6.4 What a transaction may contain
 
 The registry classes every command, and the class governs placement:
@@ -684,8 +942,8 @@ The registry classes every command, and the class governs placement:
   unknown source (`unknown_tag`), a target already in use
   (`duplicate_tag`; tags are never merged), and an empty or self-nested
   target (`invalid_tag_path`).
-- **Read-only** commands — `hew.query.*`, `hew.meta.*`, and
-  `hew.attr.get` — are legal anywhere: standalone (adding no undo
+- **Read-only** commands — `hew.query.*`, `hew.compute.*`, `hew.meta.*`,
+  and `hew.attr.get` — are legal anywhere: standalone (adding no undo
   entry), or interleaved inside a transaction, where their results are
   legitimate `$ref` sources (measure mid-plan, use the number).
 - **Solitary** commands — document lifecycle (`hew.doc.new`, `open`,
@@ -700,6 +958,116 @@ The registry classes every command, and the class governs placement:
 A transaction containing a solitary command alongside anything else is
 rejected statically (`-32602`, naming the offending index).
 
+A plugin-provided command (§10.2) is never transactable, whatever its
+class, and its capabilities entry says so (`"transactable": false`). A
+`hew.doc.transact` whose sole command is a plugin command unwraps to that
+command's forward and is answered in the transaction shape (`{results:
+[result], label}`, the label being the envelope's `label`, else the
+command's declared label, else its name); one holding a plugin command
+beside anything else, or two plugin commands, is refused `-32000`
+`plugin_command_in_transaction` with the plugin command's index, before
+anything runs.
+
+### 6.5 Coalescing and compare-and-swap
+
+Two optional members of `hew.doc.transact` let a client that edits in
+small steps keep the history readable and never write on a stale model.
+
+**`coalesce`** (a string of 1 to 64 bytes; anything else is `-32602`
+`coalesce must be 1..=64 bytes`). A transaction that commits under a key
+extends the top undo entry instead of pushing a new one when that entry
+was committed under the same key by the same origin, the connection
+identity history records (§6.1): ten field edits in a parts list are one
+undo step, labeled with the first edit's label. Connections that share
+an identity (two sessions of one plugin, say) share their keys.
+The history generation still moves on every such commit. A key expires
+as soon as the history generation moves without it: entries never
+coalesce after any other entry lands, after any undo or redo (even when
+the same entry is on top again), across a different origin or a
+different key, or for a commit with no key. A `hew.doc.transact` whose
+sole command is a plugin command refuses `coalesce` (`-32602`): that
+command's undo entry is its own compound, which no key can extend. Nor across a save: when the
+document was saved with the top entry in place, the next keyed commit
+lands as its own entry, so the edit after a save leaves the document
+unsaved and undoing just that edit makes it clean again.
+
+**`expect_generation`** (a non-negative integer). When the document's
+history generation is not this value as the envelope is dispatched, the
+envelope is refused `-32000` `generation_moved`, with `detail: {expected,
+actual}`, before any command runs (the static checks of §6.2 to §6.4
+included), attributed to `hew.doc.transact` at index 0. It applies to a
+sole plugin command too: the forward is not issued. The generation
+is what `hew.query.*` and `hew.history.status` report as `generation`
+(§7): a client that reads, computes, and commits with the generation it
+read never overwrites a change it did not see. It counts every entry
+pushed (each command's own and the transaction's), every undo and redo,
+and every coalesced commit. This is the default write pattern for
+plugins (docs/agents/PLUGINS.md invariant 13).
+
+### 6.6 Rehearsal (`dry_run`)
+
+**`dry_run: true`** on `hew.doc.transact` rehearses the envelope: it runs
+on a copy of the document and answers exactly what a commit would answer,
+then the copy is dropped. Nothing changes: no undo entry, no history
+generation or epoch move, no event, no `document_changed`, no
+recording, no selection or view effect. The answer is the commit's
+`{results, label}` with `dry_run: true` beside them; the results are
+byte for byte the ones the same envelope committed now would return, the
+ids a commit would mint included, so a plugin can rehearse an edit and
+read the rehearsed geometry back in the same call (a `hew.query.mesh`
+after the edit, through `$ref`). A refusal is the commit's refusal, same
+`failed_index`, same name.
+
+- **Checks.** The envelope checks come first, as for a commit and
+  before the attachment check: a rehearsal against a stale read refuses
+  `generation_moved`, a `coalesce` outside 1..=64 bytes is `-32602`, and
+  only then does an unattached connection get `-32002`. A `coalesce` of
+  any length is `-32602` ("coalesce does not apply to a dry run; nothing
+  is committed"). A document-busy host refuses a dry run as it refuses
+  any frame.
+- **Reads.** What a command reads from its host (the app's in-context
+  entries and armed gesture for `hew.query.context`, the selection, the
+  isolation, the open documents) is the live host's answer, as for a
+  commit; only the library stays out of reach. Every write to the host
+  is refused (below).
+- **The host is told.** Every answer to a dry run is one, refusals made
+  before the rehearsal ran included (`compute_busy`, `document_busy`, a
+  permission or attachment check): the desktop app tags it and skips
+  what it does after an edit (recording, the viewport refresh, the
+  selection write-back), and `hew-cli dispatch --file` does not save.
+- **Permission.** A dry run needs read permissions only: a command whose
+  permission is `model.write` or `attributes.write` (any namespace)
+  counts as `model.read`: a plugin allowed only to read may rehearse an
+  edit it may not commit, which leaks nothing. The attribute namespace rule
+  (§8) still runs inside the rehearsal, so a rehearsed write under a
+  namespace the grant does not own refuses `attr_namespace_not_granted`
+  as a commit would.
+- **What cannot be rehearsed.** A Host-served command (files, the
+  library, the screen, the selection, the windows and the open
+  documents: `hew.doc.save`, `revert`, `new`, `open`, `close`, `focus`,
+  `hew.meta.documents`), the `hew.plugin.*` commands, a plugin command,
+  and a view effect a command would ask of the host (`hew.view.hide`, a
+  Scene's apply) refuse `-32000` `dry_run_host_command` with
+  `detail: { method }` and the command's index. A Host-served read is no
+  exception: the document list and the plugin list and activity are
+  refused in a rehearsal too (the Reads above are what a Kernel-served
+  command reads from its host). A solitary Kernel-served command
+  (`hew.history.undo`, `hew.doc.attach`, …) is `-32602`.
+- **A malformed flag.** A `dry_run` that is not a boolean (`"true"`,
+  `1`, `null`, …) is `-32602`, never read as `false`: the envelope is
+  refused whole and nothing in it runs.
+- **On the desktop.** The app's shell answers no rehearsal itself; each
+  goes to a document's window, which answers as above. Two
+  consequences: a connection whose window has closed (§4.2) gets
+  `-32002` before the envelope checks run, since there is no window to
+  run them in; and a rehearsal that names another document with the
+  envelope's `document` member opens that window's session for the
+  connection, as any addressed request does. That is connection state;
+  the document does not change.
+- **Cost.** One copy of the whole document per call. That is right for a
+  check before a commit and wrong for a preview on every pointer move:
+  previews use `hew.compute.*` (§7.6), which copy only their operands.
+
 ## 7. Command surface
 
 The namespaces below and the semantics stated for them are normative; the
@@ -710,36 +1078,57 @@ for, not shipped.
 
 | Namespace | Contents | Tier |
 |---|---|---|
-| `hew.meta` | `hello`, `capabilities`, `documents` (the open documents: id, title, path, dirty; in the desktop app also front, attached, label — §4.2) | Required |
+| `hew.meta` | `hello`, `capabilities`, `documents` (the open documents: id, title, path, dirty, document_id; in the desktop app also front, attached, label — §4.2) | Required |
 | `hew.doc` | `attach` (to a named document, §4.2), `transact`, `new`, `open` (the desktop app opens each into a new background window), `close`, `focus` (desktop app windows; `app` profile), `save`, `export` (STL/3MF/glTF/USDZ), `import` (foreign formats), `purge_unused` (delete every unused palette material and component definition, one undo entry), `health` (every open object with its verdict, open rims and seam family) | Required (`import`, `purge_unused`, `health`, `close`, `focus` Standard) |
-| `hew.query` | `scene` (tree + per-entity summaries), `entity`, `faces` (planes, areas, centroids, boundary loops), `raycast`, `measure`, `resolve` (§5.3), `context` (the open frame stack) | Required |
+| `hew.query` | `scene` (tree + per-entity summaries), `entity`, `faces` (planes, areas, centroids, boundary loops), `raycast`, `measure`, `resolve` (§5.3), `context` (the open frame stack as `stack`, the app's in-context entries as `fallback`, whether a tool gesture is armed as `armed`; headless: `fallback: []`, `armed: false`), `changes_since` (what changed since a history generation, §4.5), `occurrences`, `part_frame`, `signature` (same part or mirrored twin), `mesh`, `topology` (§7.4) | Required (`changes_since`, `occurrences`, `part_frame`, `signature`, `mesh`, `topology` Standard) |
 | `hew.sketch` | `draw_line`, `draw_rect`, `draw_circle`, `draw_arc`, `draw_polygon`, `offset` (a sketch region, or a face/plane region by unit key), `units` (list a plane's drawing as units), `move`, `rotate`, `scale`, `copy`, `delete` (edit units on a plane) | Required (`units`, `move`, `rotate`, `scale`, `copy`, `delete` Standard) |
-| `hew.solid` | `extrude` (region → new Object; also a plane region by unit key), `push_pull` (face of a solid), `union`, `subtract`, `intersect`, `slice`, `follow_me`, `imprints` (list an object's drawn shapes), `move_imprint`, `rotate_imprint`, `scale_imprint`, `delete_imprint` (edit or remove one; kept for compatibility, implemented over plane units, with `hew.sketch.units`/`move`/... as the general form), `cap`, `delete_faces`, `mark_surface`, `thicken` (repair open objects, see below) | Required (`follow_me`, `imprints`, `move_imprint`, `rotate_imprint`, `scale_imprint`, `delete_imprint`, and the repair commands Standard) |
-| `hew.entity` | `rename` (objects, groups, instances, component definitions, materials), `delete` (also materials and component definitions — a definition dies with every instance that places it), `move` (with copy/array), `rotate`, `scale` | Required |
+| `hew.solid` | `extrude` (region → new Object; also a plane region by unit key), `push_pull` (face of a solid), `union`, `subtract`, `intersect`, `slice` (`subtract`, `slice`, and `push_pull` also on a definition member through a path, below), `follow_me`, `imprints` (list an object's drawn shapes), `move_imprint`, `rotate_imprint`, `scale_imprint`, `delete_imprint` (edit or remove one; kept for compatibility, implemented over plane units, with `hew.sketch.units`/`move`/... as the general form), `cap`, `delete_faces`, `mark_surface`, `thicken` (repair open objects, see below), `shell` (hollow to a wall, chosen faces open), `project` (drape a sketch's shape onto faces, then engrave or emboss it straight or following the surface), `bake` (replace a smoothed object's cage with its Smooth surface), `fillet` (round, cove, bullnose or profile edges, or round a 2D corner), `chamfer` (bevel edges or a 2D corner), `resize_blend` (resize or switch a fillet or chamfer by naming one of its faces), `remove_blend` (restore the sharp edges), `remove_degenerate_faces` (a Model Health repair), `soften` (soften edges bending less than an angle), `from_faces` (Make Solid on drawn faces) | Required (`follow_me`, `imprints`, `move_imprint`, `rotate_imprint`, `scale_imprint`, `delete_imprint`, the repair commands, `from_faces`, `shell`, `project`, `bake`, `fillet`, `chamfer`, `resize_blend`, `remove_blend` and `soften` Standard) |
+| `hew.compute` | `boolean`, `slice`, `shells`, `measure`, `outline`, `offset`: pure computations on transient solids that never change the document (§7.6); `project` and `stretch` are declared and refuse `unimplemented` until the flat-drawing projection and section stretch land | Standard |
+| `hew.object` | `smooth` (set the Smooth level, 0–3), `crease` (keep edges sharp under Smooth) | Standard |
+| `hew.entity` | `rename` (objects, groups, instances, component definitions, materials), `delete` (also materials and component definitions — a definition dies with every instance that places it), `move` (with copy, array, and grid forms), `rotate`, `scale`, `flip` (mirror across a plane, with an optional mirrored copy) (each also on members of one definition through a path, below), `set_frame` (a part's frame override, §7.4) | Required (`flip`, `set_frame` Standard) |
+| `hew.array` | `path` (copy nodes along a sketch curve or face loop with an optional scale ramp; params `nodes`, `path`, `count` (total instances, 2 to 1000), `scale` `{from,to}`, `align`; result `node_ids`; one undo entry) | Standard |
 | `hew.context` | `enter`, `exit` | Required |
 | `hew.group` | `create`, `explode`, `reparent` | Required (`reparent` Standard) |
-| `hew.component` | `create`, `place`, `make_unique`, `explode` | Standard |
-| `hew.material` | `create` (color or texture), `paint`, `set_default`, `set_opacity`, `position_texture`, `replace` | Standard |
+| `hew.component` | `create`, `place`, `make_unique` (one placement, through a path at any depth), `promote` (a linked set becomes a named component), `explode`, `rebase` (new definition axes, nothing moves), `flip_instance` (mirror one placement) (§7.4) | Standard |
+| `hew.material` | `create` (color or texture), `paint`, `set_default`, `set_opacity`, `set_pbr` (metallic and roughness, 0 to 1; maps are kept), `position_texture`, `replace` | Standard |
 | `hew.tag` | `create`, `assign`, `set_visible`, `delete`, `rename` | Standard |
+| `hew.geo` | `get`, `set` (the document's geo-reference / coordinate reference system; `set` is one undo step) | Standard |
 | `hew.guide` | `line`, `point`, `angular`, `clear` | Standard |
 | `hew.scenes` | `list`, `add`, `update`, `rename`, `describe`, `remove`, `reorder`, `apply` (§7.1) | Standard |
-| `hew.library` | `list`, `describe`, `insert`, `save`, `remove`, `update_meta` — the Hew Library (§8.1) | Standard |
+| `hew.library` | `list`, `describe`, `insert`, `save`, `remove`, `update_meta`, `status`, `update` — the Hew Library (§8.1) | Standard |
 | `hew.attr` | `get`, `set`, `delete` (§8) | Required |
 | `hew.history` | `undo`, `redo`, `status` (depth; top entry's label and origin; the saved depth; every undo/redo entry's label and origin) | Required |
-| `hew.view` | `snapshot` (render the attached document to PNG, headless or live), `camera` (set the live viewport's camera), `zoom_extents` (frame all visible geometry), `units` (set the app's displayed length-unit format), `line_drawing` (hidden-line SVG or segments, headless or live, §7.2) | Standard (`core` grants `snapshot` and `line_drawing` specifically; `camera`/`zoom_extents`/`units` stay `app`-only — live-host-only effects) |
+| `hew.view` | `snapshot` (render the attached document to PNG, headless or live), `camera` (set the live viewport's camera), `zoom_extents` (frame all visible geometry), `units` (set the app's displayed length-unit format), `line_drawing` (hidden-line SVG or segments, headless or live, §7.2), `hide`, `show`, `show_all`, `hidden`, `isolate`, `clear_isolation`, `zoom_to` (view state, §7.3), `enter`, `exit`, `exit_all` (the person's editing context, §6.3) | Standard (`core` grants six: `snapshot`, `line_drawing`, `hide`, `show`, `show_all`, and `hidden` — none needs a window, and the last four are kernel-served over the document's user-hidden flags; the rest stay `app`-only — live-host-only effects. `hew.view.hidden` reports `isolated: null` on a host with no isolation) |
+| `hew.selection` | `get`, `set`, `clear`: the app's selection (§7.3) | Standard |
 | `hew.print` | `pdf` (a full print job — paper/scale/tiling/marks — as a PDF, headless or live, §7.2) | Standard |
 | `hew.annotate` | dimensions, leader text | Reserved |
-| `hew.event` | notifications + `subscribe` | Reserved (§4.5) |
+| `hew.event` | `subscribe`, `unsubscribe`: server-originated notifications (§4.5) | Standard |
 
 Semantics notes, normative:
 
+- **The document's clock.** Every `hew.query.*` result and
+  `hew.history.status` carry two integers as top-level members.
+  `generation` is the history generation: it moves on every recorded
+  change, undo, and redo, and an aborted transaction or compound rewinds
+  it with the stacks it restores, so it identifies a history state and is
+  what `expect_generation` compares (§6.5). `epoch` moves whenever the
+  generation does and also on every abort, and never runs backwards, not
+  even across a document replacement: a subscriber keyed on it never
+  sees time go back. Writes that record no undo entry (tag visibility,
+  hidden flags, palette and tag registry additions, Scenes; §6.4) move
+  neither. Neither is serialized; a replacement document starts its
+  generation at 0 and its epoch above the old document's.
 - Drawing commands take a **plane spec**: `{"ground": true}`, an explicit
   `{origin, normal[, x_axis]}` frame, `{"face": <locator>}` (draw on a
   solid's face), or `{"sketch": id}` (extend an existing sketch). Points
   are 3D world coordinates and must lie on the plane within kernel
   tolerance; off-plane input is refused typed, never projected silently
   (on a face: `point_not_on_face`). Any point parameter accepts a
-  derived-point locator (§5.3) in place of coordinates.
+  derived-point locator (§5.3) in place of coordinates. A `{"sketch": id}`
+  naming a **detached** sketch (below) is that sketch's own context:
+  `hew.sketch.units` lists exactly its units, and the unit verbs,
+  `hew.sketch.offset` and `hew.solid.extrude` with it act on that sketch
+  alone; a plane or face spec never includes a detached sketch.
 - **The plane is the drafting context.** With a `{"face": ...}` plane
   spec the draw goes through the drafting engine: everything drawn on the
   face's plane — the face edges of every solid with a face on it, the
@@ -779,6 +1168,67 @@ Semantics notes, normative:
   that produced no face (a loose line, a shape wholly over the void) mints
   no token, and a later `{"$face": ...}` reference to one refuses
   `face_token_unknown`.
+- **Faces and solids from drawing.** A loop on one plane is a face,
+  whichever sketches hold its lines, and flat faces that enclose a space
+  with no gap become a solid, in the same undo step as the edit that
+  closed them; a shape that closes against one solid's face grows that
+  solid (it gets a new id and keeps the old one's name and tags), and a
+  detached shape is a solid of its own. This applies to API drawing as to
+  pointer drawing: `draw_line`, `draw_rect`, `draw_polygon`,
+  `draw_circle`, `draw_arc`, and the unit edits `move`, `rotate`, `scale`
+  and `copy` add two optional result fields — `faces_closed`, the
+  sketches that now hold a face the edit closed on another plane (a face
+  a solid consumed in the same step is not listed), and `solid:
+  {object_id, grew}`, the first solid the edit made. A rectangle and four
+  lines to an apex, each line on any plane through it, return `solid` on
+  the closing `draw_line`. Planarity is exact: four points that miss a
+  plane make no face. `hew.solid.from_faces {sketches}` is Make Solid for
+  faces that are already drawn (a file drawn before this rule, or a shape
+  whose closing edit was not a draw): the close pass first fills any loop
+  of the named sketches' lines that is not yet a face, as a draw would;
+  then every face the named sketches hold, and every face the pass made,
+  seeds the search, which gathers the faces connected to them through
+  shared edges, and the result is `{object_id, grew}` as above, one undo
+  step labeled "Make Solid" (every face the pass made is kept, those of
+  named shapes that stayed open included). Nothing made refuses with the
+  document untouched: `loop_not_planar` when a gap's open edges close a loop that
+  lies on no one plane (`detail.loops`, the loops' corners), else
+  `faces_not_closed` with `detail.open_edges` (the count) and
+  `detail.segments` (up to eight sample open edges, `[[x,y,z],[x,y,z]]`),
+  else `faces_not_solid` when the faces close but build no solid
+  (`detail.reason`: `overlapping_faces`, `inside_solid` — a shape drawn
+  inside the solid it closes against makes nothing —, `self_touching`,
+  `invalid`; with `overlapping_faces`, `detail.segments` gives up to
+  eight edges two faces lie over each other along, `[[x,y,z],[x,y,z]]`).
+  When faces lie over each other while open edges or a non-planar loop
+  remain elsewhere, `faces_not_closed` and `loop_not_planar` name the
+  overlap too: `detail.reason: "overlapping_faces"` and
+  `detail.overlapping_segments` (up to eight edges), beside their own
+  fields. An id that names no live sketch refuses `unknown_entity`. Two faces
+  with the same loop on one plane (the same wall drawn twice, say once
+  as a detached shape) are one face, not an overlap: the solid takes the
+  ordinary one, else the earlier drawn, and the other stays a sketch.
+- **Detached shapes.** `draw_line`, `draw_rect`, `draw_circle`,
+  `draw_arc` and `draw_polygon` take an optional `detached` (default
+  `false`). With `detached: true` on a `{"ground"}`, `{origin, normal}` or
+  `{"face"}` plane spec, the shape is drawn as one new **detached**
+  sketch: drawing that takes part in no arrangement with ordinary
+  drawing, so it neither splits nor joins the face or the drawing under it
+  (a circle centered on a face's corner stays a whole circle and the face
+  stays whole) and nothing drawn later joins it. The one exception: an
+  Object edge in its plane whose two ends are corners of the detached
+  shape closes it. Extruding one of its regions always makes a new
+  Object. Snapping still sees it. The result is the sketch shape
+  `{sketch, region_ids, region_id?, curve_id?}` whatever the plane spec
+  (no face tokens: no face changed), so a following `hew.solid.extrude`
+  chains through `region_id` as on the ground. With a `{"sketch": id}`
+  plane spec `detached` is refused as invalid params ("detached is decided
+  by the sketch; omit it for a sketch target"): drawing into a sketch
+  continues it, and the sketch's own flag decides. Free stores of a
+  detached sketch carry `detached: true` in `hew.sketch.units` and in the
+  `units` a unit edit answers, and `hew.query.scene` marks such a sketch
+  `"detached": true`. A detached shape cannot be joined to a face later;
+  delete it and draw again without `detached`.
 - **Unit verbs.** `hew.sketch.units {plane}` (read-only) lists a plane's
   drawing: `units` — islands `{key: "isl_<hex16>", edges: [{key, a, b,
   store, object_id?, sketch_id?, curve?}]}` (`curve` is `{key:
@@ -841,33 +1291,37 @@ Semantics notes, normative:
   creates or opens documents and clients `attach`; whether a live host
   additionally honors `new`/`open` (opening a fresh window, say) is
   host-defined and advertised via capabilities.
-- `hew.doc.open` takes a `.hew` or a SketchUp `.skp` (either container,
-  chosen by the `.skp` extension). Opening a `.skp` is not an edit: it
+- `hew.doc.open` takes a `.hew` or a SketchUp `.skp` (the 2021-and-later container or a stream release, 3 to 8 or 2013 to 2020;
+  read by content, chosen by the `.skp` extension). Opening a `.skp` is not an edit: it
   leaves no undo step. A headless host keeps the opened file as the
   source of the document's next `.skp` save; opening a `.hew` or
   `hew.doc.new` drops it. A file the reader cannot decode refuses
   `load_failed`.
+- `hew.doc.save` and `hew.doc.export` take an optional `compat` boolean with format `"skp"`: it writes revision 17 of the 2021-and-later container (without layer folders, hatch patterns, PBR materials, environments, snaps, procedures, page extras and the coordinate system) so older SketchUp versions can open it; by default the lowest revision (17 or 18) that holds the content is written. `compat` with any other target refuses `format_mismatch`. SketchUp 2021 to 2025 are supported: revision 17 is the one to hand them.
 - `hew.doc.save` takes an optional `format`: `"hew"`, `"skp"` (the 2026
-  container, what current SketchUp saves) or `"skp2017"` (opens in
-  SketchUp Make 2017 and later). Without it the path's extension decides:
+  container, what current SketchUp saves), or a stream release by its
+  name: `"skp3"` to `"skp8"` and `"skp2013"` to `"skp2020"` (SketchUp 3 to
+  8 and 2013 to 2020, each in its own release's format; a file opened from
+  one of them is remembered as that release, and a file of a release
+  Skpwright does not list as the nearest one it writes). Without it the path's extension decides:
   a `.skp` path keeps the working document's own `.skp` container when it
   came from a `.skp` (the 2026 one otherwise), anything else writes
   `.hew`; with no path, the working file's own format is used. An
   explicit `format` that contradicts the path's extension (a `.skp` path
-  with `"hew"`, or a non-`.skp` path with `"skp"` / `"skp2017"`) refuses
+  with `"hew"`, or a non-`.skp` path with `"skp"`, `"skp3"` to `"skp8"` or `"skp2013"` to `"skp2020"`) refuses
   `format_mismatch` and writes nothing, so one format's bytes never land
   in the other's file. A `.skp` save builds on the file the document came
   from (or was last saved as), so unchanged content stays as SketchUp
   wrote it, and the written file becomes the new source; a `.hew` save
   drops it. The result carries `format` (what was written) and, for a
   `.skp`, `simplified` (what the file could not hold exactly) and
-  `writer_notes` (what the 2017 writer dropped), both arrays of strings.
+  `writer_notes` (what a stream-release writer dropped), both arrays of strings.
   In the desktop app a live save runs the app's own Save (Save As with a
   `path`, a saved copy with `copy`), so a `.skp` path or format writes
   exactly what File ▸ Save would. A live host that would only hand the
   bytes back (no `path`, nothing for the app to write) refuses a `.skp`
   format with `host_capability_missing`; `hew.doc.export` with `"skp"` /
-  `"skp2017"` hands back a SketchUp file instead.
+  `"skp3"` to `"skp2020"` hands back a SketchUp file instead.
 - `hew.doc.revert {document?}` is File ▸ Revert to Saved: it re-reads the
   document's saved file in place, discarding every change since the last
   save. The undo and redo history is cleared and the document reads clean;
@@ -881,7 +1335,7 @@ Semantics notes, normative:
   the history cannot see, such as scene edits, does not count; the live
   app asks its dirty flag, which does count them. The desktop app routes
   it to the window like `hew.doc.save`.
-- `hew.doc.export` also writes `"skp"` and `"skp2017"`, as `save` does
+- `hew.doc.export` also writes `"skp"`, `"skp3"` to `"skp8"` and `"skp2013"` to `"skp2020"`, as `save` does
   but never changing the document's own file or source.
 - A SketchUp file carries display units (SketchUp's Model Info > Units).
   `hew.doc.save` and `hew.doc.export` take an optional `units`, one of
@@ -913,6 +1367,32 @@ Semantics notes, normative:
   `[1,0,0]`, `v` `[0,1,0]`, 1 m wide. The bytes are kept as they are; a
   picture over 64 megapixels, or one whose size cannot be read, refuses
   `load_failed`. The report adds `picture: {width, height}`.
+- `hew.component.import_definition` `{bytes_base64, format, name?,
+  units?, images?}` turns a file's bytes into one **unplaced** component
+  definition and answers `{definition, reused, report: {objects,
+  members}}`. `format` is `hew`, `skp`, `glb`, `gltf`, `stl`, or `dae`
+  (a picture format refuses `unsupported_for_definition`); `units` and
+  `images` mean what they do for `hew.doc.import`. There is no `path`
+  member: the call carries the bytes, so a plugin needs no file
+  permission, and it requires `model.write`, not `documents.save`. A
+  `.hew` file is read directly; the other formats go through the host's
+  importers into a scratch document, so nothing lands in the world and
+  the import report is not kept. The whole world content of the file
+  becomes the definition's members in the definition's own frame
+  (nested definitions come along). The definition is stamped with the
+  SHA-256 of the format, the `units`, the bytes, and the `images` (each
+  image's uri, format, and bytes; `hew.library` provenance, a fixed
+  definition marker): a later import of the same bytes in the same
+  format with the same units and images answers the same `definition`
+  with `reused: true`, adds no undo entry, and keeps the first import's
+  name. A different `units` or `images` is a different definition. A new definition is
+  one undo entry. Place it with `hew.component.place`. The file plus all
+  its images over 64 MiB refuse `import_too_large` (checked on the
+  encoded length, before anything is decoded); a name is at most 128 bytes with no control
+  characters (default `"Imported"`); an empty file refuses `empty_group`,
+  and it refuses `explode_session_scope` while an editing session is
+  open. The live app records the whole frame for replay, so the file
+  bytes ride the recording. It cannot be rehearsed in a dry run.
 - `hew.solid.extrude` consumes a region exactly as the push/pull tool
   does: the profile becomes the new solid's base face and leaves the
   sketch. `hew.solid.push_pull` on an existing solid's face carries the
@@ -925,7 +1405,229 @@ Semantics notes, normative:
   edge locators, a face locator standing for that face's boundary loop,
   or a sketch curve id — validated for connectivity and refused typed
   where the tool itself refuses (branching selections, bends tighter
-  than the profile). Exact schema in the registry.
+  than the profile). Optional `twist` (radians), `end_scale` (ratio) and
+  `stations` (per path segment) turn and scale the profile along an open
+  path; a closed path refuses `twist_needs_open_path`. Exact schema in the
+  registry.
+- `hew.solid.revolve` mirrors the Revolve tool: the profile is a sketch
+  region or a world solid's face (as `follow_me`'s), turned about an axis
+  in its plane — two points `{from, to}` or an edge's line `{edge}`.
+  `angle` defaults to a full turn (a closed solid); `segments` defaults
+  to the drawing tools' count at the profile's largest distance from the
+  axis. A partial turn of a profile touching the axis refuses
+  `partial_sweep_on_pole`.
+- `hew.solid.fillet` and `hew.solid.chamfer` mirror the Fillet tool.
+  `edges` is an edge-set (§5.2); alternatively `corner` rounds or
+  chamfers a 2D corner, either of a drawn sketch (`{"sketch": id, "at":
+  p}`) or of a shape drawn on a face (`{"face": <locator>, "at": p}`).
+  Fillet takes `radius` (meters), `segments` (default the drawing tools'
+  count for the edge's turn), `profile` (`"round"` by default, `"cove"`,
+  `"bullnose"`, a built-in id such as `"builtin:ogee"`, or a Library
+  profile's id) with `width` for profiles, `stops`, `handles` (a radius at
+  an arc length, round only) and `corners` (`"rolled"` or `"mitered"`).
+  Chamfer takes `distance`, or `distances` `[a, b]` with a `primary`
+  face locator that takes `a`, or `distance` with `angle` (radians from
+  the primary face); `corners` is `"mitered"` or `"flat"`. A result names
+  `object_id`, `blend_ids`, `faces` and the applied `size`; a 2D corner
+  names `sketch_id` or `object_id`. A size that does not fit refuses
+  `radius_too_large` with `detail: {max, limited_by}` (`limited_by` is
+  one of `adjacent_face`, `neighbor_edge`, `hole`, `imprint`,
+  `opposite_blend`, `short_edge`, `rim_radius`, `facet_width`,
+  `other_geometry`, `known_fit`, `unknown`; `known_fit` names a size that
+  fits, not shown to be the largest), a profile wider than the faces refuses
+  `profile_too_wide` with `detail: {needed, available}`, a corner too
+  large refuses `corner_radius_too_large` with `detail: {max}`, and a
+  vertex or an obstruction refuses `unsupported_vertex` / `obstructed`
+  with `detail: {at}`, and a vertex where the edge's two faces meet
+  flush (two pipes of one radius in a tee) refuses `blend_faces_flush`
+  with `detail: {at}`. Edges outside the analytic shapes (a pipe tee, an
+  oblique cut through a cylinder, imported meshes) take `round`,
+  `chamfer`, `cove` and profiles as a rolling blend, around a closed loop
+  or along a run that ends on a face at both ends; a bullnose or a stop
+  there refuses `unsupported_edge`, and a run ending anywhere else
+  refuses `unsupported_vertex`. `hew.query.faces` adds `blend: {id, kind, role}` to
+  every face a blend made.
+- **Profile items.** A Library item of category `profile` holds one open
+  drawn chain (the shape of an edge) and nothing else; it lives under
+  `Profiles/`. `hew.library.save` takes `{"profile_chain": {"sketch":
+  <id>, "edges": [<sketch edge id or locator>, …]}}` (edges in order from
+  the profile's start on the bearing face to its end; the category is
+  implied) and normalizes the chain to the ground plane with its corner
+  at the origin. `"replace": "<item id or path>"` overwrites an existing
+  item in place and keeps its id. `hew.solid.fillet`'s `profile` accepts
+  such an item's id or path (the drawn width is the default `width`). A
+  profile item is not placeable: `hew.library.insert` refuses
+  `profile_not_insertable`.
+- `hew.solid.union`, `hew.solid.subtract` and `hew.solid.intersect` take
+  `a` and `b`, or `operands` (two or more node ids, in order) for one
+  combine over all of them as one undo step: a Union of all, the first
+  minus the union of the rest, the intersection of all. `operands` with
+  fewer than two refuses `boolean_needs_two`; `a` without `b`, or both
+  spellings at once, is a malformed request. Solids that only touch (along
+  an edge, at a corner) refuse `degenerate_contact`. An imported solid is
+  flat only to the import tolerance: where the other operand reaches one
+  of its faces that is not flat, the boolean splits that face into flat
+  triangles through its own corners (their diagonals are soft), and a face
+  it cannot split refuses `operand_face_not_flat`, with `detail.operand`
+  (`"a"` or `"b"`, the side of the pairwise boolean that refused) and
+  `detail.face` (an opaque key for logs and reports, not an address).
+  `arrangement_failed` means the boolean could not resolve where the two
+  meet, or that a face of its result would not stay flat once the file
+  is reopened; moving one solid slightly usually gives an answer.
+  A cut through dense geometry, an imported mesh above all, passes within
+  nanometers of some vertex or edge and leaves slivers far below anything
+  that can be seen or made. The boolean merges every face its own cut
+  leaves narrower than 0.1 µm (`kernel::tol::FEATURE_MIN`) into its
+  neighbors, moving no point farther than 0.2 µm
+  (`kernel::tol::TIDY_REACH`) and leaving every face the cut does not
+  touch as it was, and says so: the result then carries a `tidied` block,
+  `{ slivers_merged, slivers_kept, points_moved, max_move, faces_split,
+  sites, sites_total, feature_min }` (`max_move` and `feature_min` in
+  meters; `sites` one point per place something was merged, the first
+  16). Sites are world coordinates, except where the boolean ran in a
+  component definition's own geometry, which reports that definition's
+  coordinates: a `push_pull` on a definition member (whose face locator is
+  in the definition's coordinates too) and a `rejoin` of a definition's
+  pieces. A `subtract` or `slice` reached through a path reports world
+  points. `faces_split` counts faces a moved point bent off their plane,
+  split into flat triangles with soft diagonals. The block is present only
+  when something was merged or kept, on `hew.solid.union`, `subtract`,
+  `intersect`, `slice`, `rejoin` and a through `push_pull` (one that
+  passes another wall of the solid, a boolean) and on
+  `hew.compute.boolean` and `hew.compute.slice`; the booleans of one
+  command sum into one block.
+  When merging cannot give a valid solid the boolean keeps the cut as
+  made, and `slivers_kept` counts what it kept. `result_too_thin` is left
+  for the rare cut where neither gives a valid solid (a face under 10 nm
+  wide that would not merge); moving either solid by a hundredth of a
+  millimeter clears it.
+- `hew.solid.resize_blend` and `hew.solid.remove_blend` take a `face`
+  locator naming any face of the blend (`unknown_blend` when it has
+  none). `resize_blend` takes the same size fields as `fillet` and
+  `chamfer` (`radius`, `distance`, `distances`, `width` with `profile`)
+  and may switch a fillet to a chamfer or back; a resize keeps the
+  blend's stops and scales its radius handles with the size. A blend
+  made since blends record what they replaced is removed or resized by
+  replaying its record, with a later blend that ran into it taken off and
+  put back (if that later blend cannot be put back after the change, the
+  call refuses `dependent_blend`); a blend whose own region was edited
+  since (a face pushed through it, a boolean across it) refuses
+  `blend_modified`.
+- `hew.solid.deform` mirrors the Deform tool on a world object: `twist`,
+  `bend` and `taper` work about the object's world bounding box — `end`
+  names the moving face, the opposite face stays fixed, and `toward`
+  (bend only) the cross axis it bends toward; `bend_to_path` maps the
+  straight `base` line end to end onto a `path` (a sketch curve or a
+  face's boundary loop), stretching the object to the path's length.
+  A result that would pass through itself refuses `self_intersecting`
+  with `detail.limit`, the largest angle or ratio that works.
+- `hew.solid.loft` mirrors the Loft tool: `profiles` are closed regions
+  or world faces without holes, in order (a line or curve refuses
+  `open_profile`); an optional `apex` ends the loft in a point, up to two
+  `rails` (a sketch curve or a face's boundary loop) guide it, and
+  `start_offsets` move each profile's correspondence start by whole start
+  candidates: corners where every profile has the same number of corners
+  (they then loft corner to corner), else vertices. An arc drawn as a
+  single edge turns the short way unless a straight side tangent to it
+  says otherwise, so split one over a half turn into two or more edges.
+  The profiles are not consumed; the result is a new object.
+- `hew.solid.shell {object, open?, thickness}` hollows a solid to a wall
+  of `thickness` meters, leaving the faces named by `open` (face
+  locators, none for a closed hollow body) open. A negative thickness
+  grows the wall outward. The object keeps its id; the result is
+  `{object_id}`. Opening a pocket's floor leaves a rim in the floor's
+  plane around the opening when the pocket is deeper than the wall; when
+  it is as deep as the wall or shallower, the pocket's walls run on down
+  and the opening is a hole through the top's wall. A wall that leaves no room (one thicker than the
+  shape, or walls around a pocket that would run into the side walls or
+  another pocket's) refuses `wall_too_thick` with `detail: {at}`, a
+  corner whose offset faces do not meet in one point refuses
+  `unsupported_shell_corner` with `detail: {at}`, and a result
+  that would pass through itself refuses `self_intersecting` (with
+  `detail: {limit}`, the largest amount that works, when one is known).
+- `hew.solid.project {object, sketch, regions?, depth?, mode?}` projects
+  the sketch's closed shapes along the sketch's normal onto the object's
+  faces and draws them there as imprints. With no `depth` that is all it
+  does. With a `depth`, a positive value engraves and a negative one
+  embosses; `mode` is `"straight"` (the default: the region swept straight
+  along the projection direction, which can cut through a wall) or
+  `"follow"` (a constant depth along the surface). A depth that would cut
+  the object into pieces refuses `would_sever`; a shape that lands on
+  nothing refuses `project_misses`; an open shape refuses
+  `project_needs_closed_shape`. The result is `{object_id, faces}`, the
+  count of faces the imprint made.
+- `hew.object.smooth {object, level}` sets the Smooth level (0 is Off, 1
+  to 3 are steps), stored as the first-party attribute in §8.2. The
+  object's own faces stay the cage that other commands edit and locate
+  against; `hew.query` reports `smooth_level` on every object.
+  `hew.object.crease {edges, crease?, propagate?}` sets (default) or
+  clears the crease flag that keeps edges sharp under Smooth. `edges` are
+  `{object, at}` locators all on one object; `propagate` is `"none"` (the
+  default here, unlike Fillet) or `"tangent"`. The result is `{edges}`, the
+  number of kernel edges changed. Soft seams and edges on an opening
+  refuse `crease_on_soft_edge` and `crease_on_boundary`.
+  `hew.solid.bake {object}` replaces the cage with the dense solid of its
+  Smooth surface and clears the level; an object with no level refuses
+  `amount_out_of_range`. `hew.doc.export` takes `cages: true` to write
+  smoothed objects' cages instead of their Smooth surfaces in the mesh
+  formats (STL, 3MF, glTF, USDZ); `.skp` export always writes the cage.
+  A boolean between smooth objects works on their cages and the result
+  keeps the first operand's level.
+- `hew.solid.soften {object, max_angle}` marks soft every interior edge
+  that bends by less than `max_angle` radians (open range, 0 to pi).
+  Coplanar, creased and already-soft edges are left alone. The result is
+  `{softened}`, the number of edges changed; a call that softens nothing
+  records no undo entry.
+- `hew.solid.remove_degenerate_faces {object}` is the Model Health repair
+  of the same name: it drops zero-width and sub-tolerance faces and keeps
+  the object closed. The result is `{removed}`; an object with none
+  refuses `nothing_to_remove`. `hew.doc.health` rows carry
+  `degenerate_faces`, and a closed object is listed when it has some. A
+  boolean that meets such a face refuses `degenerate_input` with `detail:
+  {at}`, and one that meets a face too warped to treat as flat refuses
+  `non_planar_input` with `detail: {at}`.
+- `hew.array.path {nodes, path, count, scale?, align?}` places `count`
+  total instances (the originals count as the first) along a sketch curve
+  or a face's boundary loop, optionally turning each to follow the path
+  (`align`, default true) and scaling along a ramp (`scale: {from, to}`).
+  A closed path divides its loop by `count`. The copies are one undo
+  entry; the result names the new `node_ids`.
+- Paint and Push/Pull know about blends. `hew.material.paint` paints a
+  face's whole logical face by default (all facets of a fillet or a
+  cylinder wall); `logical: false` paints the one facet. `hew.solid.push_pull`
+  on a face of a fillet or chamfer resizes it, and on a face next to one
+  restores it, moves the face and re-applies the blend, falling back to
+  the ordinary push/pull if that does not work. `hew.query.faces` reports
+  each face's `surface` as `{kind: "cylinder" | "sphere" | "torus" |
+  "cone", …}` with that class's fields, and `blend: {id, kind, role}` on
+  faces a blend made.
+- Refusal details. A refusal's `detail` carries the numbers a client needs
+  to retry: `radius_too_large` `{max, limited_by}`; `profile_too_wide`
+  `{needed, available}`; `corner_radius_too_large` `{max}`;
+  `unsupported_vertex`, `obstructed`, `wall_too_thick` and
+  `unsupported_shell_corner` `{at}`; `self_intersecting` `{limit}` when known;
+  `non_planar_input` and `degenerate_input` `{at}`; and, from the drawing
+  commands, `endpoint_near_miss` `{gap, nearest}`. Every `at` and
+  `nearest` is a world point `[x, y, z]` in meters.
+- `hew.sketch.draw_line` and `hew.sketch.draw_arc` on an existing sketch
+  refuse `endpoint_near_miss` when a point misses an open end (a vertex
+  with a single edge) of that sketch by more than `1e-9` m and no more
+  than `1e-4` m. The 0.1 mm limit is a heuristic about client input (a
+  rounded coordinate leaves a gap of about `1e-7` m that never closes a
+  loop), not a kernel tolerance. Nothing is drawn on a refusal.
+- `hew.solid.mend {object, weld?, folds?, split?, fill?, require_solid?}`
+  is Model Health's Mend: merge points closer than `weld` meters (omitted
+  or `true` = the object's default distance, `false`/`null` = none), remove
+  zero-width folds, separate pinched parts (`split`; islands become objects
+  of their own), and fill small gaps (`fill`: `"holes"`, a list of
+  `hew.doc.health` rim indices, or `false`), as one undo step. It does what
+  it can: a gap it cannot close is left open and listed in `skipped_rims`
+  with its refusal code as the reason, and the result reports `closed`.
+  `require_solid` refuses `still_open` instead of committing a result that
+  is not watertight. Pieces carry the object's name and tags. It refuses
+  rather than leave the object worse (a solid opened at a narrow neck, a
+  thin part pressed flat, a face turned over) and with `nothing_to_mend`
+  when no step has work; a refusal leaves the document untouched.
 - **Editable imprints** (kept for compatibility; implemented over the
   drafting engine's plane units — `hew.sketch.units`, `move`, `rotate`,
   `scale`, `delete` are the general form and take plane and unit keys):
@@ -957,8 +1659,11 @@ Semantics notes, normative:
   point on a plain face) refuses `not_an_imprint`. `move_imprint` takes an
   `offset` translation; `rotate_imprint` an `angle` (radians) about the
   plane's normal through a pivot point; `scale_imprint` a uniform `factor`
-  about an anchor point — every point parameter accepting a derived-point
-  locator (§5.3). Each of the four is one drafting gesture on the unit's
+  (finite and nonzero; a negative factor turns the shape 180 degrees about
+  the anchor and scales it by its magnitude; a mirror about a world axis of
+  an axis-aligned drawing plane is `hew.sketch.scale` with a negative
+  per-axis factor) about an anchor point — every
+  point parameter accepting a derived-point locator (§5.3). Each of the four is one drafting gesture on the unit's
   whole island (one undo entry), so a move landing on other drawing or
   past the face's edge is accepted and lands as the same shape drawn
   there would. A landing off the plane (a move with a normal component,
@@ -980,10 +1685,42 @@ Semantics notes, normative:
 - The transform commands are contract-shaped as: `move` takes a
   translation vector or a from→to point pair; `rotate` takes a pivot
   point, an axis direction, and an angle; `scale` takes an anchor point
-  and per-axis factors — every point-typed parameter accepting a
-  derived-point locator (§5.3). `move`'s array form carries the UI's
-  semantics (`count` copies at the committed step, multiplying or
-  dividing the distance); exact schemas live in the registry.
+  and per-axis factors (finite and nonzero; a negative factor mirrors) — every point-typed parameter accepting a
+  derived-point locator (§5.3). `move` and `rotate` copy with `copy`;
+  exact schemas live in the registry. `copy: {count: n}` (the UI's
+  array form) makes `n` copies at the committed step and its multiples:
+  `step, 2·step, …, n·step`, `step` being the translation (or the
+  rotation about the pivot). `copy: {grid: [{count, step}, …]}` (`move`
+  only) makes a grid of one to three axes in one undo entry: `count` is
+  the number of slots along an axis, the original's included, and
+  `step` the vector between slots, so `[{count: 4, step}]` makes three
+  copies (where `copy.count: 3` also makes three) and `[{count: 2, step:
+  a}, {count: 3, step: b}]` makes the five other slots of a 2 × 3 field.
+  A grid takes its steps from `grid`, so `translation`, `from`, and
+  `to` are params errors beside it, as are `count` and `grid` together,
+  `grid` on `rotate`, an axis with `count` 0, and a grid with no axis
+  above 1. `copy.linked` (default `true` on the bus, whatever the app's
+  preference says) links each Object or Group copied: it is wrapped as a
+  set of linked copies (it keeps its id and becomes the definition's
+  member, a placement taking its spot) and every copy is another
+  placement, so the result's `ids` are `ins_` ids. Several Objects copied
+  together make one set each; a Group makes one set; an instance copies
+  as another placement of its own definition either way. `linked:
+  false` copies independent geometry, as before. Whenever `copy` is
+  given the result also carries `linked: [{source, instance,
+  definition}]`, every wrap the copy made (empty for `linked: false`, or
+  when every root already was a placement); a plain move has no
+  `linked`. The wrap and the copies are one undo entry whose undo
+  restores the loose node exactly. Sketches are never wrapped (a sketch
+  copy still refuses `sketch_copy_unsupported`). Through a path, a
+  linked copy wraps each member inside its definition first, so the
+  definition holds placements of the new set. The copies are every index tuple `(i0, i1, i2)` in
+  lexicographic order except `(0, 0, 0)`, each translated by `Σ i_a ·
+  step_a`; `ids` lists them placement by placement, each block in `ids`
+  order. `copy.count` makes at most 1000 copies; a grid's counts
+  multiply to at most 1000 slots, the original's included, so at most
+  999 copies. Past either cap the command refuses
+  `array_count_too_large` (`detail.max: 1000`).
 - `hew.group.reparent {ids, parent}` moves live world nodes into `parent`
   (a live group) or out to the top level (`parent: null`) without
   touching geometry — a group is a pose-less container, so this is pure
@@ -999,10 +1736,9 @@ Semantics notes, normative:
   decision this spec does not preempt.
 - `hew.view.snapshot` exists so a client can *see* the model rather than
   only query it — for an agent, the difference between knowing what is
-  true and seeing what it built. A headless host renders it through a
+  true and seeing what it built. Every host renders it through the same
   deterministic software rasterizer (no GPU, no viewport, bytes in and
-  bytes out); a live host may render through its actual viewport instead
-  — either way the command takes an explicit camera, a named standard
+  bytes out; §7.2), so the app and hew-cli agree — the command takes an explicit camera, a named standard
   view, or a Scene's id (`camera`, `view`, and `scene` mutually
   exclusive; giving none of the three renders the document's saved
   working camera if it has one, else a fitted isometric view — §7.1's
@@ -1105,7 +1841,8 @@ Semantics notes, normative:
   each face's `texture_pins` in the same form, or `null` for the default.
 - `hew.material.replace {from, to, object?}` is the Paint tool's
   Shift-click: every face and object base painted `from` becomes `to`
-  across the document, or only within `object` (Ctrl/Cmd+Shift-click).
+  across the document (instance materials too, §7.5), or only within
+  `object` (Ctrl/Cmd+Shift-click).
   `null` on either side means unpainted, and both keys are required. It is
   one undo entry, or none when nothing matches.
 - `hew.entity.rename`/`hew.entity.delete` reach a palette material
@@ -1174,7 +1911,92 @@ Semantics notes, normative:
   leaky, the stance of §2. `hew.solid.mark_surface` marks an open object
   as a surface on purpose (`accepted: false` clears it): stored in the
   object's `hew.health` attributes, no geometry, and `hew.doc.health`
-  keeps listing it with `accepted: true`.
+  keeps listing it with `accepted: true`. `hew.solid.rejoin`
+  (`{family, as: "one_solid"}`, answering `{object}`) rejoins one seam
+  family of `hew.doc.health` (the index its `families` list and an
+  `hew.query.occurrences` row report, numbered over the whole model's
+  report and resolved when the call runs; an index read from a
+  `hew.doc.health` call with an `objects` scope may name a different
+  family) into a
+  single solid in one undo entry: each piece is capped at its shared rims,
+  the inside walls are deleted, and the pieces are unioned; the result
+  keeps the largest piece's name, tags, and attributes. It refuses
+  `unknown_family`, `not_cappable` (a seam rim cannot take a cap),
+  `rejoin_not_possible` (a shape drawn with an opening, members under
+  different parents, or pieces that meet only through a wall), or a cap's
+  own refusal (`invalid`, `degenerate_contact`, `operand_face_not_flat`,
+  `arrangement_failed`, `result_too_thin`, or a boolean operand refusal
+  from the union step), and leaves the model as it was. Like the
+  booleans, its result carries `tidied` when the union merged slivers of
+  its cut. Params are
+  exactly `family` and `as`; the command takes no generation guard, so run
+  it inside `hew.doc.transact` with `expect_generation` when the index
+  came from an earlier read.
+- **Transforming a part through a path.** `hew.entity.move`, `rotate`,
+  and `scale` take each `ids` entry as a public id or an occurrence
+  locator `{"path": [instance, …, member]}` (§5.2, §7.4). One call is one
+  scope: every entry names a world node (or sketch), or every entry names
+  a member of ONE definition reached by the SAME instance path; a mix, two
+  definitions, or two paths to one definition is `-32602` ("ids must all
+  be world nodes or members of one definition reached by the same path").
+  A path whose leaf is a world node counts as that node's id; a path that
+  leads nowhere refuses `unknown_occurrence`. The gesture stays in world
+  terms — `translation`, `from`/`to`, `pivot`, `axis`, and `anchor` are
+  world values, exactly as for a world node — and Hew applies it in the
+  definition's own frame (`t_local = P⁻¹ · t · P`, `P` the path's
+  composed pose), so the member moves where the user would have dragged
+  it under that placement, and every other placement of the definition
+  follows with its own pose (a mirrored placement shows the mirror image
+  of the move). A member group's leaves bake once and a member instance's
+  pose composes, as for a world selection. `copy` (a count or a grid)
+  clones the members inside the same definition, so every placement
+  shows the copies; the result's `ids` are the copies' ids. Each call is
+  one undo entry. While the definition — or one the path passes through —
+  is open for editing, its members are world nodes, and the path form
+  refuses `explode_session_scope`: transform the world rows instead. A
+  copy also refuses `explode_session_scope` while any editing session is
+  open, even one on an unrelated definition, because closing a session
+  folds every node made since it opened into the open container. A member that left
+  the definition between resolution and the edit refuses
+  `unknown_entity`.
+- **Cutting a part through a path.** `hew.solid.subtract` takes `a` as
+  `{"path": [instance, …, object]}`: with `b` a world object, the cutter
+  is mapped into the definition's frame through the path's composed pose,
+  the subtract runs inside the definition, and the cutter is consumed;
+  every placement shows the cut, and the result is a member that keeps
+  `a`'s name, tags, and attributes (`result` is its id). `b` may instead
+  be a transient cutter, a `SolidSpec` `{prism}` or `{box}` in world
+  coordinates (§7.6): the same cut, one undo entry, and no object is
+  created for the cutter, so a machining is one call (undo brings back
+  only the host). A transient cutter beside a world `a`, or under
+  `union` or `intersect`, is `-32602`. With `b` a member
+  of the same definition by the same path (`{"path": […]}`), `union`,
+  `subtract`, and `intersect` all run between the two members inside the
+  definition. A union or intersect with any other placement operand (a
+  world instance, a path member beside a world object, or a group
+  holding an instance) would split that placement from its copies, so it
+  refuses `would_unlink` with `detail: {operands}` unless `unlink: true`
+  is passed; with it, each placement operand is exploded into plain
+  solids (its other copies keep the shared solid; a copy left alone in
+  its set is made plain too), the world boolean
+  runs, and the result adds `unlinked`, the placements split off, all in
+  one undo entry. A path member takes `unlink: true` when it is a direct
+  object member of a world placement (`{path: [instance, object]}`);
+  deeper paths are `-32602` (unlink the placement first). `unlink: true`
+  with no placement operand is accepted and ignored, and `unlink` on
+  `subtract` is `-32602` (a subtract through a placement cuts every
+  copy). `b` must not be a path member when `a` is a world node. `hew.solid.slice` takes `object` as a path to
+  a member; the `plane` stays in world coordinates and both pieces stay in
+  the definition. `hew.solid.push_pull` takes a face locator whose
+  `object` is a path to a member; `at` and `ray` stay in that object's own
+  frame, as `hew.query.raycast` reports them, and the push reaches every
+  placement as a definition member's always does. A host or object inside
+  a member group refuses `grouped_operand` (for a boolean between two
+  members, either one). The on-loan rule above applies to all of them,
+  and the ones that make new members, a subtract with a world `b`, a
+  boolean between two members, and a slice, also refuse
+  `explode_session_scope` while any editing session is open, as a copy
+  does.
 - `hew.entity.move` with `copy` over a Sketch selection refuses typed at
   1.0, whatever the count: the UI's sketch copy is tool-layer replay
   through the sticky rules, and the kernel-side sketch duplicate op does
@@ -1258,6 +2080,45 @@ Semantics notes, normative:
   so an item saved through the API shows a generic/no-thumbnail tile in
   the browser until a UI session opens the library folder and renders one
   itself.
+- `hew.library.status` (query, `{}`) lists every definition linked to a
+  Library item with its state against the item (§8.1's table:
+  `in_step`, `library_newer`, `edited_here`, `both_changed`, `different`,
+  `item_missing`; a part open for editing is reported as it would be
+  saved, so the answer is the same inside the part as after leaving it),
+  its item id, name, copy count, whether a lock would
+  make an update skip it (`locked`: the definition is frozen, its contents
+  hold a locked node, or a set of linked copies only its contents place
+  holds one; the very check `hew.library.update` makes), and its prints
+  (`mine`, `base` when the link has one,
+  `theirs` when the item is there). The item's prints come from its
+  `prints` metadata, or are computed from the file for an item saved
+  before 1.5. `hew.library.update` (`ModelMutating`, `{definitions}` or
+  `{all: true}`) replaces linked definitions' contents with their items'
+  through the insert's copy engine, as one undo entry ("Update from
+  Library"): each definition keeps its id and every placement its pose;
+  paint is matched by value or added; the item's new tags are
+  registered. A definition the item nests resolves against the model's
+  definitions from the same item and definition, those the old contents
+  place first, then by stable id: one holding the item's content is
+  placed as it is; else one that is `in_step` or `library_newer` and no
+  lock holds is updated in the same step (`also_updated`); else the
+  item's definition is copied in fresh and the ones changed here or held
+  by a lock are left as they were (`kept`). A step that replaces
+  something also brings up to date the base of each definition it
+  touched that already held the item's content (an update that would
+  only do that records nothing; such a link reads `in_step` either way).
+  `all` takes every definition whose state is `library_newer`; a named
+  one is updated whatever its state. Result `{updated, also_updated,
+  unchanged, kept, skipped: [{definition, name, refusal, explanation,
+  detail}], definitions_added, materials_added}`;
+  a skipped part is left exactly as it was (`locked_node`, with the
+  locked node in `detail.node`,
+  `explode_session_scope`, `component_cycle`, `component_depth_exceeded`,
+  `component_expansion_exceeded`, `unknown_library_item`, `load_failed`).
+  A call that named its parts and changed none of them refuses with the
+  first part's reason. Palette materials the update added stay after
+  undo, like every palette addition. Both read the Library through the
+  host, so `--live` does not serve them yet.
 
 ### 7.1 Scenes
 
@@ -1379,7 +2240,38 @@ millimeters at a given paper/model `scale` (default 1, full size) — or
 raw 2D segments in view-plane meters, each tagged with its kind (`hard`,
 `silhouette`, `soft`, `section`, `hidden`) and the public id of the
 entity it belongs to. `include_hidden`/`include_soft` opt into hidden and
-non-silhouette curved-wall lines, both off by default. A model too
+non-silhouette curved-wall lines, both off by default. `selection` draws
+only the named placements (§7.4), the camera fitted to them: with no
+`camera` or `view` the drawing is a fitted isometric over the selection,
+never the document's saved camera. `selection` and `scene` are mutually
+exclusive here as on snapshots. A `cmp_` root ignores tags and instance
+visibility and honors only its members' own hidden flags (what the
+Components panel thumbnail shows).
+
+Every host that owns a document serves both view commands from one
+renderer crate (`crates/headless-render`): `hew-cli` headless, and the
+app's live host, which renders synchronously on its own thread (the
+2048 px size clamp is the only bound). `hew.print.pdf` stays in
+`hew-cli`.
+
+**`hew.view.snapshot`'s `selection` and `background`.** `selection`
+takes the same entries as export and line drawings (node ids,
+occurrence locators, `cmp_` ids) and renders only those, so a plugin can
+ask for a picture of one part, one definition, or any set of
+placements. A `cmp_` id is one picture of the definition's members at the
+identity pose, however many times it is placed; `include_ids` then
+reports the definition's own id for those pixels, an instance's id for a
+placement inside an instance. With `selection` and neither `camera` nor
+`view` the camera is a fitted isometric over the selection, never the
+document's saved working camera (which frames the whole model); `view`
+fits that standard view to the selection; `camera` is used as given.
+`selection` and `scene` are mutually exclusive, and an empty `selection`
+is a params error. `background` is `"transparent"`, `#rrggbb`, or
+`#rrggbbaa` (alpha 255 when omitted); it fills pixels no surface
+touches, and the id, depth, and normals passes are unaffected. It
+applies to snapshots only: a line drawing is vector and has no
+background. The render is the software rasterizer's shaded look
+(no textures, edges, or section planes), not the viewport's. A model too
 complex for the vector pass refuses typed (`too_complex`) rather than
 hanging or silently falling back — headless callers get an honest error
 where the UI falls back to a raster page instead.
@@ -1415,6 +2307,722 @@ not occur for `core`/`app`, both of which always grant a render route),
 `too_complex` (the `hlr` vector pass, on both commands — see above),
 `save_failed` (a `path` the host couldn't write), `unknown_scene`.
 
+### 7.3 Selection and view state
+
+The app's selection, what is hidden, the viewport's isolation, and its
+framing are view state: none of it is modeled data, none of it is undoable,
+and none of it moves the history. Ten commands reach it, all `ReadOnly`
+and all under the `view` permission; `mutates_document` is false for each.
+Three more, `hew.view.enter`, `exit`, and `exit_all`, act on the person's
+editing context instead (§6.3): they are solitary, so they cannot share a
+transaction with another command.
+
+| Command | Served | Params | Result | Refusals |
+|---|---|---|---|---|
+| `hew.selection.get` | host | `{}` | `{ids, primary, generation, epoch}` | `host_capability_missing` |
+| `hew.selection.set` | host | `{ids, mode?}`: up to 10 000 public ids; `mode` is `replace` (the default), `add`, `subtract`, or `toggle` | the merged selection, as `get` | `unknown_entity`, `selection_target_not_visible`, `host_capability_missing` |
+| `hew.selection.clear` | host | `{}` | `{ids: [], primary: null, generation, epoch}` | `host_capability_missing` |
+| `hew.view.hide` | kernel | `{ids}`: objects, groups, component instances | `{hidden}`: every hidden object, group, and instance | `unknown_entity`, `not_a_node` |
+| `hew.view.show` | kernel | `{ids}` | `{hidden}` | `unknown_entity`, `not_a_node` |
+| `hew.view.show_all` | kernel | `{}` | `{hidden: []}` | none |
+| `hew.view.hidden` | kernel | `{}` | `{hidden, tags_hidden, isolated}` | none |
+| `hew.view.isolate` | host | `{ids}`: 1 to 10 000 node ids or `{object, instance}` pairs | `{isolated}` | `unknown_entity`, `host_capability_missing` |
+| `hew.view.clear_isolation` | host | `{}` | `{}` | `host_capability_missing` |
+| `hew.view.zoom_to` | host | `{ids, padding?}`: `padding` from 0 to 2, default 0.1 | `{min, max}`: the framed box before padding | `unknown_entity`, `nothing_to_frame`, `host_capability_missing` |
+| `hew.view.enter` | host, solitary | `{id}` or `{path}`, exactly one: a world object, group, or instance, or an occurrence path of instances whose last element, an instance or a member object, is the node to enter | `{}`; the outcome arrives as `context_changed` | `unknown_entity`, `unknown_occurrence`, `gesture_in_progress`, `nested_component_in_context`, `locked_node`, `enter_refused`, `host_capability_missing`; `-32602` for a sketch, guide, annotation, material, tag, or component target |
+| `hew.view.exit` | host, solitary | `{}` | `{}` | `gesture_in_progress`, `nothing_to_exit`, `host_capability_missing` |
+| `hew.view.exit_all` | host, solitary | `{}` | `{}` | `gesture_in_progress`, `host_capability_missing` |
+
+**The selection.** `ids` are public ids in pick order; `primary` is the
+first, or `null` for an empty selection. A selection is one ordered list
+that holds objects, groups, instances, sketches, guides, and annotations
+in any mix and any count, so the primary is the first pick whatever its
+kind: a guide picked before a box stays primary.
+An id that names no live entity of those six kinds refuses
+`unknown_entity` with `detail.id`. A target that is hidden refuses
+`selection_target_not_visible` with `detail.id`: a node is hidden when
+it, a group above it, or a tag on it or on a group above it (or any
+parent path of such a tag) is hidden; a sketch is hidden the way the
+viewport hides it; a guide or an annotation is hidden when a tag on it
+(or any parent path of such a tag) is hidden. Every id is checked before anything changes, so a
+refused `set` leaves the selection as it was. The app's drafting
+selections (units of a drawing on a plane) have no public id: while one
+is selected, the selection reads as empty.
+
+**The selection algebra.** `set` combines the picked ids with the
+current selection, as the app's own Select tool does:
+
+- `replace`: the picked ids, in pick order.
+- `add`: the current selection, then the picked ids not yet in it, in
+  pick order.
+- `subtract`: the current selection without the picked ids.
+- `toggle`: the current selection without the picked ids that were in
+  it, then the picked ids that were not, in pick order.
+
+Survivors keep their order, so the primary stays first unless it left.
+An id named twice counts once. The result is the merged selection, which
+the app then shows.
+
+**Hidden state.** `hide` and `show` set the user-hidden flag of each node
+named (every id is checked first; a sketch, guide, or anything else that
+is not an object, group, or instance refuses `not_a_node`, and tags hide
+through `hew.tag.set_visible`); `show_all` clears every one. The flags
+are saved with the document, as the Outliner's eye saves them. `hidden`
+lists the hidden nodes in creation order, the hidden tags by public id,
+and `isolated`: the live viewport's isolation as a list of node ids and
+`{object, instance}` pairs, or `null` when nothing is isolated or the
+host has no viewport.
+
+**Isolation and framing.** `isolate` shows only the named nodes, or a
+definition member through one instance that places it (`{object,
+instance}`; the object must be placed by that instance, directly or
+through nested components), and frames them; it replaces any isolation
+already on. Isolation is view-only and never saved. `zoom_to` frames the
+union of the named entities' boxes (instances in world space; a guide
+line, a material, or a tag adds nothing), widened on every side by
+`padding` times the box's largest extent; a box with no extent (a lone
+guide point) frames as a cube 1 m wide around it, padded the same way.
+Nothing with a box refuses `nothing_to_frame`.
+
+**While a session is open.** The group or component the window is inside
+is hidden in the kernel, so its own id no longer names a live entity:
+`selection.set`, `hide`, `show`, `isolate`, and `zoom_to` each refuse it
+`unknown_entity`. The nodes the session opened up (a component's or
+group's member objects) and every other node still resolve; address those
+instead.
+
+**View state and transactions.** All ten are legal inside a transaction,
+read or write, and none adds an undo entry. An envelope that aborts takes
+back what its view-state commands did: the hidden flags return with the
+document, and the selection and isolation it set are never applied. A
+`get` after a `set` in the same envelope reads the `set`'s result. A
+plugin command that is aborted puts back the selection and isolation its
+envelopes changed, and the hidden flags with the document; the camera a
+`zoom_to` or `isolate` moved stays where it is.
+
+**Where they work.** The selection, isolation, and framing need a host
+with a viewport and a selection: the desktop app serves them, and
+`hew-cli` headless refuses `host_capability_missing`. The web build and
+Shop Mode have no bus clients yet and do not carry them out. `hide`, `show`, `show_all`, and `hidden` are served by the
+kernel and are inside the `core` ceiling, as are `snapshot` and
+`line_drawing`; the other view commands (`camera`, `zoom_extents`,
+`units`, `isolate`, `clear_isolation`, `zoom_to`, `enter`, `exit`,
+`exit_all`) are inside the `app` ceiling only. `hew.selection.*` is
+inside `core` too and refuses there for want of a selection.
+
+### 7.4 Parts: occurrences, frames, meshes, topology
+
+These reads let a client list every part, measure it along its own axes,
+tell identical and mirrored parts apart, and read its geometry. All of
+them are `model.read`, kernel-served, and carry the document's clock.
+
+**`hew.query.occurrences`** `{roots?, kinds?, include_hidden?}` lists every
+placement depth-first, members in their recorded order, nested
+definitions expanded through each instance that places them. Each row:
+`{path, id, kind, definition, definition_name, parent, world_pose,
+mirrored, hidden, user_hidden, material, material_effective, tags, name,
+depth, members}`, plus `solid`, `family`, and `family_closed` on object
+rows and `linked` on instance rows (the keys are absent on the other
+kinds). `members` is `{objects, groups, instances}`, the node's direct
+members as ids in member order: a group's members, an instance's
+definition's members, three empty lists for an object; hidden members
+are left out unless `include_hidden`. `solid` is the health verdict
+being solid (closed and manifold). `family` is the object's seam family
+index in `hew.doc.health`'s `families` (valid for the same document
+state) or `null`; `family_closed` is whether every shared rim of that
+family can take a cap, `null` exactly when `family` is. `linked` is
+whether the instance's definition is a set of linked copies (`hew` /
+`linked` on the definition). `path` is
+the instances above the node (§5.2's occurrence paths; never the node's own
+id, so a member of an instance has `[...path, instance]`, and a member of a
+group has the group's `path` with `parent` naming the group); `world_pose` is
+row-major 3×4, the node's own frame in world space: an instance's own pose
+composed through its path, the path's pose for an object or group (their
+geometry is already in their owner's frame, so moving an object inside its
+definition leaves `world_pose` unchanged: read `hew.query.measure {path}`
+and its `bbox` to see that edit); `mirrored` is that pose's
+determinant sign. `hidden` is effective visibility: the node's own flag
+and tags, its groups', and the same for every instance on the path;
+`user_hidden` is the node's own flag. `name` is the node's own name,
+never the definition's; `definition_name` is an instance's definition's
+name (a list shows `name ?? definition_name`). `material` is an object's
+default material or an instance's own material; `null` for groups.
+`material_effective` is what the node's unpainted faces show: an
+object's default material, else the material of the nearest instance on
+`path` that has one (walking inward, the last); an instance's own, else
+the same inherited material; `null` for a group (§7.5).
+
+`roots` is a list of node ids (world nodes) and occurrence locators: rows
+come in root order, each root's own row first, and a placement two roots
+reach is listed once, under the first. Absent, the whole world is listed.
+An empty list is a params error; a root that does not resolve refuses
+`unknown_entity` or `unknown_occurrence`, and a `cmp_` id is not a root
+(a definition has no placement). `kinds` filters the rows returned, never
+what is traversed. `include_hidden` defaults to false: a hidden placement
+is skipped and a hidden instance is not descended, which is the "as
+displayed" view. While an editing session is open the walk reports the
+model as the kernel holds it: a group session's members are world rows
+and the group is a hidden row; an explode session's baked members are
+world rows, and the entered instance and its siblings are hidden rows
+that still list the definition under them at the pose each placement
+would have. More than 200,000 rows refuses `too_many_occurrences`.
+
+**`hew.query.part_frame`** `{id | path}` measures one placement:
+`{origin, x, y, z, extents, source, mirrored}`, axes orthonormal and
+right-handed in world space. An instance's frame is its definition's own
+axes (`source: "definition"`), its pose's columns normalized, the
+extents its definition's local box times the pose's per-axis scale, in
+the definition's axis order; a mirrored pose negates `y`. An object or
+group is measured along its largest face (`source: "face"`): `z` the
+face's outward normal and `x` its longest outer edge, swapped so the
+extents read `[length, width, thickness]` (`x` and `y` trade places, and
+`z` turns over to stay right-handed, when the width is the longer by
+more than float noise; a square part keeps its face frame). Ties break
+on the part's own shape first, so the frame turns and moves with the
+part; only faces or edges the part's symmetry makes interchangeable (the
+top and bottom of a plain box) fall back to their world position, which
+can reverse an axis's direction when such a part is turned. The frame
+is the same after a save and reload. A `hew.part` / `frame` attribute
+(`{origin, x, y}`, unit and perpendicular within 1e-6, else ignored)
+replaces it (`source: "attribute"`); its values are coordinates in the
+face frame this command reports for the part without the attribute, so
+echoing that frame's own axes back (`origin: [0,0,0], x: [1,0,0], y:
+[0,1,0]`) changes nothing. An instance whose definition holds exactly
+one member carrying such an override (a board copied as a linked set
+keeps its override on the member) answers that member's frame through
+the placement's pose, `source: "attribute"`. A placement with no face refuses
+`no_part_frame`; one holding more than 200,000 placements refuses
+`too_many_occurrences`.
+
+**`hew.query.mesh`** `{id | path, space?}` returns one placement's
+triangles: `positions_base64`, `normals_base64` (f32 little-endian xyz),
+`indices_base64` (u32 little-endian, counter-clockwise from outside),
+and `face_indices_base64` (u32 little-endian, one per triangle: the
+face's index in
+`hew.query.topology`'s `faces` plus its part's `face_index_base`), with
+`vertex_count`, `triangle_count`, and `parts` (`{id, face_index_base,
+index_base, index_count}` per leaf object, in walk order). `space` is
+`world` (the default; normals by the inverse-transpose, winding flipped
+under a mirrored pose) or `local`, the node's own frame: an object as
+stored, a group's leaves as stored, an instance's leaves in definition
+coordinates. Painted backs are not included. More than 64 MiB of buffers
+refuses `mesh_too_large`.
+
+**`hew.query.topology`** `{id | path, space?}` reads one object (a group
+or instance refuses `not_an_object`): `vertices` in the object's stored
+order, `faces` in the order `hew.query.faces` lists them (`{index, plane:
+{point, normal}, outer, holes, material, back_material, surface, area,
+attrs}`, loops as vertex indices, `surface` a cylinder's `{kind,
+axis_point, axis, radius}` or `null`), and `edges` (`{index, a, b, faces,
+curve, attrs}`, `faces` one or two face indices, `curve` a circle's
+`{kind, center, axis, radius}` or `null`). `attrs` is the face's or
+edge's attribute dictionary (§8), `{}` for none. Loops run counter-clockwise about the returned
+`plane.normal` in either space; under a mirrored pose they are reversed
+from the stored order to keep that true, as the mesh's winding is.
+Indices are valid for the returned `generation` only. Under a pose that
+is not a similarity, `surface` and `curve` are `null`.
+
+**`hew.query.raycast`** `{origin, dir, all?, max_distance?, exclude?,
+include_hidden?}` shoots a ray (meters, `dir` need not be unit) and
+reports the part it hit through any depth of nesting. A hit is
+`{object, kind, point, distance, normal, path, leaf, face, hidden}`:
+`path` is the hit part's occurrence path without the part itself (the
+form `hew.query.occurrences` uses; `[]` for a world object), `leaf` the
+hit Object's id, and `face` a face locator `{object, at}` (§5.2) with
+`at` in the leaf Object's own frame, so it feeds `hew.query.resolve`,
+`hew.material.paint`, or `hew.solid.push_pull` as is. Painting by it
+paints the shared definition's face, so every placement shows it. `object`
+and `kind` keep their older meaning: the outermost instance of `path`
+(`kind: "instance"`), else the world object (`kind: "object"`).
+`distance` is world-space along the unit direction, and `normal` is the
+face's outward world normal (a mirrored placement does not flip it). With
+`all: true` the result is `{hits: [...]}`, every crossing nearest first,
+front and back faces both (a ray through a board lists its entry and its
+exit), ties in occurrence order, at most 1,000 (`raycast_hits_capped:
+true` when more were found); an empty list is a success. Without it the
+nearest crossing is returned; a tie within 1e-9 refuses
+`ambiguous_locator` and nothing hit refuses `locator_missed`.
+`max_distance` (finite, above zero) drops crossings farther than it.
+`exclude` (at most 64 entries) is a list of world node ids and occurrence
+locators `{path}`; each entry and everything under it is ignored, so
+excluding one placement leaves the others of the same definition (a bare
+definition-member id refuses `unknown_occurrence`). Hidden parts, whether
+hidden directly, by a group, or by a tag, fall through as in rendering;
+`include_hidden: true` lets the ray hit them and `hidden` then says so.
+Sketches, guides, and annotations are never hit. More than 200,000
+placements refuses `too_many_occurrences`.
+
+**`hew.query.measure`** takes one of three forms. `{from, to}` is the
+point-to-point form: `{distance, delta}`. `{id}` (a world object, group,
+or instance) or `{path}` (an occurrence path) measures a part:
+`{volume, area, bbox: {min, max}, extents, leaf_count, open_leaves}` in
+meters, square meters, and cubic meters, summing the leaf objects under
+the node (hidden ones included; a measure is not a view). Each leaf's
+volume is scaled by its placement's `|determinant|`; `area` sums every
+face polygon after the pose, holes subtracted, exact under any affine
+pose including a mirrored one. A leaf that is not watertight adds no
+volume and is counted in `open_leaves`; `volume` is `null` when no leaf
+is watertight. `bbox` is the world-axis-aligned box of the vertices and
+`extents` its sizes `[dx, dy, dz]`; the part-frame sizes are
+`hew.query.part_frame`'s `extents`. A definition-member id without a path
+refuses `unknown_occurrence`; any other mix of the three forms is a
+params error. `scope: "own"` (part forms only) sums the container's own
+objects, below.
+
+**`scope: "own" | "all"`** (default `all`) on `hew.query.part_frame`,
+`hew.query.measure`, `hew.view.snapshot`, and `hew.view.line_drawing`:
+`own` takes a container's direct object members and the objects of its
+direct groups, recursively through groups only, never the members of a
+nested instance. A container is a group or an instance (its
+definition's direct members). On an object both scopes are the same.
+`part_frame` with `own` measures the own objects (an instance still
+answers its definition's axes, with extents from its own objects'
+definition-local box); `measure` sums them (`leaf_count` counts them);
+`snapshot` and `line_drawing` draw only the own objects of each
+`selection` root, the camera fitted to them, and need a `selection`
+(`-32602` without one); a definition's `cmp_` id there draws only when
+the definition places no nested instance (`-32602` otherwise; select a
+placement instead). A container with no own objects refuses as an
+empty one does: `no_part_frame`, `-32602` for `measure` and the render
+commands. `hew.query.mesh` and `hew.query.topology` take no `scope`.
+
+**`exclude: ["obj_…"]`** on `hew.query.part_frame` and `hew.query.measure`
+(with `scope: "own"` only): those own Objects are left out of the frame and
+of the measures (`volume`, `area`, `bbox`, `extents`, `leaf_count`, `open_leaves`), so a
+part is sized without its machining bodies (a bore, a groove). Each id must
+be an Object that is one of the target's own members; an id that is not an
+Object, is not an own member, or is given without `scope: "own"` is
+`-32602`; an empty list excludes nothing. Excluding every own Object leaves nothing to measure and refuses
+as a container with no own Objects does (`no_part_frame`; `-32602` for
+`measure`). `hew.query.mesh`, `hew.query.topology`, and
+`hew.query.signature` take no `exclude`.
+
+**`solids_only: true`** (default `false`) on `hew.query.part_frame` and
+`hew.query.measure`: every leaf the `scope` selects that is not a closed
+solid (the ones `hew.query.occurrences` reports as `solid: false`; a stray
+face, an imported surface) is left out of the frame and the measures, as
+if listed in `exclude`. Any `scope` works, and it composes with `exclude`.
+When nothing is left to measure the answer is the one `exclude` gives
+(`no_part_frame`; `-32602` for `measure`). `hew.query.mesh`,
+`hew.query.topology`, `hew.query.signature`, and a `{from, to}` measure
+take no `solids_only`.
+
+**`hew.query.signature`** `{id | path}` tells whether two objects are the
+same part or mirrored twins: `{shape, mirror, symmetric, frame: {origin,
+x, y, z, extents}}`. `frame` is the object's face frame (`l ≥ w ≥ t`,
+right-handed), what `hew.query.part_frame` reports without a `hew.part`
+/ `frame` override: `origin` is the part's minimum corner in that frame
+and `extents` its size along `x`, `y`, `z`, so a pose that maps one
+part onto its twin reflects about the frame's center, `origin +
+extents / 2` along the axes, not about `origin`. Every rotation that
+maps the frame's axes onto themselves and keeps the extent order is a
+candidate (four with distinct extents, more when they tie); under each,
+every vertex about
+the frame box's center is quantized to 1 µm, each face listed as its
+loops (outer first, each started at its smallest vertex, holes sorted)
+with its surface kind and parameters (plane; cylinder axis line and
+radius), the faces sorted, and the whole hashed with SHA-256. `shape` is
+the smallest hash (lowercase hex); `mirror` is the same over the
+reflections, so `a.shape == b.mirror` means `b` is `a`'s mirror image,
+and `symmetric` is `shape == mirror`. The hash survives a save and
+reload and any rigid motion. A group or instance refuses
+`not_an_object`; an object with no face `no_part_frame`.
+
+**Setting axes.** Three `model.write` commands change how a part is
+measured; each is one undo entry.
+
+`hew.component.rebase` `{id, origin, x, y}` re-expresses a definition
+(`cmp_`, or an `ins_` meaning its definition) in a new frame given in its
+current local coordinates: `x` and `y` unit and perpendicular within
+1e-9, `z = x × y`, so a left-handed frame cannot be stated. Every member
+object, nested group, and drawing of the definition moves into the new
+frame, every instance nested in it is re-posed to stay put, and every
+instance placing it, world or nested in another definition, takes the
+frame into its pose (`pose' = F · pose`), so world geometry is unchanged
+and nothing moves on screen; a placement's `world_pose` changes, its
+`bbox` does not. Result `{component, instances_updated}`, the latter the
+number of placing instances. A frame that fails the check refuses
+`invalid_frame`; while any editing session is open it refuses
+`rebase_during_session`.
+
+`hew.component.make_unique` `{instance? | path?, cascade? = true, deep?
+= false}` gives one placement a private definition: exactly one of
+`instance` (a world placement) and `path` (instance ids, outermost
+first, the last the placement to fork). `cascade: true` makes every
+instance on the path unique in turn, so only the placement at the end
+diverges ("Unlink" in the app); `false` forks only the last definition,
+in place inside its owner, so every placement of the owners changes.
+`deep: true` also gives each nested definition of the fork a private
+copy. Result `{component, instance, remap}`: the forked definition, the
+placement at the end of the path after the call (the leaf itself for a
+one-element path, its divergent twin for a deeper one), and `remap`, one
+flat map from each copied id to its copy over every kind (objects,
+groups, instances, definitions; only new ids are values). The copies
+keep their names and tags, and a fork of a linked set stays a linked
+set (a set of one placement). One undo entry. While a definition the
+call would read or fork is open for editing it refuses
+`explode_session_scope`.
+
+`hew.component.promote` `{component, name}` makes a set of linked copies
+a named component ("Make component"): it removes `hew` / `linked` from
+the definition and sets its name (trimmed; not blank, at most 128
+bytes, no control characters, else `-32602`). A definition that is not a
+linked set refuses `not_linked`. Result `{component}`; one undo entry.
+
+`hew.entity.flip` `{ids, axis | plane, about?, copy?}` mirrors a
+selection: world nodes and sketches, or members of one definition
+through one path, as `move` takes them. `axis` (`"x"`, `"y"`, `"z"`) is
+the mirror plane's world normal (SketchUp's Flip Along), through `about`:
+`"center"` (the default, the selection's world bounding-box center),
+`"origin"`, or `[x, y, z]`; `plane` is `{point, normal}` in world
+coordinates and takes no `about`; exactly one of `axis` and `plane`.
+Without `copy` the selection flips in place (objects and sketches bake
+the reflection right side out, an instance takes a mirrored pose) and
+the result is `{}`. `copy: {linked?}` (no `count`, no `grid`) makes one
+mirrored copy instead: linked by default, another placement at a
+mirrored pose (`mirrored: true` on its row), or independent baked
+geometry with `linked: false`; the result is `{ids, linked}` as for a
+`move` copy. A sketch copy refuses `sketch_copy_unsupported`. One undo
+entry.
+
+`hew.component.flip_instance` `{instance, axis: "x" | "y" | "z"}`
+mirrors one world instance across the plane normal to its definition's
+local `axis` through the local origin (`pose' = S · pose`, `S` the
+reflection), the same pose-level mirror a negative scale gives. Result
+`{instance, pose, mirrored}`; flipping twice restores the pose exactly.
+A definition-owned (nested) instance refuses `unknown_entity`.
+
+`hew.entity.set_frame` `{id, origin, x, y}` writes an object's or
+group's `hew.part` / `frame` override (`{origin, x, y}`, stored as
+given) after the same frame check, refusing `invalid_frame`; `{id,
+clear: true}` removes it, and clearing an absent override records
+nothing. The values are coordinates in the face frame
+`hew.query.part_frame` reports for the part without the override, after
+its `[length, width, thickness]` swap, exactly as `part_frame` reads
+them. Result `{id, source}`: `"attribute"` after a set, `"face"` after a
+clear. An instance or definition refuses `not_a_part` (a definition's
+axes are `rebase`'s). This command is the one first-party writer of the
+`hew.part` namespace; `hew.attr.set` on it stays subject to the
+attribute namespace rule (§10.1).
+
+`hew.entity.lock` `{targets}` and `hew.entity.unlock` `{targets}` lock
+and unlock objects, groups, and component instances. A lock belongs to a
+shape, not to one copy of it: an instance stands for its component, so
+locking or unlocking any copy of a component or a set of linked copies
+does it to every copy. `hew.entity.unlock` `{all: true}` (alone) unlocks
+everything in the document. Each call is one undo entry, labeled Lock or
+Unlock; targets already in the asked state are left alone, and a call
+that changes nothing records nothing. Result `{changed}`: how many
+objects, groups, and shapes changed state. A target that is not an
+object, group, or instance refuses `not_a_node`. `hew.query.entity` and
+every `hew.query.occurrences` row report `locked` (the entity's own lock,
+an instance's being its component's) and `frozen` (whether a lock keeps
+it from changing: its own, a locked group above it, or a locked shape it
+is part of, reached through any placement); a component's entity reports
+`locked`.
+
+Every command that would change a frozen entity refuses `locked_node`,
+whole, with the document untouched: moving, rotating, scaling or
+flipping it; any geometry edit (push/pull, booleans, slices, blends,
+repairs); paint, its name, its tags or its attributes; deleting it;
+grouping, ungrouping or reparenting it; making a component of it;
+exploding it; entering it with `hew.view.enter`; and an edit to a
+component's contents while that component is locked or placed inside
+something locked. Deleting or renaming a tag a frozen entity carries,
+deleting or replacing a material it wears, and a whole-document rescale
+while anything is locked refuse too. The refusal's `detail` is
+`{node, via_shared_shape}`: `node` is the public id of the locked node
+behind it (the entity itself, a locked group above it, or a placement of
+the locked component), and `via_shared_shape` is `true` when the lock
+reaches the edit only through a shared shape: the component being edited
+is also placed inside something locked, and the copy named in the call
+is not. Its explanation then says so, and the way out is
+`hew.component.make_unique` on that copy (or unlocking `node`). A
+command that names several entities is refused whole when any of them
+is frozen; leaving the locked ones out is the caller's choice.
+
+Some things still work on a frozen entity: reading it, hiding and
+showing it, copying it (a separate copy is not locked; a linked copy of
+a locked object or group moves the lock onto the new set, so the
+original and every copy are locked together; a copy that would land
+inside a frozen group refuses), drawing on its face (the drawing is free
+and does not cut the face), and `hew.component.make_unique` on a locked
+copy, which gives it a shape of its own that keeps a lock of its own
+(refused for a copy inside a locked group, and for a `path` whose copy
+sits inside a locked component). Locking refuses
+`explode_session_scope` while a component is open for editing.
+
+The app's Link identical copies (not a bus command) leaves a joined
+Object's `hew.part` / `frame` behind: its new placement has none, and
+the shared member's override serves every placement through the pose.
+The joined Object's default material becomes the placement's own
+material, its face paint is dropped, and the kernel refuses a pose that
+does not place the set's shape onto the Object (`NotIdentical`, "These
+aren't the same shape.") or that holds a non-finite number. A linked
+set's shared member carries no default material: wrapping an Object
+moves its default material onto its placement, and a join moves any
+default material the member still has onto every placement the set
+already has, so each copy keeps its own color and a node's `material`
+reads from the placement. `hew.component.make_unique` on a placement
+of a linked set moves the placement's own material back onto its
+private copy (the default material of each copied Object without one),
+so unlinking a joined or wrapped board returns its color as its
+default material; `explode` already keeps it. If the member has a
+default material anyway (set inside the open set, or from an older
+file), painting one copy (`hew.material.paint` on its instance id) first
+moves that material onto every other copy of the set and clears it on
+the member, in the same undo entry, so the painted copy shows its new
+color and the others keep theirs. `hew.material.replace` with
+`from: null` and no `object` leaves a linked member's empty default
+material empty and paints each copy that has no material of its own
+(the copy entered in an open set included); a set whose member has a
+default material shows it on every copy, so that set is left alone.
+
+**Tree and entity members.** `hew.query.scene`'s nodes carry `user_hidden`,
+`hidden` (effective, within the node's own tree), `material` (an object's
+default material, an instance's own material, else `null`), and `parent`
+(the containing group);
+instances add `pose` and `mirrored`. `hew.query.entity` on a component
+lists `member_objects` (its member objects' ids, what `members` used to
+mean), `members` (every member node as `{id, kind}`), and `bounds_local`
+(its definition-local box, `null` when it has no leaves or more than one
+walk lists); on an instance it adds `bbox`, `tags`,
+`bounds_local`, `mirrored`, `material` (its own), and
+`material_effective` (its own: an id names no path, so a nested
+placement's inherited material is read from its occurrence rows).
+
+Two boxes, two meanings. A `bbox` (on a `hew.query.scene` node, on
+`hew.query.entity`, and the box a `{"point": "bbox"}` anchor and
+`hew.view.zoom_to` read) is the extent: everything the entity draws.
+For an instance or a component that includes the lines drawn inside the
+definition and its nested definitions, as they are shown (a line on a
+hidden tag, or under a hidden member, is left out), each circle and arc
+at its true extent; an instance holding only lines has a `bbox`.
+`bounds_local` is the part box: the definition's solids only, in its
+own frame, the size a parts list or a shop card reads, and `null` for a
+definition with no solid.
+
+### 7.5 Materials on faces, objects, and placements
+
+A face shows its own material, else its object's default material, else,
+for a member reached through instances, the material of the nearest
+instance above it that has one; with none, the default gray. A painted
+face or default material therefore keeps its color in every placement,
+and an instance's material colors only what nobody painted (SketchUp's
+rule).
+
+- `hew.material.paint {face | id, material, scope?}`: `face` paints one
+  face; an object id sets its default material; an instance id (world or
+  nested) sets the placement's own material; a component id, or an
+  instance id with `scope: "definition"`, sets the default material of
+  every object the definition owns (its members and its member groups'
+  objects, not nested components' geometry) as one undo entry. `scope`
+  is `"instance"` (the default for an instance id) or `"definition"`; a
+  component id takes only `"definition"` and an object id none, else
+  `-32602`. `material: null` clears. Refuses `unknown_instance` /
+  `unknown_component` for a stale target, `unknown_material`.
+- `hew.material.replace` without `object` also switches every instance
+  whose own material is `from` (a material only: `from: null` never
+  matches an instance, whose `null` means "no material of its own"),
+  with one exception: for `from: null`, a linked set's shared member
+  keeps its empty default material and each copy of the set with no
+  material of its own takes `to` instead; a set whose member has a
+  default material is left alone (§7.4).
+- Painting one copy of a linked set whose shared member has a default
+  material moves that material onto the set's other copies first, in
+  the same undo entry; a named component's default material stays put.
+- `hew.query.faces {object | path}`: with `path` (an occurrence path
+  ending at an object, §5.2) each face also reports `material_effective`
+  through that path. Every face reports `attrs`, its attribute dictionary
+  (§8), `{}` for none. Refuses `unknown_occurrence` for a path that does
+  not lead to a placement.
+- Deleting a material clears it from instances too, and a material only
+  an instance uses is in use: `hew.doc.purge_unused` keeps it, and
+  palette usage counts each instance once.
+- `hew.component.explode` gives every created object without a default
+  material, and every created instance without a material of its own,
+  the exploded instance's material, so nothing changes color.
+  The SketchUp writers do not yet write instance materials.
+
+**`selection` on export, snapshots, and line drawings.** `hew.doc.export`,
+`hew.view.snapshot`, and `hew.view.line_drawing` take `selection`: node ids, occurrence locators,
+and `cmp_` ids, which draw a definition's leaves at the identity pose. A
+group gathers its leaves, an instance its definition's leaves through its
+world pose. A leaf placement two entries reach (a group and one of its
+members, an id named twice) is exported or drawn once. A selection over
+the walk's 200,000-row cap refuses `too_many_occurrences`. Export keeps
+its solids-only rule. The SketchUp formats write
+the whole document, so `selection` with `skp` or `skp2017` is a params
+error. An empty `selection` is a params error. `scope: "own"` narrows
+each root to its own objects (§7.4). `hew.view.snapshot`'s `orient:
+"part"` renders its one selection root in the root's part frame: the
+named view (iso when none) means the frame's axes, `front` looking along
+the frame's +y, `top` along −z, `right` along −x, so a turned board
+renders the same picture at any pose. It needs a selection of exactly
+one entity and no `camera` (`-32602`), and refuses `no_part_frame` for a
+root with no face.
+
+### 7.6 Compute
+
+`hew.compute.*` are pure functions over solids: read-only,
+`model.read`, served on every host (headless included), never creating an
+entity and never returning an id. They are what a plugin calls at
+pointer-move rate for a preview, a fit check, an outline, or a volume;
+`dry_run` (§6.6) is the whole-envelope rehearsal before a commit.
+
+**`SolidSpec`**, a solid operand, resolves to a transient solid in world
+coordinates:
+
+- `{ id | path, pose? }`: exactly one object (a group or instance refuses
+  `not_an_object`: name its objects one at a time), at its world pose.
+  `pose` (12 numbers, row-major 3×4) REPLACES the world pose. A pose that
+  mirrors, or a mirrored placement measured without a `pose`, refuses
+  `mirrored_pose` (solids never reflect; pass the un-mirrored frame and
+  flip the answer yourself).
+- `{ prism: { plane: { origin, normal }, loops: [[[x,y,z], …], …],
+  distance } }`: built the way `hew.solid.extrude` builds a solid from
+  drawn loops; the first loop is the outer boundary, the rest are holes,
+  which must lie strictly inside it and apart from each other. Every
+  loop is simple: one that crosses or touches itself (a bowtie, a loop
+  through one point twice) or another loop is `-32602`, never a part of
+  it kept. So are fewer than 3 points, a point off the plane, two
+  consecutive points that coincide, a non-finite number, a zero
+  `distance`, and a prism so large its area or volume is not a finite
+  number. The message says which. The same loop rules hold for
+  `hew.compute.offset`.
+- `{ box: { min, max, pose? } }`: the prism of its bottom rectangle,
+  `distance = max.z - min.z`, then `pose`; `min < max` on every axis.
+
+Exactly one form per operand; an unknown member is `-32602`.
+
+| Command | Params | Result |
+|---|---|---|
+| `hew.compute.boolean` | `{ op: "union" \| "subtract" \| "intersect", a, b, want? }` | `{ solid, mesh?, topology?, measure?, shells? }`; `solid: false` and no other block when nothing is left (an intersect of disjoint solids). The geometry is what the committed boolean would leave. `want` lists `mesh`, `topology`, `measure`, `shells` (a count); default `["measure"]`. Refusals are the boolean's by name (`degenerate_contact`, `operand_face_not_flat`, `arrangement_failed`, `result_too_thin`, `nothing_removed`, `operand_not_solid`). A `tidied` block, as on the committed booleans (§7), reports slivers of the cut the boolean merged. |
+| `hew.compute.slice` | `{ solid, plane: { origin, normal }, want? }` | `{ positive, negative }`, each with the wanted blocks; `positive` is the piece on the side the normal points to, and `tidied` beside them when the cut's slivers were merged (§7). Refuses `plane_misses_solid`, `degenerate`, `not_solid`. |
+| `hew.compute.shells` | `{ solid, want_mesh? }` | `{ count, shells: [{ measure, mesh? }] }`: the solid's connected pieces. |
+| `hew.compute.measure` | `{ solid }` | `{ volume, area, bbox: { min, max }, centroid }`; `volume` and `centroid` are `null` for a solid that is not watertight. |
+| `hew.compute.outline` | `{ id \| path, frame?, which }` | `{ loops: [{ outer, edges }] }` in the frame's xy. `which: "largest_face"`: the loops of the part's largest face (ties: the one facing the frame's +z). `which: "projection"`: the silhouette of every face seen along the frame's z. `frame`: `"part"` (the default, `hew.query.part_frame`'s frame) or `{ origin, x, y, z }`, orthonormal and right-handed, else `invalid_frame`. Edges are `{ kind: "line", a, b }`, `{ kind: "arc", center, radius, start, end, ccw }`, or `{ kind: "circle", center, radius }`; a circle whose axis is the frame's z stays analytic, any other edge is a line. Outer loops run counter-clockwise, holes clockwise. |
+| `hew.compute.offset` | `{ loops: [[[x, y], …], …], distance, join? }` | `{ loops }` in the outline shape; the first input loop is the outer boundary, in either winding. Positive grows the material. Refuses `offset_too_small`, `offset_collapsed`. `join: "miter"` is the default; `"round"` is reserved and `-32602` until the kernel has round joins. |
+| `hew.compute.project` | `{ solid, plane, want? }` | declared, `implemented: false` until the flat-drawing projection lands |
+| `hew.compute.stretch` | `{ paths, frame, axis, cutters, mode, distance \| dimension }` | declared, `implemented: false` until section stretch lands |
+
+`mesh` and `topology` blocks have the shapes of `hew.query.mesh` and
+`hew.query.topology` (§7.4) without `generation` and `epoch` (a
+computation is not tied to a document state), with `parts[].id` and
+`object` `null`. A `mesh` past 64 MiB of buffers refuses
+`mesh_too_large`. `measure` is `{ volume, area, bbox }`.
+
+**Caps.** The inputs of one call may hold at most 2,000,000 triangles,
+counted from face loop sizes before any work (for a prism, six per loop
+point, before it is built); past that the call refuses
+`compute_too_large` with `detail: { triangles, limit }`. The loops of
+one prism or offset hold at most 20,000 points (`-32602` past that). One computation
+runs at a time per connection: a second call while one runs refuses
+`compute_busy` (`detail: { limit: 1 }`). A connection's frames are served
+one at a time today, so a caller that waits for each answer never sees
+it; a host that serves computations off its dispatch thread holds the
+connection's gate across each one. Send the newest preview; do not queue
+older ones behind the pointer.
+
+**Error codes**, the names this section and §6.6 add:
+
+| Name | Code | `detail` |
+|---|---|---|
+| `dry_run_host_command` | `-32000` | `{ method }` |
+| `compute_busy` | `-32000` | `{ limit: 1 }` |
+| `compute_too_large` | `-32000` | `{ triangles, limit }` |
+| `mirrored_pose` | `-32000` | `{}` |
+| `invalid_frame` | `-32000` | `{}` |
+| `dry_run` with `coalesce` | `-32602` | none |
+
+### 7.7 Plugin commands (a Preview feature)
+
+Four commands tell a program what the app's plugins are doing. They belong
+to the Plugins preview feature (`preview-features.json`): a production
+build leaves them out of the registry and refuses them `preview_only`, and
+a production `hew-cli --live` refuses them before sending anything. The
+desktop app answers them itself. All are first-party only: the `all`
+profile may call them, a plugin may not, and none installs, enables or
+changes a plugin (`hew.plugin.reload` only asks running hosts to load a
+developer folder's files again). Nothing that manages a plugin completes over
+the socket; the person does that in the app.
+
+| Command | Served | Params | Result | Refusals |
+|---|---|---|---|---|
+| `hew.plugin.list` | host, solitary | `{}` | `{plugins: [{id, name, version, source, enabled, state}], developer_mode, request_waiting}` | `plugins_disabled`, `no_plugin_dir`, `dry_run_host_command`, `host_capability_missing` |
+| `hew.plugin.dev` | host, solitary | `{path}`: the plugin's folder | `{status: "awaiting_user"}` | `developer_mode_off`, `confirmation_open`, `plugins_off`, `request_waiting`, `request_dismissed`, `dry_run_host_command`, `plugins_disabled`, `no_plugin_dir`, `io`, `host_capability_missing`; `-32602` for a missing or empty `path` |
+| `hew.plugin.activity` | host, solitary, reads only | `{id}` | `{entries: [{at, window, state, reason}]}`, newest first, at most 500 | `invalid_params` (no id, or not a plugin id), `not_installed`, `installed_unreadable`, `storage_unreadable`, `io`, `plugins_disabled`, `no_plugin_dir`, `dry_run_host_command`, `host_capability_missing` |
+| `hew.plugin.reload` | host, solitary | `{id}` | `{status: "reloading"}` | inside a rehearsal, `dry_run_host_command` before any of the rest; otherwise in order: `plugins_disabled`, `no_plugin_dir`, `invalid_params`, `plugins_off`, `developer_mode_off`, `not_installed` / `installed_unreadable`, `not_a_developer_folder`, `plugin_blocked`, `plugin_stopped`, `plugin_turned_off`, `reload_too_soon`; `host_capability_missing` |
+
+`hew.plugin.activity` lists the states windows reported for a plugin
+(`enabled`, `activating`, `activated`, `crashed`, `blocked`, `idle`,
+`unloaded`): `at` in milliseconds since the Unix epoch, `window` the
+reporting window's label, `reason` cleaned and at most 160 characters
+or `null`. `hew.plugin.reload` asks every window that runs plugins to
+reload a plugin loaded from a developer folder, as a change to its
+files does; it never starts a plugin that stopped (the person turns it
+off and on), one turned off (`plugin_turned_off`) or one waiting for a
+review, and comes at most once every two seconds per plugin. Neither installs, enables or grants anything.
+Inside a rehearsal (§6.6) every `hew.plugin.*` command is refused
+`dry_run_host_command`, the two that only read included.
+
+`source` is `file`, `dir`, `index`, `git` or `url`. `state` is
+`installed`, `needs_developer_mode` (a folder plugin while developer mode
+is off), `needs_review` (a folder plugin whose changed manifest waits
+for the person), `checking` (an enabled folder plugin whose folder has
+not been compared since it started being watched; nothing of it is read
+until it has), `plugins_off` (the same, while no window runs a plugin host, so nothing will compare it) or `unreadable` (the record cannot be read; `version` and
+`source` are then `null`). `request_waiting` is true while a request to load
+a plugin is waiting for the person, including while they are reading what
+the plugin asks for (no path, no id), so a client can tell a dismissed,
+declined or expired request from one still open. The
+list carries no folder path and does not say whether a plugin is running.
+
+`hew.plugin.dev` only asks. The app shows the person "a program on this
+computer asked to load a plugin from this folder:" and `path`, with a
+button that opens its own folder picker near that folder; the person's
+pick, and the permissions the plugin asks for, are read in the app before
+anything runs. `path` is a hint: it is shown and at most used for where
+the picker starts, never read. One request waits at a time, for ten
+minutes: the same `path` again answers `awaiting_user` and shows nothing
+new, another `path` is refused `request_waiting`, and after the person
+dismisses one every request is refused `request_dismissed` for a minute.
+`plugins_off` means no Hew window has its Plugins switch on now. Inside a
+`dry_run` transaction it is refused `dry_run_host_command`. A caller learns the outcome by calling `hew.plugin.list`
+again; there is no event for it. `hew-cli plugin dev <folder>` does
+exactly that (docs/agents/PLUGINS.md, "Developer mode").
+
+The MCP server of `hew-cli` refuses every `hew.plugin.*` command but
+`hew.plugin.list` to an agent, directly and inside `hew.doc.transact`,
+in every build. That is a courtesy and not a boundary, because anything
+that can reach the socket can send the frames itself; the boundary is
+that neither command completes anything.
+
+**`hew.permissions.request`** is a plugin's own question to the person
+(docs/agents/PLUGINS.md, "Optional permissions"). It is in the Plugins
+preview feature too: a production build leaves it out of the registry and
+of the capability listing and refuses it `preview_only`. Every grant
+reaches it (`always`), but only a running plugin's own connection is
+answered, by the window's plugin host, before the frame reaches a
+dispatcher; every other caller reaches the kernel, which checks the
+params and refuses `host_capability_missing`. Nothing about it completes
+over the socket.
+
+| Command | Served | Params | Result | Refusals |
+|---|---|---|---|---|
+| `hew.permissions.request` | host, solitary | `{permissions: [name, ...], reason?}`: 1 to 64 names from the manifest's `optionalPermissions`; `reason` is at most 200 characters, shown to the person as plain text | `{granted: [name, ...]}`: the names asked for that the plugin holds now | `not_available_in_shop` (first, whatever the params), `permission_not_requestable` (`detail.permissions` lists the names that are not optional permissions of the plugin), `request_pending`, `request_declined`, `no_user_activation`, `host_capability_missing`; `-32602` for malformed params |
+
+In order: Shop Mode refuses; the params are checked; every name must be
+one of the plugin's optional permissions; one request per plugin waits
+at a time; for a minute after the person says no every request is
+`request_declined`; names already held are granted without asking; the
+person must have acted in the plugin's own window or panel in the last
+5 seconds (each act allows one request); then the person decides. A yes
+is applied to the running plugin (its connection's grant changes in
+place) before the answer. While the person decides, the clock of the
+plugin command the request was made in is stopped, for at most
+5 minutes, after which the request is `request_declined`.
+
 ## 8. Attribute dictionaries
 
 Every Object, Group, Component definition, Instance, Sketch, Guide,
@@ -1429,6 +3037,13 @@ round-trips, and never interprets.
   refuse it `reserved_attr_namespace`, matched exactly and
   case-sensitively, so a name that merely begins with those letters
   (`"hewlett.example"`) is a legitimate namespace and goes through.
+  A restricted connection (§10) writes only under its own namespace: a
+  plugin under its id and names below it (`com.example.cutlist`,
+  `com.example.cutlist.parts`), plus any namespace its grant names with
+  `attributes.write:<ns>`; a connected app only under the namespaces it
+  declared when it paired. Anything else refuses
+  `attr_namespace_not_granted`, with `detail: {ns, plugin, app}`. The
+  `hew` reservation is checked first.
   Enforcement sits at the API boundary rather than in the kernel — the
   reservation exists so first-party code can claim those namespaces, so
   the kernel and the UI keep writing them freely. Reads are
@@ -1437,10 +3052,54 @@ round-trips, and never interprets.
 - Values are arbitrary JSON (finite numbers only), read and written at
   key granularity: `hew.attr.set {target, ns, key, value}`,
   `hew.attr.get {target, ns?}`, `hew.attr.delete {target, ns, key?}`.
+- `target` is an entity's public id or `"document"`, or a solid's face or
+  edge by locator: `{"face": <face locator>}` or `{"edge": <edge
+  locator>}` (§5.2: `{object, at}`, and for faces `{object, ray}` or
+  `{"$face": "label#key"}`). The locator resolves when the command runs,
+  and a face or edge that is not found refuses as the locator does
+  (`locator_missed`, `ambiguous_locator`). A sketch edge has no edge
+  dictionary (store sketch data on the sketch) and refuses
+  `not_a_solid_edge`. A target object naming both forms, or neither, is
+  a params error. The namespace rules above apply unchanged. Face and
+  edge dictionaries are reported by `hew.query.faces` and
+  `hew.query.topology` as `attrs` on each face and edge, and change sets
+  name them under the owning object with `scope` `"face"` or `"edge"`
+  (§4.5).
+- **How face and edge dictionaries travel.** A dictionary belongs to the
+  element and moves with it through every operation, by one rule per
+  kind of change:
+  - An element that keeps its identity keeps its dictionary: a face moved
+    by push/pull, an edge an operation reuses, everything a transform,
+    copy, explode, make unique, or library insert carries.
+  - A face built from an existing one takes its source's dictionary: both
+    halves of a split, an imprinted shape's new face, every piece a
+    re-trace makes, a boolean's or slice's result face from its operand
+    face, both faces of a thickened sheet, and each face of a solid split
+    into separate pieces. An edge split in two gives both pieces its
+    dictionary.
+  - An element built from nothing has none: push/pull and boss walls,
+    extrusion and Follow Me faces, caps, and the edges of a cut or an
+    imprinted loop.
+  - A merge keeps the surviving element's dictionary and drops the other
+    one, whatever their sizes (the survivor is the one that keeps its
+    place; which one that is depends on the operation). Undo brings the
+    dropped one back. A seam between coplanar faces whose dictionaries
+    differ is part of the solid, as a paint boundary is: seam cleanup
+    after a boolean leaves it, and drawing on the face treats it as the
+    solid's own edge, which an erase refuses to remove.
+  - Edge dictionaries do not survive booleans, slices, thickening a
+    sheet, or splitting a solid into pieces: those rebuild every edge from
+    positions, and the rebuilt edges start without one. Face dictionaries
+    do survive them.
 - Attribute writes are ordinary mutations: transactional, undoable, and
   serialized in `.hew`. Copy and instancing semantics follow the entity
   (a deep-copied group copies its dictionaries; instances carry their
   own, definitions theirs).
+- Materials are not attributes. A face's, an object's, and an instance's
+  material are document fields with their own commands and undo
+  (§7.5); a plugin that wants per-part paint data beyond that (a finish
+  code, a supplier's color name) keeps it in its own dictionary on the
+  material or the part.
 - Dictionaries survive round-trip through clients that do not understand
   them — that is their entire contract.
 
@@ -1460,24 +3119,139 @@ writable only by first-party code):
 - **On a library item file's DOCUMENT dictionary** — the item's own
   metadata, written when the item is saved and edited by the library's
   manage flows: `id` (the item's stable library identity, a UUID string),
-  `name`, `category` (`"component"` | `"material"` | `"model"`),
-  `keywords` (list of strings), `collection`, `saved_at` /
-  `sourceDoc`-style bookkeeping keys. The library browser derives
-  everything it lists from this dictionary plus the manifest — there is
-  deliberately no side database.
+  `name`, `category` (`"component"` | `"material"` | `"model"` | `"profile"`),
+  `keywords` (list of strings), `collection`, the bookkeeping keys
+  `savedAt` and `sourceDoc`, and `prints` (written by every
+  save since 1.5): an object mapping each definition's stable id in the
+  item file, as a decimal string, to its content print. The library
+  browser derives everything it lists from this dictionary plus the
+  manifest — there is deliberately no side database.
 - **On entities a library insert creates** — provenance stamped by the
   kernel's insert (`Document::insert_document`) on created definitions
-  and root nodes: `source_id` (the item's `id`), `content_hash` (a
-  fingerprint of the item file's bytes), and on definitions `def_sid`
-  (the definition's stable id in the item file). This is what makes
-  re-inserting the same item version reuse the in-document definition
-  instead of copying it again, and what "in this model" queries count.
+  and root nodes, and by `hew.library.save` on the saved selection:
+  `source_id` (the item's `id`), `content_hash` (a fingerprint of the
+  item file's bytes; still written, no longer compared), and on
+  definitions `def_sid` (the definition's stable id in the item file) and
+  `print` (the definition's content print when it was last in step with
+  the item: its base). A save of several parts links each definition to
+  its own definition in the item. A re-insert reuses an in-document
+  definition
+  from the same item and definition whose content is the item's now, so
+  a renamed or re-saved item reuses it and an edited one copies fresh;
+  the same stamps are what "in this model" queries count.
+
+A **content print** (`p1:<64 hex digits>`, SHA-256 over a canonical
+stream the kernel writes) fingerprints what a definition holds: its
+members in order with their geometry rounded to 1 µm, surface claims and
+True Curves marks (a blend's record included, with the paint of the faces
+it consumed), each face's paint by value, nested placements by pose,
+paint and the nested definition's own print, and its sketches. It leaves
+out names, tags, attributes, ids, hidden flags and where the definition
+is placed. HEW_FILE_FORMAT.md §2 (`attrs`) has the full list. Three
+prints per linked definition give its state against the Library
+(`hew.library.status`): `mine` (now), `base` (the stamp) and `theirs`
+(the item's `prints`, or computed from an item saved before 1.5):
+
+| mine vs base | theirs vs base | state |
+|---|---|---|
+| same | same | `in_step` |
+| same | different | `library_newer` |
+| different | same | `edited_here` |
+| different | different (mine ≠ theirs) | `both_changed` |
+| mine = theirs, whatever base says | | `in_step` |
+| no base, or another print scheme, and mine ≠ theirs | | `different` |
+| the Library no longer holds the item or its definition | | `item_missing` |
+
+A second first-party namespace, `hew.clipboard`, lives only inside
+clipboard bytes and never in a document or a library file. The app's Copy
+(`Document::extract_clipboard_item`) stamps every definition the copy
+carries with `origin` (the copying window's document token) and `def_sid`
+(the stable id of the definition it was copied from); Paste
+(`Document::insert_document` with the same `origin`) links each stamped
+definition back to the live original, so a component instance copied and
+pasted within one document places the same definition — editing either
+edits both, and Make Unique is the way to break the link. The insert
+strips the namespace from every copy it makes, and a paste under another
+origin (another window, or after the window opened another document)
+copies as an ordinary item would.
+The `profile` category holds the shapes the Fillet tool's More shapes menu
+offers: a Library item whose whole content is one open chain of drawn
+lines and arcs, filed under `Profiles/`. `hew.library.save` writes one
+from `profile_chain` (a sketch and its edges in order, from the profile's
+start on the bearing face to its end; the category is implied) and
+rewrites an existing item in place, keeping its id, from `replace`;
+`hew.library.list`, `describe` and `update_meta` accept and report the
+category. A profile is not placeable, so `hew.library.insert` refuses
+`profile_not_insertable`. The ready-made profiles that ship with the app
+are not Library items: they are named `builtin:<name>` and only
+`hew.solid.fillet`'s `profile` parameter takes them. An older reader that
+does not know the category derives `model` for these items, since it
+reads them as a document.
+
+An item added from a source (a shared folder of Library items on a git
+host or a web host) also carries `remote` in its document dictionary,
+the note of where it came from:
+
+```json
+{ "source": "github:owner/repo", "name": "Shop Hardware",
+  "path": "Components/butt-hinge-0b6f1c.hew",
+  "sha256": "<64 hex: the file as the source published it>",
+  "commit": "<the commit it was read at>",
+  "license": "CC-BY-4.0",
+  "fetchedAt": "2026-11-23T10:15:00.000Z", "edited": false }
+```
+
+`source` is the canonical source reference and `path` the item's path in
+the source's index. `commit` is present only for a git source whose
+check resolved one. `license` is the license shown when the item was
+taken. `sha256` is the published file's hash, not the hash of the file
+on disk: stamping the note changes the file. A `remote` that is not an
+object with string `source` and `sha256` reads as no note.
+
+`hew.library.list` and `describe` report the note verbatim as a `remote`
+object on the item and omit the key for an item without one. No command
+sets or clears it. `update_meta` keeps it and leaves `edited` alone. A
+`hew.library.save` with `replace` carries the replaced item's note onto
+the new file with `edited` set to `true`. A save of a new item never
+carries a note, whatever it was made from. `hew.library.remove` deletes
+the item and writes nothing else.
+
+Only the app adds a source, takes an item from one, updates an item from
+its source, or unlinks one (which deletes the note). No API, CLI or MCP
+command does any of these. The app keeps its sources state in two
+dot-names at the root of the Library folder, which `crates/library`
+never lists as items and no `hew.library.*` command reads or writes:
+
+- `.sources.json`: `{ "hew": 1, "sources": [ … ] }`, one entry per added
+  source: `source` (canonical reference), `kind`, `name`, `followed`,
+  `addedAt`, `lastCheck` (`{ at, ok, code }`), `skipped` (ids deleted
+  from a followed source, not offered again), `kept` (id → the `sha256`
+  of a newer version the user declined), `lastGoodAt` and `commit` (the
+  time and commit of the cached listing). Every write re-reads the file
+  and changes one entry; other entries and unknown top-level keys
+  survive, and a file that does not parse is refused, not repaired.
+- `.sources/`: a cache of the last good listing of each added source and
+  of the catalog, and thumbnails fetched for source views. Deleting it
+  loses only offline listings.
 
 Clients may read these dictionaries freely; external writes through
 `hew.attr.set` remain refused like every `hew.*` namespace. The wire-level `.hew` encoding is specified in
 HEW_FILE_FORMAT.md in the change that implements it (per that document's
 same-commit rule and DEVELOPMENT.md rule 8); this section is the
 semantic contract.
+
+### 8.2 First-party namespace: `hew.smooth`
+
+`hew.smooth` on an Object holds one key, `level`, an integer from 1 to 3:
+the number of subdivision steps of the Smooth surface drawn over the
+object's faces. An absent key, or any other value, is Off. It is an
+ordinary attribute (round-tripped, readable through `hew.attr.get`,
+writable by first-party code only) and is the whole of the feature in the
+file; the per-edge crease flag lives in the geometry. `hew.object.smooth`
+is the supported way to write it, because setting the level also checks
+the size of the result and keeps the displayed mesh current. The level
+follows the object through edits to its faces, and through a boolean from
+the first operand.
 
 ## 9. Discovery, schema, and versioning
 
@@ -1532,40 +3306,168 @@ possible:
   deprecation is announced in the capabilities data long before any
   removal. Removal, if it ever happens, is a protocol-version event.
 
-## 10. Profiles
+## 10. Grants
 
-A profile is the set of methods a host grants a connection, enforced at
-the dispatcher (`-32001` outside it). Enforcement reaches **inside**
-transactions: every command of a `hew.doc.transact` is checked against
-the connection's profile statically, before any command executes, and a
-violation is `-32001` carrying the offending index. `hew.doc.transact`
-itself grants nothing — it is a container, not a capability. This is
-pinned at protocol 1 because it cannot be retrofitted additively (§9),
-and the entire future of scoped plugin grants depends on it. Protocol 1
-defines two profiles:
+### 10.1 Grants and permissions
+
+A grant is what a host lets a connection do, enforced at the dispatcher
+(`-32001` outside it). Enforcement reaches **inside** transactions: every
+command of a `hew.doc.transact` is checked against the connection's
+grant statically, before any command executes, and a violation is
+`-32001` carrying the offending index. `hew.doc.transact` itself grants
+nothing — it is a container, not a capability. This is pinned at
+protocol 1 because it cannot be retrofitted additively (§9).
+
+A grant has a **ceiling** and a set of **permissions**. The ceiling is
+the widest part of the registry the grant can reach:
 
 - **`core`** — everything headless-safe: the full command surface except
-  `hew.view.*`, with one deliberate exception — `hew.view.snapshot` has a
-  headless render path (a software rasterizer, no GPU or live viewport
-  required) and is granted here too. This is what `hew-cli` grants its own
-  embedded kernel and the ceiling for what a future plugin's manifest can
-  request.
+  `hew.view.*` and the window commands `hew.doc.close`/`focus`, with six
+  deliberate exceptions — `hew.view.snapshot` and `hew.view.line_drawing`
+  have a headless render path (a software rasterizer, no GPU or live
+  viewport required), and `hew.view.hide`, `show`, `show_all`, and
+  `hidden` are served by the kernel over the document's hidden flags; all
+  six are inside it. This is what `hew-cli` grants its
+  own embedded kernel.
 - **`app`** — `core` plus the commands that only make sense against a
   live application session: `hew.view.camera`, `hew.view.zoom_extents`,
-  and `hew.view.units` today (a future `hew.view.*` addition: selection).
-  Granted by the desktop app to authenticated local connections.
+  `hew.view.units`, the view-state commands of §7.3, `hew.doc.close`,
+  and `hew.doc.focus` today. Granted by the desktop app to authenticated
+  local connections.
 
-A profile is a *maximum* a host may narrow: a live host that keeps
+First-party connections — the app's own UI, `hew-cli`, the MCP server,
+and the desktop app's authenticated socket — hold the permission `all`
+and reach everything inside their ceiling. For them nothing changed from
+the two profiles protocol 1 started with: `hello` still reports
+`"profile": "core"` or `"app"`, and `hello`, `hew.meta.capabilities`,
+and every error answer byte-for-byte as before.
+
+A plugin or a connected app holds a **restricted** grant: the
+permissions its manifest or pairing declared, at the ceiling those
+permissions derive (`app` if it holds `view`, any `documents.*`,
+`files`, or `clipboard`; otherwise `core`). A restricted grant reaches a
+command only if the command is inside the ceiling and its declared
+permission is held. Every command declares one permission in the
+registry (the `Permission` line of each entry in `API_REFERENCE.gen.md`):
+
+| Permission | What it reaches |
+|---|---|
+| `always` | `hew.meta.hello`, `hew.meta.capabilities`, `hew.doc.attach` (to the connection's own document), `hew.doc.transact` (declaration only; every grant has it), `hew.event.subscribe`, `hew.event.unsubscribe`, and in a preview build `hew.permissions.request` (§7.7) |
+| `model.read` | the read surface: `hew.query.*`, `hew.compute.*` (§7.6), `hew.attr.get`, `hew.meta.documents`, `hew.history.status`, scene and library listings, `hew.doc.health`, `hew.solid.imprints`, `hew.sketch.units`, `hew.view.snapshot`, `hew.view.line_drawing`, `hew.print.pdf` |
+| `model.write` | every modeling command, `hew.scenes.add`/`update`/`rename`/`remove`/`reorder`/`apply`, `hew.history.undo`/`redo`, `hew.doc.purge_unused` |
+| `attributes.write` | `hew.attr.set`, `hew.attr.delete` (under the namespace rule below) |
+| `view` | `hew.view.camera`, `hew.view.zoom_extents`, `hew.view.units`, `hew.selection.*`, `hew.view.hide`/`show`/`show_all`/`hidden`/`isolate`/`clear_isolation`/`zoom_to` (§7.3), `hew.view.enter`/`exit`/`exit_all` (§6.3); the `selection_changed` and `tool_changed` events |
+| `documents.save` | `hew.doc.save`, `hew.doc.export`, `hew.doc.import` |
+| `documents.discard` | `hew.doc.close`, `hew.doc.revert` |
+| `documents.other` | `hew.doc.new`, `hew.doc.open`, `hew.doc.focus`, the `document` parameter of `hew.doc.attach`, `close`, `revert`, and `focus`, and the envelope `document` member (§4.2) |
+| `library` | `hew.library.insert`, `save`, `remove`, `update_meta` |
+| `first_party` | declaration only: commands no restricted grant reaches |
+
+A dry run (`hew.doc.transact` with `dry_run: true`, §6.6) changes
+nothing, so it needs read permissions only: for each command it holds,
+`model.write` and `attributes.write` are satisfied by `model.read`.
+Every other permission is checked as for a commit, and the attribute
+namespace rule still applies.
+
+`files`, `clipboard`, and `network:<host>` are part of the vocabulary
+for commands that later protocol revisions add; no protocol-1 command
+declares them. `attributes.write:<ns>` grants writes under one more
+namespace and also satisfies `attributes.write` for the command check.
+
+A restricted connection's `hello` reports `"profile": "plugin"` (for a
+connected app too) and adds a `grant` member echoing the grant:
+`{ceiling, permissions, plugin, app, document}`, with `permissions` in
+a fixed order. Its `hew.meta.capabilities` lists only the commands the
+grant reaches, each entry with its `permission` and its `provider`
+(`"kernel"` or `"host"` for a first-party command), and adds the same
+`grant` member at the top level. The refusal names only a restricted
+grant can meet (`document_not_granted`, `attr_namespace_not_granted`)
+appear in a restricted connection's capabilities and in the published
+reference, but not in a first-party connection's capabilities.
+
+**Document binding.** A plugin's grant is bound to the document of the
+window that owns it. Without `documents.other`, a restricted connection
+may not use the envelope `document` member at all (`-32001`, data
+`{refusal: "document_not_granted", document}`), and `hew.doc.attach`
+with a `document` refuses `document_not_granted`; attaching with no
+`document`, to the connection's own document, always works. The same
+goes for the `document` parameter of `hew.doc.close`, `hew.doc.revert`,
+and `hew.doc.focus`: naming one is `-32001` with data
+`{refusal: "document_not_granted", document}` (`{refusal, index,
+document}` inside a transaction), and leaving it out or `null` acts on
+the connection's own document. A restricted grant never holds `all`:
+a host refuses to open one that names it, and the dispatcher ignores it
+if it is there. `hello` and
+`hew.meta.documents` list only the bound document (every document with
+`documents.other`), and leave out each entry's `path` unless the grant
+holds `documents.save`.
+
+**Path parameters.** A restricted connection may not set a parameter
+that names a file on the host's disk: `path` on `hew.doc.open`, `save`,
+`export`, `import`, `hew.view.snapshot`, `hew.view.line_drawing`, and
+`hew.print.pdf`, and `texture.path` on `hew.material.create`. Setting
+one, even to `null` or through a transaction `$ref`, is `-32001` with
+data `{refusal: "path_not_granted", method, pointer}` for a plain
+request, or `{refusal: "path_not_granted", index, pointer}` inside a
+transaction, checked before anything runs. Byte-returning forms
+(`return_bytes`, `bytes_base64`) stay available.
+
+A grant is a *maximum* a host may narrow: a live host that keeps
 document lifecycle user-driven simply withholds `hew.doc.new`/`open`
 from its `app` grant. `hew.meta.capabilities` is the sole authority for
 what a connection actually holds, and any registry command outside the
-grant answers `-32001` — never `-32601`, which is reserved for methods
-the registry has never heard of.
+grant answers `-32001` with the message `method not in the granted
+profile` — never `-32601`, which is reserved for methods the registry
+has never heard of.
 
-Profiles are the mechanism by which the plugin system will later express
-scoped capability grants ("this plugin may read but not mutate") without
-touching the protocol: a plugin profile is just a smaller view of the same
-registry.
+### 10.2 Plugin commands
+
+A plugin's manifest commands (docs/agents/PLUGINS.md "Commands") enter
+the same registry as Hew's own, named `<plugin-id>.<local>`
+(`com.example.cutlist.generate`). A host registers them when the plugin
+loads and removes them when it unloads; first-party commands are never
+displaced, and a name that is already taken refuses the whole plugin.
+Committed artifacts (the TypeScript SDK and `API_REFERENCE.gen.md`) never
+list plugin commands.
+
+`hew.meta.capabilities` lists a plugin command, to any grant that holds
+its permission, with six members beyond the usual eight: `provider`
+(`{"plugin": "<id>"}`), `permission`, `transactable` (always `false`),
+`label` (its undo label, or `null`), `timeout_ms`, and `concurrency`
+(`"parallel"` or `"serial"`). A read-only plugin command has class
+`read_only`; a mutating one has class `solitary`.
+
+**Forwarding.** The dispatcher never runs a plugin command. It applies the
+checks every command gets, in the same order (unknown method, `hello`,
+document binding, the grant, path parameters), then answers `-32002` if
+the connection is not attached, then checks `params` against the
+command's declared schema (`-32602`, message `params do not match
+<method>'s declared schema: <pointer>: <why>`, naming the first mismatch
+depth-first, with an object's members taken alphabetically by key). A call that passes is
+handed back to the host as a forward; the host routes it to the plugin
+and completes it with the plugin's reply, which the dispatcher shapes
+into the response. A forward completes once.
+
+| Plugin reply | Response |
+|---|---|
+| a result matching the declared result schema | the result (in the transaction shape for a sole-command transaction) |
+| a result that does not match | `-32003` `plugin returned a result that does not match its declared schema`, data `{refusal: "plugin_bad_result", plugin, method, why, raw}` |
+| a refusal `{name, explanation, detail}` | `-32000` `refused`, the canonical five fields with the refusal named `<plugin-id>.<name>` |
+| no answer in time | `-32003` `the plugin did not answer in time`, data `{plugin, method, reason: "timeout"}` |
+| the plugin stopped | `-32003` `the plugin stopped while handling this command`, data `{plugin, method, reason: "crashed"}` |
+| the user cancelled | `-32000` `refused`, `plugin_command_cancelled` |
+| the plugin is not running | `-32000` `refused`, `plugin_unavailable`, detail `{plugin}` |
+| the plugin registers no handler | `-32601` `the plugin registers no handler for this command`, data `{plugin, method}` |
+
+The app answers every forward `plugin_unavailable` until the plugin realm
+lands.
+
+**Read scope.** While a host serves a forwarded read-only command, it can
+put the calling plugin's connection in a read scope: inside one, any
+command that can change the document (a plugin's mutating command, a
+first-party mutation, a transaction holding one) answers `-32001`,
+message `this command is not available while serving a read-only
+command`, data `{refusal: "read_only_forward"}`.
 
 ## 11. Transports
 
@@ -1577,6 +3479,12 @@ required to route through the public API at 1.0 — but the standing
 direction is that the UI never performs a *model mutation* the bus cannot
 express, so that a future migration of the UI onto the bus (the "first
 overlay" end-state) is never structurally foreclosed.
+
+While a compound is open (§6.1), the UI is refused too: every
+document-changing call the app makes into the kernel fails typed
+(`DocumentBusy`), and the input layer ignores pointer, keyboard, menu,
+and palette input. After a quarter second the window shows a non-modal
+notice naming the command, with Cancel, which aborts it.
 
 ### 11.2 Local socket (desktop)
 
@@ -1650,6 +3558,16 @@ client has not yet read. Connecting
 to a dead socket is therefore a bug in the connector, not a hazard the
 user meets.
 
+A frame that arrives while a plugin command holds the document (§6.1)
+waits in the window, in arrival order, and is dispatched once the
+document is free. The host's 60-second reply clock restarts when the
+frame is dispatched and each time a plugin command ahead of it finishes,
+so a client is disconnected only if one command outlasts the clock, not
+by the length of its wait; `hew-cli`'s own client clock is 120 seconds for the same
+reason. When the host's clock does run out on a connection, it also
+aborts any compound held for that connection's forward, so a closed
+socket never leaves the document held.
+
 ### 11.3 stdio (MCP)
 
 `hew-cli mcp` speaks MCP (itself JSON-RPC) on stdio to the AI client that
@@ -1704,6 +3622,12 @@ Subcommands:
   §4.2).
 - `hew-cli documents --live` — print the open documents, one JSON object
   per line (`hew.meta.documents`).
+- `hew-cli events --live [--filter name,...] [--document <ref>]` —
+  attach, subscribe to the named events (every name in §4.5 by default),
+  print the subscribe reply to stderr, then print every frame that
+  arrives to stdout as one compact JSON line until the app closes the
+  connection (exit 0; any other failure exits 1). The other subcommands
+  set aside any event that reaches them while they wait for a reply.
 - `hew-cli run <script> [--out model.hew]` — headless script runner: the
   script is a JSON array (or JSONL stream) of envelopes, executed in
   order against the embedded kernel; refusals stop execution with a
@@ -1764,7 +3688,7 @@ invocation) — is handled identically.
 
 ### 12.2 Headless and live: what is the same, and what cannot be
 
-The 81 commands the kernel serves run the same dispatcher over the same
+The 101 commands the kernel serves run the same dispatcher over the same
 kernel in both modes — a script's replies are the same, byte for byte
 (exports included), except where §12.2's last list says otherwise. The 18
 host-served commands are where the two hosts differ, and each is either
@@ -1780,10 +3704,15 @@ at parity or a stated, reasoned difference:
 | `hew.doc.save`, no path, never saved | refuses `path_required` | hands the bytes back (the app cannot ask where) |
 | `hew.doc.export` | writes the file | `hew-cli` writes it from the bytes the app returns |
 | `hew.doc.import` | reads the file (and a COLLADA file's textures) | the same: `hew-cli` reads them and sends `bytes_base64`/`images`; the app merges additively, one undo entry, and records it for replay |
+| `hew.component.import_definition` | decodes the bytes it is sent | the same; the definition is reused by content hash on both hosts, and the app records the whole frame for replay |
 | `hew.material.create {texture: {path}}` | the host reads the image | the same: `hew-cli` reads it and sends `texture.bytes_base64` in place of `path` |
-| `hew.view.snapshot`, `line_drawing`, `hew.print.pdf` | software renderer | `hew-cli` renders a copy of the document's saved bytes with the same renderer, from the camera the request names or the one the user is looking at |
+| `hew.view.snapshot`, `line_drawing` with `path` | writes the file | `hew-cli` sends the request without `path` and writes the bytes the app returns, once, answering the headless result (`path`, and the `.ids.bin`, `.depth.png`, `.normals.png` files for those passes); a raw socket client that sends `path` gets `host_capability_missing` |
+| `hew.view.snapshot`, `line_drawing`, `hew.print.pdf` | software renderer | the app renders snapshot and line drawing; `hew.print.pdf`, and either of those on an older app that cannot render, `hew-cli` renders a copy of the document's saved bytes with the same renderer, from the camera the request names or the one the user is looking at |
 | `hew.library.*` | the library folder | the library folder, on the client's side (§12.1); `save` records the document's file as `source_doc` as headless does |
 | `hew.view.camera`, `zoom_extents`, `units` | refused (`core` profile) | take effect in the window |
+| `hew.view.hide`, `show`, `show_all`, `hidden`, `isolate`, `clear_isolation`, `zoom_to` | refused (`core` profile) | take effect in the window (§7.3) |
+| `hew.view.enter`, `exit`, `exit_all` | refused (`core` profile) | open and close the person's editing context (§6.3) |
+| `hew.selection.*` | `host_capability_missing` | the window's selection (§7.3) |
 | `hew.doc.close`, `focus` | refused (`core` profile) | §4.2 |
 
 A headless host has no viewport, window, or app preferences, so the
@@ -1820,10 +3749,15 @@ chunky tools, all generated from the registry:
   learn the exact command schemas at run time.
 - `hew_transact` — the workhorse: a full transaction envelope (§6),
   returning per-command results or the typed refusal.
-- `hew_query` — the read surface: any read-only command (§6.4 —
-  `hew.query.*`, `hew.meta.*`, `hew.attr.get`, and `hew.library.list`/
-  `describe`/`remove`/`update_meta`, §8.1 — none of those touch the
-  document, so they are `ReadOnly` class too) and its params.
+- `hew_query` — the read surface: any `ReadOnly`-class command that does
+  not mutate the document (§6.4 — `hew.query.*`, `hew.meta.*`,
+  `hew.attr.get`, `hew.library.list`/`describe`/`remove`/`update_meta`,
+  §8.1), plus `hew.view.snapshot`, `hew.view.line_drawing`, and
+  `hew.history.status` by name. The view and selection commands in that
+  class (`hew.view.hide`/`show`/`show_all`/`isolate`/`zoom_to`,
+  `hew.selection.set`) change what is hidden, framed, or selected, never
+  the geometry. `hew.library.save` is `ReadOnly` class but mutates the
+  document (it stamps provenance), so `hew_query` refuses it.
 - `hew_describe_scene` — `hew.query.scene` presented as a structured
   summary tuned for reasoning over (names, kinds, bounding boxes,
   watertightness, tree shape).
@@ -1838,6 +3772,19 @@ chunky tools, all generated from the registry:
 - `hew_line_drawing` — `hew.view.line_drawing` (§7.2): the hidden-line
   drawing as an SVG or as raw 2D segments for a camera, a standard view, or
   a Scene; `core` grants it the same way.
+
+Plugin commands ride the same tools: `hew_query` runs a read-only plugin
+command, `hew_transact` with a plugin command as its one command runs a
+mutating one (§6.4), and `hew_capabilities` lists them with their
+`provider`. A plugin command's result comes back labeled with the plugin
+that produced it, so an agent can tell a plugin's answer from Hew's own:
+an object result gains `"provider": "<plugin-id>"`, and any other result
+becomes `{"provider": "<plugin-id>", "value": <result>}` (on `results[0]`
+for `hew_transact`). With `--live`, the server learns the plugin commands
+from the app's capabilities when it connects, subscribes to
+`plugin_state` (§4.5), and reads the capabilities again after any tool
+call during which a `plugin_state` event arrived, so the next call sees
+the plugins as they are now.
 
 The tool list is generated from the connection's granted profile: every
 profile today grants `hew_snapshot`, `hew_print_pdf`, and
@@ -1919,9 +3866,8 @@ resolved silently in whichever direction is convenient.
 
 ## 16. Future directions (non-normative)
 
-Named here only to record that the design leaves room for them: event
-subscriptions over the reserved notification frames (§4.5); the plugin
-transport and manifest-scoped profiles (§10, §11.4); overlay/workbench
+Named here only to record that the design leaves room for them: the plugin
+transport and manifest-scoped grants (§10, §11.4); overlay/workbench
 surfaces built atop the same bus; a binary encoding negotiated at
 handshake for an out-of-process kernel (§4.3); and the eventual migration
 of Hew's own UI onto the bus as its first and most privileged client

@@ -681,6 +681,10 @@ async function renderPrintPagesNow(
         }),
       )
     }
+    if (g.solid.length >= 6) {
+      // A guide stored with a solid stipple prints unbroken.
+      overlay.add(makeFatSegments(g.solid, { color: guideColor, widthPx: mmToDevicePx(GUIDE_WEIGHT_MM, opts.dpi), absoluteWidth: true }))
+    }
     if (g.markers.length >= 6) {
       overlay.add(makeFatSegments(g.markers, { color: guideColor, widthPx: mmToDevicePx(GUIDE_WEIGHT_MM, opts.dpi), absoluteWidth: true }))
     }

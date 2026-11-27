@@ -19,7 +19,7 @@ import boltSvg from '@material-symbols/svg-400/outlined/bolt.svg?raw'
 import { paletteEntries, paletteShortcut, type PaletteEntry, type PaletteGate, type PaletteGroup } from './registry'
 import { rankEntries } from './search'
 import { getRecent, recordRun, subscribe as subscribeRecent } from './recency'
-import { isMac } from '../platform'
+import { useKeymap } from '../keymap/useKeymap'
 import { isComposingKey } from '../input/keyboard'
 
 export interface CommandPaletteProps {
@@ -49,6 +49,8 @@ function RowIcon({ entry }: { entry: PaletteEntry }) {
 
 export function CommandPalette({ open, onClose, onRun, extraEntries, gates, initialQuery }: CommandPaletteProps) {
   const { t, i18n } = useLingui()
+  // Re-render on a keymap change so the shortcuts shown stay true.
+  useKeymap()
   const [query, setQuery] = useState('')
   const [selectedIndex, setSelectedIndex] = useState(0)
   const [recentIds, setRecentIds] = useState<string[]>(() => getRecent())
@@ -106,6 +108,10 @@ export function CommandPalette({ open, onClose, onRun, extraEntries, gates, init
 
   const isDisabled = (entry: PaletteEntry): boolean =>
     entry.gate !== undefined && (gates?.[entry.gate] ?? false) === false
+
+  /** Why a gated entry is greyed: most need a selection; Unlock All never does. */
+  const disabledReason = (entry: PaletteEntry): string =>
+    entry.gate === 'canUnlockAll' ? t`nothing is locked` : t`needs a selection`
 
   const run = (entry: PaletteEntry) => {
     if (isDisabled(entry)) return
@@ -300,7 +306,7 @@ export function CommandPalette({ open, onClose, onRun, extraEntries, gates, init
                 const index = flatIndex
                 const selected = index === selectedIndex
                 const disabled = isDisabled(entry)
-                const shortcut = paletteShortcut(entry, isMac)
+                const shortcut = paletteShortcut(entry)
                 return (
                   <div
                     key={entry.id}
@@ -358,7 +364,7 @@ export function CommandPalette({ open, onClose, onRun, extraEntries, gates, init
                           whiteSpace: 'nowrap',
                         }}
                       >
-                        <Trans>needs a selection</Trans>
+                        {disabledReason(entry)}
                       </span>
                     )}
                     {shortcut !== '' && (

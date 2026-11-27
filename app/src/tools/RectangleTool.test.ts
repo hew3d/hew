@@ -345,6 +345,24 @@ describe('RectangleTool — retype dimensions after the second click', () => {
     expect(tool.hasArmedGesture()).toBe(false)
   })
 
+  it('the retype line beats the inferred-plane line while the window is open', () => {
+    const scene = Object.assign(makeRetypeScene(), { axes: vi.fn(() => new Float64Array([0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1])) })
+    const { tool } = makeTool(scene)
+    drawGround(tool, [0, 0], [2, 1])
+    // Front view, hovering empty space: the green plane is inferred.
+    const front = new THREE.PerspectiveCamera(45, 1.5, 0.1, 1000)
+    front.position.set(0, -10, 0.5)
+    front.up.set(0, 0, 1)
+    front.lookAt(0, 0, 0.5)
+    front.updateMatrixWorld(true)
+    tool.updateCamera(front)
+    const ray: Ray = { origin: [0, -10, 0.5], direction: [0, 1, 0] }
+    tool.snapConstraint(ray)
+    tool.onPointerMove(makeSnap({ x: 0, y: 0, z: 0.5, kind: 'plane' }), ray)
+    expect((tool as unknown as { _idleInferred: { axis: number } | null })._idleInferred?.axis).toBe(1)
+    expect(tool.statusHint()).toContain('Type exact dimensions to resize the rectangle you just drew')
+  })
+
   it('after a two-click ground rectangle, typing W,D + Enter undoes it once and redraws it at that size, growing the same way', () => {
     const scene = makeRetypeScene()
     const { tool, onCommit, onMeasurement } = makeTool(scene)
@@ -969,5 +987,229 @@ describe('RectangleTool — X-ray: a hidden point that is no part of the face, c
     } finally {
       setPickRenderMode('shaded')
     }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// The boundary pick's hover memory under an arrow lock or a Shift pin
+// (view-plane design §4.2 rule 2): a lock or pin skips the face pick, but
+// the memory must keep following the cursor, so a release at a corner
+// remembers the face the cursor crossed last, not the one before the lock.
+// ---------------------------------------------------------------------------
+
+describe('RectangleTool — hover memory keeps tracking under a lock or pin', () => {
+  type Vec = [number, number, number]
+  const sub = (a: Vec, b: Vec): Vec => [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+  const add = (a: Vec, b: Vec): Vec => [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
+  const mul = (a: Vec, k: number): Vec => [a[0] * k, a[1] * k, a[2] * k]
+  const dot = (a: Vec, b: Vec): number => a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+  const cross = (a: Vec, b: Vec): Vec => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
+  const unit = (a: Vec): Vec => mul(a, 1 / Math.hypot(a[0], a[1], a[2]))
+
+  const CUBE = 7n
+  const FRONT = 1n
+  const RIGHT = 4n
+  const TOP = 6n
+  /** The unit cube [0,1]³, each face wound counter-clockwise about its outward normal. */
+  const FACES: { face: bigint; verts: Vec[] }[] = [
+    { face: FRONT, verts: [[0, 0, 0], [1, 0, 0], [1, 0, 1], [0, 0, 1]] },
+    { face: 2n, verts: [[0, 1, 0], [0, 1, 1], [1, 1, 1], [1, 1, 0]] },
+    { face: 3n, verts: [[0, 0, 0], [0, 0, 1], [0, 1, 1], [0, 1, 0]] },
+    { face: RIGHT, verts: [[1, 0, 0], [1, 1, 0], [1, 1, 1], [1, 0, 1]] },
+    { face: 5n, verts: [[0, 0, 0], [0, 1, 0], [1, 1, 0], [1, 0, 0]] },
+    { face: TOP, verts: [[0, 0, 1], [1, 0, 1], [1, 1, 1], [0, 1, 1]] },
+  ]
+  const normalOf = (f: { verts: Vec[] }): Vec => unit(cross(sub(f.verts[1], f.verts[0]), sub(f.verts[2], f.verts[0])))
+
+  /** A scene double that really casts against the cube: `pick_face` is the
+   *  nearest face the ray crosses STRICTLY inside (a ray through a corner
+   *  misses, as the kernel's does). */
+  function castingScene(): WasmScene {
+    const byFace = new Map(FACES.map((f) => [f.face, f]))
+    return {
+      history_generation: vi.fn(() => 1n),
+      ...draftMock().members,
+      axes: vi.fn(() => new Float64Array([0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1])),
+      pick_sketch: vi.fn(() => undefined),
+      sketch_plane: vi.fn(() => undefined),
+      node_parent: vi.fn(() => undefined),
+      pick_face: vi.fn((ox: number, oy: number, oz: number, dx: number, dy: number, dz: number) => {
+        const o: Vec = [ox, oy, oz]
+        const d = unit([dx, dy, dz])
+        let best: { face: bigint; t: number } | null = null
+        for (const f of FACES) {
+          const n = normalOf(f)
+          const den = dot(d, n)
+          if (Math.abs(den) < 1e-12) continue
+          const t = dot(sub(f.verts[0], o), n) / den
+          if (t <= 0) continue
+          const hit = add(o, mul(d, t))
+          let inside = true
+          for (let i = 0; i < f.verts.length; i++) {
+            const a = f.verts[i]
+            const b = f.verts[(i + 1) % f.verts.length]
+            if (dot(cross(sub(b, a), sub(hit, a)), n) <= 1e-12) { inside = false; break }
+          }
+          if (inside && (best === null || t < best.t)) best = { face: f.face, t }
+        }
+        if (best === null) return undefined
+        return makePick(CUBE, best.face)
+      }),
+      face_normal: vi.fn((_o: bigint, face: bigint) => new Float64Array(normalOf(byFace.get(face)!))),
+      face_plane: vi.fn((_o: bigint, face: bigint) => {
+        const f = byFace.get(face)!
+        return new Float64Array([...f.verts[0], ...normalOf(f)])
+      }),
+    } as unknown as WasmScene
+  }
+
+  /** The home view (eye offset [3.5, −3, 2.5] from the target), framing the cube. */
+  const EYE: Vec = add([0.5, 0.5, 0.5], mul([3.5, -3.0, 2.5], 2))
+  const N: Vec = [1, 0, 1] // the corner the front, right and top faces share
+
+  function setup() {
+    const scene = castingScene()
+    const { tool } = makeTool(scene)
+    const cam = new THREE.PerspectiveCamera(45, 1.5, 0.1, 1000)
+    cam.position.set(...EYE)
+    cam.up.set(0, 0, 1)
+    cam.lookAt(0.5, 0.5, 0.5)
+    cam.updateMatrixWorld(true)
+    tool.updateCamera(cam)
+    /** One pointer event, in the Viewport's order: the snap constraint
+     *  first, then the move. */
+    const hoverAt = (p: Vec, snap: Snap) => {
+      const ray: Ray = { origin: [...EYE], direction: unit(sub(p, EYE)) }
+      tool.snapConstraint(ray)
+      tool.onPointerMove(snap, ray)
+      return ray
+    }
+    const hoverFace = (p: Vec) => hoverAt(p, makeSnap({ x: p[0], y: p[1], z: p[2], kind: 'face' }))
+    const cornerSnap = makeSnap({ x: N[0], y: N[1], z: N[2], kind: 'endpoint', object: CUBE, elementKind: 'vertex' })
+    /** Replay at the shared corner, the cursor exactly on it (inside the
+     *  lean dead zone, so the hover memory decides): the face a click
+     *  there would start on. */
+    const cornerFace = () => {
+      const ray = hoverAt(N, cornerSnap)
+      const pick = (tool as unknown as { _facePickAt(s: Snap, r: Ray): { face: bigint } | null })._facePickAt(cornerSnap, ray)
+      return pick?.face ?? null
+    }
+    const key = (k: string) => tool.onKey({ key: k } as KeyboardEvent)
+    return { tool, hoverFace, cornerFace, key }
+  }
+
+  const ON_FRONT: Vec = [0.6, 0, 0.5]
+  const ON_RIGHT: Vec = [1, 0.5, 0.5]
+
+  it('unlocked control: the corner remembers the face the cursor came from', () => {
+    const a = setup()
+    a.hoverFace(ON_FRONT)
+    expect(a.cornerFace()).toBe(FRONT)
+    const b = setup()
+    b.hoverFace(ON_FRONT)
+    b.hoverFace(ON_RIGHT)
+    expect(b.cornerFace()).toBe(RIGHT)
+  })
+
+  it('crossing a face under an arrow lock is remembered once the lock is released at the corner', () => {
+    const { hoverFace, cornerFace, key } = setup()
+    hoverFace(ON_FRONT)
+    key('ArrowUp') // lock blue
+    hoverFace(ON_RIGHT)
+    key('ArrowUp') // release
+    expect(cornerFace()).toBe(RIGHT)
+  })
+
+  it('…and under a Shift pin', () => {
+    const { tool, hoverFace, cornerFace } = setup()
+    hoverFace(ON_FRONT)
+    tool.setShiftHeld(true) // pin the front face's plane
+    tool.setShiftHeld(false)
+    hoverFace(ON_RIGHT)
+    tool.setShiftHeld(true) // unpin
+    tool.setShiftHeld(false)
+    expect(cornerFace()).toBe(RIGHT)
+  })
+})
+
+describe('RectangleTool — a document reset forgets memoized picks', () => {
+  it('onDocumentReset clears the face pick cache', () => {
+    const { tool } = makeTool(makeWasmScene())
+    const cache = (tool as unknown as { _pickCache: { clear(): void } })._pickCache
+    const clear = vi.spyOn(cache, 'clear')
+    tool.onDocumentReset()
+    expect(clear).toHaveBeenCalled()
+  })
+})
+
+// Over a standing sketch's filled interior (view-plane design §2 step 4b):
+// the hover adopts that sketch's plane, so Shift pins IT (not the ground or
+// the plane the view faces) and a click draws into it.
+describe('RectangleTool — hovering inside a standing sketch\'s fill', () => {
+  const RED_SKETCH = 61n
+  /** From the Front side, off-centre, into a rectangle standing on the red
+   *  plane x = 0: it crosses that plane at (0, 0.9, 0.37). */
+  const FILL_RAY: Ray = { origin: [3, -3, 0.5], direction: [-3, 3.9, -0.13] }
+  const FILL_HIT = makeSnap({ x: 0, y: 0.9, z: 0.37, kind: 'plane' })
+
+  function fillScene(): WasmScene {
+    const scene = makeWasmScene({ pick: () => undefined }) as unknown as Record<string, unknown>
+    scene.sketch_plane = vi.fn((h: bigint) =>
+      new Float64Array(h === RED_SKETCH ? [0, 0, 0, 1, 0, 0] : [0, 0, 0, 0, 0, 1]))
+    scene.sketch_lines = vi.fn(() => new Float32Array())
+    scene.axes = vi.fn(() => new Float64Array([0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1]))
+    // The fill pick hits the red rectangle wherever the ray goes.
+    scene.pick_sketch_region = vi.fn(() => ({
+      sketch: () => RED_SKETCH, region: () => 1n, depth: () => 5, detached: () => false, free: vi.fn(),
+    }))
+    return scene as unknown as WasmScene
+  }
+
+  /** A level Front camera, so over nothing the tool would infer green. */
+  function frontCamera(): THREE.PerspectiveCamera {
+    const cam = new THREE.PerspectiveCamera(45, 4 / 3, 0.1, 1000)
+    cam.position.set(0, -8, 0.5)
+    cam.up.set(0, 0, 1)
+    cam.lookAt(0, 0, 0.5)
+    cam.updateMatrixWorld(true)
+    return cam
+  }
+
+  it('Shift pins the sketch\'s plane: constrained to x = 0, and the click draws on it', () => {
+    const scene = fillScene()
+    const { tool } = makeTool(scene)
+    tool.updateCamera(frontCamera())
+    tool.snapConstraint(FILL_RAY)
+    tool.onPointerMove(FILL_HIT, FILL_RAY)
+    expect(tool.statusHint()).not.toMatch(/Facing/)
+
+    tool.setShiftHeld(true)
+    tool.setShiftHeld(false)
+    expect(tool.statusHint()).toContain('Pinned to the hovered plane')
+    const normal = tool.snapConstraint(FILL_RAY)?.constraintPlane?.normal
+    expect(normal).toBeDefined()
+    expect(Math.abs(normal![0])).toBeCloseTo(1, 12)
+    expect(normal![1]).toBeCloseTo(0, 12)
+    expect(normal![2]).toBeCloseTo(0, 12)
+
+    tool.onPointerDown(FILL_HIT, FILL_RAY)
+    tool.onPointerDown(makeSnap({ x: 0, y: 1.2, z: 0.45, kind: 'plane' }), FILL_RAY)
+    expect(scene.draft_begin_plane).toHaveBeenCalledTimes(1)
+    const begin = (scene.draft_begin_plane as ReturnType<typeof vi.fn>).mock.calls[0] as number[]
+    expect(begin[0]).toBeCloseTo(0, 12) // on x = 0
+    expect(Math.abs(begin[3])).toBeCloseTo(1, 12)
+    expect(scene.draft_add_segment).toHaveBeenCalledTimes(4)
+  })
+
+  it('unpinned, a click inside the fill draws into that sketch (sketch target)', () => {
+    const scene = fillScene()
+    const { tool } = makeTool(scene)
+    tool.updateCamera(frontCamera())
+    tool.onPointerMove(FILL_HIT, FILL_RAY)
+    tool.onPointerDown(FILL_HIT, FILL_RAY)
+    tool.onPointerDown(makeSnap({ x: 0, y: 1.2, z: 0.45, kind: 'plane' }), FILL_RAY)
+    expect(scene.draft_begin_sketch).toHaveBeenCalledTimes(1)
+    expect((scene.draft_begin_sketch as ReturnType<typeof vi.fn>).mock.calls[0][0]).toBe(RED_SKETCH)
+    expect(scene.draft_begin_plane).not.toHaveBeenCalled()
   })
 })

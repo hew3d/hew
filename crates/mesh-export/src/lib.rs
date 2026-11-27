@@ -1,3 +1,9 @@
+// Outside the determinism-critical kernel scope (kernel / inference /
+// tessellate / mesh-heal). The one transcendental here converts an exported
+// color from sRGB; it writes a file and never reaches a document. The
+// workspace clippy.toml ban is suppressed here deliberately.
+#![allow(clippy::disallowed_methods)]
+
 //! STL, 3MF, GLB, and USDZ writers for `hew.doc.export` (docs/agents/HEW_API.md
 //! §7, `format` "stl" | "3mf" | "glb" (alias "gltf") | "usdz") — shared by
 //! every host
@@ -65,11 +71,13 @@
 //!
 //! **Session normalization.** `Document::open_explode_session`/`open_group_
 //! session` bake an entered definition's members into world-owned objects
-//! for the session's duration and HIDE every sibling placement of that
-//! component (so editing one of eight identical chairs doesn't show the
-//! other seven mid-bake twice). `visible_object_ids`/`instance_ids` (this
-//! traversal's own inputs) honor that hiding, so exporting mid-session
-//! used to silently drop every hidden sibling — a live `hew.doc.export`
+//! for the session's duration and HIDE the entered placement (every other
+//! placement stays live and renders the session's world content through
+//! its own pose — ARCHITECTURE.md 2.11). `visible_object_ids`/
+//! `instance_ids` (this traversal's own inputs) honor that hiding, and
+//! the sibling expansion is a render-time view of baked world coordinates,
+//! so exporting mid-session used to silently drop the hidden placement (and
+//! every sibling, when sessions still hid them all) — a live `hew.doc.export`
 //! disagreed with `hew.doc.save` about what the document even was, though
 //! `save` was always correct: `Document::save_for_persistence` already
 //! normalized against exactly this by writing a session-closed clone
@@ -78,7 +86,9 @@
 //! does — a live export must see what a live save sees (docs/agents/HEW_API.md:
 //! "the same command produces the same file headless or live").
 
-use kernel::{Document, FaceId, MaterialId, MaterialPalette, Object, Point3, Rgba8};
+use kernel::{
+    Document, FaceId, MaterialId, MaterialPalette, Object, Point3, RenderRoot, Rgba8, Transform,
+};
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Cursor;
 
@@ -90,14 +100,20 @@ use std::io::Cursor;
 /// [`message`](ExportError::message).
 #[derive(Debug)]
 pub enum ExportError {
-    /// No watertight solid survived the traversal — an empty document, or
-    /// every solid tessellating to nothing.
+    /// No object survived the traversal (an empty document, or every
+    /// object excluded by solids_only).
     NothingToExport,
     /// Re-faceting a solid failed outright.
     Failed(tessellate::TessellateError),
+    /// STL cannot hold finite coordinates, or a solid's topology and volume
+    /// at its millimeter f32 precision. No partial file is returned.
+    StlIntegrity(&'static str),
     /// [`export`]'s format dispatch saw a `format` none of the writers
     /// recognize.
     UnsupportedFormat(String),
+    /// A selection root holds more leaf placements than one occurrence
+    /// walk lists (`Document::occurrences`'s cap).
+    TooManyOccurrences,
 }
 
 impl ExportError {
@@ -108,7 +124,9 @@ impl ExportError {
         match self {
             ExportError::NothingToExport => "nothing_to_export",
             ExportError::Failed(_) => "export_failed",
+            ExportError::StlIntegrity(_) => "export_failed",
             ExportError::UnsupportedFormat(_) => "host_capability_missing",
+            ExportError::TooManyOccurrences => "too_many_occurrences",
         }
     }
 
@@ -119,8 +137,15 @@ impl ExportError {
                 "This document has no watertight solids to export. Check the Object Info panel for open (non-watertight) objects.".to_string()
             }
             ExportError::Failed(e) => format!("re-faceting object failed: {e}"),
+            ExportError::StlIntegrity(reason) => format!(
+                "STL export cannot preserve this mesh: {reason}. No file was produced. \
+                 Check the geometry, move the model closer to the origin, or use a higher-precision format such as 3MF."
+            ),
             ExportError::UnsupportedFormat(format) => {
                 format!("Unrecognized export format \"{format}\".")
+            }
+            ExportError::TooManyOccurrences => {
+                "That selection holds more placed parts than one export can list. Select fewer parts.".to_string()
             }
         }
     }
@@ -143,17 +168,220 @@ pub fn export(
     format: &str,
     segments_per_turn: u32,
     solids_only: bool,
+    cages: bool,
+) -> Result<Vec<u8>, ExportError> {
+    // Session normalization (module doc, "Session normalization"): a live
+    // export must see what a live save sees.
+    let normalized = doc.session_closed();
+    let roots = world_roots(&normalized);
+    export_roots(
+        &normalized,
+        &roots,
+        format,
+        segments_per_turn,
+        solids_only,
+        true,
+        cages,
+    )
+}
+
+/// Exports only `roots` (`hew.doc.export`'s `selection`, docs/agents/HEW_API.md
+/// §7): a group root gathers its leaves, an instance root its definition's
+/// leaves through its world pose, an object itself, and a definition root
+/// its leaves at the identity pose. The roots are read against `doc` as
+/// given — they were resolved against it — so, unlike [`export`], an open
+/// session is not closed first. [`export`] is this with every world root of
+/// the session-closed document. `cages` as for [`export`].
+pub fn export_occurrences(
+    doc: &Document,
+    roots: &[RenderRoot],
+    format: &str,
+    segments_per_turn: u32,
+    solids_only: bool,
+    cages: bool,
+) -> Result<Vec<u8>, ExportError> {
+    export_roots(
+        doc,
+        roots,
+        format,
+        segments_per_turn,
+        solids_only,
+        false,
+        cages,
+    )
+}
+
+/// The shared body of [`export`] and [`export_occurrences`]. `whole`:
+/// the roots are every world root of `doc` (they never overlap), so each
+/// instance takes the render walk's own expansion; otherwise every root is
+/// walked as an occurrence and a leaf placement two roots reach (a group
+/// and one of its members, an id named twice) is exported once.
+fn export_roots(
+    doc: &Document,
+    roots: &[RenderRoot],
+    format: &str,
+    segments_per_turn: u32,
+    solids_only: bool,
+    whole: bool,
+    cages: bool,
 ) -> Result<Vec<u8>, ExportError> {
     match format {
-        "stl" => export_stl(doc, segments_per_turn, solids_only),
-        "3mf" => export_3mf(doc, segments_per_turn, solids_only),
-        "glb" | "gltf" => export_glb(doc, segments_per_turn, solids_only),
-        "usdz" => export_usdz(doc, segments_per_turn, solids_only),
+        "stl" => stl_from_roots(doc, roots, segments_per_turn, solids_only, whole, cages),
+        "3mf" => {
+            let solids =
+                collect_export_solids(doc, roots, segments_per_turn, solids_only, whole, cages)?;
+            write_3mf(&solids).ok_or(ExportError::NothingToExport)
+        }
+        "glb" | "gltf" => {
+            let solids =
+                collect_export_solids(doc, roots, segments_per_turn, solids_only, whole, cages)?;
+            write_glb(&solids, doc.materials()).ok_or(ExportError::NothingToExport)
+        }
+        "usdz" => {
+            let solids =
+                collect_export_solids(doc, roots, segments_per_turn, solids_only, whole, cages)?;
+            write_usdz(&solids).ok_or(ExportError::NothingToExport)
+        }
         other => Err(ExportError::UnsupportedFormat(other.to_string())),
     }
 }
 
+/// Every world root of `doc` in the whole-document traversal's order: each
+/// live world object (grouped ones included, flat), then each world
+/// instance.
+fn world_roots(doc: &Document) -> Vec<RenderRoot> {
+    let objects = doc
+        .visible_object_ids()
+        .into_iter()
+        .map(kernel::NodeId::Object);
+    let instances = doc.instance_ids().into_iter().map(kernel::NodeId::Instance);
+    objects
+        .chain(instances)
+        .filter_map(|n| doc.occurrence_at(&[], n))
+        .map(RenderRoot::Occurrence)
+        .collect()
+}
+
+/// What one root exports: its leaf objects, each with the pose that maps it
+/// to world space (`None` for a world object, whose geometry already is),
+/// and the instance-style display name its parts take, if any.
+struct RootLeaves {
+    /// Each leaf with its pose and the material it inherits from the
+    /// placements above it (`Document::inherited_material`).
+    leaves: Vec<(kernel::ObjectId, Option<Transform>, Option<MaterialId>)>,
+    /// `Some` for an instance or definition root: parts are named after it
+    /// the way an instance's members always were.
+    instance_name: Option<Option<String>>,
+}
+
+/// Identifies one leaf placement across roots: the definition a
+/// definition root draws at identity (`None` for a placement), the
+/// instances above the leaf, and the leaf object.
+type LeafKey = (
+    Option<kernel::ComponentId>,
+    Vec<kernel::InstanceId>,
+    kernel::ObjectId,
+);
+
+/// One root's leaves. With `seen` (a selection), every root is walked as
+/// an occurrence and a leaf placement already exported under an earlier
+/// root is skipped; without it (the whole document, whose roots never
+/// overlap), a world object exports as stored and an instance takes the
+/// render walk's own expansion, exactly as the whole-document export
+/// always has.
+fn root_leaves(
+    doc: &Document,
+    root: &RenderRoot,
+    seen: Option<&mut BTreeSet<LeafKey>>,
+) -> Result<RootLeaves, ExportError> {
+    let instance_name = match root {
+        RenderRoot::Definition(def) => Some(doc.component_name(*def).map(str::to_string)),
+        RenderRoot::Occurrence(occ) => match occ.node {
+            kernel::NodeId::Instance(i) => Some(doc.instance_name(i).map(str::to_string)),
+            _ => None,
+        },
+    };
+    if let Some(seen) = seen {
+        let marker = match root {
+            RenderRoot::Definition(def) => Some(*def),
+            RenderRoot::Occurrence(_) => None,
+        };
+        let leaves = doc
+            .render_root_leaves(root, true)
+            .map_err(|e| match e {
+                kernel::DocumentError::TooManyOccurrences => ExportError::TooManyOccurrences,
+                _ => ExportError::NothingToExport,
+            })?
+            .into_iter()
+            .filter(|(o, _, path)| seen.insert((marker, path.clone(), *o)))
+            .map(|(o, t, path)| (o, Some(t), doc.inherited_material(&path)))
+            .collect();
+        return Ok(RootLeaves {
+            leaves,
+            instance_name,
+        });
+    }
+    let leaves = match root {
+        RenderRoot::Definition(def) => doc
+            .expanded_def_placements(*def)
+            .into_iter()
+            .zip(doc.expanded_def_placements_inherited(*def, None))
+            .map(|((o, t), m)| (o, Some(t), m))
+            .collect(),
+        RenderRoot::Occurrence(occ) => match occ.node {
+            kernel::NodeId::Object(o) => vec![(o, None, None)],
+            kernel::NodeId::Instance(i) => match (doc.instance_def(i), doc.instance_pose(i)) {
+                (Some(def), Some(pose)) => doc
+                    .expanded_def_placements(def)
+                    .into_iter()
+                    .zip(doc.instance_expanded_inherited(i))
+                    .map(|((o, local), m)| (o, Some(local.then(&pose)), m))
+                    .collect(),
+                _ => Vec::new(),
+            },
+            kernel::NodeId::Group(_) => Vec::new(),
+        },
+    };
+    Ok(RootLeaves {
+        leaves,
+        instance_name,
+    })
+}
+
 // -------------------------------------------------------- shared collection
+
+/// One object's export triangles (9 `f64`s each, object-local, CCW from
+/// outside) with the source face of each: its Smooth surface when it has
+/// a Smooth level and `cages` is off (each subdivided quad split along its
+/// 0–2 diagonal, closed by construction), else its own faces at
+/// `segments_per_turn`.
+fn object_triangles(
+    doc: &Document,
+    id: kernel::ObjectId,
+    obj: &Object,
+    segments_per_turn: u32,
+    cages: bool,
+) -> Result<(Vec<f64>, Vec<FaceId>), ExportError> {
+    let level = doc.smooth_level(id);
+    if level == 0 || cages {
+        return tessellate::export_triangles_with_faces(obj, segments_per_turn)
+            .map_err(ExportError::Failed);
+    }
+    let m = kernel::subdiv::subdivide(obj, level)
+        .map_err(|e| ExportError::Failed(tessellate::TessellateError::Subdivide(e)))?;
+    let mut tris = Vec::with_capacity(m.faces.len() * 18);
+    let mut faces = Vec::with_capacity(m.faces.len() * 2);
+    for (f, &src) in m.faces.iter().zip(&m.source) {
+        for k in 1..f.len() - 1 {
+            for i in [f[0], f[k], f[k + 1]] {
+                let p = m.points[i as usize];
+                tris.extend([p.x, p.y, p.z]);
+            }
+            faces.push(src);
+        }
+    }
+    Ok((tris, faces))
+}
 
 /// One exported solid: a display name plus its world-space triangle soup
 /// (meters, 9 `f64`s per triangle, CCW from outside) — pose baked in,
@@ -171,10 +399,18 @@ pub(crate) struct ExportSolid {
 }
 
 /// A face's effective material: its own, else its object's default
-/// (`Object::default_material`) — the same fallback `tessellate()` uses for
-/// the live viewport (crates/tessellate/src/lib.rs).
-fn resolve_face_material(object: &Object, fid: FaceId) -> Option<MaterialId> {
-    object.faces()[fid].material.or(object.default_material())
+/// (`Object::default_material`), else what its placement passes down
+/// (`inherited`) — the same fallback `tessellate_with()` uses for the live
+/// viewport (crates/tessellate/src/lib.rs).
+fn resolve_face_material(
+    object: &Object,
+    fid: FaceId,
+    inherited: Option<MaterialId>,
+) -> Option<MaterialId> {
+    object.faces()[fid]
+        .material
+        .or(object.default_material())
+        .or(inherited)
 }
 
 /// A material's resolved display color, falling back to
@@ -232,13 +468,14 @@ fn resolve_triangle_materials(
     raw: &[f64],
     face_ids: &[FaceId],
     vertex_order: [usize; 3],
+    inherited: Option<MaterialId>,
 ) -> (Vec<Rgba8>, Vec<Option<MaterialId>>, Vec<[f32; 2]>) {
     let tri_count = face_ids.len();
     let mut colors = Vec::with_capacity(tri_count);
     let mut materials = Vec::with_capacity(tri_count);
     let mut uvs = Vec::with_capacity(tri_count * 3);
     for (t, &fid) in face_ids.iter().enumerate() {
-        let mat_id = resolve_face_material(object, fid);
+        let mat_id = resolve_face_material(object, fid, inherited);
         colors.push(resolve_color(mat_id, palette));
         materials.push(mat_id);
         let o = t * 9;
@@ -254,109 +491,79 @@ fn resolve_triangle_materials(
     (colors, materials, uvs)
 }
 
-/// Walks `doc`'s solids exactly as [`export_stl`] does, but keeps one
-/// named [`ExportSolid`] per top-level object and per placed instance
-/// member rather than flattening everything into one soup. Display names
-/// prefer the document's own object/instance names (`hew.query`'s own
-/// source, `Document::object_name`/`instance_name`), falling back to a
-/// stable `Object N` counter — deliberately a plain export-local ordinal
-/// rather than the kernel's internal handle, which is not a meaningful
-/// label to a human opening the file in another tool.
+/// Walks the roots' solids exactly as [`export_stl`] does, but keeps one
+/// named [`ExportSolid`] per world object and per placed instance member
+/// rather than flattening everything into one soup. Display names prefer
+/// the document's own object/instance names (`hew.query`'s own source,
+/// `Document::object_name`/`instance_name`), falling back to a stable
+/// `Object N` counter — deliberately a plain export-local ordinal rather
+/// than the kernel's internal handle, which is not a meaningful label to a
+/// human opening the file in another tool.
 pub(crate) fn collect_export_solids(
     doc: &Document,
+    roots: &[RenderRoot],
     segments_per_turn: u32,
     solids_only: bool,
+    whole: bool,
+    cages: bool,
 ) -> Result<Vec<ExportSolid>, ExportError> {
-    // Session normalization (module doc, "Session normalization"): a live
-    // export must see what a live save sees.
-    let normalized = doc.session_closed();
-    let doc: &Document = &normalized;
-
     let mut solids: Vec<ExportSolid> = Vec::new();
     let palette = doc.materials();
+    let mut seen = BTreeSet::new();
 
-    for id in doc.visible_object_ids() {
-        if solids_only && !doc.object_solid(id) {
-            continue;
-        }
-        let Some(obj) = doc.object(id) else {
-            continue;
-        };
-        let (triangles, face_ids) = tessellate::export_triangles_with_faces(obj, segments_per_turn)
-            .map_err(ExportError::Failed)?;
-        if triangles.is_empty() {
-            continue;
-        }
-        let (colors, materials, uvs) =
-            resolve_triangle_materials(obj, palette, &triangles, &face_ids, [0, 1, 2]);
-        let name = doc
-            .object_name(id)
-            .map(str::to_string)
-            .unwrap_or_else(|| format!("Object {}", solids.len() + 1));
-        solids.push(ExportSolid {
-            name,
-            triangles,
-            colors,
-            materials,
-            uvs,
-        });
-    }
-
-    for instance in doc.instance_ids() {
-        let Some(def) = doc.instance_def(instance) else {
-            continue;
-        };
-        let Some(pose) = doc.instance_pose(instance) else {
-            continue;
-        };
-        // Nested definitions expand recursively: one export part per leaf
-        // placement, each at its fully composed pose.
-        let placements = doc.expanded_def_placements(def);
-        let inst_name = doc.instance_name(instance).map(str::to_string);
-        let multi_member = placements.len() > 1;
-
-        for (member, local) in placements {
-            let pose = local.then(&pose);
-            let flip = pose.determinant() < 0.0;
-            let vertex_order: [usize; 3] = if flip { [0, 2, 1] } else { [0, 1, 2] };
+    for root in roots {
+        let RootLeaves {
+            leaves,
+            instance_name,
+        } = root_leaves(doc, root, (!whole).then_some(&mut seen))?;
+        let multi_member = leaves.len() > 1;
+        for (member, pose, inherited) in leaves {
             if solids_only && !doc.object_solid(member) {
                 continue;
             }
             let Some(obj) = doc.object(member) else {
                 continue;
             };
-            let (raw, face_ids) = tessellate::export_triangles_with_faces(obj, segments_per_turn)
-                .map_err(ExportError::Failed)?;
+            let flip = pose.is_some_and(|p| p.determinant() < 0.0);
+            let vertex_order: [usize; 3] = if flip { [0, 2, 1] } else { [0, 1, 2] };
+            let (raw, face_ids) = object_triangles(doc, member, obj, segments_per_turn, cages)?;
             if raw.is_empty() {
                 continue;
             }
             let (colors, materials, uvs) =
-                resolve_triangle_materials(obj, palette, &raw, &face_ids, vertex_order);
-            let mut triangles = Vec::with_capacity(raw.len());
-            for tri in raw.chunks(9) {
-                let verts = [
-                    Point3::new(tri[0], tri[1], tri[2]),
-                    Point3::new(tri[3], tri[4], tri[5]),
-                    Point3::new(tri[6], tri[7], tri[8]),
-                ];
-                for &i in &vertex_order {
-                    let p = pose.apply_point(verts[i]);
-                    triangles.push(p.x);
-                    triangles.push(p.y);
-                    triangles.push(p.z);
+                resolve_triangle_materials(obj, palette, &raw, &face_ids, vertex_order, inherited);
+            let triangles = match pose {
+                None => raw,
+                Some(pose) => {
+                    let mut triangles = Vec::with_capacity(raw.len());
+                    for tri in raw.chunks(9) {
+                        let verts = [
+                            Point3::new(tri[0], tri[1], tri[2]),
+                            Point3::new(tri[3], tri[4], tri[5]),
+                            Point3::new(tri[6], tri[7], tri[8]),
+                        ];
+                        for &i in &vertex_order {
+                            let p = pose.apply_point(verts[i]);
+                            triangles.push(p.x);
+                            triangles.push(p.y);
+                            triangles.push(p.z);
+                        }
+                    }
+                    triangles
                 }
-            }
+            };
             let member_name = doc.object_name(member).map(str::to_string);
             // Mirrors threeMfExport.ts's `collectExportParts` naming table:
             // a single-member instance is named after the instance alone; a
             // multi-member one qualifies with the member's own name (or a
-            // stable ordinal if the member itself is unnamed).
-            let name = match (&inst_name, &member_name) {
-                (Some(inst), _) if !multi_member => inst.clone(),
-                (Some(inst), Some(member_n)) => format!("{inst} · {member_n}"),
-                (Some(inst), None) => format!("{inst} · Object {}", solids.len() + 1),
-                (None, Some(member_n)) => member_n.clone(),
-                (None, None) => format!("Object {}", solids.len() + 1),
+            // stable ordinal if the member itself is unnamed). Anything else
+            // is named after the object itself.
+            let name = match (&instance_name, &member_name) {
+                (Some(Some(inst)), _) if !multi_member => inst.clone(),
+                (Some(Some(inst)), Some(member_n)) => format!("{inst} · {member_n}"),
+                (Some(Some(inst)), None) => format!("{inst} · Object {}", solids.len() + 1),
+                (_, Some(member_n)) => member_n.clone(),
+                (_, None) => format!("Object {}", solids.len() + 1),
             };
             solids.push(ExportSolid {
                 name,
@@ -395,64 +602,68 @@ pub fn export_stl(
     doc: &Document,
     segments_per_turn: u32,
     solids_only: bool,
+    cages: bool,
 ) -> Result<Vec<u8>, ExportError> {
     // Session normalization (module doc, "Session normalization"): a live
     // export must see what a live save sees.
     let normalized = doc.session_closed();
-    let doc: &Document = &normalized;
+    let roots = world_roots(&normalized);
+    stl_from_roots(
+        &normalized,
+        &roots,
+        segments_per_turn,
+        solids_only,
+        true,
+        cages,
+    )
+}
 
+fn stl_from_roots(
+    doc: &Document,
+    roots: &[RenderRoot],
+    segments_per_turn: u32,
+    solids_only: bool,
+    whole: bool,
+    cages: bool,
+) -> Result<Vec<u8>, ExportError> {
     let mut soup: Vec<f64> = Vec::new();
-
-    let export_object = |soup: &mut Vec<f64>, id: kernel::ObjectId| -> Result<bool, ExportError> {
-        if solids_only && !doc.object_solid(id) {
-            return Ok(false);
-        }
-        let Some(obj) = doc.object(id) else {
-            return Ok(false);
-        };
-        let triangles =
-            tessellate::export_triangles(obj, segments_per_turn).map_err(ExportError::Failed)?;
-        soup.extend(triangles);
-        Ok(true)
-    };
-
+    // Validate each claimed solid independently: STL flattens the scene,
+    // and independent objects/placements may legitimately share coordinates.
+    let mut closed_ranges: Vec<std::ops::Range<usize>> = Vec::new();
     let mut any_solid = false;
-    for id in doc.visible_object_ids() {
-        any_solid |= export_object(&mut soup, id)?;
-    }
-
-    for instance in doc.instance_ids() {
-        let Some(def) = doc.instance_def(instance) else {
-            continue;
-        };
-        let Some(pose) = doc.instance_pose(instance) else {
-            continue;
-        };
-        for (member, local) in doc.expanded_def_placements(def) {
-            let pose = local.then(&pose);
-            let flip = pose.determinant() < 0.0;
+    let mut seen = BTreeSet::new();
+    for root in roots {
+        for (member, pose, _) in root_leaves(doc, root, (!whole).then_some(&mut seen))?.leaves {
             if solids_only && !doc.object_solid(member) {
                 continue;
             }
             let Some(obj) = doc.object(member) else {
                 continue;
             };
-            let triangles = tessellate::export_triangles(obj, segments_per_turn)
-                .map_err(ExportError::Failed)?;
+            let (triangles, _) = object_triangles(doc, member, obj, segments_per_turn, cages)?;
             any_solid = true;
-            for tri in triangles.chunks(9) {
-                let verts = [
-                    Point3::new(tri[0], tri[1], tri[2]),
-                    Point3::new(tri[3], tri[4], tri[5]),
-                    Point3::new(tri[6], tri[7], tri[8]),
-                ];
-                let order: [usize; 3] = if flip { [0, 2, 1] } else { [0, 1, 2] };
-                for &i in &order {
-                    let p = pose.apply_point(verts[i]);
-                    soup.push(p.x);
-                    soup.push(p.y);
-                    soup.push(p.z);
+            let start = soup.len() / 9;
+            if let Some(pose) = pose {
+                let flip = pose.determinant() < 0.0;
+                for tri in triangles.chunks(9) {
+                    let verts = [
+                        Point3::new(tri[0], tri[1], tri[2]),
+                        Point3::new(tri[3], tri[4], tri[5]),
+                        Point3::new(tri[6], tri[7], tri[8]),
+                    ];
+                    let order: [usize; 3] = if flip { [0, 2, 1] } else { [0, 1, 2] };
+                    for &i in &order {
+                        let p = pose.apply_point(verts[i]);
+                        soup.push(p.x);
+                        soup.push(p.y);
+                        soup.push(p.z);
+                    }
                 }
+            } else {
+                soup.extend(triangles);
+            }
+            if doc.object_solid(member) {
+                closed_ranges.push(start..soup.len() / 9);
             }
         }
     }
@@ -461,49 +672,84 @@ pub fn export_stl(
         return Err(ExportError::NothingToExport);
     }
 
-    Ok(write_binary_stl(&soup))
+    write_binary_stl(&soup, &closed_ranges)
 }
+
+/// One triangle as converted for STL: its written normal (`None` if it is a
+/// sliver the file cannot hold), the `f32` corners, and the exact millimeter
+/// `f64` corners it came from.
+type ConvertedTriangle = (Option<[f32; 3]>, [f32; 9], [f64; 9]);
 
 /// Millimeter-scale binary STL layout (docs/design/api-kernel-map.md §6.3;
 /// mirrors `app/src/io/exporters/stlExport.ts`'s `writeBinaryStl`): an
 /// 80-byte header, a `u32` triangle count, then 50 bytes per triangle (3×f32
-/// normal, 3×3×f32 vertices, a zero `u16` attribute count). Degenerate
-/// (near-zero-area) triangles are skipped, never emitted with a fabricated
-/// normal. `soup` is meters, 9 `f64`s per triangle, CCW from outside.
-fn write_binary_stl(soup: &[f64]) -> Vec<u8> {
+/// normal, 3×3×f32 vertices, a zero `u16` attribute count). Every triangle
+/// whose finite corners and winding survive f32 conversion is written,
+/// however small; there is no area gate. A triangle that collapses or
+/// flips in rounding ([`writes_forward`]) covers no area the file can
+/// hold and is omitted, never written with a normal that contradicts its
+/// vertices. Normals come from the serialized corners. Non-finite or
+/// overflowing coordinates refuse the whole file, as does a claimed
+/// solid (each range) that rounding itself damages: a topological defect
+/// or a lost volume that the exact `f64` mesh did not have, judged with
+/// the omitted slivers included ([`check_solid_survives_conversion`]).
+/// Defects the model already had are exported as the model is. Explicit
+/// open surfaces retain the interactive export's existing inclusion
+/// policy.
+/// `soup` is meters, 9 f64s per triangle, CCW from outside.
+fn write_binary_stl(
+    soup: &[f64],
+    closed_ranges: &[std::ops::Range<usize>],
+) -> Result<Vec<u8>, ExportError> {
     const HEADER_BYTES: usize = 80;
     const METERS_TO_MM: f64 = 1000.0;
-    // Degeneracy gate on the squared winding-cross length, in mm^4 — the
-    // same threshold the TypeScript writer uses.
-    const DEGENERATE_CROSS_LENGTH_SQ_MM4: f64 = 1e-12;
-
-    let mut kept: Vec<([f32; 3], [f32; 9])> = Vec::new();
-    for tri in soup.chunks(9) {
-        let mm: Vec<f64> = tri.iter().map(|v| v * METERS_TO_MM).collect();
-        let (ax, ay, az) = (mm[0], mm[1], mm[2]);
-        let (bx, by, bz) = (mm[3], mm[4], mm[5]);
-        let (cx, cy, cz) = (mm[6], mm[7], mm[8]);
-        let (ux, uy, uz) = (bx - ax, by - ay, bz - az);
-        let (vx, vy, vz) = (cx - ax, cy - ay, cz - az);
-        let nx = uy * vz - uz * vy;
-        let ny = uz * vx - ux * vz;
-        let nz = ux * vy - uy * vx;
-        let len_sq = nx * nx + ny * ny + nz * nz;
-        if len_sq <= DEGENERATE_CROSS_LENGTH_SQ_MM4 {
+    if !soup.len().is_multiple_of(9) {
+        return Err(ExportError::StlIntegrity("incomplete triangle data"));
+    }
+    // Every triangle, in soup order: `Some(normal)` if it is written,
+    // `None` if it is a sliver the file cannot hold. Solid ranges index
+    // this list, so closure is judged on the mesh as converted, slivers
+    // included: omitting one covers no area, so it cannot open a solid.
+    let mut converted: Vec<ConvertedTriangle> = Vec::with_capacity(soup.len() / 9);
+    for tri in soup.as_chunks::<9>().0 {
+        let mm: [f64; 9] = std::array::from_fn(|i| tri[i] * METERS_TO_MM);
+        let verts: [f32; 9] = std::array::from_fn(|i| mm[i] as f32);
+        if mm.iter().any(|v| !v.is_finite()) || verts.iter().any(|v| !v.is_finite()) {
+            return Err(ExportError::StlIntegrity(
+                "non-finite or overflowing coordinates",
+            ));
+        }
+        if !writes_forward(&mm) {
+            // Collinear or flipped by rounding: it has no area the file
+            // can hold, so it is left out rather than written backwards.
+            converted.push((None, verts, mm));
             continue;
         }
-        let inv_len = 1.0 / len_sq.sqrt();
+        let point = |i: usize| {
+            Point3::new(
+                f64::from(verts[i]),
+                f64::from(verts[i + 1]),
+                f64::from(verts[i + 2]),
+            )
+        };
+        let cross = (point(3) - point(0)).cross(point(6) - point(0));
+        let length = cross.length();
         let normal = [
-            (nx * inv_len) as f32,
-            (ny * inv_len) as f32,
-            (nz * inv_len) as f32,
+            (cross.x / length) as f32,
+            (cross.y / length) as f32,
+            (cross.z / length) as f32,
         ];
-        let verts = [
-            ax as f32, ay as f32, az as f32, bx as f32, by as f32, bz as f32, cx as f32, cy as f32,
-            cz as f32,
-        ];
-        kept.push((normal, verts));
+        converted.push((Some(normal), verts, mm));
     }
+    for range in closed_ranges {
+        check_solid_survives_conversion(&converted[range.clone()])?;
+    }
+    let kept: Vec<([f32; 3], [f32; 9])> = converted
+        .into_iter()
+        .filter_map(|(normal, verts, _)| normal.map(|n| (n, verts)))
+        .collect();
+    let count = u32::try_from(kept.len())
+        .map_err(|_| ExportError::StlIntegrity("too many triangles for binary STL"))?;
 
     let version = env!("CARGO_PKG_VERSION");
     let header_text = format!("Hew {version} binary STL, millimeters");
@@ -512,9 +758,16 @@ fn write_binary_stl(soup: &[f64]) -> Vec<u8> {
         header[i] = b & 0x7f;
     }
 
-    let mut out = Vec::with_capacity(HEADER_BYTES + 4 + kept.len() * 50);
+    let bytes = kept
+        .len()
+        .checked_mul(50)
+        .and_then(|n| n.checked_add(HEADER_BYTES + 4))
+        .ok_or(ExportError::StlIntegrity(
+            "binary STL exceeds the addressable file size",
+        ))?;
+    let mut out = Vec::with_capacity(bytes);
     out.extend_from_slice(&header);
-    out.extend_from_slice(&(kept.len() as u32).to_le_bytes());
+    out.extend_from_slice(&count.to_le_bytes());
     for (normal, verts) in &kept {
         for c in normal {
             out.extend_from_slice(&c.to_le_bytes());
@@ -524,7 +777,167 @@ fn write_binary_stl(soup: &[f64]) -> Vec<u8> {
         }
         out.extend_from_slice(&0u16.to_le_bytes());
     }
-    out
+    Ok(out)
+}
+
+/// Refuses a claimed solid whose millimeter `f32` conversion damaged it:
+/// a topological defect (unmatched, repeated or inconsistently oriented
+/// edges, a pinched vertex) or a flipped or vanished volume that the
+/// exact `f64` mesh did not have. A defect already present before
+/// rounding is the model's own, not the file format's; it is exported as
+/// the solid is, like every other writer does. Matching is by exact
+/// position with signed zero canonicalized: no epsilon welding, no repair.
+fn check_solid_survives_conversion(triangles: &[ConvertedTriangle]) -> Result<(), ExportError> {
+    let key32 = |c: &[f32; 9], i: usize| -> [u64; 3] {
+        std::array::from_fn(|j| {
+            let v = c[i * 3 + j];
+            if v == 0.0 { 0 } else { u64::from(v.to_bits()) }
+        })
+    };
+    let key64 = |c: &[f64; 9], i: usize| -> [u64; 3] {
+        std::array::from_fn(|j| {
+            let v = c[i * 3 + j];
+            if v == 0.0 { 0 } else { v.to_bits() }
+        })
+    };
+    let after: Vec<[[u64; 3]; 3]> = triangles
+        .iter()
+        .map(|(_, c, _)| [key32(c, 0), key32(c, 1), key32(c, 2)])
+        .collect();
+    if let Some(reason) = solid_topology_defect(&after) {
+        let before: Vec<[[u64; 3]; 3]> = triangles
+            .iter()
+            .map(|(_, _, c)| [key64(c, 0), key64(c, 1), key64(c, 2)])
+            .collect();
+        if solid_topology_defect(&before).is_none() {
+            return Err(ExportError::StlIntegrity(reason));
+        }
+    }
+    // A tetrahedral shell can flatten after rounding without collapsing
+    // any individual triangle. Compare the oriented volume in a local
+    // frame before and after: it must keep its sign and not vanish.
+    let exact = six_volume(triangles.iter().map(|(_, _, c)| *c));
+    let written = six_volume(
+        triangles
+            .iter()
+            .map(|(_, c, _)| std::array::from_fn(|i| f64::from(c[i]))),
+    );
+    if !written.is_finite()
+        || (exact != 0.0 && (written == 0.0 || written.signum() != exact.signum()))
+    {
+        return Err(ExportError::StlIntegrity(
+            "a solid loses its volume at STL precision",
+        ));
+    }
+    Ok(())
+}
+
+/// Six times the oriented volume of a triangle list, taken in a frame at
+/// the first corner so a model far from the origin does not cancel.
+fn six_volume(triangles: impl Iterator<Item = [f64; 9]>) -> f64 {
+    let mut origin = None;
+    let mut total = 0.0;
+    for c in triangles {
+        let o = *origin.get_or_insert(Point3::new(c[0], c[1], c[2]));
+        let p = |i: usize| Point3::new(c[i], c[i + 1], c[i + 2]) - o;
+        total += p(0).dot(p(3).cross(p(6)));
+    }
+    total
+}
+
+/// The first topological defect in a triangle list given by exact corner
+/// keys, or `None` if every edge is used once in each direction and every
+/// vertex's fan is one connected piece. A triangle with two coincident
+/// corners has collapsed to a segment and is not counted: its two
+/// neighbors across the surviving edges meet each other.
+fn solid_topology_defect(triangles: &[[[u64; 3]; 3]]) -> Option<&'static str> {
+    type Vertex = [u64; 3];
+    let mut edges = BTreeMap::<(Vertex, Vertex), (Option<usize>, Option<usize>)>::new();
+    if triangles.is_empty() {
+        return Some("a solid has no triangles");
+    }
+    for (face, vertices) in triangles.iter().enumerate() {
+        if vertices[0] == vertices[1] || vertices[1] == vertices[2] || vertices[2] == vertices[0] {
+            continue;
+        }
+        for i in 0..3 {
+            let (a, b) = (vertices[i], vertices[(i + 1) % 3]);
+            let (key, forward) = if a < b {
+                ((a, b), true)
+            } else {
+                ((b, a), false)
+            };
+            let uses = edges.entry(key).or_default();
+            let slot = if forward { &mut uses.0 } else { &mut uses.1 };
+            if slot.replace(face).is_some() {
+                return Some("non-manifold or inconsistently oriented edges");
+            }
+        }
+    }
+    let mut links = BTreeMap::<Vertex, Vec<(usize, usize)>>::new();
+    for ((a, b), (forward, reverse)) in edges {
+        let (Some(f), Some(r)) = (forward, reverse) else {
+            return Some("a solid has unmatched boundary edges after conversion");
+        };
+        for vertex in [a, b] {
+            links.entry(vertex).or_default().push((f, r));
+        }
+    }
+    for pairs in links.values() {
+        let mut neighbors = BTreeMap::<usize, Vec<usize>>::new();
+        for &(a, b) in pairs {
+            neighbors.entry(a).or_default().push(b);
+            neighbors.entry(b).or_default().push(a);
+        }
+        let mut pending = vec![pairs[0].0];
+        let mut visited = BTreeSet::new();
+        while let Some(face) = pending.pop() {
+            if visited.insert(face) {
+                pending.extend(&neighbors[&face]);
+            }
+        }
+        if visited.len() != neighbors.len() {
+            return Some("non-manifold vertex contact after conversion");
+        }
+    }
+    None
+}
+
+/// Whether a triangle (9 `f64`s, in the coordinates the writer is about to
+/// round to `f32`) still winds the way its own `f64` normal says once each
+/// corner is rounded — [`tessellate::winds_forward_in_f32`], the gate the
+/// render buffers apply, at the writer's own scale.
+///
+/// The export soup is `f64`, and every triangle in it has a strictly
+/// positive area; but `tessellate::export_triangles` fans a face from one
+/// vertex across a hole's chain of chords, and the fan's last triangle
+/// before the tangent can be thinner than the `f32` quantum of its
+/// coordinates (about 2e-7 m two meters from the origin, the same at any
+/// scale: 2e-4 mm at 2000 mm). STL, GLB, and USDZ all store `f32`; such a
+/// sliver, written, winds backwards or collapses — an STL facet whose
+/// normal contradicts its vertices, a glTF triangle facing into the solid.
+/// GLB and USDZ leave it out instead: its footprint is below what the file
+/// can hold, so after rounding its two neighbours already cover it between them.
+/// (Its three edges are then unmatched in the file by exact endpoint, as
+/// at a T-junction; the gap they bound is below the file's resolution,
+/// where the written sliver would have been a fold of the same size.)
+/// STL applies the same omission, but only after checking that rounding
+/// did not damage a claimed solid, and without any fixed area gate.
+/// Only the sign of the rounded winding decides — a triangle with any
+/// representable altitude passes. GLB/USDZ retain their existing output;
+/// STL derives its normal from the rounded corners it actually writes.
+/// 3MF needs no such gate: it writes `f64` decimal text
+/// (`format_coord`), which round-trips exactly.
+///
+/// The scale matters: STL rounds millimeters, GLB and USDZ meters, and
+/// 1000 is not a power of two, so a sliver that inverts at one scale can
+/// survive at the other. Each writer asks in its own coordinates.
+fn writes_forward(tri: &[f64]) -> bool {
+    let a = Point3::new(tri[0], tri[1], tri[2]);
+    let b = Point3::new(tri[3], tri[4], tri[5]);
+    let c = Point3::new(tri[6], tri[7], tri[8]);
+    let normal = (b - a).cross(c - a);
+    tessellate::winds_forward_in_f32(a, b, c, normal)
 }
 
 // -------------------------------------------------------------------- 3MF
@@ -547,8 +960,18 @@ pub fn export_3mf(
     doc: &Document,
     segments_per_turn: u32,
     solids_only: bool,
+    cages: bool,
 ) -> Result<Vec<u8>, ExportError> {
-    let solids = collect_export_solids(doc, segments_per_turn, solids_only)?;
+    let normalized = doc.session_closed();
+    let doc: &Document = &normalized;
+    let solids = collect_export_solids(
+        doc,
+        &world_roots(doc),
+        segments_per_turn,
+        solids_only,
+        true,
+        cages,
+    )?;
     write_3mf(&solids).ok_or(ExportError::NothingToExport)
 }
 
@@ -647,7 +1070,8 @@ fn build_3mf_objects(solids: &[ExportSolid]) -> (Vec<Model3mfObject>, ColorPalet
             i
         };
 
-        for t in 0..tri_count {
+        // Slicing keeps the old indexing's panic when `colors` is short.
+        for (t, &src_color) in solid.colors[..tri_count].iter().enumerate() {
             let o = t * 9;
             let v1 = vertex_at(o);
             let v2 = vertex_at(o + 3);
@@ -657,7 +1081,7 @@ fn build_3mf_objects(solids: &[ExportSolid]) -> (Vec<Model3mfObject>, ColorPalet
                 // repaired (rule 4 in spirit).
                 continue;
             }
-            let color = palette.index_of(solid.colors[t]);
+            let color = palette.index_of(src_color);
             let default = *default_color.get_or_insert(color);
             let p1 = if color == default {
                 String::new()
@@ -851,8 +1275,18 @@ pub fn export_glb(
     doc: &Document,
     segments_per_turn: u32,
     solids_only: bool,
+    cages: bool,
 ) -> Result<Vec<u8>, ExportError> {
-    let solids = collect_export_solids(doc, segments_per_turn, solids_only)?;
+    let normalized = doc.session_closed();
+    let doc: &Document = &normalized;
+    let solids = collect_export_solids(
+        doc,
+        &world_roots(doc),
+        segments_per_turn,
+        solids_only,
+        true,
+        cages,
+    )?;
     write_glb(&solids, doc.materials()).ok_or(ExportError::NothingToExport)
 }
 
@@ -1025,6 +1459,13 @@ fn build_glb_meshes(
             };
 
             for &t in &bucket_tris[bi] {
+                // A sliver that would wind backwards once its meter
+                // corners are `f32` is left out before its vertices are
+                // welded in (`writes_forward`); the Z-up to Y-up swap
+                // below is a rotation, so it keeps the winding's sign.
+                if !writes_forward(&solid.triangles[t * 9..t * 9 + 9]) {
+                    continue;
+                }
                 let i0 = vertex_at(t, 0);
                 let i1 = vertex_at(t, 1);
                 let i2 = vertex_at(t, 2);
@@ -1290,8 +1731,18 @@ pub fn export_usdz(
     doc: &Document,
     segments_per_turn: u32,
     solids_only: bool,
+    cages: bool,
 ) -> Result<Vec<u8>, ExportError> {
-    let solids = collect_export_solids(doc, segments_per_turn, solids_only)?;
+    let normalized = doc.session_closed();
+    let doc: &Document = &normalized;
+    let solids = collect_export_solids(
+        doc,
+        &world_roots(doc),
+        segments_per_turn,
+        solids_only,
+        true,
+        cages,
+    )?;
     write_usdz(&solids).ok_or(ExportError::NothingToExport)
 }
 
@@ -1452,6 +1903,12 @@ fn build_usdz_parts(solids: &[ExportSolid]) -> (Vec<UsdPart>, ColorPalette) {
 
         for t in 0..tri_count {
             let o = t * 9;
+            // A sliver that would wind backwards once its meter corners
+            // are `f32` is left out before its points are welded in
+            // (`writes_forward`), as in GLB; the Y-up swap is a rotation.
+            if !writes_forward(&solid.triangles[o..o + 9]) {
+                continue;
+            }
             let v1 = vertex_at(o);
             let v2 = vertex_at(o + 3);
             let v3 = vertex_at(o + 6);
@@ -1725,6 +2182,7 @@ mod tests {
             section: None,
             view_style: None,
             extra: Default::default(),
+            geo: None,
         };
         doc.ingest(scene, Vec::new()).expect("ingest a plain box");
         doc
@@ -1753,6 +2211,7 @@ mod tests {
             section: None,
             view_style: None,
             extra: Default::default(),
+            geo: None,
         };
         doc.ingest(scene, Vec::new()).expect("ingest a painted box");
         let ids = doc.material_ids();
@@ -1786,6 +2245,7 @@ mod tests {
             section: None,
             view_style: None,
             extra: Default::default(),
+            geo: None,
         };
         doc.ingest(scene, Vec::new())
             .expect("ingest a textured box");
@@ -1824,6 +2284,7 @@ mod tests {
             section: None,
             view_style: None,
             extra: Default::default(),
+            geo: None,
         };
         doc.ingest(scene, Vec::new()).expect("ingest an open quad");
         doc
@@ -1832,9 +2293,31 @@ mod tests {
     // ---------------------------------------------------------------- STL
 
     #[test]
+    fn smoothed_stl_differs_from_cage_and_cages_flag_restores_it() {
+        let mut doc = box_document();
+        let cage = export_stl(&doc, 0, true, false).unwrap();
+        let id = doc.visible_object_ids()[0];
+        doc.set_smooth_level(id, 1).unwrap();
+        let smooth = export_stl(&doc, 0, true, false).unwrap();
+        assert_ne!(smooth, cage, "a smoothed object exports its Smooth surface");
+        let count = |b: &[u8]| u32::from_le_bytes([b[80], b[81], b[82], b[83]]);
+        assert_eq!(count(&smooth), 48, "24 quads, two triangles each");
+        assert_eq!(
+            export_stl(&doc, 0, true, true).unwrap(),
+            cage,
+            "cages restores the cage"
+        );
+        // The named formats follow the same switch.
+        assert_ne!(
+            export_3mf(&doc, 0, true, false).unwrap(),
+            export_3mf(&doc, 0, true, true).unwrap()
+        );
+    }
+
+    #[test]
     fn export_stl_produces_a_well_formed_binary_stl_with_twelve_triangles() {
         let doc = box_document();
-        let bytes = export_stl(&doc, 0, true).expect("a solid box exports");
+        let bytes = export_stl(&doc, 0, true, false).expect("a solid box exports");
         // Version-agnostic: the header is "Hew <version> binary STL…", so
         // assert the stable signature prefix, not a version digit (a version
         // bump must not break this).
@@ -1847,18 +2330,16 @@ mod tests {
     #[test]
     fn export_stl_refuses_nothing_to_export_on_an_empty_document() {
         let doc = Document::new();
-        let err = export_stl(&doc, 0, true).unwrap_err();
+        let err = export_stl(&doc, 0, true, false).unwrap_err();
         assert_eq!(err.name(), "nothing_to_export");
     }
 
-    /// A zero-area (degenerate) triangle carries no meaningful normal and
-    /// is skipped rather than emitted with a fabricated one
-    /// (`write_binary_stl`'s doc comment) — ported from the retired
-    /// `stlExport.test.ts`'s "skips zero-area (degenerate) triangles and
-    /// counts them", which exercised the pure writer directly on a
-    /// synthetic soup the same way.
+    /// A collinear, zero-area facet has no area the file can hold, so it
+    /// is left out (covering nothing, it cannot open a solid); the real
+    /// triangle beside it is written. Real models routinely tessellate
+    /// into such slivers where a face has a vertex along a straight edge.
     #[test]
-    fn write_binary_stl_skips_degenerate_triangles() {
+    fn write_binary_stl_omits_degenerate_triangles() {
         #[rustfmt::skip]
         let soup = [
             // One real triangle in the XY plane (unit right triangle).
@@ -1866,9 +2347,204 @@ mod tests {
             // One degenerate (collinear, zero-area) triangle.
             0.0, 0.0, 0.0,  1.0, 0.0, 0.0,  2.0, 0.0, 0.0,
         ];
-        let bytes = write_binary_stl(&soup);
+        let bytes = write_binary_stl(&soup, &[]).unwrap();
         let count = u32::from_le_bytes(bytes[80..84].try_into().unwrap());
-        assert_eq!(count, 1, "the degenerate triangle is skipped, not repaired");
+        assert_eq!(count, 1, "the degenerate triangle is omitted, not repaired");
+    }
+
+    fn tetra_soup(points: [Point3; 4]) -> Vec<f64> {
+        [[0, 2, 1], [0, 3, 2], [0, 1, 3], [1, 2, 3]]
+            .into_iter()
+            .flat_map(|face| {
+                face.into_iter().flat_map(|i| {
+                    let p = points[i];
+                    [p.x, p.y, p.z]
+                })
+            })
+            .collect()
+    }
+
+    fn decoded_closed_stl_volume(bytes: &[u8]) -> f64 {
+        let count = u32::from_le_bytes(bytes[80..84].try_into().unwrap()) as usize;
+        assert_eq!(bytes.len(), 84 + count * 50);
+        let mut edges = BTreeMap::new();
+        let mut six_volume = 0.0;
+        for triangle in bytes[84..].as_chunks::<50>().0 {
+            let read = |i| f64::from(f32::from_le_bytes(triangle[i..i + 4].try_into().unwrap()));
+            let point = |i| Point3::new(read(i), read(i + 4), read(i + 8));
+            let normal = point(0).to_vec();
+            let vertices = [point(12), point(24), point(36)];
+            let cross = (vertices[1] - vertices[0]).cross(vertices[2] - vertices[0]);
+            assert!(cross.length() > 0.0 && cross.dot(normal) > 0.0);
+            six_volume += vertices[0]
+                .to_vec()
+                .dot(vertices[1].to_vec().cross(vertices[2].to_vec()));
+            let key = |p: Point3| [p.x.to_bits(), p.y.to_bits(), p.z.to_bits()];
+            for i in 0..3 {
+                *edges
+                    .entry((key(vertices[i]), key(vertices[(i + 1) % 3])))
+                    .or_insert(0) += 1;
+            }
+        }
+        for ((a, b), uses) in &edges {
+            assert_eq!(*uses, 1);
+            assert_eq!(edges.get(&(*b, *a)), Some(&1));
+        }
+        six_volume / 6.0 / 1e9 // mm³ to m³
+    }
+
+    #[test]
+    fn stl_preserves_a_closed_tetrahedron_of_small_valid_triangles() {
+        // Every facet was below the old fixed area threshold. All are
+        // representable, including their normals and exact shared corners.
+        let side = 1e-7;
+        let soup = tetra_soup([
+            Point3::ORIGIN,
+            Point3::new(side, 0.0, 0.0),
+            Point3::new(0.0, side, 0.0),
+            Point3::new(0.0, 0.0, side),
+        ]);
+        let bytes = write_binary_stl(&soup, std::slice::from_ref(&(0..4))).unwrap();
+        assert_eq!(u32::from_le_bytes(bytes[80..84].try_into().unwrap()), 4);
+        let actual = decoded_closed_stl_volume(&bytes);
+        let expected = side * side * side / 6.0;
+        assert!((actual - expected).abs() <= expected * 8.0 * f64::from(f32::EPSILON));
+    }
+
+    #[test]
+    fn stl_refuses_nonfinite_and_overflowing_coordinates() {
+        for coordinate in [f64::NAN, f64::INFINITY, f64::MAX, 1e38] {
+            let soup = [coordinate, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+            assert!(matches!(
+                write_binary_stl(&soup, &[]),
+                Err(ExportError::StlIntegrity(_))
+            ));
+        }
+        // At 100 km, mm-f32 cannot distinguish these 1 mm offsets.
+        let soup = [
+            100_000.0,
+            100_000.0,
+            0.0,
+            100_000.001,
+            100_000.0,
+            0.0,
+            100_000.0,
+            100_000.001,
+            0.0,
+        ];
+        // On its own it is omitted like any sliver the file cannot hold.
+        let bytes = write_binary_stl(&soup, &[]).unwrap();
+        assert_eq!(u32::from_le_bytes(bytes[80..84].try_into().unwrap()), 0);
+    }
+
+    #[test]
+    fn stl_omits_a_triangle_whose_winding_flips_after_rounding() {
+        // At 1000 mm one f32 ULP is 1/16384 mm. The original signed
+        // area is positive (1.3 - 2*0.6 ULP); rounded it is negative
+        // (1 - 2*1 ULP). This is not a zero-area input triangle.
+        let ulp = 1.0 / 16384.0;
+        let soup = [
+            1.0,
+            1.0,
+            0.0,
+            1.001,
+            (1000.0 + 0.6 * ulp) / 1000.0,
+            0.0,
+            1.002,
+            (1000.0 + 1.3 * ulp) / 1000.0,
+            0.0,
+        ];
+        let mm: Vec<_> = soup.iter().map(|v| v * 1000.0).collect();
+        let signed = |p: &[f64]| (p[3] - p[0]) * (p[7] - p[1]) - (p[4] - p[1]) * (p[6] - p[0]);
+        assert!(signed(&mm) > 0.0);
+        let rounded: Vec<_> = mm.iter().map(|v| f64::from(*v as f32)).collect();
+        assert!(signed(&rounded) < 0.0);
+        // Written backwards its stored normal would contradict its
+        // vertices, so it is omitted instead.
+        let bytes = write_binary_stl(&soup, &[]).unwrap();
+        assert_eq!(u32::from_le_bytes(bytes[80..84].try_into().unwrap()), 0);
+    }
+
+    #[test]
+    fn stl_refuses_a_vertex_pinch_that_only_rounding_creates() {
+        // Two tetrahedra whose apexes differ by 1e-12 m (1e-9 mm) at
+        // 1000 mm: distinct in f64, the same f32 position in the file, so
+        // the one solid would pinch at a vertex the model does not have.
+        let apex = |x: f64| Point3::new(x, 1.0, 1.0);
+        let a = tetra_soup([
+            apex(1.0),
+            Point3::new(2.0, 1.0, 1.0),
+            Point3::new(1.0, 2.0, 1.0),
+            Point3::new(1.0, 1.0, 2.0),
+        ]);
+        let b = tetra_soup([
+            apex(1.0 + 1e-12),
+            Point3::new(0.0, 1.0, 1.0),
+            Point3::new(1.0, 0.0, 1.0),
+            Point3::new(1.0, 1.0, 0.0),
+        ]);
+        let both: Vec<_> = a.iter().copied().chain(b).collect();
+        let error = write_binary_stl(&both, std::slice::from_ref(&(0..8))).unwrap_err();
+        assert!(error.message().contains("vertex"));
+        // Separate objects are independent even at coincident positions.
+        let duplicate: Vec<_> = a.iter().chain(&a).copied().collect();
+        write_binary_stl(&duplicate, &[0..4, 4..8]).unwrap();
+    }
+
+    #[test]
+    fn stl_exports_a_defect_the_model_already_had_unchanged() {
+        // A tetrahedron missing a face is open before any rounding: that
+        // is the model's own state, not damage done by the file format.
+        let soup = tetra_soup([
+            Point3::ORIGIN,
+            Point3::new(1.0, 0.0, 0.0),
+            Point3::new(0.0, 1.0, 0.0),
+            Point3::new(0.0, 0.0, 1.0),
+        ]);
+        let bytes = write_binary_stl(&soup[..27], std::slice::from_ref(&(0..3))).unwrap();
+        assert_eq!(u32::from_le_bytes(bytes[80..84].try_into().unwrap()), 3);
+        // An inside-out closed shell keeps its orientation too.
+        let inverted: Vec<f64> = soup
+            .chunks(9)
+            .flat_map(|t| [t[0], t[1], t[2], t[6], t[7], t[8], t[3], t[4], t[5]])
+            .collect();
+        let bytes = write_binary_stl(&inverted, std::slice::from_ref(&(0..4))).unwrap();
+        assert_eq!(u32::from_le_bytes(bytes[80..84].try_into().unwrap()), 4);
+    }
+
+    #[test]
+    fn stl_refuses_a_shell_that_flattens_without_degenerate_triangles() {
+        let soup = tetra_soup([
+            Point3::new(0.0, 0.0, 100_000.0),
+            Point3::new(1.0, 0.0, 100_000.0),
+            Point3::new(0.0, 1.0, 100_000.0),
+            Point3::new(0.25, 0.25, 100_000.001),
+        ]);
+        let error = write_binary_stl(&soup, std::slice::from_ref(&(0..4))).unwrap_err();
+        assert!(error.message().contains("volume"));
+    }
+
+    #[test]
+    fn unsafe_stl_failure_propagates_through_the_public_dispatch() {
+        let mut doc = box_document();
+        let id = doc.visible_object_ids()[0];
+        doc.transform_object(id, &kernel::Transform::uniform_scale(0.001))
+            .unwrap();
+        doc.transform_object(
+            id,
+            &kernel::Transform::translation(kernel::Vec3::new(100_000.0, 100_000.0, 100_000.0)),
+        )
+        .unwrap();
+        let before = doc.save();
+        for error in [
+            export_stl(&doc, 0, true, false).unwrap_err(),
+            export(&doc, "stl", 0, true, false).unwrap_err(),
+        ] {
+            assert!(matches!(error, ExportError::StlIntegrity(_)));
+            assert_eq!(error.name(), "export_failed");
+            assert!(error.message().contains("No file was produced"));
+        }
+        assert_eq!(doc.save(), before);
     }
 
     /// A mirrored (negative-determinant) instance pose flips triangle
@@ -1891,7 +2567,7 @@ mod tests {
         doc.place_instance(component, mirrored)
             .expect("place a mirrored second instance");
 
-        let bytes = export_3mf(&doc, 0, true).expect("both instances export");
+        let bytes = export_3mf(&doc, 0, true, false).expect("both instances export");
         let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).expect("a valid zip");
         let mut model = String::new();
         std::io::Read::read_to_string(
@@ -1933,14 +2609,14 @@ mod tests {
         doc.place_instance(component, translated)
             .expect("place a second instance");
 
-        let before = export_stl(&doc, 0, true).expect("both instances export");
+        let before = export_stl(&doc, 0, true, false).expect("both instances export");
         let count_before = u32::from_le_bytes(before[80..84].try_into().unwrap());
         assert_eq!(count_before, 24, "two box instances, 12 triangles each");
 
         doc.open_explode_session(first_instance)
             .expect("open a session on the first instance");
 
-        let after = export_stl(&doc, 0, true).expect("still exports mid-session");
+        let after = export_stl(&doc, 0, true, false).expect("still exports mid-session");
         let count_after = u32::from_le_bytes(after[80..84].try_into().unwrap());
         assert_eq!(
             count_after, count_before,
@@ -1973,6 +2649,7 @@ mod tests {
             section: None,
             view_style: None,
             extra: Default::default(),
+            geo: None,
         };
         doc.ingest(scene, Vec::new())
             .expect("ingest a second, painted box");
@@ -1990,6 +2667,7 @@ mod tests {
             section: None,
             view_style: None,
             extra: Default::default(),
+            geo: None,
         };
         doc.ingest(scene, Vec::new())
             .expect("ingest the component source box");
@@ -2007,7 +2685,7 @@ mod tests {
         )
         .expect("place a second instance");
 
-        let bytes = export_3mf(&doc, 0, true).expect("the whole scene exports");
+        let bytes = export_3mf(&doc, 0, true, false).expect("the whole scene exports");
         let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).expect("a valid zip");
         let mut model = String::new();
         std::io::Read::read_to_string(
@@ -2031,9 +2709,50 @@ mod tests {
         assert!(model.contains("#FF0000"), "{model}");
         assert!(model.contains("#CCCCCC"), "{model}");
 
-        let stl = export_stl(&doc, 0, true).expect("the whole scene exports to stl too");
+        let stl = export_stl(&doc, 0, true, false).expect("the whole scene exports to stl too");
         let count = u32::from_le_bytes(stl[80..84].try_into().unwrap());
         assert_eq!(count, 48, "4 boxes, 12 triangles each");
+    }
+
+    /// A painted placement exports in its own material: an unpainted member
+    /// face resolves through the instance (docs/dev/HEW_FILE_FORMAT.md
+    /// §4.4), whole-document and selection exports alike.
+    #[test]
+    fn a_painted_instance_exports_its_material_on_unpainted_member_faces() {
+        let mut doc = box_document();
+        let src = doc.visible_object_ids()[0];
+        let (component, first, _) = doc
+            .make_component(&[kernel::NodeId::Object(src)])
+            .expect("make a component from the box");
+        let (second, _) = doc
+            .place_instance(
+                component,
+                kernel::Transform::translation(kernel::Vec3::new(4.0, 0.0, 0.0)),
+            )
+            .expect("place a second instance");
+        let blue = doc.add_material(Material::solid("Blue", Rgba8::rgb(0x00, 0x00, 0xff)));
+        doc.set_instance_material(second, Some(blue)).unwrap();
+
+        let solids = collect_export_solids(&doc, &world_roots(&doc), 0, true, true, false).unwrap();
+        assert_eq!(solids.len(), 2);
+        let blue_parts = solids
+            .iter()
+            .filter(|s| s.materials.iter().all(|&m| m == Some(blue)))
+            .count();
+        assert_eq!(blue_parts, 1, "only the painted placement is blue");
+
+        let only_first = vec![RenderRoot::Occurrence(
+            doc.occurrence_at(&[], kernel::NodeId::Instance(first))
+                .unwrap(),
+        )];
+        let solids = collect_export_solids(&doc, &only_first, 0, true, false, false).unwrap();
+        assert!(solids[0].materials.iter().all(|&m| m.is_none()));
+        let only_second = vec![RenderRoot::Occurrence(
+            doc.occurrence_at(&[], kernel::NodeId::Instance(second))
+                .unwrap(),
+        )];
+        let solids = collect_export_solids(&doc, &only_second, 0, true, false, false).unwrap();
+        assert!(solids[0].materials.iter().all(|&m| m == Some(blue)));
     }
 
     // ------------------------------------------------------------- dispatch
@@ -2044,15 +2763,15 @@ mod tests {
     #[test]
     fn export_dispatches_by_format() {
         let doc = box_document();
-        let direct = export_stl(&doc, 0, true).unwrap();
-        let dispatched = export(&doc, "stl", 0, true).unwrap();
+        let direct = export_stl(&doc, 0, true, false).unwrap();
+        let dispatched = export(&doc, "stl", 0, true, false).unwrap();
         assert_eq!(direct, dispatched);
     }
 
     #[test]
     fn export_refuses_host_capability_missing_for_an_unrecognized_format() {
         let doc = box_document();
-        let err = export(&doc, "obj", 0, true).unwrap_err();
+        let err = export(&doc, "obj", 0, true, false).unwrap_err();
         assert_eq!(err.name(), "host_capability_missing");
         assert_eq!(err.message(), "Unrecognized export format \"obj\".");
     }
@@ -2064,6 +2783,10 @@ mod tests {
     #[test]
     fn export_error_names_are_pinned() {
         assert_eq!(ExportError::NothingToExport.name(), "nothing_to_export");
+        assert_eq!(
+            ExportError::StlIntegrity("unsafe mesh").name(),
+            "export_failed"
+        );
         assert_eq!(
             ExportError::Failed(tessellate::TessellateError::DegenerateFace {
                 face: kernel::FaceId::default()
@@ -2085,7 +2808,7 @@ mod tests {
     #[test]
     fn export_3mf_produces_one_object_with_eight_vertices_and_twelve_triangles() {
         let doc = box_document();
-        let bytes = export_3mf(&doc, 0, true).expect("a solid box exports to 3mf");
+        let bytes = export_3mf(&doc, 0, true, false).expect("a solid box exports to 3mf");
 
         let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).expect("a valid zip");
         assert!(zip.by_name("[Content_Types].xml").is_ok());
@@ -2109,15 +2832,15 @@ mod tests {
     #[test]
     fn export_3mf_refuses_nothing_to_export_on_an_empty_document() {
         let doc = Document::new();
-        let err = export_3mf(&doc, 0, true).unwrap_err();
+        let err = export_3mf(&doc, 0, true, false).unwrap_err();
         assert_eq!(err.name(), "nothing_to_export");
     }
 
     #[test]
     fn export_3mf_is_byte_identical_across_two_exports() {
         let doc = box_document();
-        let a = export_3mf(&doc, 0, true).unwrap();
-        let b = export_3mf(&doc, 0, true).unwrap();
+        let a = export_3mf(&doc, 0, true, false).unwrap();
+        let b = export_3mf(&doc, 0, true, false).unwrap();
         assert_eq!(a, b, "3MF export must be deterministic");
     }
 
@@ -2129,7 +2852,7 @@ mod tests {
     #[test]
     fn export_3mf_encodes_face_colors_via_basematerials() {
         let (doc, _red, _blue) = painted_box_document();
-        let bytes = export_3mf(&doc, 0, true).expect("a painted box exports to 3mf");
+        let bytes = export_3mf(&doc, 0, true, false).expect("a painted box exports to 3mf");
 
         let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).expect("a valid zip");
         let mut model = String::new();
@@ -2173,7 +2896,7 @@ mod tests {
     #[test]
     fn export_3mf_renders_a_textured_face_as_its_tint_color() {
         let doc = textured_box_document();
-        let bytes = export_3mf(&doc, 0, true).expect("a textured box exports to 3mf");
+        let bytes = export_3mf(&doc, 0, true, false).expect("a textured box exports to 3mf");
 
         let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).expect("a valid zip");
         let mut model = String::new();
@@ -2261,17 +2984,17 @@ mod tests {
     fn solids_only_toggles_non_solid_inclusion() {
         let doc = open_quad_document();
         assert!(
-            export_stl(&doc, 0, true).is_err(),
+            export_stl(&doc, 0, true, false).is_err(),
             "solids-only drops the open quad"
         );
-        assert!(export_3mf(&doc, 0, true).is_err());
-        assert!(export_glb(&doc, 0, true).is_err());
+        assert!(export_3mf(&doc, 0, true, false).is_err());
+        assert!(export_glb(&doc, 0, true, false).is_err());
 
-        let stl = export_stl(&doc, 0, false).expect("permissive mode includes it");
+        let stl = export_stl(&doc, 0, false, false).expect("permissive mode includes it");
         let count = u32::from_le_bytes(stl[80..84].try_into().unwrap());
         assert_eq!(count, 2, "one quad triangulates to 2 triangles");
 
-        let glb = export_glb(&doc, 0, false).expect("permissive mode includes it");
+        let glb = export_glb(&doc, 0, false, false).expect("permissive mode includes it");
         let (json, _bin) = glb_chunks(&glb);
         assert_eq!(json["meshes"].as_array().unwrap().len(), 1);
     }
@@ -2308,7 +3031,7 @@ mod tests {
     #[test]
     fn export_glb_produces_a_well_formed_container_with_one_mesh() {
         let doc = box_document();
-        let bytes = export_glb(&doc, 0, true).expect("a solid box exports to glb");
+        let bytes = export_glb(&doc, 0, true, false).expect("a solid box exports to glb");
         let (json, bin) = glb_chunks(&bytes);
 
         assert_eq!(json["asset"]["version"], "2.0");
@@ -2348,22 +3071,22 @@ mod tests {
     #[test]
     fn export_glb_refuses_nothing_to_export_on_an_empty_document() {
         let doc = Document::new();
-        let err = export_glb(&doc, 0, true).unwrap_err();
+        let err = export_glb(&doc, 0, true, false).unwrap_err();
         assert_eq!(err.name(), "nothing_to_export");
     }
 
     #[test]
     fn export_glb_is_byte_identical_across_two_exports() {
         let doc = box_document();
-        let a = export_glb(&doc, 0, true).unwrap();
-        let b = export_glb(&doc, 0, true).unwrap();
+        let a = export_glb(&doc, 0, true, false).unwrap();
+        let b = export_glb(&doc, 0, true, false).unwrap();
         assert_eq!(a, b, "GLB export must be deterministic");
     }
 
     #[test]
     fn export_glb_chunks_are_four_byte_aligned() {
         let doc = box_document();
-        let bytes = export_glb(&doc, 0, true).unwrap();
+        let bytes = export_glb(&doc, 0, true, false).unwrap();
         let json_len = u32::from_le_bytes(bytes[12..16].try_into().unwrap());
         assert_eq!(json_len % 4, 0, "JSON chunk length must be 4-byte aligned");
         let bin_header = 20 + json_len as usize;
@@ -2379,7 +3102,7 @@ mod tests {
     #[test]
     fn export_glb_encodes_face_colors_as_distinct_materials() {
         let (doc, _red, _blue) = painted_box_document();
-        let bytes = export_glb(&doc, 0, true).expect("a painted box exports to glb");
+        let bytes = export_glb(&doc, 0, true, false).expect("a painted box exports to glb");
         let (json, _bin) = glb_chunks(&bytes);
 
         let materials = json["materials"].as_array().unwrap();
@@ -2436,7 +3159,7 @@ mod tests {
     #[test]
     fn export_glb_embeds_a_textured_materials_image_bytes() {
         let doc = textured_box_document();
-        let bytes = export_glb(&doc, 0, true).expect("a textured box exports to glb");
+        let bytes = export_glb(&doc, 0, true, false).expect("a textured box exports to glb");
         let (json, bin) = glb_chunks(&bytes);
 
         let materials = json["materials"].as_array().unwrap();
@@ -2534,7 +3257,7 @@ mod tests {
     #[test]
     fn export_usdz_produces_one_mesh_with_eight_points_and_twelve_triangles() {
         let doc = box_document();
-        let bytes = export_usdz(&doc, 0, true).expect("a solid box exports to usdz");
+        let bytes = export_usdz(&doc, 0, true, false).expect("a solid box exports to usdz");
 
         let mut zip = zip::ZipArchive::new(Cursor::new(bytes.clone())).expect("a valid zip");
         assert_eq!(zip.len(), 1, "a single usda layer entry");
@@ -2563,23 +3286,23 @@ mod tests {
     #[test]
     fn export_usdz_refuses_nothing_to_export_on_an_empty_document() {
         let doc = Document::new();
-        let err = export_usdz(&doc, 0, true).unwrap_err();
+        let err = export_usdz(&doc, 0, true, false).unwrap_err();
         assert_eq!(err.name(), "nothing_to_export");
     }
 
     #[test]
     fn export_usdz_is_byte_identical_across_two_exports() {
         let doc = box_document();
-        let a = export_usdz(&doc, 0, true).unwrap();
-        let b = export_usdz(&doc, 0, true).unwrap();
+        let a = export_usdz(&doc, 0, true, false).unwrap();
+        let b = export_usdz(&doc, 0, true, false).unwrap();
         assert_eq!(a, b, "USDZ export must be deterministic");
     }
 
     #[test]
     fn export_dispatches_usdz_format() {
         let doc = box_document();
-        let direct = export_usdz(&doc, 0, true).unwrap();
-        let dispatched = export(&doc, "usdz", 0, true).unwrap();
+        let direct = export_usdz(&doc, 0, true, false).unwrap();
+        let dispatched = export(&doc, "usdz", 0, true, false).unwrap();
         assert_eq!(direct, dispatched);
     }
 
@@ -2594,7 +3317,7 @@ mod tests {
     fn export_usdz_splits_a_multi_colored_part_into_geom_subsets_bound_to_preview_surface_materials()
      {
         let (doc, _red, _blue) = painted_box_document();
-        let bytes = export_usdz(&doc, 0, true).expect("a painted box exports to usdz");
+        let bytes = export_usdz(&doc, 0, true, false).expect("a painted box exports to usdz");
         let usda = usda_layer(bytes);
 
         assert_eq!(usda.matches("def GeomSubset \"").count(), 3, "{usda}");
@@ -2632,7 +3355,7 @@ mod tests {
     #[test]
     fn export_usdz_renders_a_textured_face_as_its_tint_color_with_no_embedded_image() {
         let doc = textured_box_document();
-        let bytes = export_usdz(&doc, 0, true).expect("a textured box exports to usdz");
+        let bytes = export_usdz(&doc, 0, true, false).expect("a textured box exports to usdz");
         let usda = usda_layer(bytes);
         assert!(
             usda.contains("color3f inputs:diffuseColor"),
@@ -2663,11 +3386,12 @@ mod tests {
             section: None,
             view_style: None,
             extra: Default::default(),
+            geo: None,
         };
         doc.ingest(scene, Vec::new())
             .expect("ingest an awkwardly named box");
 
-        let bytes = export_usdz(&doc, 0, true).expect("exports despite the name");
+        let bytes = export_usdz(&doc, 0, true, false).expect("exports despite the name");
         let usda = usda_layer(bytes);
 
         let expected_id = sanitize_usd_identifier("3 Legs & \"Stuff\"");
@@ -2708,11 +3432,12 @@ mod tests {
             section: None,
             view_style: None,
             extra: Default::default(),
+            geo: None,
         };
         doc.ingest(scene, Vec::new())
             .expect("ingest two colliding-sanitized boxes");
 
-        let bytes = export_usdz(&doc, 0, true).expect("both boxes export");
+        let bytes = export_usdz(&doc, 0, true, false).expect("both boxes export");
         let usda = usda_layer(bytes);
         assert_eq!(usda.matches("def Xform \"Leg_1\" (").count(), 1, "{usda}");
         assert_eq!(usda.matches("def Xform \"Leg_1_2\" (").count(), 1, "{usda}");
@@ -2725,7 +3450,7 @@ mod tests {
     #[test]
     fn export_usdz_every_entry_is_stored_and_sixty_four_byte_aligned() {
         let (doc, _red, _blue) = painted_box_document();
-        let bytes = export_usdz(&doc, 0, true).expect("a painted box exports to usdz");
+        let bytes = export_usdz(&doc, 0, true, false).expect("a painted box exports to usdz");
 
         let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).expect("a valid zip");
         assert!(!zip.is_empty(), "at least one entry");
@@ -2760,7 +3485,7 @@ mod tests {
     #[test]
     fn export_usdz_central_directory_matches_local_headers() {
         let (doc, _red, _blue) = painted_box_document();
-        let bytes = export_usdz(&doc, 0, true).expect("a painted box exports to usdz");
+        let bytes = export_usdz(&doc, 0, true, false).expect("a painted box exports to usdz");
 
         let mut zip = zip::ZipArchive::new(Cursor::new(bytes.clone())).expect("a valid zip");
         assert!(!zip.is_empty());
@@ -2835,6 +3560,7 @@ mod tests {
             section: None,
             view_style: None,
             extra: Default::default(),
+            geo: None,
         };
         doc.ingest(scene, Vec::new())
             .expect("ingest a second, painted box");
@@ -2850,6 +3576,7 @@ mod tests {
             section: None,
             view_style: None,
             extra: Default::default(),
+            geo: None,
         };
         doc.ingest(scene, Vec::new())
             .expect("ingest the component source box");
@@ -2867,9 +3594,10 @@ mod tests {
         )
         .expect("place a second instance");
 
-        let usda_bytes = export_usdz(&doc, 0, true).expect("the whole scene exports to usdz");
+        let usda_bytes =
+            export_usdz(&doc, 0, true, false).expect("the whole scene exports to usdz");
         let usda = usda_layer(usda_bytes);
-        let glb = export_glb(&doc, 0, true).expect("the whole scene exports to glb too");
+        let glb = export_glb(&doc, 0, true, false).expect("the whole scene exports to glb too");
         let (json, _bin) = glb_chunks(&glb);
 
         let glb_meshes = json["meshes"].as_array().unwrap();
@@ -2911,11 +3639,11 @@ mod tests {
     fn export_usdz_solids_only_toggles_non_solid_inclusion() {
         let doc = open_quad_document();
         assert!(
-            export_usdz(&doc, 0, true).is_err(),
+            export_usdz(&doc, 0, true, false).is_err(),
             "solids-only drops the open quad"
         );
 
-        let bytes = export_usdz(&doc, 0, false).expect("permissive mode includes it");
+        let bytes = export_usdz(&doc, 0, false, false).expect("permissive mode includes it");
         let usda = usda_layer(bytes);
         assert_eq!(usda.matches("def Mesh \"").count(), 1, "{usda}");
         assert_eq!(

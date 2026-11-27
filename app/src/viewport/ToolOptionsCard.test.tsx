@@ -1,0 +1,64 @@
+import { fireEvent, render, screen } from '@testing-library/react'
+import { afterEach, beforeEach, expect, it, vi } from 'vitest'
+import { ToolOptionsCard, resetToolOptionsCardForTest } from './ToolOptionsCard'
+
+beforeEach(() => resetToolOptionsCardForTest())
+afterEach(() => vi.restoreAllMocks())
+
+it('mounts without taking focus and pointer choices leave typed sizes in the viewport', () => {
+  const viewport = document.createElement('button')
+  document.body.append(viewport)
+  viewport.focus()
+  render(<ToolOptionsCard tool="Focus test" info="Help."><button>Choice</button></ToolOptionsCard>)
+  expect(document.activeElement).toBe(viewport)
+  expect(fireEvent.pointerDown(screen.getByRole('button', { name: 'Choice' }))).toBe(false)
+  expect(document.activeElement).toBe(viewport)
+  viewport.remove()
+})
+
+it('keeps only the title when collapsed, remembers per tool, and expands again', () => {
+  const { unmount } = render(<ToolOptionsCard tool="Collapse test" info="Help."><span>Rows</span></ToolOptionsCard>)
+  fireEvent.click(screen.getByRole('button', { name: 'Collapse Collapse test options' }))
+  expect(screen.getByText('Rows').closest('.tool-options-content')).toHaveAttribute('aria-hidden', 'true')
+  expect(screen.getByText('Collapse test')).toBeVisible()
+  unmount()
+  const second = render(<ToolOptionsCard tool="Collapse test" info="Help."><span>Rows</span></ToolOptionsCard>)
+  expect(screen.getByText('Rows').closest('.tool-options-content')).toHaveAttribute('aria-hidden', 'true')
+  fireEvent.click(screen.getByRole('button', { name: 'Expand Collapse test options' }))
+  expect(screen.getByText('Rows')).toBeVisible()
+  second.unmount()
+  render(<ToolOptionsCard tool="Another tool" info="Help."><span>Other rows</span></ToolOptionsCard>)
+  expect(screen.getByText('Other rows')).toBeVisible()
+})
+
+it('opens text help and dismisses it with Escape or an outside press', () => {
+  render(<ToolOptionsCard tool="Help test" info="One plain sentence.">Rows</ToolOptionsCard>)
+  const button = screen.getByRole('button', { name: 'About Help test' })
+  fireEvent.click(button)
+  expect(screen.getByRole('note')).toHaveTextContent('One plain sentence.')
+  fireEvent.keyDown(window, { key: 'Escape' })
+  expect(screen.queryByRole('note')).toBeNull()
+  fireEvent.click(button)
+  fireEvent.pointerDown(document.body)
+  expect(screen.queryByRole('note')).toBeNull()
+})
+
+it('contains native button keys but preserves global CAD shortcuts', () => {
+  const key = vi.fn()
+  render(<div onKeyDown={key}><ToolOptionsCard tool="Keyboard test" info="Help."><button>Choice</button></ToolOptionsCard></div>)
+  const choice = screen.getByRole('button', { name: 'Choice' })
+  fireEvent.keyDown(choice, { key: 'Enter' })
+  fireEvent.keyDown(choice, { key: ' ', code: 'Space' })
+  expect(key).not.toHaveBeenCalled()
+  fireEvent.keyDown(choice, { key: 'z', ctrlKey: true })
+  expect(key).toHaveBeenCalledTimes(1)
+})
+
+it('forgets every remembered collapsed state when reset', () => {
+  const first = render(<ToolOptionsCard tool="Reset test" info="Help."><span>Rows</span></ToolOptionsCard>)
+  fireEvent.click(screen.getByRole('button', { name: 'Collapse Reset test options' }))
+  first.unmount()
+  resetToolOptionsCardForTest()
+  render(<ToolOptionsCard tool="Reset test" info="Help."><span>Rows</span></ToolOptionsCard>)
+  expect(screen.getByText('Rows').closest('.tool-options-content')).toHaveAttribute('aria-hidden', 'false')
+})

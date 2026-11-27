@@ -64,6 +64,7 @@ fn api_meta(label: &str) -> CompoundMeta {
     CompoundMeta {
         label: label.to_string(),
         origin: HistoryOrigin::Connection("hew-cli:test".to_string()),
+        coalesce: None,
     }
 }
 

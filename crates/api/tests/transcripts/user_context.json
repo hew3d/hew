@@ -1,0 +1,187 @@
+{
+  "profile": "app",
+  "frames": [
+    {
+      "note": "the handshake",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 0,
+        "method": "hew.meta.hello",
+        "params": {
+          "protocol": 1
+        }
+      },
+      "compare": "/result/profile",
+      "response": "app"
+    },
+    {
+      "note": "attach binds the connection",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "hew.doc.attach",
+        "params": {}
+      },
+      "response": {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "result": {}
+      }
+    },
+    {
+      "note": "the context read on a host with no window: no frames, no fallback entries, no armed gesture",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "hew.query.context",
+        "params": {}
+      },
+      "compare": "/result",
+      "response": {
+        "stack": [],
+        "direct_members": null,
+        "fallback": [],
+        "armed": false,
+        "generation": 0,
+        "epoch": 0
+      }
+    },
+    {
+      "note": "the user's window is a host capability: enter, exit, and exit_all refuse host_capability_missing headless",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "hew.view.exit",
+        "params": {}
+      },
+      "response": {
+        "jsonrpc": "2.0",
+        "id": 3,
+        "error": {
+          "code": -32000,
+          "message": "refused",
+          "data": {
+            "refusal": "host_capability_missing",
+            "failed_index": 0,
+            "failed_method": "hew.view.exit",
+            "detail": {
+              "capability": "leave the user's context"
+            },
+            "explanation": "This host cannot leave the user's context. Connect through a host that can (hew-cli has file access; the desktop app renders)."
+          }
+        }
+      }
+    },
+    {
+      "note": "exit_all refuses the same way",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 4,
+        "method": "hew.view.exit_all",
+        "params": {}
+      },
+      "response": {
+        "jsonrpc": "2.0",
+        "id": 4,
+        "error": {
+          "code": -32000,
+          "message": "refused",
+          "data": {
+            "refusal": "host_capability_missing",
+            "failed_index": 0,
+            "failed_method": "hew.view.exit_all",
+            "detail": {
+              "capability": "leave the user's context"
+            },
+            "explanation": "This host cannot leave the user's context. Connect through a host that can (hew-cli has file access; the desktop app renders)."
+          }
+        }
+      }
+    },
+    {
+      "note": "enter names its target first: an id naming nothing is unknown_entity",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 5,
+        "method": "hew.view.enter",
+        "params": {
+          "id": "obj_1"
+        }
+      },
+      "compare": "/error/data/refusal",
+      "response": "unknown_entity"
+    },
+    {
+      "note": "enter takes exactly one of id and path: neither is -32602",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 6,
+        "method": "hew.view.enter",
+        "params": {}
+      },
+      "compare": "/error/code",
+      "response": -32602
+    },
+    {
+      "note": "the commands are solitary: beside another command in a transaction they are -32602 before anything runs",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 7,
+        "method": "hew.doc.transact",
+        "params": {
+          "commands": [
+            {
+              "method": "hew.view.exit",
+              "params": {}
+            },
+            {
+              "method": "hew.view.exit_all",
+              "params": {}
+            }
+          ]
+        }
+      },
+      "compare": "/error/code",
+      "response": -32602
+    },
+    {
+      "note": "an empty locator is -32602",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 8,
+        "method": "hew.view.enter",
+        "params": {
+          "path": []
+        }
+      },
+      "compare": "/error/code",
+      "response": -32602
+    },
+    {
+      "note": "an enter carrying a locator, beside another command in a transaction, is -32602 before anything runs",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 9,
+        "method": "hew.doc.transact",
+        "params": {
+          "commands": [
+            {
+              "method": "hew.view.enter",
+              "params": {
+                "path": [
+                  "ins_1"
+                ]
+              }
+            },
+            {
+              "method": "hew.view.exit",
+              "params": {}
+            }
+          ]
+        }
+      },
+      "compare": "/error/code",
+      "response": -32602
+    }
+  ]
+}

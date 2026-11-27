@@ -1,4 +1,5 @@
 import { test, expect, type Page } from '@playwright/test'
+import { isMac } from './helpers/platform'
 import {
   buildViewProjection,
   worldToPagePixel,
@@ -155,7 +156,7 @@ test('journey: Rectangle (typed 2,2) then Push/Pull (typed 1) builds a real soli
 
 test('Arc: two chord clicks + typed bulge ⏎ commits through the live VCB', async ({ page }) => {
   const ctx = await setup(page)
-  const hash0 = await page.evaluate(() => window.__hew_test!.getStateHash())
+  const hash0 = await page.evaluate(() => window.__hew_test!.getModelStateHash())
 
   await page.keyboard.press('a')
   await expect(
@@ -179,7 +180,7 @@ test('Arc: two chord clicks + typed bulge ⏎ commits through the live VCB', asy
   await page.keyboard.press('Enter')
 
   const after = await page.evaluate(() => ({
-    hash: window.__hew_test!.getStateHash(),
+    hash: window.__hew_test!.getModelStateHash(),
     err: window.__hew_test!.getLastError(),
     count: window.__hew_test!.getObjectCount(),
   }))
@@ -196,7 +197,7 @@ test('Arc: two chord clicks + typed bulge ⏎ commits through the live VCB', asy
 
 test('Escape mid-gesture: no document mutation is committed', async ({ page }) => {
   const ctx = await setup(page)
-  const hash0 = await page.evaluate(() => window.__hew_test!.getStateHash())
+  const hash0 = await page.evaluate(() => window.__hew_test!.getModelStateHash())
 
   await page.keyboard.press('r')
   await clickWorld(page, ctx, 0, 0, 0) // anchor only — nothing kernel-side yet
@@ -204,7 +205,7 @@ test('Escape mid-gesture: no document mutation is committed', async ({ page }) =
   await page.keyboard.press('Escape')
 
   const after = await page.evaluate(() => ({
-    hash: window.__hew_test!.getStateHash(),
+    hash: window.__hew_test!.getModelStateHash(),
     canUndo: window.__hew_test!.canUndo(),
   }))
   expect(after.hash).toBe(hash0)
@@ -268,12 +269,40 @@ test('Ctrl+Z undoes and Ctrl+Shift+Z redoes through the live keydown path', asyn
   await page.evaluate(() => window.__hew_test!.drawBox([0, 0, 0], [1, 1, 0], 1))
   await page.waitForFunction(() => window.__hew_test!.getObjectCount() === 1)
 
-  await page.keyboard.press('Control+z')
+  await page.keyboard.press('ControlOrMeta+z')
   await page.waitForFunction(() => window.__hew_test!.getObjectCount() === 0)
 
   // Uppercase 'Z': a physical Shift+Z produces `key === 'Z'` — pressing the
   // lowercase variant here would mask case-sensitivity bugs in the handler.
-  await page.keyboard.press('Control+Shift+Z')
+  await page.keyboard.press('ControlOrMeta+Shift+Z')
+  await page.waitForFunction(() => window.__hew_test!.getObjectCount() === 1)
+})
+
+test('Ctrl+Y redoes through the live keydown path, but not inside a text field', async ({ page }) => {
+  await setup(page)
+
+  await page.evaluate(() => window.__hew_test!.drawBox([0, 0, 0], [1, 1, 0], 1))
+  await page.waitForFunction(() => window.__hew_test!.getObjectCount() === 1)
+
+  await page.keyboard.press('ControlOrMeta+z')
+  await page.waitForFunction(() => window.__hew_test!.getObjectCount() === 0)
+
+  // Focus a text field: its native Ctrl+Y must not redo the scene.
+  await page.evaluate(() => {
+    const input = document.createElement('input')
+    input.id = 'ctrl-y-probe'
+    document.body.appendChild(input)
+    input.focus()
+  })
+  await page.keyboard.press(isMac ? 'Meta+Shift+Z' : 'Control+y')
+  await page.waitForTimeout(150)
+  expect(await page.evaluate(() => window.__hew_test!.getObjectCount())).toBe(0)
+
+  await page.evaluate(() => {
+    document.getElementById('ctrl-y-probe')?.remove()
+    ;(document.activeElement as HTMLElement | null)?.blur()
+  })
+  await page.keyboard.press(isMac ? 'Meta+Shift+Z' : 'Control+y')
   await page.waitForFunction(() => window.__hew_test!.getObjectCount() === 1)
 })
 
@@ -294,7 +323,7 @@ test('Ctrl+G groups the selection and Ctrl+Shift+G ungroups, through the live ke
   })
   await page.waitForFunction(() => window.__hew_test!.getSelection().length === 2)
 
-  await page.keyboard.press('Control+g')
+  await page.keyboard.press('ControlOrMeta+g')
   await page.waitForFunction(() => {
     const sel = window.__hew_test!.getSelection()
     return sel.length === 1 && sel[0].kind === 'group'
@@ -302,7 +331,7 @@ test('Ctrl+G groups the selection and Ctrl+Shift+G ungroups, through the live ke
 
   // Uppercase 'G' — a physical Shift+G produces `key === 'G'`; the lowercase
   // variant would mask case-sensitivity bugs (same rationale as redo above).
-  await page.keyboard.press('Control+Shift+G')
+  await page.keyboard.press('ControlOrMeta+Shift+G')
   // Ungroup clears the selection; both objects are top-level again.
   await page.waitForFunction(() => window.__hew_test!.getSelection().length === 0)
   expect(await page.evaluate(() => window.__hew_test!.getObjectCount())).toBe(2)
@@ -385,8 +414,8 @@ test('Rotate: X-locked 90° (arrow lock, two clicks, typed angle) stands a drawn
 
   // And it committed cleanly — no error toast. [WouldRetopologize] is what
   // this flow used to surface; [PointOffPlane] is its kernel-level cause.
-  await expect(page.getByText('[WouldRetopologize]')).toHaveCount(0)
-  await expect(page.getByText('[PointOffPlane]')).toHaveCount(0)
+  await expect(page.getByText('would make lines cross or merge', { exact: false })).toHaveCount(0)
+  await expect(page.getByText("isn't on the drawing surface", { exact: false })).toHaveCount(0)
 })
 
 test('Ctrl+G with a single object selected is a no-op — the keyboard path honors the ≥2-sibling gate', async ({
@@ -400,17 +429,17 @@ test('Ctrl+G with a single object selected is a no-op — the keyboard path hono
     h.selectObjects(h.getObjectIds())
   })
   await page.waitForFunction(() => window.__hew_test!.getSelection().length === 1)
-  const hashBefore = await page.evaluate(() => window.__hew_test!.getStateHash())
+  const hashBefore = await page.evaluate(() => window.__hew_test!.getModelStateHash())
 
   // The Edit menu disables Group for a 1-node selection; the accelerator must
   // agree — before the handler-side gate, this silently made a 1-member group.
-  await page.keyboard.press('Control+g')
+  await page.keyboard.press('ControlOrMeta+g')
 
   // Positive control: Ctrl+Shift+G on the (still object) selection is also
   // a no-op, then verify the document hash and selection never changed.
-  await page.keyboard.press('Control+Shift+G')
+  await page.keyboard.press('ControlOrMeta+Shift+G')
   await expect
-    .poll(async () => page.evaluate(() => window.__hew_test!.getStateHash()))
+    .poll(async () => page.evaluate(() => window.__hew_test!.getModelStateHash()))
     .toBe(hashBefore)
   const sel = await page.evaluate(() => window.__hew_test!.getSelection())
   expect(sel).toHaveLength(1)

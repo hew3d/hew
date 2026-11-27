@@ -6,6 +6,7 @@
  * uses for MaterialPalette et al.), so no wasm/loader mock is required.
  */
 
+import { StrictMode } from 'react'
 import { act, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ComponentsPanel } from './ComponentsPanel'
@@ -175,6 +176,23 @@ describe('ComponentsPanel thumbnails', () => {
     expect(imgs).toHaveLength(2)
     for (const img of imgs) expect(img.src).toMatch(/^blob:/)
     expect(URL.createObjectURL).toHaveBeenCalledTimes(2)
+  })
+
+  it('still shows its thumbnail after a StrictMode remount', () => {
+    const scene = makeScene({
+      component_ids: () => new BigUint64Array([1n]),
+      component_name: () => 'Leg',
+      render_definition_thumbnail: () => new Uint8Array([1, 2, 3, 4]),
+    })
+    render(
+      <StrictMode>
+        <ComponentsPanel {...baseProps} scene={scene} />
+      </StrictMode>,
+    )
+    act(() => {
+      vi.runAllTimers()
+    })
+    expect(screen.getAllByTestId('components-row-thumb')).toHaveLength(1)
   })
 
   it('caches a thumbnail across re-renders at the same docRev — no repeat render call', () => {

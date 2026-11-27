@@ -66,6 +66,10 @@ async function pinCamera(page: Page, cam: CameraParams): Promise<Ctx> {
 }
 
 async function setup(page: Page): Promise<Ctx> {
+  // These specs predate linked copies and assert on plain, independent
+  // copies; the preference gives them exactly that. linked-copies.spec.ts
+  // covers the default.
+  await page.addInitScript(() => localStorage.setItem('hew.settings.copiesLinked', 'false'))
   await page.goto('/')
   await page.waitForFunction(() => window.__hew_test?.isReady() === true, null, {
     timeout: 15_000,
@@ -364,7 +368,7 @@ test('Move+Alt on a drawn circle copies it 8 cm along X: two true circles, one u
 
   // ONE undo removes the whole copy (the gesture is one step) and restores
   // the original exactly; redo brings it back for the identity check below.
-  await page.keyboard.press('Control+z')
+  await page.keyboard.press('ControlOrMeta+z')
   await page.waitForFunction(
     (args) => window.__hew_test!.getSketchLines(args.s).length === args.n,
     { s: sketch, n: before.length },
@@ -376,7 +380,7 @@ test('Move+Alt on a drawn circle copies it 8 cm along X: two true circles, one u
   expect(
     restored.every((p) => ring.some((q) => Math.hypot(q[0] - p[0], q[1] - p[1], q[2] - p[2]) < 1e-7)),
   ).toBe(true)
-  await page.keyboard.press('Control+Shift+Z')
+  await page.keyboard.press('ControlOrMeta+Shift+Z')
   await page.waitForFunction(
     (args) => window.__hew_test!.getSketchLines(args.s).length >= args.n * 2,
     { s: sketch, n: before.length },
@@ -481,7 +485,7 @@ test('Move+Alt copies a drawn circle UP the Z axis: a second sketch on the lifte
 
   // ONE undo removes just the copy (the new sketch is gone); the source
   // stays. Redo brings the copy back.
-  await page.keyboard.press('Control+z')
+  await page.keyboard.press('ControlOrMeta+z')
   await page.waitForFunction(() => window.__hew_test!.getSketchIds().length === 1, null, {
     timeout: 10_000,
   })
@@ -489,7 +493,7 @@ test('Move+Alt copies a drawn circle UP the Z axis: a second sketch on the lifte
     await page.evaluate((s) => window.__hew_test!.getSketchLines(s), sketch),
   )
   expect(afterUndo).toHaveLength(ring.length) // source untouched by the undo
-  await page.keyboard.press('Control+Shift+Z')
+  await page.keyboard.press('ControlOrMeta+Shift+Z')
   await page.waitForFunction(() => window.__hew_test!.getSketchIds().length === 2, null, {
     timeout: 10_000,
   })
@@ -551,7 +555,7 @@ test('Move+Alt copies a donut (region + hole) up the Z axis onto ONE new sketch,
 
   // Select the WHOLE sketch (both islands) and copy it up the Z axis.
   await page.keyboard.press(' ')
-  await page.keyboard.press('Control+a')
+  await page.keyboard.press('ControlOrMeta+a')
   await page.waitForFunction(() => window.__hew_test!.getSelection().length >= 1)
 
   await page.keyboard.press('m')
@@ -587,7 +591,7 @@ test('Move+Alt copies a donut (region + hole) up the Z axis onto ONE new sketch,
   for (const p of sourceAfter) expect(p[2]).toBeCloseTo(0, 6)
 
   // One undo removes the whole copy (one step for the whole sketch).
-  await page.keyboard.press('Control+z')
+  await page.keyboard.press('ControlOrMeta+z')
   await page.waitForFunction(() => window.__hew_test!.getSketchIds().length === 1, null, {
     timeout: 10_000,
   })

@@ -1,0 +1,77 @@
+{
+  "profile": "core",
+  "frames": [
+    {
+      "compare": "/result/profile",
+      "note": "the handshake",
+      "request": { "id": 0, "jsonrpc": "2.0", "method": "hew.meta.hello", "params": { "protocol": 1 } },
+      "response": "core"
+    },
+    {
+      "note": "attach binds the connection",
+      "request": { "id": 1, "jsonrpc": "2.0", "method": "hew.doc.attach", "params": {} },
+      "response": { "id": 1, "jsonrpc": "2.0", "result": {} }
+    },
+    {
+      "fixture": "seam_halves",
+      "compare": "/result/families",
+      "note": "two open halves share a rim: one seam family",
+      "request": { "id": 2, "jsonrpc": "2.0", "method": "hew.doc.health", "params": {} },
+      "response": [{ "members": ["obj_0", "obj_1"], "shared_rims": 1 }]
+    },
+    {
+      "compare": "/error/data/refusal",
+      "note": "a family the report does not list",
+      "request": { "id": 3, "jsonrpc": "2.0", "method": "hew.solid.rejoin", "params": { "family": 5, "as": "one_solid" } },
+      "response": "unknown_family"
+    },
+    {
+      "compare": "/error/code",
+      "note": "only one_solid is accepted",
+      "request": { "id": 4, "jsonrpc": "2.0", "method": "hew.solid.rejoin", "params": { "family": 0, "as": "two_solids" } },
+      "response": -32602
+    },
+    {
+      "compare": "/result/results/0/object",
+      "note": "the family rejoins as one solid",
+      "request": { "id": 5, "jsonrpc": "2.0", "method": "hew.solid.rejoin", "params": { "family": 0, "as": "one_solid" } },
+      "response": "obj_2"
+    },
+    {
+      "compare": "/result",
+      "note": "nothing is open any more",
+      "request": { "id": 6, "jsonrpc": "2.0", "method": "hew.doc.health", "params": {} },
+      "response": {
+        "rows": [],
+        "families": [],
+        "counts": { "objects": 1, "solids": 1, "flat_sheets": 0, "bent_sheets": 0, "cappable": 0, "holes": 0, "mixed": 0, "non_manifold": 0, "seam_families": 0 }
+      }
+    },
+    {
+      "compare": "/result",
+      "note": "undo puts the pieces back in one entry",
+      "request": { "id": 7, "jsonrpc": "2.0", "method": "hew.history.undo", "params": {} },
+      "response": {}
+    },
+    {
+      "compare": "/result/families",
+      "note": "the family is listed again after undo",
+      "request": { "id": 8, "jsonrpc": "2.0", "method": "hew.doc.health", "params": {} },
+      "response": [{ "members": ["obj_0", "obj_1"], "shared_rims": 1 }]
+    },
+    {
+      "fixture": "bent_halves",
+      "compare": "/error/data/refusal",
+      "note": "a warped seam cannot take a cap",
+      "request": { "id": 9, "jsonrpc": "2.0", "method": "hew.solid.rejoin", "params": { "family": 1, "as": "one_solid" } },
+      "response": "not_cappable"
+    },
+    {
+      "fixture": "half_with_wall",
+      "compare": "/error/data/refusal",
+      "note": "one piece and its wall are not a split shape",
+      "request": { "id": 10, "jsonrpc": "2.0", "method": "hew.solid.rejoin", "params": { "family": 2, "as": "one_solid" } },
+      "response": "rejoin_not_possible"
+    }
+  ]
+}

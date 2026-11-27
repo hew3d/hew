@@ -30,7 +30,15 @@ function unavailableStore(): LibraryStore {
     writeThumbnail: fail,
     reveal: fail,
     itemPath: () => Promise.resolve(null),
+    nameForPath: () => Promise.resolve(null),
     capabilities: () => ({ canReveal: false, canChooseFolder: false, canDownload: false }),
+    readSources: () => Promise.resolve(null),
+    writeSources: fail,
+    readSourceCache: () => Promise.resolve(null),
+    writeSourceCache: fail,
+    removeSourceCache: fail,
+    subscribeSources: () => () => {},
+    editingNames: () => Promise.resolve([]),
     subscribe: () => () => {},
   }
 }
@@ -48,7 +56,15 @@ function availableStore(overrides: Partial<LibraryStore> = {}): LibraryStore {
     writeThumbnail: () => Promise.resolve(),
     reveal: () => Promise.resolve(),
     itemPath: () => Promise.resolve(null),
+    nameForPath: () => Promise.resolve(null),
     capabilities: () => ({ canReveal: true, canChooseFolder: true, canDownload: false }),
+    readSources: () => Promise.resolve(null),
+    writeSources: () => Promise.resolve(),
+    readSourceCache: () => Promise.resolve(null),
+    writeSourceCache: () => Promise.resolve(),
+    removeSourceCache: () => Promise.resolve(),
+    subscribeSources: () => () => {},
+    editingNames: () => Promise.resolve([]),
     subscribe: () => () => {},
     ...overrides,
   }
@@ -160,5 +176,26 @@ describe('FoldersPane', () => {
     render(<FoldersPane />)
     expect(screen.queryByText(/plain/i)).not.toBeInTheDocument()
     expect(screen.queryByText(/sync it, back it up/i)).not.toBeInTheDocument()
+  })
+
+  it('"Check the Library for newer parts" is on by default and saves at once', () => {
+    localStorage.removeItem('hew.settings.checkLibraryUpdates')
+    vi.mocked(libraryStore).mockReturnValue(availableStore())
+    render(<FoldersPane />)
+    const box = screen.getByRole('checkbox', { name: 'Check the Library for newer parts' })
+    expect(box).toBeChecked()
+    fireEvent.click(box)
+    expect(box).not.toBeChecked()
+    expect(localStorage.getItem('hew.settings.checkLibraryUpdates')).toBe('false')
+    fireEvent.click(box)
+    expect(localStorage.getItem('hew.settings.checkLibraryUpdates')).toBe('true')
+  })
+
+  it('the setting says what off means: no checking by itself, still checks when a panel or the Save popover opens', () => {
+    vi.mocked(libraryStore).mockReturnValue(availableStore())
+    render(<FoldersPane />)
+    expect(screen.getByText(/With this off, Hew stops checking by itself/)).toHaveTextContent(
+      /still checks when you open the Components panel or the Library, or save a part to the Library/,
+    )
   })
 })

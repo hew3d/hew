@@ -10,3 +10,5 @@ mesh-heal.workspace = true
 
 [dev-dependencies]
 kernel.workspace = true
+tessellate.workspace = true
+tracing.workspace = true

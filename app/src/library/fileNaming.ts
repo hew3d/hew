@@ -7,7 +7,7 @@
  * without a directory listing round trip (two saves of "Box" get two
  * different suffixes, since each mints its own uuid), and still readable in
  * a Finder/Explorer window. Prefixed with the category's subfolder
- * (`Components/`, `Materials/`, `Models/`) — the library folder is
+ * (`Components/`, `Materials/`, `Models/`, `Profiles/`) — the library folder is
  * organized by type — and ending `.hew`, matching
  * `valid_library_item_name` (`shells/tauri/src-tauri/src/main.rs`) — the
  * only shape `library_write` accepts.
@@ -21,6 +21,7 @@ const CATEGORY_DIR: Record<LibraryCategory, string> = {
   component: 'Components',
   material: 'Materials',
   model: 'Models',
+  profile: 'Profiles',
 }
 /* oxlint-enable lingui/no-unlocalized-strings */
 

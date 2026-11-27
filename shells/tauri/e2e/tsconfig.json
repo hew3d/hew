@@ -10,5 +10,5 @@
     "esModuleInterop": true,
     "noEmit": true
   },
-  "include": ["wdio.conf.ts", "specs/**/*.ts"]
+  "include": ["wdio.conf.ts", "specs/**/*.ts", "probe/**/*.ts"]
 }

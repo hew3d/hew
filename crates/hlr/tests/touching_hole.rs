@@ -1,3 +1,9 @@
+// Test-only, and outside the determinism-critical kernel scope (kernel /
+// inference / tessellate / mesh-heal): transcendentals here build the
+// inputs and expectations of a native test, never a document a user keeps.
+// Suppress the workspace clippy.toml ban for this integration-test crate.
+#![allow(clippy::disallowed_methods)]
+
 //! Print line art of a solid whose top holds a circle tangent to its front
 //! edge at one point (a disc face in a hole touching the top's outer loop):
 //! seen from above, the visible hard line work is the top square and the

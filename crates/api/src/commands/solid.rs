@@ -48,25 +48,60 @@ use kernel::{
 use serde_json::{Value, json};
 
 /// This namespace's slice of the handler table.
-pub fn handler(name: &str) -> Option<Handler> {
+pub(crate) fn handler(name: &str) -> Option<Handler> {
     Some(match name {
         "hew.solid.extrude" => extrude,
-        "hew.solid.push_pull" => push_pull,
-        "hew.solid.union" => union,
-        "hew.solid.subtract" => subtract,
-        "hew.solid.intersect" => intersect,
-        "hew.solid.slice" => slice,
+        // A through push or pull is a boolean (`push_pull_through`).
+        "hew.solid.push_pull" => |ctx, params| with_tidy(ctx, params, push_pull),
+        "hew.solid.rejoin" => |ctx, params| with_tidy(ctx, params, rejoin),
+        "hew.solid.union" => |ctx, params| with_tidy(ctx, params, union),
+        "hew.solid.subtract" => |ctx, params| with_tidy(ctx, params, subtract),
+        "hew.solid.intersect" => |ctx, params| with_tidy(ctx, params, intersect),
+        "hew.solid.slice" => |ctx, params| with_tidy(ctx, params, slice),
         "hew.solid.follow_me" => follow_me,
         "hew.solid.imprints" => imprints,
         "hew.solid.move_imprint" => move_imprint,
         "hew.solid.rotate_imprint" => rotate_imprint,
         "hew.solid.scale_imprint" => scale_imprint,
         "hew.solid.delete_imprint" => delete_imprint,
+        "hew.solid.from_faces" => from_faces,
         _ => return None,
     })
 }
 
 // ------------------------------------------------------------- plumbing
+
+/// Runs a command whose booleans may tidy their own cut, adding the
+/// `tidied` block (docs/agents/HEW_API.md §7) to its result when any of
+/// them merged or kept a sliver narrower than `kernel::tol::FEATURE_MIN`.
+/// A command's booleans sum into one block.
+fn with_tidy(ctx: &mut Ctx, params: &Value, run: Handler) -> Result<Value, CmdError> {
+    // What earlier edits reported is not this command's.
+    let _ = ctx.doc.take_boolean_tidy();
+    let mut result = run(ctx, params)?;
+    let tidy = ctx.doc.take_boolean_tidy();
+    if let (false, Some(out)) = (tidy.is_empty(), result.as_object_mut()) {
+        out.insert("tidied".into(), tidied_json(&tidy));
+    }
+    Ok(result)
+}
+
+/// The `tidied` result block: what a boolean merged out of its own cut,
+/// in meters, sites as [`kernel::Document::take_boolean_tidy`] gives them
+/// (world coordinates, or a definition's own where the boolean ran in its
+/// geometry directly).
+pub(super) fn tidied_json(tidy: &kernel::BooleanTidy) -> Value {
+    json!({
+        "slivers_merged": tidy.slivers_merged,
+        "slivers_kept": tidy.slivers_kept,
+        "points_moved": tidy.points_moved,
+        "max_move": tidy.max_move,
+        "faces_split": tidy.faces_split,
+        "sites": tidy.sites.iter().map(|p| json!([p.x, p.y, p.z])).collect::<Vec<_>>(),
+        "sites_total": tidy.sites_total,
+        "feature_min": kernel::tol::FEATURE_MIN,
+    })
+}
 
 fn parse_params<T: serde::de::DeserializeOwned>(params: &Value) -> Result<T, CmdError> {
     serde_json::from_value(params.clone()).map_err(|e| CmdError::Params(e.to_string()))
@@ -149,7 +184,9 @@ pub(super) fn extrude(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> 
 /// region is one of the drafting plane's units (`hew.sketch.units`). A
 /// region over the void extrudes as a new Object; a region that IS a face
 /// of a solid push/pulls that face; a region over a face that cannot hold
-/// it (a sliver kept as drawing) refuses `region_not_pushable`.
+/// it (a sliver kept as drawing) refuses `region_not_pushable`. With a
+/// `{sketch: id}` spec on a detached sketch the regions are that sketch's
+/// own, every one over no face: each extrudes as a new Object.
 fn extrude_plane_region(
     ctx: &mut Ctx,
     plane_spec: &Value,
@@ -161,7 +198,7 @@ fn extrude_plane_region(
         return Err(draft::unknown_unit(region));
     }
     let dc = draft::resolve_context(ctx, plane_spec)?;
-    let pu = ctx.doc.plane_units(dc.plane, dc.frame, &dc.objects)?;
+    let pu = draft::units_of(ctx, &dc)?;
     let r = pu
         .regions
         .iter()
@@ -244,8 +281,75 @@ pub(super) fn push_pull(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError
         distance: f64,
     }
     let p: P = parse_params(params)?;
-    let face_ref = locate::resolve_face(ctx, &p.face)?;
+    let face = face_through_path(ctx, &p.face)?;
+    let face_ref = locate::resolve_face(ctx, &face)?;
     push_pull_face(ctx, face_ref, p.distance)
+}
+
+/// A face locator whose `object` is an occurrence locator
+/// `{ "path": [instance, …, object] }` (docs/agents/HEW_API.md §7,
+/// `hew.solid.push_pull`): the path names the member object, which the
+/// locator then addresses by its own id (`at` and `ray` stay in the
+/// object's own frame, as `hew.query.raycast` reports them). Refuses
+/// `explode_session_scope` while a definition on the path is open for
+/// editing. Any other locator passes through unchanged.
+fn face_through_path(ctx: &Ctx, face: &Value) -> Result<Value, CmdError> {
+    let Some(object) = face.get("object").filter(|o| o.is_object()) else {
+        return Ok(face.clone());
+    };
+    let occ = locate::resolve_occurrence_locator(ctx, object)?;
+    let NodeId::Object(id) = occ.node else {
+        return Err(CmdError::Params(
+            "a face locator's path must end at an object".into(),
+        ));
+    };
+    refuse_path_on_loan(ctx, &occ.path)?;
+    let mut out = face.clone();
+    out["object"] = Value::String(public_id_of(ctx, EntityRef::Object(id)));
+    Ok(out)
+}
+
+/// The on-loan refusal every path form makes before any kernel call: a
+/// definition on the path is open for editing, so its members are world
+/// nodes and the caller edits those instead.
+fn refuse_path_on_loan(ctx: &Ctx, path: &[kernel::InstanceId]) -> Result<(), CmdError> {
+    if ctx.doc.path_on_loan(path) {
+        return Err(DocumentError::ExplodeSessionScope.into());
+    }
+    Ok(())
+}
+
+/// One boolean or slice operand: a world node, or a definition member
+/// reached through a placement.
+enum Operand {
+    World(NodeId),
+    Member {
+        path: Vec<kernel::InstanceId>,
+        node: NodeId,
+    },
+}
+
+/// `id | { "path": [instance, …, node] }`. A path with no instance before
+/// its leaf is the leaf's world id.
+fn resolve_operand(ctx: &Ctx, v: &Value) -> Result<Operand, CmdError> {
+    if let Some(id) = v.as_str() {
+        return Ok(Operand::World(resolve_node(ctx, id)?));
+    }
+    let occ = locate::resolve_occurrence_locator(ctx, v)?;
+    Ok(if occ.owner_def.is_some() && !occ.path.is_empty() {
+        Operand::Member {
+            path: occ.path,
+            node: occ.node,
+        }
+    } else {
+        Operand::World(occ.node)
+    })
+}
+
+fn path_operand_rule() -> CmdError {
+    CmdError::Params(
+        "with a reached by a path, b must be a world object or a member of the same definition reached by the same path; a world a takes a world b".into(),
+    )
 }
 
 fn push_pull_face(
@@ -259,6 +363,31 @@ fn push_pull_face(
     // instance of the component picks it up at once (module doc
     // comment; mirrors `commands/sketch.rs`'s `apply_face_op`).
     let component = ctx.doc.object_owner_component(face_ref.object);
+
+    // A blend face resizes its blend; a face beside blends moves with them
+    // re-applied, falling back to the ordinary Push/Pull (WP08 §5).
+    if component.is_none()
+        && let Some(obj) = ctx.doc.object(face_ref.object)
+    {
+        if obj.blend_of_face(face_ref.face).is_some() {
+            ctx.doc
+                .push_pull_blend(face_ref.object, face_ref.face, distance)
+                .map_err(push_pull_refusal)?;
+            return Ok(
+                serde_json::json!({ "object_id": public_id_of(ctx, EntityRef::Object(face_ref.object)) }),
+            );
+        }
+        if obj.face_borders_blend(face_ref.face)
+            && ctx
+                .doc
+                .push_pull_with_blends(face_ref.object, face_ref.face, distance)
+                .is_ok()
+        {
+            return Ok(
+                serde_json::json!({ "object_id": public_id_of(ctx, EntityRef::Object(face_ref.object)) }),
+            );
+        }
+    }
 
     let overshoots = ctx
         .doc
@@ -315,23 +444,526 @@ fn boolean_op(ctx: &mut Ctx, params: &Value, op: kernel::BooleanOp) -> Result<Va
     #[derive(serde::Deserialize)]
     #[serde(deny_unknown_fields)]
     struct P {
-        a: String,
-        b: String,
+        #[serde(default)]
+        a: Option<Value>,
+        #[serde(default)]
+        b: Option<Value>,
+        /// Every operand in order, two or more; replaces `a` and `b`.
+        #[serde(default)]
+        operands: Vec<Value>,
+        #[serde(default)]
+        unlink: Option<bool>,
     }
     let p: P = parse_params(params)?;
-    let a = resolve_node(ctx, &p.a)?;
-    let b = resolve_node(ctx, &p.b)?;
+    if p.unlink.is_some() && op == kernel::BooleanOp::Subtract {
+        return Err(CmdError::Params(
+            "unlink applies to hew.solid.union and hew.solid.intersect; a subtract through a placement cuts every copy".into(),
+        ));
+    }
+    let (pa, pb) = if !p.operands.is_empty() {
+        if p.a.is_some() || p.b.is_some() {
+            return Err(CmdError::Params(
+                "give either operands or a and b, not both".to_string(),
+            ));
+        }
+        if p.operands.len() == 2 {
+            // Two operands are the two-operand call, with every rule it has.
+            let mut it = p.operands.into_iter();
+            (it.next().expect("two"), it.next().expect("two"))
+        } else {
+            // Three or more (or one, which the kernel refuses by name):
+            // world nodes only. A path operand and `unlink` are rules of
+            // the two-operand call; `unlink` is ignored here, as it is
+            // when no operand is a placement, and a placement among these
+            // refuses by the kernel's own name.
+            let nodes: Vec<NodeId> = p
+                .operands
+                .iter()
+                .map(|v| match v.as_str() {
+                    Some(id) => resolve_node(ctx, id),
+                    None => Err(CmdError::Params(
+                        "operands of three or more are world node ids; a path operand takes a and b".to_string(),
+                    )),
+                })
+                .collect::<Result<_, _>>()?;
+            let (result, _change) = ctx.doc.boolean_nodes_many(op, &nodes)?;
+            return Ok(boolean_result_json(ctx, op, result));
+        }
+    } else {
+        match (p.a, p.b) {
+            (Some(a), Some(b)) => (a, b),
+            _ => {
+                return Err(CmdError::Params(
+                    "give a and b, or operands with two or more node ids".to_string(),
+                ));
+            }
+        }
+    };
+    // A transient cutter (Addendum B6): `b` as a `SolidSpec` prism or box,
+    // so a machining through a placement is one call with no temporary
+    // object.
+    if pb.get("prism").is_some() || pb.get("box").is_some() {
+        return subtract_transient(ctx, op, &pa, &pb);
+    }
+    let (oa, ob) = (resolve_operand(ctx, &pa)?, resolve_operand(ctx, &pb)?);
+    if op != kernel::BooleanOp::Subtract && needs_unlink(ctx, &oa, &ob)? {
+        if p.unlink != Some(true) {
+            let operands: Vec<Value> = [(&pa, &oa), (&pb, &ob)]
+                .into_iter()
+                .filter(|(_, o)| is_placement_operand(ctx, o).unwrap_or(false))
+                .map(|(v, _)| v.clone())
+                .collect();
+            return Err(CmdError::Refusal(
+                Refusal::api(
+                    "would_unlink",
+                    "An operand is a placement of shared geometry (a linked copy or a component). Joining it splits it from its other copies; pass \"unlink\": true to unlink and explode it first, or edit through its definition.",
+                )
+                .with_detail(json!({ "operands": operands })),
+            ));
+        }
+        return boolean_unlinking(ctx, op, oa, ob);
+    }
+    let (a, b) = match (oa, ob) {
+        (Operand::World(a), Operand::World(b)) => (a, b),
+        (Operand::World(_), Operand::Member { .. }) => return Err(path_operand_rule()),
+        (Operand::Member { path, node, .. }, b) => {
+            return boolean_through_path(ctx, op, path, node, b);
+        }
+    };
     let (result, _change) = ctx.doc.boolean_nodes(op, a, b)?;
-    let entity = match result {
+    Ok(boolean_result_json(ctx, op, result))
+}
+
+/// `{result}` for a world boolean. A result in more than one piece comes
+/// back as a group of them: a Union of operands that only touch (the app
+/// says so in a toast), a Subtract whose cutter severs, an Intersect of
+/// several overlaps. The API says which in the result (`pieces`, `note`).
+fn boolean_result_json(ctx: &Ctx, op: kernel::BooleanOp, result: NodeId) -> Value {
+    let mut out = serde_json::json!({ "result": public_id_of(ctx, node_entity(result)) });
+    if let NodeId::Group(group) = result
+        && let Some(members) = ctx.doc.group_members(group)
+    {
+        let pieces = members.len();
+        out["pieces"] = serde_json::json!(pieces);
+        out["note"] = serde_json::json!(match op {
+            kernel::BooleanOp::Union => format!(
+                "The operands don't overlap, so the result is a group of {pieces} separate pieces. Move one a little into the other and try again for one solid."
+            ),
+            kernel::BooleanOp::Subtract =>
+                format!("The cut left {pieces} separate pieces, kept as a group."),
+            kernel::BooleanOp::Intersect =>
+                format!("The operands overlap in {pieces} separate places, kept as a group."),
+        });
+    }
+    out
+}
+
+fn node_entity(node: NodeId) -> EntityRef {
+    match node {
         NodeId::Object(id) => EntityRef::Object(id),
         NodeId::Group(id) => EntityRef::Group(id),
         NodeId::Instance(id) => EntityRef::Instance(id),
+    }
+}
+
+/// Whether an operand is a placement: a world instance, a definition member
+/// reached by a path, or a group holding an instance anywhere below it.
+fn is_placement_operand(ctx: &Ctx, o: &Operand) -> Result<bool, CmdError> {
+    Ok(match o {
+        Operand::Member { .. } => true,
+        Operand::World(NodeId::Instance(_)) => true,
+        Operand::World(NodeId::Object(_)) => false,
+        Operand::World(g @ NodeId::Group(_)) => !world_instances_under(ctx, *g)?.is_empty(),
+    })
+}
+
+/// Whether a union or intersect needs the `unlink` path: a placement
+/// operand, except two members of one definition reached by the same path
+/// (that boolean runs inside the definition and every placement follows).
+fn needs_unlink(ctx: &Ctx, a: &Operand, b: &Operand) -> Result<bool, CmdError> {
+    if let (Operand::Member { path: pa, .. }, Operand::Member { path: pb, .. }) = (a, b)
+        && pa == pb
+    {
+        return Ok(false);
+    }
+    Ok(is_placement_operand(ctx, a)? || is_placement_operand(ctx, b)?)
+}
+
+/// Every world instance at or below `node`, outermost first.
+fn world_instances_under(ctx: &Ctx, node: NodeId) -> Result<Vec<kernel::InstanceId>, CmdError> {
+    Ok(ctx
+        .doc
+        .occurrences(Some(&[(Vec::new(), node)]), true)?
+        .into_iter()
+        .filter(|r| r.path.is_empty())
+        .filter_map(|r| match r.node {
+            NodeId::Instance(i) => Some(i),
+            _ => None,
+        })
+        .collect())
+}
+
+/// Explodes every world instance at or below `node` until none is left
+/// (nested instances surface as world instances when their placement
+/// explodes); the instances first named are pushed to `unlinked`.
+fn explode_all_under(
+    ctx: &mut Ctx,
+    node: NodeId,
+    unlinked: &mut Vec<kernel::InstanceId>,
+) -> Result<(), CmdError> {
+    // Each pass explodes at least one instance; the bound only guards a
+    // kernel that stopped doing so.
+    for _ in 0..100_000 {
+        let Some(&i) = world_instances_under(ctx, node)?.first() else {
+            return Ok(());
+        };
+        unlinked.push(i);
+        ctx.doc.explode_instance(i)?;
+    }
+    Err(CmdError::Internal(
+        "exploding placements did not converge".into(),
+    ))
+}
+
+/// An operand of [`boolean_unlinking`] before anything explodes: what it
+/// will need once its placement has.
+enum Pending {
+    /// A plain world Object, used as it is.
+    Plain(NodeId),
+    /// A world group whose placements explode in place.
+    Group(NodeId),
+    /// A world placement, replaced by what it explodes into.
+    Placement(kernel::InstanceId),
+    /// A direct Object member of a world placement: the `k`-th such
+    /// member, in member order, whose copy stands in for it.
+    Member(kernel::InstanceId, usize),
+}
+
+/// Checks one operand and notes what it needs, before anything changes.
+fn prepare_operand(ctx: &Ctx, o: Operand) -> Result<Pending, CmdError> {
+    match o {
+        Operand::World(NodeId::Group(g)) => Ok(Pending::Group(NodeId::Group(g))),
+        Operand::World(NodeId::Instance(i)) => Ok(Pending::Placement(i)),
+        Operand::World(n) => Ok(Pending::Plain(n)),
+        Operand::Member { path, node } => {
+            let NodeId::Object(member) = node else {
+                return Err(unlink_member_rule());
+            };
+            let [placement] = path.as_slice() else {
+                return Err(unlink_member_rule());
+            };
+            let def = ctx.doc.instance_def(*placement).ok_or_else(|| {
+                CmdError::Internal("a resolved placement has no definition".into())
+            })?;
+            // An explode's roots hold one copy per live member, in member
+            // order: the direct Object members' copies are its Objects.
+            let k = ctx
+                .doc
+                .def_member_nodes(def)
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|m| match m {
+                    NodeId::Object(o) if ctx.doc.object(o).is_some() => Some(o),
+                    _ => None,
+                })
+                .position(|o| o == member)
+                .ok_or_else(unlink_member_rule)?;
+            Ok(Pending::Member(*placement, k))
+        }
+    }
+}
+
+/// One operand made plain for a world boolean once every placement operand
+/// has exploded (`exploded`: each one's roots, where it stood): a world
+/// placement's roots (grouped when there are several, nested placements
+/// exploded in turn), a group's placements exploded in place, or a
+/// definition member's copy.
+fn settle_operand(
+    ctx: &mut Ctx,
+    p: Pending,
+    exploded: &[(kernel::InstanceId, Vec<NodeId>)],
+    unlinked: &mut Vec<kernel::InstanceId>,
+) -> Result<NodeId, CmdError> {
+    let roots_of = |i: kernel::InstanceId| -> Result<Vec<NodeId>, CmdError> {
+        exploded
+            .iter()
+            .find(|(e, _)| *e == i)
+            .map(|(_, r)| r.clone())
+            .ok_or_else(|| CmdError::Internal("a placement operand did not explode".into()))
     };
-    Ok(serde_json::json!({ "result": public_id_of(ctx, entity) }))
+    match p {
+        Pending::Plain(n) => Ok(n),
+        Pending::Group(g) => {
+            explode_all_under(ctx, g, unlinked)?;
+            Ok(g)
+        }
+        Pending::Placement(i) => {
+            let mut roots = roots_of(i)?;
+            // Nested placements surfaced by the explode explode in turn.
+            while let Some(k) = roots.iter().position(|n| matches!(n, NodeId::Instance(_))) {
+                let NodeId::Instance(inner) = roots[k] else {
+                    unreachable!()
+                };
+                let (mut inner_roots, _) = ctx.doc.explode_instances(&[inner])?;
+                roots.splice(k..=k, inner_roots.pop().unwrap_or_default());
+            }
+            for &r in &roots {
+                if matches!(r, NodeId::Group(_)) {
+                    explode_all_under(ctx, r, &mut Vec::new())?;
+                }
+            }
+            match roots.as_slice() {
+                [] => Err(DocumentError::BooleanOperandEmpty.into()),
+                [one] => Ok(*one),
+                many => Ok(NodeId::Group(ctx.doc.group_nodes(many)?.0)),
+            }
+        }
+        Pending::Member(placement, k) => roots_of(placement)?
+            .into_iter()
+            .filter(|n| matches!(n, NodeId::Object(_)))
+            .nth(k)
+            .ok_or_else(|| CmdError::Internal("an exploded member has no copy".into())),
+    }
+}
+
+fn unlink_member_rule() -> CmdError {
+    CmdError::Params(
+        "unlink takes a member reached by a path only when it is a direct object member of a world placement ({path: [instance, object]}); otherwise unlink and explode its placement first".into(),
+    )
+}
+
+/// `hew.solid.union` / `intersect` with `unlink: true` over a placement
+/// operand (Addendum D §5): each placement operand is exploded into plain
+/// solids (the other copies keep the shared geometry, and a copy left
+/// alone in its set is made plain too), then the world boolean runs. One undo entry with the command. `unlinked` lists the
+/// placements that were split off.
+fn boolean_unlinking(
+    ctx: &mut Ctx,
+    op: kernel::BooleanOp,
+    a: Operand,
+    b: Operand,
+) -> Result<Value, CmdError> {
+    for o in [&a, &b] {
+        if let Operand::Member { path, .. } = o {
+            refuse_path_on_loan(ctx, path)?;
+        }
+    }
+    let mut unlinked = Vec::new();
+    let mut named = Vec::new();
+    for o in [&a, &b] {
+        match o {
+            Operand::World(NodeId::Instance(i)) => named.push(*i),
+            Operand::Member { path, .. } => named.extend(path.first().copied()),
+            _ => {}
+        }
+    }
+    let unlinked_public: Vec<String> = named
+        .iter()
+        .map(|&i| public_id_of(ctx, EntityRef::Instance(i)))
+        .collect();
+    let a = prepare_operand(ctx, a)?;
+    let b = prepare_operand(ctx, b)?;
+    // Every placement operand explodes first, in one step: a linked set
+    // they leave with one copy has that copy made plain only once all of
+    // them are gone, so one operand's explode never takes the other's
+    // placement first, and its pieces are never taken for an operand's.
+    let mut placements: Vec<kernel::InstanceId> = Vec::new();
+    for &i in &named {
+        if !placements.contains(&i) {
+            placements.push(i);
+        }
+    }
+    let exploded: Vec<(kernel::InstanceId, Vec<NodeId>)> = if placements.is_empty() {
+        Vec::new()
+    } else {
+        let (roots, _) = ctx.doc.explode_instances(&placements)?;
+        placements.iter().copied().zip(roots).collect()
+    };
+    unlinked.extend(placements.iter().copied());
+    let a = settle_operand(ctx, a, &exploded, &mut unlinked)?;
+    let b = settle_operand(ctx, b, &exploded, &mut unlinked)?;
+    let (result, _change) = ctx.doc.boolean_nodes(op, a, b)?;
+    let mut out = boolean_result_json(ctx, op, result);
+    let mut all: Vec<String> = unlinked_public;
+    for i in unlinked {
+        let id = public_id_of(ctx, EntityRef::Instance(i));
+        if !all.contains(&id) {
+            all.push(id);
+        }
+    }
+    out["unlinked"] = json!(all);
+    Ok(out)
+}
+
+/// A boolean whose `a` is a definition member reached by `path`
+/// (docs/agents/HEW_API.md §7): with `b` a member of the same definition by
+/// the same path, the boolean runs between the two members
+/// ([`kernel::Document::boolean_members_through_placement`]); with `b` a world object
+/// and `op` Subtract, the cutter maps into the definition through the
+/// path's pose and is consumed ([`kernel::Document::boolean_through_placement`]).
+/// Either way every placement shows the result. A union or intersect with
+/// a world `b` would move world material into a shared definition, which
+/// unlinking is for, so it refuses `-32602`.
+fn boolean_through_path(
+    ctx: &mut Ctx,
+    op: kernel::BooleanOp,
+    path: Vec<kernel::InstanceId>,
+    a: NodeId,
+    b: Operand,
+) -> Result<Value, CmdError> {
+    let NodeId::Object(host) = a else {
+        return Err(CmdError::Params(
+            "a reached by a path must be an object".into(),
+        ));
+    };
+    refuse_path_on_loan(ctx, &path)?;
+    let result = match b {
+        Operand::Member {
+            path: b_path, node, ..
+        } => {
+            if b_path != path {
+                return Err(path_operand_rule());
+            }
+            let NodeId::Object(other) = node else {
+                return Err(CmdError::Params(
+                    "b reached by a path must be an object".into(),
+                ));
+            };
+            ctx.doc
+                .boolean_members_through_placement(&path, host, other, op)?
+                .0
+        }
+        Operand::World(NodeId::Object(tool)) => {
+            if op != kernel::BooleanOp::Subtract {
+                return Err(CmdError::Params(
+                    "through a path, a world b can only be subtracted; union and intersect take b as a member reached by the same path".into(),
+                ));
+            }
+            ctx.doc.boolean_through_placement(&path, host, tool, op)?.0
+        }
+        Operand::World(NodeId::Instance(_)) => {
+            return Err(DocumentError::BooleanOperandHasInstance.into());
+        }
+        Operand::World(NodeId::Group(_)) => {
+            return Err(CmdError::Params(
+                "with a reached by a path, a world b must be an object".into(),
+            ));
+        }
+    };
+    Ok(serde_json::json!({ "result": public_id_of(ctx, EntityRef::Object(result)) }))
+}
+
+/// `hew.solid.subtract` with `a` a definition member reached by a path and
+/// `b` a `SolidSpec` prism or box in world coordinates: the cutter is never
+/// a record, it maps into the definition through the path's pose, and every
+/// placement shows the cut ([`kernel::Document::subtract_solid_through_placement`]).
+/// A world `a`, or a union or intersect, refuses `-32602`.
+fn subtract_transient(
+    ctx: &mut Ctx,
+    op: kernel::BooleanOp,
+    a: &Value,
+    b: &Value,
+) -> Result<Value, CmdError> {
+    if op != kernel::BooleanOp::Subtract {
+        return Err(CmdError::Params(
+            "a prism or box b can only be subtracted".into(),
+        ));
+    }
+    let Operand::Member {
+        path,
+        node: NodeId::Object(host),
+    } = resolve_operand(ctx, a)?
+    else {
+        return Err(CmdError::Params(
+            "a prism or box b cuts a member reached by a path ending at an object; for a world a, extrude the cutter or use hew.compute.boolean".into(),
+        ));
+    };
+    refuse_path_on_loan(ctx, &path)?;
+    let cutter = crate::solid_spec::resolve_solid(ctx, b)?;
+    crate::solid_spec::check_compute_size(&[&cutter])?;
+    let (result, _change) = ctx
+        .doc
+        .subtract_solid_through_placement(&path, host, &cutter)?;
+    Ok(serde_json::json!({ "result": public_id_of(ctx, EntityRef::Object(result)) }))
 }
 
 pub(super) fn union(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
     boolean_op(ctx, params, kernel::BooleanOp::Union)
+}
+
+/// `hew.solid.rejoin { family, as: "one_solid" }`: Model Health's one-entry
+/// rejoin of a seam family. The members are the family's Objects in the
+/// current health report; the kernel refuses a partial family, so a stale
+/// index cannot join a subset. A seam rim that cannot take a cap refuses
+/// `not_cappable`, and the model is left as it was. `family` is numbered
+/// over the whole-model health report.
+pub(super) fn rejoin(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct P {
+        family: usize,
+        #[serde(rename = "as")]
+        as_: String,
+    }
+    let p: P = parse_params(params)?;
+    if p.as_ != "one_solid" {
+        return Err(CmdError::Params(format!(
+            "unknown \"as\" value \"{}\"; expected one_solid",
+            p.as_
+        )));
+    }
+    let report = ctx.doc.health_report(None);
+    let Some(family) = report.families.get(p.family) else {
+        return Err(CmdError::Refusal(
+            Refusal::api(
+                "unknown_family",
+                &format!(
+                    "The model has no seam family {}; hew.doc.health lists {}.",
+                    p.family,
+                    report.families.len()
+                ),
+            )
+            .with_detail(json!({ "family": p.family, "families": report.families.len() })),
+        ));
+    };
+    // The pieces are capped at their shared rims; a flat wall between them
+    // is deleted, never capped, so only the pieces' rims must take a cap.
+    let cappable = report
+        .rows
+        .iter()
+        .filter(|row| {
+            row.seam_family == Some(p.family)
+                && !matches!(
+                    row.diagnosis.verdict,
+                    kernel::health::Verdict::FlatSheet { .. }
+                )
+        })
+        .all(|row| {
+            ctx.doc.object(row.object).is_some_and(|o| {
+                row.shared_rims
+                    .iter()
+                    .all(|&i| kernel::repair::rim_is_cappable(o, &row.diagnosis, i))
+            })
+        });
+    let members = family.members.clone();
+    // The kernel runs its own structural checks first (too few pieces,
+    // members under different parents), so those refuse
+    // `rejoin_not_possible` even beside a seam that cannot take a cap; a
+    // cap refusal on a family with such a seam is `not_cappable`.
+    let (result, _change) = match ctx.doc.rejoin_as_one_solid(&members) {
+        Ok(done) => done,
+        Err(kernel::DocumentError::Repair(_)) if !cappable => {
+            return Err(CmdError::Refusal(
+                Refusal::api(
+                    "not_cappable",
+                    "A seam between these pieces cannot take a cap, so they cannot be joined into one solid.",
+                )
+                .with_detail(json!({ "family": p.family })),
+            ));
+        }
+        Err(e) => return Err(e.into()),
+    };
+    Ok(json!({ "object": public_id_of(ctx, EntityRef::Object(result)) }))
 }
 
 pub(super) fn subtract(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
@@ -352,23 +984,191 @@ pub(super) fn slice(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
     #[derive(serde::Deserialize)]
     #[serde(deny_unknown_fields)]
     struct P {
-        object: String,
+        object: Value,
         plane: PlaneSpec,
     }
     let p: P = parse_params(params)?;
-    let Some(EntityRef::Object(object)) = ctx.resolver().resolve(&p.object) else {
-        return Err(unknown_entity(&p.object));
+    let target = match p.object.as_str() {
+        Some(id) => match ctx.resolver().resolve(id) {
+            Some(EntityRef::Object(object)) => Operand::World(NodeId::Object(object)),
+            _ => return Err(unknown_entity(id)),
+        },
+        None => resolve_operand(ctx, &p.object)?,
     };
     let origin = locate::resolve_point(ctx, &p.plane.origin)?;
     let normal = locate::parse_dir(&p.plane.normal)?;
     let plane = kernel::Plane::from_point_normal(origin, normal)
         .map_err(|_| CmdError::Params("degenerate plane normal".into()))?;
 
-    let ((positive, negative), _change) = ctx.doc.slice_node(object, &plane)?;
+    let ((positive, negative), _change) = match target {
+        Operand::World(NodeId::Object(object)) => ctx.doc.slice_node(object, &plane)?,
+        Operand::Member {
+            path,
+            node: NodeId::Object(object),
+            ..
+        } => {
+            // The plane is world space; the kernel maps it through the
+            // path's pose, and both pieces stay in the definition.
+            refuse_path_on_loan(ctx, &path)?;
+            ctx.doc.slice_through_placement(&path, object, &plane)?
+        }
+        _ => {
+            return Err(CmdError::Params(
+                "slice takes an object, by id or by a path ending at one".into(),
+            ));
+        }
+    };
     Ok(serde_json::json!({
         "positive": public_id_of(ctx, EntityRef::Object(positive)),
         "negative": public_id_of(ctx, EntityRef::Object(negative)),
     }))
+}
+
+/// How many open edges a `faces_not_closed` / `loop_not_planar` refusal
+/// samples in its detail.
+const OPEN_EDGE_SAMPLES: usize = 8;
+
+/// `hew.solid.from_faces { sketches }` — Make Solid from drawn faces
+/// (wireframe faces §6, §16 R26/R27): it first fills the faces the named
+/// free sketches' lines can close (the close pass, as a draw runs it), then
+/// runs the cells search seeded by every faced region of those sketches and
+/// of the faces so filled ([`kernel::Document::make_solid_from_sketches`]),
+/// one undo step; when no solid forms, nothing is kept. The first solid it makes answers `{object_id, grew}`
+/// (`grew`: the shape closed against a solid and that solid grew; its new
+/// id is `object_id`). Nothing made refuses, the document untouched:
+/// `loop_not_planar` when a gap's rim is a closed loop off one plane,
+/// else `faces_not_closed` with the open-edge count and up to eight sample
+/// segments, else `faces_not_solid` (the faces close but build no solid:
+/// `detail.reason` says why; for `overlapping_faces`, `detail.segments`
+/// samples the edges two faces lie over each other along). Faces with the
+/// same loop on one plane are one face (§16 R22), not an overlap.
+pub(super) fn from_faces(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct P {
+        sketches: Vec<String>,
+    }
+    let p: P = parse_params(params)?;
+    if p.sketches.is_empty() {
+        return Err(CmdError::Params("sketches needs at least one id".into()));
+    }
+    let resolver = ctx.resolver();
+    let mut ids = Vec::with_capacity(p.sketches.len());
+    for public in &p.sketches {
+        match resolver.resolve(public) {
+            Some(EntityRef::Sketch(s)) if ctx.doc.sketch(s).is_some() => ids.push(s),
+            _ => return Err(unknown_entity(public)),
+        }
+    }
+    let (outcomes, _change) = ctx
+        .doc
+        .make_solid_from_sketches(&ids)
+        .map_err(|e| match e {
+            DocumentError::UnknownSketch => unknown_entity(&p.sketches.join(", ")),
+            other => CmdError::from(other),
+        })?;
+    if let Some(solid) = super::solid_of(ctx, &outcomes) {
+        return Ok(solid);
+    }
+    // Nothing was made: say what is missing.
+    let missing = ctx.doc.faces_open_edges(&ids);
+    let samples: Vec<Value> = missing
+        .open_edges
+        .iter()
+        .take(OPEN_EDGE_SAMPLES)
+        .map(|&(a, b)| json!([point_json(a), point_json(b)]))
+        .collect();
+    let n = missing.count();
+    // Faces lying over each other elsewhere in the same faces (§16 R22):
+    // named beside the open edges or loops, so the caller learns of them
+    // before those are drawn (`reason` and `overlapping_segments`, added to
+    // the detail only when there are any).
+    let overlap = |mut detail: Value| -> Value {
+        if !missing.overlapping_edges.is_empty() {
+            detail["reason"] = json!("overlapping_faces");
+            detail["overlapping_segments"] = Value::Array(
+                missing
+                    .overlapping_edges
+                    .iter()
+                    .take(OPEN_EDGE_SAMPLES)
+                    .map(|&(a, b)| json!([point_json(a), point_json(b)]))
+                    .collect(),
+            );
+        }
+        detail
+    };
+    if !missing.non_planar_loops.is_empty() {
+        let loops: Vec<Value> = missing
+            .non_planar_loops
+            .iter()
+            .map(|l| Value::Array(l.iter().map(|&q| point_json(q)).collect()))
+            .collect();
+        return Err(CmdError::Refusal(
+            Refusal::api(
+                "loop_not_planar",
+                "The faces leave a gap whose edges do not lie on one plane, so no face can fill it. Draw a line across the gap so each part is flat, then try again.",
+            )
+            .with_detail(overlap(json!({
+                "loops": loops,
+                "open_edges": n,
+                "segments": samples,
+            }))),
+        ));
+    }
+    let reason = outcomes.iter().find_map(|c| match c {
+        kernel::CellOutcome::Declined(d) => match d.reason {
+            kernel::CellDeclineReason::NotClosed => None,
+            kernel::CellDeclineReason::OverlappingFaces => Some("overlapping_faces"),
+            kernel::CellDeclineReason::InsideSolid(_) => Some("inside_solid"),
+            kernel::CellDeclineReason::SelfTouching => Some("self_touching"),
+            kernel::CellDeclineReason::Invalid(_) => Some("invalid"),
+        },
+        _ => None,
+    });
+    match reason {
+        Some(reason) if n == 0 => {
+            // Where faces lie over each other (§16 R22): up to eight
+            // sample edges, as `faces_not_closed` gives its open edges.
+            let mut detail = json!({ "reason": reason });
+            if reason == "overlapping_faces" {
+                detail["segments"] = Value::Array(
+                    missing
+                        .overlapping_edges
+                        .iter()
+                        .take(OPEN_EDGE_SAMPLES)
+                        .map(|&(a, b)| json!([point_json(a), point_json(b)]))
+                        .collect(),
+                );
+            }
+            Err(CmdError::Refusal(
+                Refusal::api(
+                    "faces_not_solid",
+                    match reason {
+                        "overlapping_faces" => "Two faces lie on top of each other along the edges in detail.segments, so they enclose no single space. Erase one of them, then try again.",
+                        "inside_solid" => "The closed shape lies inside the solid it was drawn against, so nothing is made from it.",
+                        "self_touching" => "The faces enclose a space that touches itself across one face, so it builds no solid.",
+                        _ => "The faces close, but they build no valid solid.",
+                    },
+                )
+                .with_detail(detail),
+            ))
+        }
+        _ => Err(CmdError::Refusal(
+            Refusal::api(
+                "faces_not_closed",
+                &if n == 0 {
+                    "These sketches hold no faces that enclose a space. Draw closed shapes that meet edge to edge, then try again.".to_string()
+                } else {
+                    format!(
+                        "Not closed yet: {n} open edge{} remain{}. Draw the missing faces or lines, then try again.",
+                        if n == 1 { "" } else { "s" },
+                        if n == 1 { "s" } else { "" }
+                    )
+                },
+            )
+            .with_detail(overlap(json!({ "open_edges": n, "segments": samples }))),
+        )),
+    }
 }
 
 /// Follow Me has no definition-scoped kernel path yet (`follow_me_face`
@@ -387,20 +1187,15 @@ fn require_world_follow_me_face(ctx: &Ctx, object: kernel::ObjectId) -> Result<(
     Ok(())
 }
 
-pub(super) fn follow_me(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
-    #[derive(serde::Deserialize)]
-    #[serde(deny_unknown_fields)]
-    struct P {
-        profile: Value,
-        path: Value,
-    }
-    let p: P = parse_params(params)?;
-
-    let path_obj = p
-        .path
+/// A Follow Me path parameter: `{"face": <locator>}` (that face's boundary
+/// loop) or `{"curve": "<sketch curve id>"}`; `{"edges": …}` refuses
+/// `unimplemented`. Shared with Deform's Bend to Path, Loft's rails and
+/// Array along Path.
+pub(super) fn follow_me_path(ctx: &Ctx, path: &Value) -> Result<FollowMePath, CmdError> {
+    let path_obj = path
         .as_object()
         .ok_or_else(|| CmdError::Params("path needs an object".into()))?;
-    let path = if let Some(face_locator) = path_obj.get("face") {
+    Ok(if let Some(face_locator) = path_obj.get("face") {
         if path_obj.len() != 1 {
             return Err(CmdError::Params("path.face takes no sibling keys".into()));
         }
@@ -440,14 +1235,39 @@ pub(super) fn follow_me(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError
         return Err(CmdError::Params(
             "path needs \"edges\", \"face\", or \"curve\"".into(),
         ));
+    })
+}
+
+pub(super) fn follow_me(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct P {
+        profile: Value,
+        path: Value,
+        /// Twist (radians), end scale (ratio) and stations per path
+        /// segment (true-curves.md §5.2); absent = a plain sweep.
+        #[serde(default)]
+        twist: Option<f64>,
+        #[serde(default)]
+        end_scale: Option<f64>,
+        #[serde(default)]
+        stations: Option<u32>,
+    }
+    let p: P = parse_params(params)?;
+    let opts = kernel::SweepOptions {
+        twist: p.twist.unwrap_or(0.0),
+        end_scale: p.end_scale.unwrap_or(1.0),
+        stations: p.stations,
     };
+
+    let path = follow_me_path(ctx, &p.path)?;
 
     if let Some(profile_pub) = p.profile.as_str() {
         let (sketch, region) = ctx
             .resolver()
             .resolve_region(profile_pub)
             .ok_or_else(|| unknown_entity(profile_pub))?;
-        let (object, _change) = ctx.doc.follow_me(sketch, region, &path)?;
+        let (object, _change) = ctx.doc.follow_me_with(sketch, region, &path, None, opts)?;
         Ok(serde_json::json!({ "object_id": public_id_of(ctx, EntityRef::Object(object)) }))
     } else if let Some(profile_obj) = p.profile.as_object() {
         let face_val = profile_obj
@@ -460,7 +1280,9 @@ pub(super) fn follow_me(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError
         }
         let f = locate::resolve_face(ctx, face_val)?;
         require_world_follow_me_face(ctx, f.object)?;
-        let (object, _change) = ctx.doc.follow_me_face(f.object, f.face, &path, None)?;
+        let (object, _change) = ctx
+            .doc
+            .follow_me_face_with(f.object, f.face, &path, None, opts)?;
         Ok(serde_json::json!({ "object_id": public_id_of(ctx, EntityRef::Object(object)) }))
     } else {
         Err(CmdError::Params(
@@ -1178,15 +2000,18 @@ pub(super) fn scale_imprint(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdE
         about: Value,
     }
     let p: P = parse_params(params)?;
-    if !p.factor.is_finite() || p.factor <= 0.0 {
+    if !p.factor.is_finite() || p.factor == 0.0 {
         return Err(CmdError::Params(
-            "scale factor must be finite and positive".into(),
+            "scale factor must be finite and nonzero".into(),
         ));
     }
     let about = locate::resolve_point(ctx, &p.about)?;
     let target = resolve_imprint(ctx, &p.imprint)?;
     // Uniform scale about `about`; the draft refuses `not_in_plane` when
-    // `about` is off the drawing plane (the result would leave it).
+    // `about` is off the drawing plane (the result would leave it). A
+    // negative factor is the point reflection through `about` scaled by
+    // |factor|, which in the plane is a half turn: the drawing is replayed
+    // where it lands, so its regions re-derive as drawn there.
     let s = Transform::scale(Vec3::new(p.factor, p.factor, p.factor));
     apply_transform(ctx, target, "Scale", about_point(about, &s))
 }

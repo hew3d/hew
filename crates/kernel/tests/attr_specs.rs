@@ -198,6 +198,7 @@ fn duplicates_carry_copied_dictionaries() {
         .duplicate_node(
             NodeId::Object(obj),
             &Transform::translation(Vec3::new(3.0, 0.0, 0.0)),
+            kernel::LinkPolicy::Independent,
         )
         .expect("duplicate");
     let NodeId::Object(copy_obj) = copy else {
@@ -249,6 +250,7 @@ fn attr_writes_ride_transactions() {
         kernel::CompoundMeta {
             label: "annotate".to_string(),
             origin: kernel::HistoryOrigin::Connection("test".to_string()),
+            coalesce: None,
         },
     )
     .expect("commit");

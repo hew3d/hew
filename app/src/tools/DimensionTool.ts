@@ -115,7 +115,7 @@ import {
 } from '../viewport/annotationLayout'
 import { nextIdlePlaneLock, axisLockColorName, radiusReadout, diameterReadout } from './moveInput'
 import { worldFaceNormal } from './faceDraw'
-import { ctxGround, ctxOfFace, ctxOfSketch, planeOfCtx, readPlaneUnits, type PlaneUnitsScene } from './planeUnits'
+import { ctxGround, ctxOfFace, ctxOfSketchUnits, planeOfCtxIn, readPlaneUnits, type PlaneUnitsScene } from './planeUnits'
 import { projectPointOntoPlane } from './tapeOffset'
 import { snapEdgeEndpoints } from './snapEdge'
 import { axisColorsForTheme } from '../viewport/axisColors'
@@ -294,7 +294,7 @@ function tryResolveListedCurve(
       ctxs.push(ctxHint)
     } else {
       if (snap.sketch !== undefined) {
-        const c = ctxOfSketch(wasmScene, snap.sketch, null)
+        const c = ctxOfSketchUnits(wasmScene, snap.sketch, null)
         if (c !== null) ctxs.push(c)
       }
       if (ray !== undefined && typeof wasmScene.pick_face === 'function') {
@@ -319,7 +319,7 @@ function tryResolveListedCurve(
   if (typeof wasmScene.plane_units_json !== 'function') return null
   const P: V3 = [snap.x, snap.y, snap.z]
   for (const ctx of ctxs) {
-    const pl = planeOfCtx(ctx)
+    const pl = planeOfCtxIn(wasmScene, ctx)
     const pu = readPlaneUnits(wasmScene as unknown as PlaneUnitsScene, ctx)
     if (pl === null || pu === null) continue
     if (Math.abs(dot(sub(P, pl.point), pl.normal)) > LISTED_CURVE_EPS) continue

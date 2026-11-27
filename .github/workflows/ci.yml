@@ -1,9 +1,26 @@
-# Hew CI — mirrors scripts/verify.sh (the canonical local gate: fmt +
+# Hew CI — runs scripts/verify.sh (the canonical local gate: fmt +
 # clippy -D warnings + cargo test + wasm-pack + Vitest + app build + the
-# site build + the Tauri host crate's fmt/clippy), then adds the replay
-# gate, the web-E2E smoke, and the visual goldens, and artifacts the built
-# web app. A second job holds the "Open on Phone" relay to its contract
+# site build + the Tauri host crate's fmt/clippy) as parallel lanes, then
+# adds the replay gate, the web-E2E smoke (sharded), and the visual goldens.
+# A separate job holds the "Open on Phone" relay to its contract
 # (scripts/relay-contract.sh) on both implementations.
+#
+# Shape: one `wasm` job builds the kernel once, WITHOUT wasm-opt (about 7 of
+# every 9 minutes of a wasm-pack build is wasm-opt, and nothing that tests
+# the kernel needs it: E2E runs the vite dev server and the replay gate
+# checks state hashes). Everything that needs the kernel downloads that
+# artifact. The size-optimized build that actually ships is built once, in
+# parallel and off the critical path (`wasm-release`), so a wasm-opt failure
+# still turns a PR red; deploy-beta reuses that artifact.
+#
+# The Preview wall (docs/dev/DEVELOPMENT.md "Preview features"): the kernel
+# module embeds the API's wall, fixed at compile time, so `wasm` builds two
+# flavors (scripts/wasm-flavors.sh), and every lane the flag changes runs in
+# both builds: Rust and Tauri through scripts/verify.sh, the unit suites in
+# `web`, the replay, and the chromium E2E (the preview build with the curve
+# specs, the production-shape build with the wall spec). Nothing here sets
+# HEW_PREVIEW at the workflow or job level; a step that wants the preview
+# build says so itself. The production half has no switch to skip it.
 #
 # Every toolchain here is pinned, and every action is pinned to a commit SHA;
 # Renovate proposes the bumps (.github/renovate.json5). Nothing in this file
@@ -14,144 +31,116 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, feature/plugin-system]
   pull_request:
 
+# A new push to a PR supersedes the old one. Pushes to main are never
+# cancelled (every commit keeps its own signal, and deploy-beta carries its
+# own group): their group key is the unique run id.
+concurrency:
+  group: ci-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
-  verify:
+  # The kernel, built once per flavor for the test lanes. --no-opt skips
+  # wasm-opt (see the header). A flavor's two wasm-pack targets compile the
+  # same cargo artifact, so its second build is bindgen only. The packages
+  # are gitignored build outputs; they travel between jobs as one artifact,
+  # target/wasm-flavors/<production|preview>/<web|nodejs>.
+  wasm:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      # The Tauri host crate's clippy pass needs the webkit2gtk/gtk stack;
-      # the Playwright/WebGL smoke needs xvfb for the non-headless engines.
-      - name: System libs (Tauri + WebGL)
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            pkg-config build-essential libssl-dev \
-            libwebkit2gtk-4.1-dev libgtk-3-dev \
-            libayatana-appindicator3-dev librsvg2-dev libxdo-dev \
-            xvfb xauth
-
-      # rustup honors rust-toolchain.toml — a PINNED version, so this runner
-      # compiles with the exact toolchain a developer machine does.
       - name: Rust cache
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          workspaces: |
-            .
-            shells/tauri/src-tauri
-
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Install wasm-pack (pinned)
         run: scripts/install-wasm-pack.sh
 
-      - name: Setup Node
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
-        with:
-          node-version-file: .node-version
-
-      # pnpm's version comes from `packageManager` in the root package.json —
-      # one source of truth that pnpm itself also honors locally. (Corepack,
-      # which this step used to use, is no longer distributed with Node 25+.)
-      - name: Setup pnpm
-        uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
-
-      - name: Toolchain versions
+      - name: Build kernel, production flavor (web + Node, no wasm-opt)
         run: |
-          rustc --version
-          cargo --version
-          wasm-pack --version
-          node --version
-          pnpm --version
+          scripts/wasm-flavors.sh build production web --no-opt
+          scripts/wasm-flavors.sh build production nodejs --no-opt
 
-      # Ask pnpm where its store is rather than assuming: the path depends on
-      # the OS and on how pnpm was installed, and a wrong guess yields a cache
-      # that silently never hits.
-      - name: Locate pnpm store
-        run: echo "PNPM_STORE=$(pnpm store path --silent)" >> "$GITHUB_ENV"
+      - name: Build kernel, preview flavor (web + Node, no wasm-opt)
+        run: |
+          scripts/wasm-flavors.sh build preview web --no-opt
+          scripts/wasm-flavors.sh build preview nodejs --no-opt
 
-      - name: Cache pnpm store
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - name: Upload kernel flavors
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          path: ${{ env.PNPM_STORE }}
-          key: pnpm-${{ runner.os }}-${{ hashFiles('**/pnpm-lock.yaml') }}
-          restore-keys: |
-            pnpm-${{ runner.os }}-
+          name: wasm-flavors
+          path: target/wasm-flavors
+          if-no-files-found: error
 
-      - name: Install JS dependencies
-        run: pnpm install --frozen-lockfile
+  # Rust: packaging tests, fmt, clippy -D warnings, cargo test.
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Rust cache
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Rust gate
+        run: scripts/verify.sh rust
 
-      - name: Verify (fmt, clippy, cargo test, wasm, vitest, builds)
-        run: scripts/verify.sh
+  # The determinism golden and the curves scoreboard on the other desktop
+  # platforms. The `rust` job checks both on Linux through the gate and
+  # `replay` checks the golden in the wasm build; this job is what notices
+  # geometry that comes out differently on macOS or Windows. Pushes to main
+  # only: it follows the work rather than gating a pull request.
+  determinism-platforms:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Rust cache
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: ". -> target/preview"
+      - name: Determinism golden
+        run: scripts/determinism.sh --check
+      - name: Curves scoreboard
+        run: scripts/scoreboard.sh --check
 
-      # Replay gate — replay every committed recording into a fresh kernel
-      # and assert its golden state_hash still matches. Needs a separate
-      # wasm build: the runner consumes `--target nodejs` (CommonJS)
-      # bindings, distinct from verify.sh's `--target web` app build.
-      # NB: wasm-pack's --out-dir is relative to the crate dir.
-      - name: Build kernel for Node (replay runner)
-        run: wasm-pack build crates/wasm-api --target nodejs --out-dir ../../tools/replay-runner/pkg-node
-
-      - name: Replay gate (golden state-hash fixtures)
-        run: node tools/replay-runner/run.mjs
-
-      - name: Install Playwright browsers
-        run: pnpm --dir app exec playwright install --with-deps chromium webkit
-
-      # Chromium (SwiftShader software GL): boot smoke, harness specs, and
-      # the draw → push/pull → save/reload lifecycle.
-      - name: Web E2E smoke (chromium)
+  # Web app: typecheck, lint, i18n, Vitest, app + site builds. The app build
+  # reuses the downloaded kernel package.
+  web:
+    needs: wasm
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up JS toolchain
+        uses: ./.github/actions/setup-js
+      # verify.sh's web lane copies each flavor into app/src/wasm/pkg as it
+      # needs it (scripts/wasm-flavors.sh use), freshening the mtimes so
+      # app/scripts/build-wasm.mjs does not rebuild over it.
+      - name: Download kernel flavors (WASM)
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: wasm-flavors
+          path: target/wasm-flavors
+      - name: Web gate
         env:
-          CI: '1'
-        run: pnpm --dir app exec playwright test --project=chromium
-
-      # WebKit (WebKitGTK) — the engine closest to the macOS WKWebView.
-      # Runs under Xvfb because headless WebKitGTK needs a display + system
-      # GL (llvmpipe) to bring up the WebGL2 viewport.
-      #
-      # Still non-blocking, deliberately, even though it has been green as
-      # consistently as the visual lane. The visual lane is deterministic by
-      # construction — pinned resolution, pinned DPR, and a software
-      # rasterizer that ships inside Playwright. This one depends on the
-      # runner image's WebKitGTK, its system GL (llvmpipe), and Xvfb, none of
-      # which are pinned by anything in this repository, so a green history
-      # is weaker evidence here than it is there. Promote it when its stack
-      # is pinned, or when a failure it catches justifies the flake risk.
-      - name: Web E2E smoke (webkit) [validating — non-blocking]
-        continue-on-error: true
-        env:
-          CI: '1'
-        run: xvfb-run -a pnpm --dir app exec playwright test --project=webkit
-
-      # Visual-regression goldens on the pinned `visual` project (fixed
-      # 800×600 / DPR=1 / SwiftShader). The renderer is ANGLE-SwiftShader
-      # bundled with Playwright's pinned Chromium, so output is reproducible
-      # across hosts on the same @playwright/test version.
-      #
-      # BLOCKING. It spent its validation period non-blocking and came back
-      # green on every run that reached it — including the one that carried
-      # three.js 0.184 -> 0.185 and Playwright 1.61 -> 1.62 together, which
-      # replaced both the renderer and the bundled SwiftShader at once. That
-      # is the pair most likely to shift pixels, and it did not.
-      #
-      # Making it required is what lets three.js and Playwright automerge
-      # (.github/renovate.json5): until now nothing could fail a build on a
-      # renderer regression, so those two needed a person. A legitimate shift
-      # — usually a Playwright bump bringing a new Chromium — now turns the
-      # PR red rather than landing unnoticed, and the fix is to regenerate:
-      # Actions ▸ Regen Visual Goldens ▸ Run workflow (it takes a branch),
-      # then commit the PNGs it produces onto that branch.
-      - name: Web E2E visual goldens
-        env:
-          CI: '1'
-        run: pnpm --dir app exec playwright test --project=visual
+          # This lane builds against the unoptimized test kernel; see the
+          # precache ceiling in app/vite.config.ts.
+          HEW_UNOPTIMIZED_WASM: '1'
+        run: scripts/verify.sh web
 
       - name: Upload built web app
         if: always()
         continue-on-error: true
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: web-dist
           path: app/dist
@@ -160,20 +149,230 @@ jobs:
       - name: Upload built site
         if: always()
         continue-on-error: true
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: site-dist
           path: site/dist
           if-no-files-found: warn
 
+  # Tauri host crate fmt + clippy. tauri's generate_context! reads app/dist
+  # at compile time, so this needs the web build's output.
+  tauri:
+    needs: web
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # The Tauri host crate's clippy pass needs the webkit2gtk/gtk stack.
+      - name: System libs (Tauri)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config build-essential libssl-dev \
+            libwebkit2gtk-4.1-dev libgtk-3-dev \
+            libayatana-appindicator3-dev librsvg2-dev libxdo-dev
+      - name: Rust cache
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: |
+            .
+            shells/tauri/src-tauri
+
+      - name: Set up JS toolchain
+        uses: ./.github/actions/setup-js
+      - name: Download built web app
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: web-dist
+          path: app/dist
+
+      - name: Tauri host gate
+        run: scripts/verify.sh tauri
+
+  # Replay gate — replay every committed recording into a fresh kernel and
+  # assert its golden state_hash still matches, then rebuild the determinism
+  # golden's models in the same kernel and assert they match the native
+  # table. Consumes the `--target nodejs` (CommonJS) bindings built by the
+  # `wasm` job.
+  replay:
+    needs: wasm
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Setup Node
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .node-version
+
+      - name: Download kernel flavors (WASM)
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: wasm-flavors
+          path: target/wasm-flavors
+
+      # Both modules, as scripts/verify-full.sh runs it. The determinism
+      # golden's wasm leg holds each module to the table the native build
+      # wrote (docs/dev/DEVELOPMENT.md, "The determinism golden").
+      - name: Replay gate and determinism golden (both flavors)
+        run: |
+          for flavor in production preview; do
+            scripts/wasm-flavors.sh use-node "$flavor"
+            node tools/replay-runner/run.mjs
+            node tools/replay-runner/determinism.mjs --strict
+          done
+
+  # Chromium (SwiftShader software GL): boot smoke, harness specs, and the
+  # draw -> push/pull -> save/reload lifecycle. Sharded across runners:
+  # playwright.config.ts pins workers: 1 because SwiftShader is CPU-bound
+  # and parallel workers on ONE machine contend; separate runners do not.
+  # fullyParallel is off, so a shard is a set of whole spec files.
+  #
+  # Both builds (the Preview wall): `preview` is the Vite dev server with the
+  # flag on, curve specs included; `production` is `vite build` with the
+  # flag off, served as a release is, with the wall spec. The only skips
+  # allowed are the wall's own (scripts/check-e2e-skips.mjs).
+  e2e-chromium:
+    needs: wasm
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        build: [preview, production]
+        shard: [1, 2, 3, 4]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up JS toolchain
+        uses: ./.github/actions/setup-js
+      - name: Download kernel flavors (WASM)
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: wasm-flavors
+          path: target/wasm-flavors
+      - name: Select the ${{ matrix.build }} kernel
+        run: scripts/wasm-flavors.sh use ${{ matrix.build }}
+      - name: Install Playwright browsers
+        run: pnpm --dir app exec playwright install --with-deps chromium
+
+      - name: Web E2E smoke (chromium, ${{ matrix.build }} build, shard ${{ matrix.shard }}/4)
+        env:
+          CI: '1'
+          HEW_PREVIEW: ${{ matrix.build == 'preview' && '1' || '0' }}
+          PLAYWRIGHT_JSON_OUTPUT_FILE: ${{ runner.temp }}/e2e-report.json
+        run: |
+          pnpm --dir app exec playwright test --project=chromium --shard=${{ matrix.shard }}/4 --reporter=list,html,json
+          node scripts/check-e2e-skips.mjs "$PLAYWRIGHT_JSON_OUTPUT_FILE" ${{ matrix.build }}
+
       - name: Upload Playwright report on failure
         if: failure()
         continue-on-error: true
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: playwright-report
+          name: playwright-report-chromium-${{ matrix.build }}-${{ matrix.shard }}
           path: app/playwright-report
           if-no-files-found: ignore
+
+  # The wall spec (app/e2e/preview-wall.spec.ts) whole, in each build, with
+  # the check that it passed something there: sharding spreads files, so
+  # this is where "the wall was checked" is asserted.
+  e2e-wall:
+    needs: wasm
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        build: [preview, production]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up JS toolchain
+        uses: ./.github/actions/setup-js
+      - name: Download kernel flavors (WASM)
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: wasm-flavors
+          path: target/wasm-flavors
+      - name: Select the ${{ matrix.build }} kernel
+        run: scripts/wasm-flavors.sh use ${{ matrix.build }}
+      - name: Install Playwright browsers
+        run: pnpm --dir app exec playwright install --with-deps chromium
+
+      - name: Preview wall spec (chromium, ${{ matrix.build }} build)
+        env:
+          CI: '1'
+          HEW_PREVIEW: ${{ matrix.build == 'preview' && '1' || '0' }}
+          PLAYWRIGHT_JSON_OUTPUT_FILE: ${{ runner.temp }}/e2e-report.json
+        run: |
+          pnpm --dir app exec playwright test --project=chromium preview-wall.spec.ts --reporter=list,html,json
+          node scripts/check-e2e-skips.mjs "$PLAYWRIGHT_JSON_OUTPUT_FILE" ${{ matrix.build }} --wall
+
+      - name: Upload Playwright report on failure
+        if: failure()
+        continue-on-error: true
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: playwright-report-wall-${{ matrix.build }}
+          path: app/playwright-report
+          if-no-files-found: ignore
+
+  # Visual-regression goldens on the pinned `visual` project (fixed 800x600 /
+  # DPR=1 / SwiftShader). The renderer is ANGLE-SwiftShader bundled with
+  # Playwright's pinned Chromium, so output is reproducible across hosts on
+  # the same @playwright/test version. Not sharded: it is a handful of
+  # tests.
+  #
+  # BLOCKING. It spent its validation period non-blocking and came back
+  # green on every run that reached it — including the one that carried
+  # three.js 0.184 -> 0.185 and Playwright 1.61 -> 1.62 together, which
+  # replaced both the renderer and the bundled SwiftShader at once. That
+  # is the pair most likely to shift pixels, and it did not.
+  #
+  # Making it required is what lets three.js and Playwright automerge
+  # (.github/renovate.json5): until now nothing could fail a build on a
+  # renderer regression, so those two needed a person. A legitimate shift
+  # — usually a Playwright bump bringing a new Chromium — now turns the
+  # PR red rather than landing unnoticed, and the fix is to regenerate:
+  # Actions > Regen Visual Goldens > Run workflow (it takes a branch),
+  # then commit the PNGs it produces onto that branch.
+  e2e-visual:
+    needs: wasm
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Set up JS toolchain
+        uses: ./.github/actions/setup-js
+      # The goldens run the preview build (the Vite dev server, flag on),
+      # so they take the preview kernel.
+      - name: Download kernel flavors (WASM)
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: wasm-flavors
+          path: target/wasm-flavors
+      - name: Select the preview kernel
+        run: scripts/wasm-flavors.sh use preview
+      - name: Install Playwright browsers
+        run: pnpm --dir app exec playwright install --with-deps chromium
+
+      - name: Web E2E visual goldens
+        env:
+          CI: '1'
+          HEW_PREVIEW: '1'
+        run: pnpm --dir app exec playwright test --project=visual
+
+      - name: Upload Playwright report on failure
+        if: failure()
+        continue-on-error: true
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: playwright-report-visual
+          path: app/playwright-report
+          if-no-files-found: ignore
+
+  # The WebKit run of the E2E suite is not here: it is non-blocking and takes
+  # four runners for over an hour, so it runs nightly, in its own workflow
+  # (.github/workflows/e2e-webkit.yml).
 
   # The relay contract, on both implementations (scripts/relay-contract.sh —
   # the same script scripts/verify-full.sh runs): the share-relay Worker's
@@ -191,10 +390,10 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Rust cache
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
 
       - name: Setup Node
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .node-version
 
@@ -217,7 +416,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup Node
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .node-version
 
@@ -225,3 +424,162 @@ jobs:
         run: |
           cd workers/bug-intake
           npm test
+
+  # The size-optimized kernel that actually ships (wasm-opt on). Built on
+  # every run, in parallel with the test lanes, so a wasm-opt or release-
+  # profile failure surfaces on the PR rather than after merge, and so
+  # deploy-beta finds it ready instead of spending ~7 minutes on it after
+  # everything is green.
+  wasm-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+
+      - name: Install wasm-pack (pinned)
+        run: scripts/install-wasm-pack.sh
+
+      # The production flavor, always: this is the module beta.hew3d.com
+      # ships.
+      - name: Build kernel (web target, optimized, production flavor)
+        run: |
+          scripts/wasm-flavors.sh build production web
+          scripts/wasm-flavors.sh use production
+
+      # The shipped module must fit the service worker's precache ceiling
+      # (maximumFileSizeToCacheInBytes in app/vite.config.ts). The gate's own
+      # app build uses the unoptimized module and a raised ceiling, so this
+      # is where kernel growth past the limit turns a PR red.
+      - name: Optimized kernel fits the precache ceiling (16 MB)
+        run: |
+          size="$(stat -c %s app/src/wasm/pkg/wasm_api_bg.wasm)"
+          echo "wasm_api_bg.wasm: $size bytes"
+          [ "$size" -le $((16 * 1024 * 1024)) ]
+
+      - name: Upload optimized kernel
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: wasm-web-release
+          path: app/src/wasm/pkg
+          if-no-files-found: error
+
+  # beta.hew3d.com — the pre-release copy of main for testers. Every push to
+  # main that passes the WHOLE workflow is deployed here, so testers see
+  # fixes and features before the next tagged release reaches app.hew3d.com.
+  #
+  # It needs all three gates (verify, relay-contract, bug-intake-tests):
+  # "main is green" means the entire workflow, not just the app lane, and a
+  # broken relay or intake service is not something to hand to testers.
+  #
+  # `--branch=main` matters: the Pages project's production branch is main,
+  # and the production deployment is what the custom domain serves. Any
+  # other branch name would publish a preview URL and leave beta.hew3d.com
+  # unchanged. cancel-in-progress only trims the queue; runs for different
+  # pushes finish in any order and an old run can be re-run. The tip check
+  # (compare GITHUB_SHA with the live main) is what guarantees the newest
+  # commit wins, including re-runs of old runs.
+  #
+  # The deploy self-skips when the Cloudflare secrets are absent, which is
+  # the case on forks and on clones that have not configured them; the guard
+  # on `github.repository` keeps forks from running the job at all. This is
+  # separate from the production deploy: release.yml's `web` job still
+  # publishes app.hew3d.com at tag time and is unaffected.
+  deploy-beta:
+    needs: [wasm, rust, web, tauri, replay, e2e-chromium, e2e-wall, e2e-visual, relay-contract, bug-intake-tests, wasm-release]
+    if: >-
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/main' &&
+      github.repository == 'hew3d/hew'
+    concurrency:
+      group: deploy-beta
+      cancel-in-progress: true
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up JS toolchain
+        uses: ./.github/actions/setup-js
+
+      # The size-optimized kernel built in parallel by `wasm-release`. Freshen
+      # the mtimes so app/scripts/build-wasm.mjs sees it as newer than the
+      # sources and does not rebuild it (a wasm-pack build is ~7 minutes,
+      # almost all of it wasm-opt).
+      - name: Download optimized kernel (WASM)
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: wasm-web-release
+          path: app/src/wasm/pkg
+      - name: Freshen kernel package mtimes
+        run: find app/src/wasm/pkg -type f -exec touch {} +
+
+      # beta.hew3d.com is a production build: the production module, and no
+      # preview flag in the environment of the app build below.
+      - name: Refuse a preview build
+        run: |
+          if [ "${HEW_PREVIEW:-}" = 1 ] || [ "$(cat app/src/wasm/pkg/preview-build)" != 0 ]; then
+            echo "::error::beta.hew3d.com must be a production build; HEW_PREVIEW is set or the kernel is the preview flavor."
+            exit 1
+          fi
+
+      # Freshness guard. Skip a stale run before spending minutes building it.
+      - name: Skip if main has moved on
+        run: |
+          tip="$(git ls-remote --exit-code origin refs/heads/main | cut -f1)"
+          if [ -z "$tip" ]; then
+            echo "::error::Could not read the tip of main; refusing to deploy blind."
+            exit 1
+          fi
+          if [ "$tip" != "$GITHUB_SHA" ]; then
+            echo "::notice::main has moved on ($GITHUB_SHA is not the tip $tip); skipping the beta deploy."
+            echo "STALE=1" >> "$GITHUB_ENV"
+          fi
+
+      # app build + CSP <meta> injection. HEW_BETA_SHA stamps the version as
+      # `<version>+beta.<sha>` so testers can quote exactly which build they
+      # ran. The `${GITHUB_SHA::8}` is bash parameter expansion, evaluated by
+      # the shell at run time, not by the workflow expression parser.
+      - name: Build web shell (beta stamp)
+        if: env.STALE != '1'
+        run: |
+          HEW_BETA_SHA="${GITHUB_SHA::8}" pnpm --dir shells/web build
+
+      # A separate, complete headers file (not an append to the production
+      # one) so everything beta serves is reviewable in one place.
+      - name: Install beta headers
+        if: env.STALE != '1'
+        run: cp shells/web/_headers.beta shells/web/dist/_headers
+
+      - name: Deploy beta.hew3d.com (Cloudflare Pages)
+        if: env.STALE != '1'
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          if [ -z "$CLOUDFLARE_API_TOKEN" ] || [ -z "$CLOUDFLARE_ACCOUNT_ID" ]; then
+            echo "::notice::Cloudflare secrets not set — skipping the beta.hew3d.com deploy."
+            exit 0
+          fi
+          # Re-check right before the upload to close the window since the
+          # early check.
+          tip="$(git ls-remote --exit-code origin refs/heads/main | cut -f1)"
+          if [ -z "$tip" ]; then
+            echo "::error::Could not read the tip of main; refusing to deploy blind."
+            exit 1
+          fi
+          if [ "$tip" != "$GITHUB_SHA" ]; then
+            echo "::notice::main has moved on ($GITHUB_SHA is not the tip $tip); skipping the beta deploy."
+            exit 0
+          fi
+          # The default shell has no pipefail; without it a failed deploy
+          # would be masked by tee's exit status.
+          set -o pipefail
+          npx wrangler@4 pages deploy shells/web/dist \
+            --project-name=hew-app-beta --branch=main --commit-dirty=true \
+            2>&1 | tee wrangler.log
+          version="$(node -p "require('./app/package.json').version")+beta.${GITHUB_SHA::8}"
+          url="$(grep -Eo 'https://[^ ]+' wrangler.log | tail -n 1 || true)"
+          echo "::notice::Deployed beta $version to ${url:-an unknown URL (wrangler printed none)}."

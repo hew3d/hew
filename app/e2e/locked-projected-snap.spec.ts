@@ -316,7 +316,7 @@ the cursor was squarely on`,
       .toBeCloseTo(DESKTOP_TOP_Z, 5)
 
     // Back to the floating original for the next azimuth.
-    await page.keyboard.press('Control+z')
+    await page.keyboard.press('ControlOrMeta+z')
     await expect.poll(async () => await sketchHeight(page)).toBeCloseTo(FLOATING_Z, 5)
   }
 })

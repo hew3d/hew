@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import * as THREE from 'three'
-import { guideLinePickPx, segmentPickPx } from './screenPick'
+import { guideLinePickPx, guideLinePickSamples, segmentPickPx, segmentPickSamples } from './screenPick'
 
 const SIZE = 100
 
@@ -94,5 +94,94 @@ describe('segmentPickPx', () => {
 
   it('a segment wholly behind the near plane is not pickable', () => {
     expect(segmentPickPx(camera(), SIZE, SIZE, [0, 0, 9.95], [0, 0, 20], 50, 50)).toBe(Infinity)
+  })
+})
+
+describe('segmentPickSamples', () => {
+  const cameras: Array<[string, () => THREE.PerspectiveCamera | THREE.OrthographicCamera]> = [
+    ['perspective', () => {
+      const c = new THREE.PerspectiveCamera(45, 1, 0.1, 100)
+      c.position.set(2, -6, 3)
+      c.lookAt(0, 0, 0)
+      c.updateMatrixWorld()
+      return c
+    }],
+    ['parallel', () => {
+      const c = new THREE.OrthographicCamera(-4, 4, 4, -4, 0.1, 100)
+      c.position.set(2, -6, 3)
+      c.lookAt(0, 0, 0)
+      c.updateMatrixWorld()
+      return c
+    }],
+  ]
+  const A: [number, number, number] = [-2, 1, 0]
+  const B: [number, number, number] = [2, 3, 1]
+
+  for (const [name, make] of cameras) {
+    it(`${name}: nearest first, within the radius, first is segmentPickPx`, () => {
+      const cam = make()
+      const mid = pixelOf(cam, 0, 2, 0.5)
+      const samples = segmentPickSamples(cam, SIZE, SIZE, A, B, mid.x + 2, mid.y + 1, 8)
+      expect(samples.length).toBeGreaterThan(1)
+      for (let i = 1; i < samples.length; i++) expect(samples[i].px).toBeGreaterThanOrEqual(samples[i - 1].px)
+      for (const s of samples) expect(s.px).toBeLessThanOrEqual(8)
+      expect(samples[0].px).toBeCloseTo(segmentPickPx(cam, SIZE, SIZE, A, B, mid.x + 2, mid.y + 1), 6)
+    })
+
+    it(`${name}: a sample's world point projects back to its screen distance and lies on the segment`, () => {
+      const cam = make()
+      const mid = pixelOf(cam, 0, 2, 0.5)
+      const click = { x: mid.x + 1, y: mid.y }
+      for (const s of segmentPickSamples(cam, SIZE, SIZE, A, B, click.x, click.y, 9)) {
+        const p = pixelOf(cam, s.point[0], s.point[1], s.point[2])
+        expect(Math.hypot(p.x - click.x, p.y - click.y)).toBeCloseTo(s.px, 4)
+        // on the segment: cross product with the direction is ~0
+        const u = new THREE.Vector3(B[0] - A[0], B[1] - A[1], B[2] - A[2])
+        const w = new THREE.Vector3(s.point[0] - A[0], s.point[1] - A[1], s.point[2] - A[2])
+        expect(u.clone().cross(w).length()).toBeLessThan(1e-4)
+      }
+    })
+
+    it(`${name}: clamped to the segment's ends`, () => {
+      const cam = make()
+      const end = pixelOf(cam, B[0], B[1], B[2])
+      const samples = segmentPickSamples(cam, SIZE, SIZE, A, B, end.x, end.y, 8)
+      for (const s of samples) {
+        const t = new THREE.Vector3(s.point[0] - A[0], s.point[1] - A[1], s.point[2] - A[2])
+          .dot(new THREE.Vector3(B[0] - A[0], B[1] - A[1], B[2] - A[2])) /
+          new THREE.Vector3(B[0] - A[0], B[1] - A[1], B[2] - A[2]).lengthSq()
+        expect(t).toBeLessThanOrEqual(1 + 1e-6)
+        expect(t).toBeGreaterThanOrEqual(-1e-6)
+      }
+    })
+
+    it(`${name}: a click far from the segment has no samples`, () => {
+      const cam = make()
+      expect(segmentPickSamples(cam, SIZE, SIZE, A, B, 0, 0, 8)).toEqual([])
+    })
+  }
+
+  it('a segment with one end behind the camera: every sample is in front of the near plane', () => {
+    const cam = new THREE.PerspectiveCamera(45, 1, 0.01, 100)
+    cam.position.set(0.3, 0.02, 0)
+    cam.lookAt(0.5, 0, 0)
+    cam.updateMatrixWorld()
+    const click = pixelOf(cam, 0.4, 0, 0)
+    const samples = guideLinePickSamples(cam, SIZE, SIZE, X_GUIDE, click.x, click.y, 8)
+    expect(samples.length).toBeGreaterThan(0)
+    for (const s of samples) {
+      const v = new THREE.Vector3(...s.point).applyMatrix4(cam.matrixWorldInverse)
+      expect(-v.z).toBeGreaterThanOrEqual(cam.near - 1e-9)
+    }
+    expect(samples[0].px).toBeCloseTo(guideLinePickPx(cam, SIZE, SIZE, X_GUIDE, click.x, click.y), 6)
+  })
+
+  it('wholly behind the camera or degenerate: no samples', () => {
+    const cam = new THREE.PerspectiveCamera(45, 1, 0.01, 100)
+    cam.position.set(0.3, 0.02, 0)
+    cam.lookAt(0.5, 0, 0)
+    cam.updateMatrixWorld()
+    expect(guideLinePickSamples(cam, SIZE, SIZE, [0, 0, 0, 1, 0, 0, -2, 0.2], 50, 50, 8)).toEqual([])
+    expect(guideLinePickSamples(cam, SIZE, SIZE, [0, 0, 0, 0, 0, 0], 50, 50, 8)).toEqual([])
   })
 })

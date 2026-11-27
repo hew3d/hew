@@ -21,7 +21,7 @@
  */
 import { render, screen, fireEvent, waitFor, act, within } from '@testing-library/react'
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
-import { objectBoundsFromMesh } from '../test/meshBounds'
+import { objectBoundsFromMesh, partFrameFromMesh } from '../test/meshBounds'
 
 /** Sets `window.innerWidth`/`innerHeight` (jsdom's own are read-only own
  *  properties, not plain assignable fields) — matches `orientation.test.ts`'s
@@ -122,6 +122,10 @@ const mockScene = {
     positions: () => fixture.objectMesh[String(id)] ?? new Float32Array([0, 0, 0, 1, 1, 1]),
     free: () => {},
   })),
+  part_frame_json: partFrameFromMesh((id: bigint) => ({
+    positions: () => fixture.objectMesh[String(id)] ?? new Float32Array([0, 0, 0, 1, 1, 1]),
+    free: () => {},
+  })),
   instance_pose: () => undefined as Float64Array | undefined,
   instance_expanded_members: () => new BigUint64Array(),
   instance_expanded_local_poses: () => new Float64Array(),
@@ -137,6 +141,8 @@ const mockScene = {
   // open re-issues this, since `Scene.load` itself resets the kernel's
   // inference state, silently re-enabling axis snapping otherwise).
   set_axes_snappable: vi.fn(),
+  // The bus mirror of the in-context entries (`ShopApp`).
+  set_ui_context: vi.fn(),
   // Registry accessors the seed fix (documentLoad.ts's
   // seedHiddenKeysFromRegistry/seedHiddenTagPathsFromRegistry) reads on
   // every open — vi.fn() (not plain closures) so individual tests can
@@ -154,7 +160,31 @@ const mockScene = {
   section_plane_json: vi.fn((): string | undefined => undefined),
   resolve_scene: vi.fn((_sid: bigint) => makeFakeResolvedScene()),
   scene_drift: vi.fn(() => '{}'),
+  // The lifecycle note a running plugin host is told after an open.
+  note_document_event: vi.fn(),
 }
+
+/** What the plugin-host tests steer: the loader root `ShopApp` reaches the
+ *  host through, and whether the Plugins switch is on. */
+const pluginHostControl = vi.hoisted(() => ({
+  load: null as (() => Promise<(opts: unknown) => () => void>) | null,
+  enabled: false,
+}))
+vi.mock('../preview/loaderRoots', () => ({
+  get loadPluginHost() {
+    return pluginHostControl.load
+  },
+  PluginsPane: null,
+  ProbeRoot: null,
+}))
+vi.mock('../preview', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../preview')>()),
+  loaderEnabled: () => pluginHostControl.enabled,
+}))
+vi.mock('../api/eventPump', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../api/eventPump')>()),
+  pumpEvents: vi.fn(),
+}))
 
 vi.mock('../wasm/loader', () => ({
   loadKernel: vi.fn(() =>
@@ -189,6 +219,7 @@ import { setLengthUnit } from '../settings/units'
 import { getSceneTransitions, SCENE_TRANSITION_MS } from '../settings/sceneTransitions'
 import { HINT_STORAGE_KEYS } from './hints'
 import { loadKernel } from '../wasm/loader'
+import { pumpEvents } from '../api/eventPump'
 import type { NodeRef } from '../panels/treeModel'
 import type { Snap } from '../tools/types'
 
@@ -472,6 +503,21 @@ describe('ShopApp — tool switcher', () => {
     await renderAndOpenWithFixture()
     fireEvent.click(screen.getByRole('button', { name: /^orbit$/i }))
     await waitFor(() => expect(latestViewportProps().activeTool).toBe('Orbit'))
+  })
+
+  it('the keymap\'s keys for the three tools switch them; editor-only keys do nothing', async () => {
+    await renderAndOpenWithFixture()
+    fireEvent.keyDown(window, { key: 'o', code: 'KeyO' })
+    await waitFor(() => expect(latestViewportProps().activeTool).toBe('Orbit'))
+    fireEvent.keyDown(window, { key: 't', code: 'KeyT' })
+    await waitFor(() => expect(latestViewportProps().activeTool).toBe('Tape Measure'))
+    // Rectangle's R is an editor command: not Shop Mode's, and not swallowed.
+    const r = new KeyboardEvent('keydown', { key: 'r', code: 'KeyR', cancelable: true })
+    act(() => { window.dispatchEvent(r) })
+    expect(r.defaultPrevented).toBe(false)
+    expect(latestViewportProps().activeTool).toBe('Tape Measure')
+    fireEvent.keyDown(window, { key: ' ', code: 'Space' })
+    await waitFor(() => expect(latestViewportProps().activeTool).toBe('Select'))
   })
 
   it('switching to Tape Measure updates the activeTool prop Viewport receives', async () => {
@@ -1928,5 +1974,158 @@ describe('ShopApp — Scenes (docs/design/scenes.md §6)', () => {
     fireEvent.click(within(screen.getByRole('dialog', { name: 'Views' })).getByText('Cut layout'))
 
     expect(mockScene.set_hidden).not.toHaveBeenCalled()
+  })
+})
+
+describe('ShopApp — beta tab title', () => {
+  const ORIGINAL_TITLE = document.title
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    document.title = ORIGINAL_TITLE
+  })
+
+  it('sets the document title in a beta build', async () => {
+    vi.stubGlobal('__HEW_BETA__', true)
+    document.title = 'untouched'
+    await renderAndLoad()
+    expect(document.title).toBe('Hew Beta')
+  })
+
+  it('does not write the document title in a normal build', async () => {
+    vi.stubGlobal('__HEW_BETA__', false)
+    document.title = 'untouched'
+    await renderAndLoad()
+    expect(document.title).toBe('untouched')
+  })
+})
+
+describe('ShopApp — plugin host', () => {
+  type Started = { bridge: Record<string, unknown>; toast: (m: string) => void; platform?: string; harness?: Record<string, unknown> | null }
+  let started: Started[]
+  let stopped: number
+
+  beforeEach(() => {
+    started = []
+    stopped = 0
+    pluginHostControl.enabled = true
+    pluginHostControl.load = () =>
+      Promise.resolve((opts: unknown) => {
+        started.push(opts as Started)
+        return () => {
+          stopped++
+        }
+      })
+  })
+  afterEach(() => {
+    pluginHostControl.enabled = false
+    pluginHostControl.load = null
+  })
+
+  /** The file host Shop makes at mount picks `name`: call before rendering. */
+  const pickNext = (name = 'Cafe Table.hew') => {
+    const host = { openAny: vi.fn(async () => ({ kind: 'hew' as const, name, bytes: new Uint8Array([1]), handle: null })) }
+    vi.mocked(makeFileHost).mockReturnValue(host as never)
+  }
+  const openDoc = async (name = 'Cafe Table.hew') => {
+    fireEvent.click(screen.getByRole('button', { name: /^open a model…$/i }))
+    await waitFor(() => expect(screen.getByText(name)).toBeInTheDocument())
+  }
+
+  it('starts the host for the shop platform once the scene exists, with the window\'s own scene and viewport', async () => {
+    await renderAndLoad()
+    await waitFor(() => expect(started).toHaveLength(1))
+    expect(started[0].platform).toBe('shop')
+    expect((started[0].bridge.getScene as () => unknown)()).toBe(mockScene)
+    expect(typeof started[0].toast).toBe('function')
+  })
+
+  it('hands the host the shop test harness object to attach its hooks to', async () => {
+    await renderAndLoad()
+    await waitFor(() => expect(started).toHaveLength(1))
+    expect(started[0].harness).toBe((window as unknown as { __hew_shop_test?: unknown }).__hew_shop_test ?? null)
+  })
+
+  it('gives the host no selection or entering targets, and inert isolate targets: those directives are no-ops here', async () => {
+    await renderAndLoad()
+    await waitFor(() => expect(started).toHaveLength(1))
+    const bridge = started[0].bridge
+    for (const name of ['selectMany', 'selectGuide', 'selectAnnotation', 'selectNone', 'enterNode', 'snapshotEntry', 'setPathDepth', 'contextDepth', 'activateScene']) {
+      expect(bridge[name], name).toBeUndefined()
+    }
+    for (const name of ['getScene', 'getViewportApi', 'reconcile', 'reseedViewState', 'reconcileVisibility']) {
+      expect(typeof bridge[name], name).toBe('function')
+    }
+    // Isolate and clear_isolation are wired to do nothing, so a plugin cannot
+    // act on the viewport outside Shop's own isolate and hidden state.
+    for (const name of ['isolate', 'clearIsolation']) {
+      expect(typeof bridge[name], name).toBe('function')
+      expect(() => (bridge[name] as () => void)(), name).not.toThrow()
+    }
+  })
+
+  it('does not start a host while the Plugins switch is off', async () => {
+    pluginHostControl.enabled = false
+    await renderAndLoad()
+    await new Promise((r) => setTimeout(r, 20))
+    expect(started).toHaveLength(0)
+  })
+
+  it('does not start a host where there is none to load (a production build)', async () => {
+    pluginHostControl.load = null
+    pickNext()
+    await renderAndLoad()
+    await new Promise((r) => setTimeout(r, 20))
+    expect(started).toHaveLength(0)
+    await openDoc()
+    expect(mockScene.note_document_event).not.toHaveBeenCalled()
+    expect(vi.mocked(pumpEvents)).not.toHaveBeenCalled()
+  })
+
+  it('stops the host when Shop unmounts', async () => {
+    const view = render(<ShopApp />)
+    await waitFor(() => expect(started).toHaveLength(1))
+    view.unmount()
+    expect(stopped).toBe(1)
+  })
+
+  it('tells a running host each document that opens into the same scene, and pumps its events', async () => {
+    pickNext()
+    await renderAndLoad()
+    await waitFor(() => expect(started).toHaveLength(1))
+    await openDoc('Cafe Table.hew')
+    expect(mockScene.note_document_event).toHaveBeenCalledWith('opened', 'Cafe Table.hew', undefined, 'hew')
+    expect(vi.mocked(pumpEvents)).toHaveBeenCalledWith(mockScene)
+    const before = vi.mocked(pumpEvents).mock.calls.length
+    expect(before).toBeGreaterThan(0)
+  })
+
+  it('does not touch the scene\'s lifecycle events when no host runs (the switch is off)', async () => {
+    pluginHostControl.enabled = false
+    pickNext()
+    await renderAndLoad()
+    await openDoc()
+    expect(mockScene.note_document_event).not.toHaveBeenCalled()
+  })
+
+  it('tells the host the document closed when the page goes away', async () => {
+    pickNext()
+    await renderAndLoad()
+    await waitFor(() => expect(started).toHaveLength(1))
+    await openDoc('Cafe Table.hew')
+    mockScene.note_document_event.mockClear()
+    window.dispatchEvent(new Event('pagehide'))
+    expect(mockScene.note_document_event).toHaveBeenCalledWith('closed', 'Cafe Table.hew', undefined, undefined)
+  })
+
+  it('re-seeds the hidden state from the document and pushes it when the host asks (an aborted plugin command)', async () => {
+    await renderAndLoad()
+    await waitFor(() => expect(started).toHaveLength(1))
+    const api = makeViewportApiStub()
+    latestViewportProps().apiRef!.current = api
+    mockScene.tag_meta_paths.mockReturnValueOnce(['Walls'])
+    mockScene.tag_meta_hidden.mockReturnValueOnce(new Uint8Array([1]))
+    ;(started[0].bridge.reseedViewState as () => void)()
+    expect(api.setHidden).toHaveBeenCalled()
   })
 })

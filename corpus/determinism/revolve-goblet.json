@@ -1,0 +1,19 @@
+{
+  "title": "A goblet revolved from a curved-free profile about the vertical axis",
+  "from": "Revolve: trig-heavy surface of revolution at 48 segments.",
+  "build": [
+    {
+      "method": "hew.sketch.draw_line",
+      "as": "profile",
+      "params": {
+        "plane": {"origin": [0, 0, 0], "normal": [0, -1, 0]},
+        "points": [[0, 0, 0], ["30mm", 0, 0], ["30mm", 0, "4mm"], ["6mm", 0, "8mm"], ["6mm", 0, "50mm"], ["28mm", 0, "70mm"], ["30mm", 0, "90mm"], [0, 0, "90mm"], [0, 0, 0]]
+      }
+    },
+    {
+      "method": "hew.solid.revolve",
+      "as": "goblet",
+      "params": {"profile": {"$ref": "profile#/region_id"}, "axis": {"from": [0, 0, 0], "to": [0, 0, 1]}, "segments": 48}
+    }
+  ]
+}

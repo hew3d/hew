@@ -125,6 +125,7 @@ pub fn ui_copy(code: &str) -> Option<&'static str> {
         "DegenerateUvFrame" => {
             "That texture position isn't valid. Drag the handle further before releasing it."
         }
+        "InvalidMaterialPbr" => "Metallic and roughness must each be between 0 and 100%.",
         "BadUvFrame" => {
             "That texture position couldn't be read. Press Escape and start the positioning again."
         }
@@ -150,7 +151,7 @@ pub fn ui_copy(code: &str) -> Option<&'static str> {
             "Pushing that far would shrink the curved wall to nothing. Push a shorter distance."
         }
         "WallNeighborNonPlanar" => {
-            "Offsetting this curved wall would bend a neighboring face out of flat, so it was refused. Adjust or simplify the touching faces first."
+            "Moving this face would bend a face that touches it out of flat, so it was refused. Adjust or simplify the touching faces first."
         }
         "EmptyPath" => {
             "Follow Me needs a path. Select or click the line, curve, or face edge to follow."
@@ -176,6 +177,9 @@ pub fn ui_copy(code: &str) -> Option<&'static str> {
         }
         "PathTooTight" => {
             "The path turns tighter than the profile is wide, so the sweep would fold into itself. Use a smaller profile or gentler turns."
+        }
+        "ProfileTooWideForCorner" => {
+            "The profile is too wide to fit inside this corner, so the sweep would run into itself. Draw the profile at a corner of the path, square to the edge it starts along, and narrower than half the shortest side."
         }
         "ProfileCrossesAxis" => {
             "This profile crosses the circle's center axis, so revolving it would lose the geometry on one side. Draw the profile entirely on one side of the axis instead."
@@ -248,7 +252,19 @@ pub fn ui_copy(code: &str) -> Option<&'static str> {
             "One object's placement is scaled down to nothing, so the operation can't run."
         }
         "DegenerateContact" => {
-            "The objects only touch along a face, edge, or corner — combining needs real overlap. Nudge one object so their volumes intersect."
+            "The objects only touch, or graze each other along an edge or at a corner, so there is no clean solid to make. Nudge one object a little and try again."
+        }
+        "OperandFaceNotFlat" => {
+            "One of these objects has a face that isn't flat enough to cut. Some imported models have them. Try the cut on a different part of the object, or export the model again from the program it came from with its faces as triangles."
+        }
+        "ArrangementFailed" => {
+            "Hew couldn't work out a clean result where these two objects meet. Move one of them a little and try again. If it keeps happening, please send a bug report with Help ▸ Report Bug."
+        }
+        "ResultTooThin" => {
+            "The cut passes so close to a corner or edge that it would leave a piece too thin to keep. Move one of the objects a tiny bit (a hundredth of a millimeter is enough) and try again."
+        }
+        "NothingRemoved" => {
+            "Nothing was cut away: the solids only touch or sit apart. Check that each cutter is the shape you expect, then move it so it passes through the solid you're cutting."
         }
         "NotSolid" => {
             "Only a solid can be sliced. To make it solid, select it and choose Object ▸ Make Solid…"
@@ -263,11 +279,11 @@ pub fn ui_copy(code: &str) -> Option<&'static str> {
         "DegenerateAxis" => {
             "The rotation axis needs two distinct points. Pick a second point further from the first."
         }
-        "Reflection" => {
-            "This would turn the object inside out (a mirror), which can't be baked into a solid. Mirror a component instance instead."
-        }
         "DegenerateTextureFrame" => {
             "That would stretch a picture or texture on the object so far it couldn't stay on its face, so it was refused. Try a smaller stretch."
+        }
+        "FaceNotFlat" => {
+            "That shape is too far from the origin, or would be stretched too far, for its faces to stay flat, so it was refused. Try moving it closer to the origin, or use a smaller change."
         }
         "InvalidRescaleFactor" => {
             "That resize factor isn't valid. Pick two points that aren't on top of each other and type a positive distance."
@@ -289,9 +305,6 @@ pub fn ui_copy(code: &str) -> Option<&'static str> {
         "ComponentExpansionExceeded" => {
             "That would multiply past a million rendered component parts. Reduce how many copies the nested components repeat — explode or thin out a level — and try again."
         }
-        "CannotExplodeReflected" => {
-            "A mirrored instance can't be exploded — baking the mirror would turn the solid inside out. Use Make Unique instead."
-        }
         "CannotExplodeNonUniformScale" => {
             "This instance has an unfinished sketch inside it, and its scale isn't even across all three axes, so the sketch's circles and arcs can't be baked exactly. Even out the instance's scale first, or finish (extrude) the sketch before exploding."
         }
@@ -302,11 +315,37 @@ pub fn ui_copy(code: &str) -> Option<&'static str> {
         "GroupCycle" => {
             "A group can't be moved into itself or into one of its own members. Pick a different group, or move it out to the top level."
         }
+        "TooManyOccurrences" => "This model has more placed parts than Hew can list at once.",
+        "InvalidFrame" => {
+            "That frame is not a valid right-handed set of axes. Give three unit-length, mutually perpendicular directions."
+        }
+        "RebaseDuringSession" => "Finish editing the component before changing its axes.",
+        "NotPlaced" => "That part is no longer in the model. Pick it again.",
+        "NoPartFrame" => "That part has no faces to measure.",
+        "NoGeometry" => "There is nothing in that selection to measure.",
+        "BooleanNeedsTwo" => "Select at least two objects to combine.",
         "GroupedOperand" => {
             "This operation can't target an object inside a group. Ungroup it, or leave the group context, first."
         }
         "BooleanOperandHasInstance" => {
             "Combining can't consume a component instance — its geometry is shared with every copy. Explode the instance (or Make Unique, then Explode) first."
+        }
+        "AmbiguousHost" => {
+            "This copy is made of more than one part, so there's no single part to cut. Pick the part you want to cut, then try again."
+        }
+        "NotWrappable" => {
+            "Only an object or a group can start a set of linked copies. This is already a component, so copy it as it is."
+        }
+        "NotLinkable" => {
+            "A component can't be turned back into linked copies. Copy one of its parts to start a new set."
+        }
+        "NotLinked" => {
+            "This is already a component, not a set of linked copies, so there's nothing to change."
+        }
+        "NotIdentical" => "These aren't the same shape.",
+        "LockedNode" => "Locked. Unlock it to change it.",
+        "LockedNodeViaSharedShape" => {
+            "This shape is also used inside a locked group. Make this copy unique to change it."
         }
         "BooleanOperandNotSolid" => {
             "Something in that selection isn't solid, so it can't be combined. To make it solid, select it and choose Object ▸ Make Solid…"
@@ -328,7 +367,7 @@ pub fn ui_copy(code: &str) -> Option<&'static str> {
         }
         "UnknownRim" => "That opening is already closed. Check the list again for what is left.",
         "RimNotPlanar" => {
-            "This opening isn't flat, so one face can't close it. Draw faces across it by hand."
+            "This opening isn't flat, so one face can't close it. Mend in Model Health can fill small ones; otherwise draw faces across it by hand."
         }
         "RimSelfIntersecting" => {
             "The edge of this opening crosses itself, so one face can't close it. Draw faces across it by hand."
@@ -353,25 +392,29 @@ pub fn ui_copy(code: &str) -> Option<&'static str> {
         "UnjoinedSeam" => {
             "Two faces in this panel meet without sharing an edge, so a thickness would leave a crack inside. Draw a line where they meet, then try again."
         }
+        "RejoinNotPossible" => {
+            "These pieces can't be joined into one solid. An opening may keep the result open, there may be only one piece, the pieces may sit in different groups, they may not fit together into one solid, or they may be in a group inside a component, which Hew can't rejoin yet. Use Rejoin to close each piece instead."
+        }
         "ExplodeSessionOpen" => {
             "This component is already open for editing further out. Step back out to it (Escape) instead of opening it again — and close the editor before saving."
         }
         "ExplodeSessionNotOpen" => "No component is currently open for editing.",
         "ExplodeSessionPoseUnsupported" => {
-            "This instance's pose is scaled unevenly or mirrored, so it can't be opened for direct editing. Even out its scale and unmirror it first."
+            "This instance is scaled unevenly, so it can't be opened for direct editing. Even out its scale first."
         }
         "ExplodeSessionScope" => {
             "That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again."
         }
         "ExplodeSessionGroupedInstance" => {
-            "A placement of this component sits inside a group, so it opens in the in-context editing mode instead."
+            "This instance sits inside a group, so it opens in the in-context editing mode instead."
         }
         "ExplodeSessionNestedGroup" => {
             "This group is nested inside another one, so it can't be opened for editing directly. Enter its enclosing group first, then drill down to this one."
         }
         "NestedComponentInContext" => {
-            "This nested component can't open for editing here — its placement is mirrored, unevenly scaled, or inside a group. Explode the instance, or make it unique, to edit its parts."
+            "This nested component can't open for editing here — its placement is unevenly scaled or inside a group. Explode the instance, or make it unique, to edit its parts."
         }
+        "EnterRefused" => "Hew couldn't open that for editing.",
         "NothingToUndo" => "Nothing to undo.",
         "NothingToRedo" => "Nothing to redo.",
         "InverseFailed" => {
@@ -392,6 +435,12 @@ pub fn ui_copy(code: &str) -> Option<&'static str> {
         "TransactionGestureUnbalanced" => {
             "A connected tool left a drawing step unfinished at the end of its batch, so the whole batch was discarded and the model was left unchanged."
         }
+        "CompoundTokenMismatch" => {
+            "Hew lost track of a plugin's work in progress. Nothing was changed; if this keeps happening, use Report Bug."
+        }
+        "DocumentBusy" => {
+            "A plugin is still working on this model. Wait for it to finish, or cancel it from the notice at the top of the window."
+        }
         "UnknownTag" => "That tag doesn't exist in this model. Check the tag name and try again.",
         "InvalidAttrName" => {
             "Attribute names need both a namespace and a key. Give the attribute a non-empty name and try again."
@@ -404,6 +453,9 @@ pub fn ui_copy(code: &str) -> Option<&'static str> {
         }
         "UnknownAttr" => {
             "That attribute doesn't exist on this item, so there was nothing to remove."
+        }
+        "InvalidGeoReference" => {
+            "That geo-location has a number that isn't finite or a unit size that isn't above zero, so it wasn't set. Fix the value and try again."
         }
         "NotAContainer" => "This file isn't a Hew document. Pick a .hew file saved by Hew.",
         "Incomplete" => {
@@ -479,11 +531,23 @@ pub fn ui_copy(code: &str) -> Option<&'static str> {
         "BadLibraryMeta" => {
             "Hew's own request to the model kernel carried malformed library-item metadata. If this keeps happening, use Report Bug."
         }
+        "BadLibrary" => {
+            "Hew's own request to the model kernel carried a malformed Library listing. If this keeps happening, use Report Bug."
+        }
+        "UnknownLibraryItem" => {
+            "That part's Library item is no longer in the Library, so it can't be updated."
+        }
+        "LoadFailed" => {
+            "The Library item couldn't be read, so the part wasn't updated. The Library file may be damaged."
+        }
         "BadSelection" => {
             "Hew's own request to the model kernel carried a malformed selection. If this keeps happening, use Report Bug."
         }
         "BadCount" => {
             "Hew's own request to the model kernel asked for an invalid copy count. If this keeps happening, use Report Bug."
+        }
+        "BadFlip" => {
+            "Hew's own request to the model kernel carried a malformed flip plane or copy choice. If this keeps happening, use Report Bug."
         }
         "BadAnchor" => {
             "Hew's own request to the model kernel carried a malformed snap point. If this keeps happening, use Report Bug."
@@ -509,12 +573,141 @@ pub fn ui_copy(code: &str) -> Option<&'static str> {
         "ImageTooBig" => {
             "That picture would be too big to place: each side can be at most 1,000,000 m. Drag it out smaller or type a smaller width."
         }
+        "GRANT" => {
+            "A plugin could not connect because its permissions were unreadable. Reinstall the plugin, or use Report Bug if this keeps happening."
+        }
+        "REGISTER" => {
+            "A plugin's commands could not be added: its manifest declares a command Hew cannot accept. Update or reinstall the plugin."
+        }
+        "FORWARD" => {
+            "A plugin command's answer could not be delivered. If this keeps happening, use Report Bug."
+        }
+        "SELECTION" => {
+            "The selection could not be shared with a connected program. If this keeps happening, use Report Bug."
+        }
+        "ISOLATION" => {
+            "What is isolated could not be shared with a connected program. If this keeps happening, use Report Bug."
+        }
+        "CONTEXT" => {
+            "What is open for editing could not be shared with a connected program. If this keeps happening, use Report Bug."
+        }
         "BadRenderMode" => {
             "The view mode must be shaded, xray or wireframe. If this keeps happening, use Report Bug."
         }
         "REPLAY" => {
             "This recorded session couldn't be replayed. If this keeps happening, use Report Bug."
         }
+        "EmptySpec" => "Select the edges to fillet first.",
+        "BlendNeedsSolid" => "Fillet needs a solid. This object has gaps.",
+        "EdgeIsSmooth" => "That edge is already smooth.",
+        "UnsupportedEdge" => "This edge can't be filleted yet.",
+        "UnsupportedVertex" => "Can't blend this corner. Try these edges one at a time.",
+        "RadiusTooLarge" => "That radius doesn't fit here. Try a smaller one.",
+        "ProfileTooWide" => {
+            "This profile is wider than the face it has to fit on. Try a smaller profile or a smaller size."
+        }
+        "ProfileNeedsConvexEdge" => "A cove needs an outside edge.",
+        "BullnoseNeedsParallelSides" => "A bullnose needs two parallel edges of one face.",
+        "InvalidProfile" => "This profile shape isn't valid. Redraw it as one open chain.",
+        "UnknownProfile" => "That profile isn't built in. Pick one from the profile list.",
+        "RenderFailed" => "Couldn't draw the preview picture. Try again.",
+        "StopOutOfRange" => {
+            "A stop or radius point has to sit on the edge, farther from its end than the radius."
+        }
+        "Obstructed" => "The fillet would cut into other geometry.",
+        "SegmentsOutOfRange" => "Use between 2 and 96 segments.",
+        "NonUniformInstance" => "Make this component unique, or reset its scale, to fillet it.",
+        "BlendModified" => {
+            "This fillet has been changed and can't be edited. It's ordinary geometry now."
+        }
+        "UnknownBlend" => "That face isn't part of a fillet.",
+        "BlendDegenerate" => "That fillet didn't produce a valid solid. The model is unchanged.",
+        "CornerNotBlendable" => "Only a corner where two straight lines meet can be rounded.",
+        "CornerIsStraight" => "Those lines are in a straight line; there is no corner to round.",
+        "CornerRadiusTooLarge" => "The radius is too large for this corner. Try a smaller radius.",
+        "CornerLeavesFace" => {
+            "The rounded corner would run off the face. Draw the shape farther inside the face, or use a smaller radius."
+        }
+        "DependentBlend" => {
+            "A fillet that runs into this one can't be rebuilt after that change. Change or remove that fillet first."
+        }
+        "BadSpec" => {
+            "Hew's own request to the model kernel carried a malformed shape or path. If this keeps happening, use Report Bug."
+        }
+        "TwistNeedsOpenPath" => "Twist and end scale need an open path.",
+        "SelfIntersecting" => "The result would pass through itself.",
+        "WallTooThick" => "The wall is too thick for this shape. Try a thinner wall.",
+        "OpenProfile" => "Loft needs closed shapes. Close this one first.",
+        "LoftProfileHasHole" => {
+            "Loft needs shapes without holes. Shell the lofted solid to hollow it."
+        }
+        "LoftNeedsTwoProfiles" => "Loft needs at least two shapes, or one shape and a point.",
+        "LoftTooManyRails" => "Loft takes at most two rails.",
+        "RailMissesProfile" => {
+            "Each rail must run through a matching corner or point on every shape you loft between, and two rails must line the shapes up the same way."
+        }
+        "AxisNotInProfilePlane" => {
+            "The axis has to lie in the plane of the shape. Move the axis onto that plane."
+        }
+        "ProjectMisses" => "The shape doesn't land on this object. Aim it at a face.",
+        "ProjectNeedsClosedShape" => "Project needs a closed shape. Close the drawing first.",
+        "WouldSever" => {
+            "That depth would cut the object apart. Use Push/Pull or Subtract to split it."
+        }
+        "UnsupportedShellCorner" => "Can't thicken this corner: its faces don't meet in one point.",
+        "ShapeNeedsSolid" => "This needs a solid. This object has gaps.",
+        "AmountOutOfRange" => "That amount is out of range.",
+        "SmoothTooDense" => {
+            "This shape is too dense for that Smooth level. Try a lower level, or simplify the shape first."
+        }
+        "PathTooShortForCount" => "The path is too short for that many copies.",
+        "CreaseOnSoftEdge" => "Soft seams can't be creased.",
+        "CreaseOnBoundary" => "An edge on an opening can't be creased.",
+        "ShapeDegenerate" => "That change didn't produce a valid solid. The model is unchanged.",
+        "ReshapeRedoDiverged" => "Couldn't redo this change. The model is unchanged.",
+        "TooThinToDeform" => {
+            "Part of this solid is too thin to deform at this size. Deform a shorter piece, or make the thin part thicker."
+        }
+        "PreviewTooLarge" => {
+            "This object is too large to preview. Click or press Enter to apply it anyway."
+        }
+        "BlendFacesFlush" => {
+            "The two surfaces meet smoothly here, with no edge between them, as two pipes of the same size do. There's nothing to round, chamfer, or cove there. Make one part a little larger or smaller."
+        }
+        "NothingToRemove" => "No degenerate faces found.",
+        "NonPlanarInput" => "One of these objects has a face that isn't flat enough to combine.",
+        "DegenerateInput" => {
+            "One of these objects has a face with no area. Use Model Health ▸ Remove degenerate faces first."
+        }
+        "NothingToMend" => "Nothing to mend here: no nearby points, touching parts or small gaps.",
+        "WeldDistanceOutOfRange" => {
+            "That distance for merging points is out of range. Try a distance nearer the one first shown."
+        }
+        "WeldFoldsFaces" => {
+            "Merging those points would fold faces onto each other. Turn on Separate parts that touch at a point too."
+        }
+        "WeldCollapsesObject" => {
+            "Merging points that far apart would leave nothing. Try a smaller distance."
+        }
+        "FillCrossesFaces" => {
+            "Filling this gap would cut through other faces, so it was left open."
+        }
+        "FillRimTooSmall" => "This gap is too small or thin to fill.",
+        "StillOpen" => "Mend would leave this object open, so nothing was changed.",
+        "FoldRemovalPinches" => {
+            "Removing those overlaps would leave parts touching at one point. Turn on Separate parts that touch at a point too."
+        }
+        "WeldFlipsFaces" => {
+            "Merging points that far apart would turn a thin face over onto its neighbor. Try a smaller distance."
+        }
+        "MendOpensObject" => {
+            "Mend would leave this object more open than it is now, so nothing was changed. Try a smaller distance."
+        }
+        "WeldFlattensObject" => {
+            "Merging points that far apart would press the sides of a thin part together. Try a smaller distance."
+        }
+        "BadMendPlan" => "Couldn't read those Mend settings.",
+        "BadHistoryBudget" => "The undo memory limit has to be a size of zero or more.",
         _ => return None,
     })
 }

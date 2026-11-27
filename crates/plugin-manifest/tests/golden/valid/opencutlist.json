@@ -1,0 +1,185 @@
+{
+  "manifest": 1,
+  "id": "com.tinyworkshop.opencutlist",
+  "name": "OpenCutList",
+  "version": "1.0.0",
+  "description": "Cut lists, cutting diagrams, labels, and estimates.",
+  "author": {
+    "name": "Tiny Workshop Design",
+    "url": "https://example.com"
+  },
+  "license": "GPL-3.0-only",
+  "homepage": "https://example.com/opencutlist",
+  "source": "https://github.com/example/opencutlist-hew",
+  "hew": ">=1.4.0",
+  "api": 1,
+  "main": "dist/background.js",
+  "icon": "icon.svg",
+  "requires": [
+    {
+      "id": "org.hew3d.units",
+      "range": "^1.2"
+    }
+  ],
+  "permissions": [
+    "model.read",
+    "model.write",
+    "attributes.write",
+    "view",
+    "files",
+    "clipboard"
+  ],
+  "optionalPermissions": [
+    "network:www.lairdubois.fr",
+    "network:api.opencollective.com"
+  ],
+  "activation": [
+    "on_command",
+    "on_tool",
+    "on_surface_open",
+    "on_document_has_namespace"
+  ],
+  "activationReason": "Shows the cut list as soon as a document opens.",
+  "data": {
+    "version": 2,
+    "migrate": "data.migrate"
+  },
+  "locales": {
+    "default": "en",
+    "catalogs": "locales/"
+  },
+  "agent": {
+    "notes": "agent-notes.md"
+  },
+  "contributes": {
+    "commands": [
+      {
+        "id": "cutlist.generate",
+        "class": "read_only",
+        "summary": "Build the cut list for the selection or the whole model.",
+        "label": {
+          "$t": "command.generate"
+        },
+        "permission": "model.read",
+        "timeout_ms": 120000,
+        "concurrency": "serial",
+        "params": {
+          "type": "object",
+          "properties": {
+            "scope": {
+              "type": "string",
+              "enum": [
+                "selection",
+                "model"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        "result": {
+          "type": "object",
+          "properties": {
+            "parts": {
+              "type": "array"
+            }
+          },
+          "additionalProperties": false
+        },
+        "refusals": [
+          "nothing_to_list"
+        ]
+      },
+      {
+        "id": "parts.set_grain",
+        "class": "mutating",
+        "summary": "Set the grain direction stored on a part."
+      }
+    ],
+    "actions": [
+      {
+        "id": "open",
+        "command": "com.tinyworkshop.opencutlist.cutlist.generate"
+      }
+    ],
+    "toolbars": [
+      {
+        "id": "main",
+        "items": [
+          "open"
+        ]
+      }
+    ],
+    "menus": {
+      "extensions": [
+        {
+          "action": "open"
+        }
+      ]
+    },
+    "tools": [
+      {
+        "id": "pick"
+      }
+    ],
+    "hud": {
+      "tool": "pick"
+    },
+    "panels": [
+      {
+        "id": "parts"
+      }
+    ],
+    "windows": [
+      {
+        "id": "cutlist"
+      }
+    ],
+    "viewportSurfaces": [
+      {
+        "id": "labels"
+      }
+    ],
+    "sheets": [
+      {
+        "id": "parts"
+      }
+    ],
+    "events": [
+      "document_changed"
+    ],
+    "dialogSlots": {
+      "export": [
+        {
+          "id": "x"
+        }
+      ]
+    },
+    "settings": {
+      "units": {
+        "type": "string"
+      }
+    },
+    "printPages": [
+      {
+        "id": "cutlist"
+      }
+    ],
+    "exportFormats": [
+      {
+        "id": "csv",
+        "extensions": [
+          "csv"
+        ]
+      }
+    ],
+    "importFormats": [
+      {
+        "id": "ocl",
+        "extensions": [
+          "ocl"
+        ]
+      }
+    ],
+    "presave": false
+  }
+}

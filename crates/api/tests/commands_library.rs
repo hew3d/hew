@@ -7,13 +7,16 @@
 //! proving the geometry and provenance actually round-trip.
 
 use api::{
-    Connection, DispatchOutcome, Host, LibraryItemEntry, LibraryListing, LibraryReadResult,
-    LibraryWriteResult, LibraryWriteTarget, NoHost, Profile, Refusal, Request, RequestId, Response,
-    codes,
+    Connection, DispatchOutcome, Grant, Host, LibraryItemEntry, LibraryListing, LibraryReadResult,
+    LibraryWriteResult, LibraryWriteTarget, NoHost, Refusal, Request, RequestId, Response, codes,
 };
 use kernel::{AttrTarget, Document, EntityRef, NodeId};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
+
+/// The registry every dispatch in this file runs against.
+static REGISTRY: std::sync::LazyLock<api::Registry> =
+    std::sync::LazyLock::new(api::Registry::protocol_1);
 
 // ----------------------------------------------------------------- fixtures
 
@@ -29,6 +32,7 @@ fn req(id: i64, method: &str, params: Value) -> Request {
 
 fn hello_attach(conn: &mut Connection, doc: &mut Document, host: &mut dyn Host) {
     let DispatchOutcome::Reply(r) = conn.dispatch(
+        &REGISTRY,
         doc,
         host,
         req(0, "hew.meta.hello", json!({ "protocol": 1 })),
@@ -36,7 +40,8 @@ fn hello_attach(conn: &mut Connection, doc: &mut Document, host: &mut dyn Host) 
         panic!("hello replies")
     };
     assert!(r.error.is_none(), "hello failed: {:?}", r.error);
-    let DispatchOutcome::Reply(r) = conn.dispatch(doc, host, req(1, "hew.doc.attach", json!({})))
+    let DispatchOutcome::Reply(r) =
+        conn.dispatch(&REGISTRY, doc, host, req(1, "hew.doc.attach", json!({})))
     else {
         panic!("attach replies")
     };
@@ -51,7 +56,8 @@ fn call(
     method: &str,
     params: Value,
 ) -> Response {
-    let DispatchOutcome::Reply(r) = conn.dispatch(doc, host, req(id, method, params)) else {
+    let DispatchOutcome::Reply(r) = conn.dispatch(&REGISTRY, doc, host, req(id, method, params))
+    else {
         panic!("{method} replies")
     };
     r
@@ -91,7 +97,7 @@ fn call_err(
 }
 
 fn new_conn() -> Connection {
-    Connection::new(Profile::Core, "test")
+    Connection::new(Grant::core(), "test")
 }
 
 fn ground_rect(corner_a: [f64; 3], corner_b: [f64; 3]) -> Value {
@@ -251,6 +257,7 @@ impl Host for FakeHost {
                 let dir = match category {
                     "component" => "Components",
                     "material" => "Materials",
+                    "profile" => "Profiles",
                     _ => "Models",
                 };
                 let slug: String = name.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
@@ -796,6 +803,31 @@ fn save_with_no_selection_saves_the_whole_document_as_a_model_item() {
     assert!(path.starts_with("Models/"), "{path}");
 }
 
+/// A model item is a separate document: it never carries the source
+/// document's id, so documents opened from it do not share that identity.
+#[test]
+fn a_model_item_carries_no_document_id() {
+    let mut conn = new_conn();
+    let mut doc = Document::new();
+    let mut host = FakeHost::default();
+    hello_attach(&mut conn, &mut doc, &mut host);
+    build_box(&mut conn, &mut doc);
+    doc.ensure_document_id([0x7e; 16]);
+
+    call_ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        3,
+        "hew.library.save",
+        json!({"name": "Whole Doc"}),
+    );
+    let (_, bytes) = host.write_log.last().expect("the item was written");
+    let item = Document::load(bytes).expect("the item loads");
+    assert_eq!(item.document_id(), None);
+    assert!(doc.document_id().is_some(), "the source keeps its own");
+}
+
 #[test]
 fn save_return_bytes_includes_the_item_bytes_only_when_asked() {
     let mut conn = new_conn();
@@ -976,4 +1008,1316 @@ fn base64_encode(bytes: &[u8]) -> String {
         }
     }
     out
+}
+
+// ======================================================== profile items
+//
+// Saving a profile (`profile_chain`) belongs to a Preview feature
+// (`fillet-profiles` in preview-features.json): these run in a preview
+// build only; a production build refuses the parameter `preview_only`
+// (preview_wall.rs).
+
+/// Draws a three-point open chain in the ground plane and returns the
+/// sketch id with the two edge locators in drawing order.
+#[cfg(hew_preview)]
+fn draw_profile_chain(conn: &mut Connection, doc: &mut Document) -> (String, Vec<Value>) {
+    let r = call_ok(
+        conn,
+        doc,
+        &mut NoHost,
+        20,
+        "hew.sketch.draw_line",
+        json!({
+            "plane": { "ground": true },
+            "points": [[0.0, 0.05, 0.0], [-0.02, 0.02, 0.0], [-0.05, 0.0, 0.0]]
+        }),
+    );
+    let sketch = r["results"][0]["sketch"].as_str().unwrap().to_string();
+    let edges = vec![
+        json!({ "from": [0.0, 0.05, 0.0], "to": [-0.02, 0.02, 0.0] }),
+        json!({ "from": [-0.02, 0.02, 0.0], "to": [-0.05, 0.0, 0.0] }),
+    ];
+    (sketch, edges)
+}
+
+#[test]
+#[cfg(hew_preview)]
+fn save_a_profile_chain_then_fillet_with_it_and_replace_it() {
+    let mut conn = new_conn();
+    let mut doc = Document::new();
+    let mut host = FakeHost::default();
+    hello_attach(&mut conn, &mut doc, &mut host);
+    let (sketch, edges) = draw_profile_chain(&mut conn, &mut doc);
+    let saved = call_ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        21,
+        "hew.library.save",
+        json!({ "name": "My Edge", "profile_chain": { "sketch": sketch, "edges": edges } }),
+    );
+    let path = saved["path"].as_str().unwrap().to_string();
+    let id = saved["id"].as_str().unwrap().to_string();
+    assert!(path.starts_with("Profiles/"), "{path}");
+    let bytes = host.items.get(&path).unwrap().clone();
+    let summary = item_summary(&bytes);
+    assert!(summary.profile_chain_only);
+    assert_eq!(summary.doc_attrs["hew.library"]["category"], "profile");
+
+    // Fillet a box edge with the saved profile, by item id.
+    let b = build_box(&mut conn, &mut doc);
+    let object = api::IdResolver::new(&doc)
+        .public_of(&doc, &EntityRef::Object(b))
+        .unwrap();
+    let r = call_ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        22,
+        "hew.solid.fillet",
+        json!({
+            "edges": [{ "object": object, "from": [0.0, 0.0, 1.0], "to": [1.0, 0.0, 1.0] }],
+            "profile": id,
+            "propagate": "none"
+        }),
+    );
+    assert!((r["results"][0]["size"].as_f64().unwrap() - 0.05).abs() < 1e-9);
+    // An unknown profile still refuses typed.
+    let d = call_err(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        23,
+        "hew.solid.fillet",
+        json!({
+            "edges": [{ "object": object, "from": [0.0, 1.0, 1.0], "to": [1.0, 1.0, 1.0] }],
+            "profile": "no-such-item",
+            "width": 0.1
+        }),
+    );
+    assert_eq!(d["refusal"], "unknown_profile");
+
+    // Replace keeps the id and overwrites the same file.
+    let replaced = call_ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        24,
+        "hew.library.save",
+        json!({
+            "name": "My Edge v2",
+            "replace": id,
+            "profile_chain": { "sketch": sketch, "edges": edges }
+        }),
+    );
+    assert_eq!(replaced["path"], json!(path));
+    assert_eq!(replaced["id"], json!(id));
+    assert_eq!(host.items.len(), 1);
+}
+
+#[test]
+#[cfg(hew_preview)]
+fn a_profile_item_cannot_be_inserted_and_save_refuses_a_bad_chain() {
+    let mut conn = new_conn();
+    let mut doc = Document::new();
+    let mut host = FakeHost::default();
+    hello_attach(&mut conn, &mut doc, &mut host);
+    let (sketch, edges) = draw_profile_chain(&mut conn, &mut doc);
+    let saved = call_ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        21,
+        "hew.library.save",
+        json!({ "name": "Edge", "profile_chain": { "sketch": sketch, "edges": edges } }),
+    );
+    let d = call_err(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        22,
+        "hew.library.insert",
+        json!({ "item": saved["id"] }),
+    );
+    assert_eq!(d["refusal"], "profile_not_insertable");
+    // One edge of a two-edge chain is still a chain; two unconnected are not.
+    let d = call_err(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        23,
+        "hew.library.save",
+        json!({ "name": "Bad", "profile_chain": { "sketch": sketch, "edges": [] } }),
+    );
+    assert_eq!(d["refusal"], "invalid_profile");
+    // Two edges that do not meet are not a chain either.
+    let d = call_err(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        24,
+        "hew.library.save",
+        json!({
+            "name": "Bad",
+            "profile_chain": { "sketch": sketch, "edges": [edges[0].clone(), edges[0].clone()] }
+        }),
+    );
+    assert_eq!(d["refusal"], "invalid_profile");
+}
+
+// ============================================ profile items, both builds
+//
+// A Library folder can hold profile items (a preview build wrote them, or
+// a file was copied in). A production build tolerates them: it lists none,
+// refuses to describe, edit or write over one (`preview_only`, naming the
+// feature), and refuses to place one with copy that names no preview
+// feature. A preview build serves them like any other item.
+
+/// A Library holding one component item and one profile item.
+fn library_with_a_profile() -> FakeHost {
+    let mut host = FakeHost::default();
+    host.seed(
+        "Components/a.hew",
+        bare_item_bytes("id-a", "A", "component"),
+    );
+    host.seed(
+        "Profiles/edge.hew",
+        bare_item_bytes("id-p", "Edge", "profile"),
+    );
+    host
+}
+
+#[test]
+#[cfg(not(hew_preview))]
+fn a_production_build_tolerates_profile_items_and_serves_none() {
+    let mut conn = new_conn();
+    let mut doc = Document::new();
+    let mut host = library_with_a_profile();
+    hello_attach(&mut conn, &mut doc, &mut host);
+    let wall = |d: &Value, what: &str| {
+        assert_eq!(d["refusal"], "preview_only", "{what}: {d}");
+        assert_eq!(d["detail"]["feature"], "fillet", "{what}: {d}");
+        assert!(
+            d["explanation"]
+                .as_str()
+                .unwrap()
+                .contains("Fillet and Chamfer"),
+            "{what}: {d}"
+        );
+    };
+
+    // Listing leaves the profile out, filtered or not.
+    let listed = call_ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        2,
+        "hew.library.list",
+        json!({}),
+    );
+    let paths: Vec<&str> = listed["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(paths, ["Components/a.hew"]);
+    let d = call_err(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        3,
+        "hew.library.list",
+        json!({ "category": "profile" }),
+    );
+    wall(&d, "list by category");
+
+    // Describe and update_meta refuse it; the component still answers.
+    for (id, method, params) in [
+        (4, "hew.library.describe", json!({ "item": "id-p" })),
+        (
+            5,
+            "hew.library.describe",
+            json!({ "item": "Profiles/edge.hew" }),
+        ),
+        (
+            6,
+            "hew.library.update_meta",
+            json!({ "item": "id-p", "name": "X" }),
+        ),
+    ] {
+        let d = call_err(&mut conn, &mut doc, &mut host, id, method, params);
+        wall(&d, method);
+    }
+    call_ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        7,
+        "hew.library.describe",
+        json!({ "item": "id-a" }),
+    );
+
+    // Saving as a profile refuses, and so does writing over one, whatever
+    // the category asked for.
+    for (id, params) in [
+        (8, json!({ "name": "P", "category": "profile" })),
+        (9, json!({ "name": "P", "replace": "id-p" })),
+        (
+            10,
+            json!({ "name": "P", "replace": "id-p", "category": "model" }),
+        ),
+        (
+            11,
+            json!({ "name": "P", "replace": "id-p", "category": "profile" }),
+        ),
+    ] {
+        let d = call_err(
+            &mut conn,
+            &mut doc,
+            &mut host,
+            id,
+            "hew.library.save",
+            params.clone(),
+        );
+        wall(&d, &format!("save {params}"));
+    }
+    let d = call_err(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        12,
+        "hew.doc.transact",
+        json!({ "commands": [{ "method": "hew.library.save", "params": { "name": "P", "replace": "id-p" } }] }),
+    );
+    wall(&d, "save replace in a transaction");
+    assert!(host.write_log.is_empty(), "nothing was written");
+
+    // A typo is told the categories this build takes.
+    let d = call(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        13,
+        "hew.library.save",
+        json!({ "name": "P", "category": "profiles" }),
+    );
+    let message = d.error.unwrap().message;
+    assert!(message.contains("\"model\""), "{message}");
+    assert!(!message.contains("\"profile\""), "{message}");
+
+    // Placing it refuses, in words that name no preview feature.
+    for (id, params) in [
+        (14, json!({ "item": "id-p" })),
+        (
+            15,
+            json!({ "bytes_base64": base64_encode(&bare_item_bytes("id-q", "Q", "profile")) }),
+        ),
+    ] {
+        let d = call_err(
+            &mut conn,
+            &mut doc,
+            &mut host,
+            id,
+            "hew.library.insert",
+            params,
+        );
+        assert_eq!(d["refusal"], "profile_not_insertable");
+        let copy = d["explanation"].as_str().unwrap();
+        assert_eq!(copy, api::preview::GATED_API_COPY[0].3);
+        for f in api::preview::features() {
+            assert!(!copy.contains(&f.name), "{copy} names {}", f.name);
+            for t in &f.tools {
+                assert!(!copy.contains(t.as_str()), "{copy} names {t}");
+            }
+        }
+    }
+    assert_eq!(host.items.len(), 2, "the profile file is still there");
+}
+
+#[test]
+#[cfg(hew_preview)]
+fn a_preview_build_serves_profile_items() {
+    let mut conn = new_conn();
+    let mut doc = Document::new();
+    let mut host = library_with_a_profile();
+    hello_attach(&mut conn, &mut doc, &mut host);
+    let listed = call_ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        2,
+        "hew.library.list",
+        json!({ "category": "profile" }),
+    );
+    assert_eq!(listed["items"][0]["path"], "Profiles/edge.hew");
+    let d = call_ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        3,
+        "hew.library.describe",
+        json!({ "item": "id-p" }),
+    );
+    assert_eq!(d["category"], "profile");
+    call_ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        4,
+        "hew.library.update_meta",
+        json!({ "item": "id-p", "name": "Edge 2" }),
+    );
+    let d = call_err(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        5,
+        "hew.library.insert",
+        json!({ "item": "id-p" }),
+    );
+    assert_eq!(d["refusal"], "profile_not_insertable");
+    assert_eq!(d["explanation"], api::preview::GATED_API_COPY[0].2);
+}
+
+// ============================================ Library updates (OW-2)
+
+/// The public id of `entity` in `doc`.
+fn public(doc: &Document, entity: EntityRef) -> String {
+    api::IdResolver::new(doc)
+        .public_of(doc, &entity)
+        .expect("a live entity")
+}
+
+/// A library with one component item ("box-id"), saved the way
+/// `hew.library.save` saves one: through the command, from a box.
+fn library_with_a_box() -> FakeHost {
+    let mut conn = new_conn();
+    let mut doc = Document::new();
+    let mut host = FakeHost::default();
+    hello_attach(&mut conn, &mut doc, &mut host);
+    let root = build_box(&mut conn, &mut doc);
+    let id = public(&doc, EntityRef::Object(root));
+    let saved = call_ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        3,
+        "hew.library.save",
+        json!({ "selection": [id], "name": "Box" }),
+    );
+    // Rename the item's id to a fixed one for the tests (a replace keeps
+    // whatever id the item has).
+    let path = saved["path"].as_str().unwrap().to_string();
+    let mut item = Document::load(&host.items[&path]).unwrap();
+    item.attr_set(
+        AttrTarget::Document,
+        "hew.library",
+        "id",
+        kernel::AttrValue::Text("box-id".into()),
+    )
+    .unwrap();
+    host.items.insert(path, item.save());
+    host
+}
+
+/// A document holding two inserted copies of "box-id": the connection,
+/// the document, and the linked definition's public id.
+fn model_with_two_boxes(host: &mut FakeHost) -> (Connection, Document, String) {
+    let mut conn = new_conn();
+    let mut doc = Document::new();
+    hello_attach(&mut conn, &mut doc, host);
+    for (n, x) in [(2, 0.0), (3, 3.0)] {
+        call_ok(
+            &mut conn,
+            &mut doc,
+            host,
+            n,
+            "hew.library.insert",
+            json!({ "item": "box-id", "at": [x, 0.0, 0.0] }),
+        );
+    }
+    assert_eq!(doc.component_ids().len(), 1);
+    let def = public(&doc, EntityRef::Component(doc.component_ids()[0]));
+    (conn, doc, def)
+}
+
+/// Edits "box-id" in the Library from a second document: insert it, raise
+/// the box, and save it back over the item with `replace`.
+fn edit_the_box_in_the_library(host: &mut FakeHost, rise: f64) {
+    let mut conn = new_conn();
+    let mut doc = Document::new();
+    hello_attach(&mut conn, &mut doc, host);
+    call_ok(
+        &mut conn,
+        &mut doc,
+        host,
+        2,
+        "hew.library.insert",
+        json!({ "item": "box-id" }),
+    );
+    let c = doc.component_ids()[0];
+    let o = doc.def_members(c).unwrap()[0];
+    let top = doc
+        .object(o)
+        .unwrap()
+        .faces()
+        .iter()
+        .find(|(_, f)| f.plane.normal().z > 0.9)
+        .map(|(id, _)| id)
+        .unwrap();
+    doc.apply_def_op(
+        c,
+        o,
+        kernel::KernelOp::PushPull {
+            face: top,
+            distance: rise,
+        },
+    )
+    .unwrap();
+    let inst = public(&doc, EntityRef::Instance(doc.instance_ids()[0]));
+    call_ok(
+        &mut conn,
+        &mut doc,
+        host,
+        3,
+        "hew.library.save",
+        json!({ "selection": [inst], "name": "Box", "replace": "box-id" }),
+    );
+}
+
+fn states(status: &Value) -> Vec<String> {
+    status["links"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| l["state"].as_str().unwrap().to_string())
+        .collect()
+}
+
+#[test]
+fn every_save_writes_prints_and_the_source_is_in_step_with_its_item() {
+    let mut conn = new_conn();
+    let mut doc = Document::new();
+    let mut host = FakeHost::default();
+    hello_attach(&mut conn, &mut doc, &mut host);
+    let root = build_box(&mut conn, &mut doc);
+    // An instance selection, so the source definition is stamped.
+    let (_, inst, _) = doc.make_component(&[NodeId::Object(root)]).unwrap();
+    let inst_id = public(&doc, EntityRef::Instance(inst));
+    let saved = call_ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        4,
+        "hew.library.save",
+        json!({ "selection": [inst_id], "name": "Box" }),
+    );
+    let bytes = &host.items[saved["path"].as_str().unwrap()];
+    let summary = item_summary(bytes);
+    let prints = summary.doc_attrs["hew.library"]["prints"]
+        .as_object()
+        .expect("the item carries its prints");
+    assert_eq!(prints.len(), 1);
+    let sid = summary.first_component_sid.clone().unwrap();
+    let print = prints[&sid].as_str().unwrap();
+    assert!(print.starts_with("p1:"), "{print}");
+    // The source definition's base is that print.
+    let c = doc.component_ids()[0];
+    let stamp = doc.library_stamp(c).unwrap();
+    assert_eq!(stamp.print.as_deref(), Some(print));
+    let status = call_ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        5,
+        "hew.library.status",
+        json!({}),
+    );
+    assert_eq!(states(&status), vec!["in_step"]);
+    assert_eq!(status["links"][0]["copies"], 1);
+    assert_eq!(status["links"][0]["locked"], false);
+    assert_eq!(status["links"][0]["item"], saved["id"]);
+}
+
+#[test]
+fn saving_two_parts_links_each_to_its_own_definition_and_both_read_in_step() {
+    let mut conn = new_conn();
+    let mut doc = Document::new();
+    let mut host = FakeHost::default();
+    hello_attach(&mut conn, &mut doc, &mut host);
+    // Two different parts: a 1 m box and a box twice as wide.
+    let a = build_box(&mut conn, &mut doc);
+    let wide = call_ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        3,
+        "hew.doc.transact",
+        json!({
+            "commands": [
+                { "method": "hew.sketch.draw_rect", "as": "profile", "params": ground_rect([4.0, 0.0, 0.0], [6.0, 1.0, 0.0]) },
+                { "method": "hew.solid.extrude", "params": {
+                    "region": { "$ref": "profile#/region_id" }, "distance": 1.0
+                }}
+            ]
+        }),
+    );
+    let Some(EntityRef::Object(b)) =
+        api::IdResolver::new(&doc).resolve(wide["results"][1]["object_id"].as_str().unwrap())
+    else {
+        panic!("expected an object");
+    };
+    let (_, ai, _) = doc.make_component(&[NodeId::Object(a)]).unwrap();
+    let (_, bi, _) = doc.make_component(&[NodeId::Object(b)]).unwrap();
+    let sel = [
+        public(&doc, EntityRef::Instance(ai)),
+        public(&doc, EntityRef::Instance(bi)),
+    ];
+    let saved = call_ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        4,
+        "hew.library.save",
+        json!({ "selection": sel, "name": "Pair" }),
+    );
+    let bytes = &host.items[saved["path"].as_str().unwrap()];
+    let prints = item_summary(bytes).doc_attrs["hew.library"]["prints"].clone();
+    // Each definition's base is the item's print of its own copy.
+    let mut sids = Vec::new();
+    for c in doc.component_ids() {
+        let stamp = doc.library_stamp(c).unwrap();
+        let sid = stamp.def_sid.unwrap().to_string();
+        assert_eq!(stamp.print.as_deref(), prints[&sid].as_str());
+        sids.push(sid);
+    }
+    assert_ne!(sids[0], sids[1], "two definitions, two ids");
+    let status = call_ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        5,
+        "hew.library.status",
+        json!({}),
+    );
+    assert_eq!(states(&status), vec!["in_step", "in_step"]);
+}
+
+#[test]
+fn a_newer_item_reads_library_newer_and_update_all_brings_it_in_step() {
+    let mut host = library_with_a_box();
+    let (mut conn, mut doc, def) = model_with_two_boxes(&mut host);
+    let status = call_ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        10,
+        "hew.library.status",
+        json!({}),
+    );
+    assert_eq!(states(&status), vec!["in_step"]);
+    assert_eq!(status["links"][0]["definition"], def);
+    assert_eq!(status["links"][0]["copies"], 2);
+
+    edit_the_box_in_the_library(&mut host, 0.5);
+    let status = call_ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        11,
+        "hew.library.status",
+        json!({}),
+    );
+    assert_eq!(states(&status), vec!["library_newer"]);
+
+    let poses: Vec<_> = doc
+        .instance_ids()
+        .iter()
+        .map(|&i| doc.instance_pose(i).unwrap().to_affine())
+        .collect();
+    let before = doc.state_hash();
+    let out = call_ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        12,
+        "hew.library.update",
+        json!({ "all": true }),
+    );
+    let out = &out["results"][0];
+    assert_eq!(out["updated"], json!([def]));
+    assert_eq!(out["skipped"], json!([]));
+    assert_eq!(out["kept"], json!([]));
+    let after_poses: Vec<_> = doc
+        .instance_ids()
+        .iter()
+        .map(|&i| doc.instance_pose(i).unwrap().to_affine())
+        .collect();
+    assert_eq!(poses, after_poses, "nothing moves");
+    let status = call_ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        13,
+        "hew.library.status",
+        json!({}),
+    );
+    assert_eq!(states(&status), vec!["in_step"]);
+
+    // One undo entry takes it all back.
+    call_ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        14,
+        "hew.history.undo",
+        json!({}),
+    );
+    assert_eq!(doc.state_hash(), before);
+    let status = call_ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        15,
+        "hew.library.status",
+        json!({}),
+    );
+    assert_eq!(states(&status), vec!["library_newer"]);
+}
+
+#[test]
+fn status_lists_a_part_that_is_open_for_editing() {
+    let mut host = library_with_a_box();
+    let (mut conn, mut doc, def) = model_with_two_boxes(&mut host);
+    doc.open_explode_session(doc.instance_ids()[0]).unwrap();
+    let status = call_ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        10,
+        "hew.library.status",
+        json!({}),
+    );
+    assert_eq!(states(&status), vec!["in_step"]);
+    assert_eq!(status["links"][0]["definition"], def);
+
+    let o = doc.explode_session_objects().expect("open")[0];
+    let top = doc
+        .object(o)
+        .unwrap()
+        .faces()
+        .iter()
+        .find(|(_, f)| f.plane.normal().z > 0.9)
+        .map(|(id, _)| id)
+        .unwrap();
+    doc.apply_object_op(
+        o,
+        kernel::KernelOp::PushPull {
+            face: top,
+            distance: 0.5,
+        },
+    )
+    .unwrap();
+    let status = call_ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        11,
+        "hew.library.status",
+        json!({}),
+    );
+    assert_eq!(states(&status), vec!["edited_here"]);
+}
+
+#[test]
+fn renaming_an_item_announces_nothing() {
+    let mut host = library_with_a_box();
+    let (mut conn, mut doc, _) = model_with_two_boxes(&mut host);
+    call_ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        10,
+        "hew.library.update_meta",
+        json!({ "item": "box-id", "name": "Oak box" }),
+    );
+    let status = call_ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        11,
+        "hew.library.status",
+        json!({}),
+    );
+    assert_eq!(states(&status), vec!["in_step"]);
+    // And a third insert still reuses the definition.
+    let third = call_ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        12,
+        "hew.library.insert",
+        json!({ "item": "box-id", "at": [9.0, 0.0, 0.0] }),
+    );
+    assert_eq!(third["results"][0]["definitions_reused"], 1);
+}
+
+#[test]
+fn an_item_saved_before_prints_is_printed_from_its_file() {
+    let mut host = library_with_a_box();
+    // Strip the prints, as an item saved by 1.4 has none.
+    let path = host.items.keys().next().unwrap().clone();
+    let mut item = Document::load(&host.items[&path]).unwrap();
+    item.attr_delete(AttrTarget::Document, "hew.library", Some("prints"))
+        .unwrap();
+    host.items.insert(path, item.save());
+    let (mut conn, mut doc, _) = model_with_two_boxes(&mut host);
+    let status = call_ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        10,
+        "hew.library.status",
+        json!({}),
+    );
+    assert_eq!(states(&status), vec!["in_step"]);
+}
+
+#[test]
+fn a_part_changed_here_reads_edited_here_and_update_all_leaves_it() {
+    let mut host = library_with_a_box();
+    let (mut conn, mut doc, _) = model_with_two_boxes(&mut host);
+    let c = doc.component_ids()[0];
+    let o = doc.def_members(c).unwrap()[0];
+    let top = doc
+        .object(o)
+        .unwrap()
+        .faces()
+        .iter()
+        .find(|(_, f)| f.plane.normal().z > 0.9)
+        .map(|(id, _)| id)
+        .unwrap();
+    doc.apply_def_op(
+        c,
+        o,
+        kernel::KernelOp::PushPull {
+            face: top,
+            distance: 0.3,
+        },
+    )
+    .unwrap();
+    let status = call_ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        10,
+        "hew.library.status",
+        json!({}),
+    );
+    assert_eq!(states(&status), vec!["edited_here"]);
+    let out = call_ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        11,
+        "hew.library.update",
+        json!({ "all": true }),
+    );
+    assert_eq!(out["results"][0]["updated"], json!([]));
+    edit_the_box_in_the_library(&mut host, 0.5);
+    let status = call_ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        12,
+        "hew.library.status",
+        json!({}),
+    );
+    assert_eq!(states(&status), vec!["both_changed"]);
+}
+
+#[test]
+fn update_refusals_are_typed_and_change_nothing() {
+    let mut host = library_with_a_box();
+    let (mut conn, mut doc, def) = model_with_two_boxes(&mut host);
+    edit_the_box_in_the_library(&mut host, 0.5);
+
+    // Neither or both of definitions/all.
+    for (n, params) in [
+        (10, json!({})),
+        (11, json!({ "all": true, "definitions": [def] })),
+    ] {
+        let r = call(
+            &mut conn,
+            &mut doc,
+            &mut host,
+            n,
+            "hew.library.update",
+            params,
+        );
+        assert_eq!(r.error.unwrap().code, codes::INVALID_PARAMS);
+    }
+    // An id that is not a definition.
+    let d = call_err(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        12,
+        "hew.library.update",
+        json!({ "definitions": ["obj_999999"] }),
+    );
+    assert_eq!(d["refusal"], "unknown_entity");
+
+    // A locked part, named alone: a typed refusal naming the lock.
+    let inst = public(&doc, EntityRef::Instance(doc.instance_ids()[0]));
+    call_ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        13,
+        "hew.entity.lock",
+        json!({ "targets": [inst] }),
+    );
+    let hash_locked = doc.state_hash();
+    let d = call_err(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        14,
+        "hew.library.update",
+        json!({ "definitions": [def] }),
+    );
+    assert_eq!(d["refusal"], "locked_node");
+    assert!(d["detail"]["node"].is_string(), "{d}");
+    assert_eq!(doc.state_hash(), hash_locked);
+    let status = call_ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        15,
+        "hew.library.status",
+        json!({}),
+    );
+    assert_eq!(status["links"][0]["locked"], true);
+    // With all: true the locked part is skipped and named.
+    let out = call_ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        16,
+        "hew.library.update",
+        json!({ "all": true }),
+    );
+    let out = &out["results"][0];
+    assert_eq!(out["updated"], json!([]));
+    assert_eq!(out["skipped"][0]["definition"], def);
+    assert_eq!(out["skipped"][0]["refusal"], "locked_node");
+    assert_eq!(doc.state_hash(), hash_locked);
+
+    // A definition with no Library link.
+    let root = build_box(&mut conn, &mut doc);
+    let (plain, _, _) = doc.make_component(&[NodeId::Object(root)]).unwrap();
+    let plain_id = public(&doc, EntityRef::Component(plain));
+    let d = call_err(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        17,
+        "hew.library.update",
+        json!({ "definitions": [plain_id] }),
+    );
+    assert_eq!(d["refusal"], "unknown_library_item");
+
+    // The item gone from the Library.
+    call_ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        18,
+        "hew.entity.unlock",
+        json!({ "all": true }),
+    );
+    let path = host.items.keys().next().unwrap().clone();
+    host.items.remove(&path);
+    let d = call_err(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        19,
+        "hew.library.update",
+        json!({ "definitions": [def] }),
+    );
+    assert_eq!(d["refusal"], "unknown_library_item");
+    let status = call_ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        20,
+        "hew.library.status",
+        json!({}),
+    );
+    assert_eq!(states(&status), vec!["item_missing"]);
+}
+
+#[test]
+fn status_and_update_need_a_library_host() {
+    let mut conn = new_conn();
+    let mut doc = Document::new();
+    hello_attach(&mut conn, &mut doc, &mut NoHost);
+    let d = call_err(
+        &mut conn,
+        &mut doc,
+        &mut NoHost,
+        2,
+        "hew.library.status",
+        json!({}),
+    );
+    assert_eq!(d["refusal"], "host_capability_missing");
+    let d = call_err(
+        &mut conn,
+        &mut doc,
+        &mut NoHost,
+        3,
+        "hew.library.update",
+        json!({ "all": true }),
+    );
+    assert_eq!(d["refusal"], "host_capability_missing");
+}
+
+mod update_fuzz {
+    use super::*;
+    use proptest::prelude::*;
+
+    #[derive(Debug, Clone)]
+    enum Step {
+        Insert(f64),
+        EditInLibrary(f64),
+        EditHere(f64),
+        Lock(usize),
+        UnlockAll,
+        Update(Vec<usize>),
+        UpdateAll,
+        Undo,
+        Redo,
+    }
+
+    fn arb_step() -> impl Strategy<Value = Step> {
+        prop_oneof![
+            (-5.0f64..5.0).prop_map(Step::Insert),
+            (0.05f64..0.6).prop_map(Step::EditInLibrary),
+            (0.05f64..0.6).prop_map(Step::EditHere),
+            any::<usize>().prop_map(Step::Lock),
+            Just(Step::UnlockAll),
+            proptest::collection::vec(any::<usize>(), 0..3).prop_map(Step::Update),
+            Just(Step::UpdateAll),
+            Just(Step::Undo),
+            Just(Step::Redo),
+        ]
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(32))]
+
+        /// Arbitrary status reads and update calls, among inserts, edits on
+        /// both sides, locks, undo and redo, never corrupt the document: it
+        /// validates after every step (debug builds), reopens, and a refused
+        /// update changes nothing.
+        #[test]
+        fn arbitrary_updates_never_corrupt(steps in proptest::collection::vec(arb_step(), 1..14)) {
+            let mut host = library_with_a_box();
+            let (mut conn, mut doc, _) = model_with_two_boxes(&mut host);
+            for (k, step) in steps.iter().enumerate() {
+                let n = 100 + k as i64;
+                match step {
+                    Step::Insert(x) => {
+                        call(&mut conn, &mut doc, &mut host, n, "hew.library.insert", json!({ "item": "box-id", "at": [x, 0.0, 0.0] }));
+                    }
+                    Step::EditInLibrary(rise) => edit_the_box_in_the_library(&mut host, *rise),
+                    Step::EditHere(rise) => {
+                        if let Some(&c) = doc.component_ids().first()
+                            && let Some(o) = doc.def_members(c).and_then(|m| m.first().copied())
+                            && let Some(top) = doc.object(o).and_then(|obj| obj.faces().iter().find(|(_, f)| f.plane.normal().z > 0.9).map(|(id, _)| id))
+                        {
+                            let _ = doc.apply_def_op(c, o, kernel::KernelOp::PushPull { face: top, distance: *rise });
+                        }
+                    }
+                    Step::Lock(sel) => {
+                        let insts = doc.instance_ids();
+                        if !insts.is_empty() {
+                            let id = public(&doc, EntityRef::Instance(insts[sel % insts.len()]));
+                            call(&mut conn, &mut doc, &mut host, n, "hew.entity.lock", json!({ "targets": [id] }));
+                        }
+                    }
+                    Step::UnlockAll => {
+                        call(&mut conn, &mut doc, &mut host, n, "hew.entity.unlock", json!({ "all": true }));
+                    }
+                    Step::Update(sels) => {
+                        let defs = doc.component_ids();
+                        let ids: Vec<String> = sels
+                            .iter()
+                            .filter(|_| !defs.is_empty())
+                            .map(|s| public(&doc, EntityRef::Component(defs[s % defs.len()])))
+                            .collect();
+                        let before = doc.state_hash();
+                        let r = call(&mut conn, &mut doc, &mut host, n, "hew.library.update", json!({ "definitions": ids }));
+                        if r.error.is_some() {
+                            prop_assert_eq!(doc.state_hash(), before, "a refused update changed the document");
+                        }
+                    }
+                    Step::UpdateAll => {
+                        let r = call(&mut conn, &mut doc, &mut host, n, "hew.library.update", json!({ "all": true }));
+                        prop_assert!(r.error.is_none(), "{:?}", r.error);
+                    }
+                    Step::Undo => {
+                        let _ = doc.undo();
+                    }
+                    Step::Redo => {
+                        let _ = doc.redo();
+                    }
+                }
+                let status = call(&mut conn, &mut doc, &mut host, n + 1000, "hew.library.status", json!({}));
+                prop_assert!(status.error.is_none(), "{:?}", status.error);
+                let back = Document::load(&doc.save());
+                prop_assert!(back.is_ok(), "step {k} ({step:?}): the document does not reopen");
+            }
+        }
+    }
+}
+
+// =============================================== the remote note (7.2, B3)
+//
+// docs/design/shared-library-sources.md 5.2 / 6.5 / 7.2: the note under
+// `hew.library` / `remote` stays only on the item it was stamped on.
+
+/// A note as 6.5 shows it, with `edited` as given.
+fn remote_note(edited: bool) -> Value {
+    json!({
+        "source": "github:hew3d/example",
+        "name": "Example",
+        "path": "Components/chair.hew",
+        "sha256": "ab".repeat(32),
+        "commit": "c0ffee",
+        "license": "CC0-1.0",
+        "fetchedAt": "2026-11-01T00:00:00.000Z",
+        "edited": edited,
+    })
+}
+
+/// `bare_item_bytes` plus a `remote` note.
+fn noted_item_bytes(id: &str, name: &str, category: &str, note: &Value) -> Vec<u8> {
+    let mut doc = Document::load(&bare_item_bytes(id, name, category)).unwrap();
+    doc.attr_set(
+        AttrTarget::Document,
+        "hew.library",
+        "remote",
+        kernel::AttrValue::from_json(note).unwrap(),
+    )
+    .unwrap();
+    doc.save()
+}
+
+/// The `hew.library` / `remote` note of item bytes, as JSON, if any.
+fn note_of(bytes: &[u8]) -> Option<Value> {
+    let item = Document::load(bytes).expect("item bytes load");
+    let dict = item.attr_get(&AttrTarget::Document).unwrap()?;
+    let lib = dict.get("hew.library")?;
+    lib.get("remote").map(|v| v.to_json())
+}
+
+fn last_written(host: &FakeHost) -> &[u8] {
+    &host.write_log.last().expect("something was written").1
+}
+
+/// 7.2 "keep the note, set `edited`": `hew.library.save {replace}` reads
+/// the note from the item it replaces.
+#[test]
+fn save_replace_keeps_the_note_of_the_replaced_item_and_sets_edited() {
+    let mut conn = new_conn();
+    let mut doc = Document::new();
+    let mut host = FakeHost::default();
+    host.seed(
+        "Components/chair.hew",
+        noted_item_bytes("id-chair", "Chair", "component", &remote_note(false)),
+    );
+    hello_attach(&mut conn, &mut doc, &mut host);
+    let root = build_box(&mut conn, &mut doc);
+    let public_id = api::IdResolver::new(&doc)
+        .public_of(&doc, &EntityRef::Object(root))
+        .unwrap();
+
+    call_ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        3,
+        "hew.library.save",
+        json!({"selection": [public_id], "name": "Chair", "replace": "id-chair"}),
+    );
+    let mut expected = remote_note(false);
+    expected["edited"] = json!(true);
+    assert_eq!(note_of(last_written(&host)), Some(expected));
+}
+
+/// The note comes from the replaced item, not from the document being
+/// saved: a whole-document replace whose document carries a stale note of
+/// its own (it was opened from another item) writes the replaced item's.
+#[test]
+fn save_replace_takes_the_note_from_the_replaced_item_not_the_document() {
+    let mut conn = new_conn();
+    let mut doc = Document::new();
+    let mut host = FakeHost::default();
+    host.seed(
+        "Models/house.hew",
+        noted_item_bytes("id-house", "House", "model", &remote_note(false)),
+    );
+    hello_attach(&mut conn, &mut doc, &mut host);
+    build_box(&mut conn, &mut doc);
+    let mut stale = remote_note(true);
+    stale["source"] = json!("github:someone/else");
+    doc.attr_set(
+        AttrTarget::Document,
+        "hew.library",
+        "remote",
+        kernel::AttrValue::from_json(&stale).unwrap(),
+    )
+    .unwrap();
+
+    call_ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        3,
+        "hew.library.save",
+        json!({"name": "House", "replace": "id-house"}),
+    );
+    let mut expected = remote_note(false);
+    expected["edited"] = json!(true);
+    assert_eq!(note_of(last_written(&host)), Some(expected));
+}
+
+/// Replacing an item that has no note must not invent one.
+#[test]
+fn save_replace_of_an_item_without_a_note_writes_none() {
+    let mut conn = new_conn();
+    let mut doc = Document::new();
+    let mut host = FakeHost::default();
+    host.seed(
+        "Components/chair.hew",
+        bare_item_bytes("id-chair", "Chair", "component"),
+    );
+    hello_attach(&mut conn, &mut doc, &mut host);
+    let root = build_box(&mut conn, &mut doc);
+    let public_id = api::IdResolver::new(&doc)
+        .public_of(&doc, &EntityRef::Object(root))
+        .unwrap();
+    call_ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        3,
+        "hew.library.save",
+        json!({"selection": [public_id], "name": "Chair", "replace": "id-chair"}),
+    );
+    assert_eq!(note_of(last_written(&host)), None);
+}
+
+/// 7.2 "drop the note": `hew.library.save` without `replace`. A whole
+/// document opened from a noted item carries the note at document level;
+/// saving it as a new item gets a new id and no note.
+#[test]
+fn save_without_replace_drops_a_note_the_document_carries() {
+    let mut conn = new_conn();
+    let mut doc = Document::new();
+    let mut host = FakeHost::default();
+    hello_attach(&mut conn, &mut doc, &mut host);
+    build_box(&mut conn, &mut doc);
+    doc.attr_set(
+        AttrTarget::Document,
+        "hew.library",
+        "remote",
+        kernel::AttrValue::from_json(&remote_note(false)).unwrap(),
+    )
+    .unwrap();
+
+    call_ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        3,
+        "hew.library.save",
+        json!({"name": "Copy"}),
+    );
+    assert_eq!(note_of(last_written(&host)), None);
+}
+
+/// 7.2 "keep the note, leave `edited`": `hew.library.update_meta`. Seeded
+/// with `edited: true` so a clearing or a setting both show.
+#[test]
+fn update_meta_keeps_the_note_and_leaves_edited_alone() {
+    for edited in [false, true] {
+        let mut conn = new_conn();
+        let mut doc = Document::new();
+        let mut host = FakeHost::default();
+        host.seed(
+            "Components/chair.hew",
+            noted_item_bytes("id-chair", "Chair", "component", &remote_note(edited)),
+        );
+        hello_attach(&mut conn, &mut doc, &mut host);
+        call_ok(
+            &mut conn,
+            &mut doc,
+            &mut host,
+            2,
+            "hew.library.update_meta",
+            json!({"item": "id-chair", "name": "Dining Chair", "collection": "Furniture"}),
+        );
+        assert_eq!(
+            note_of(last_written(&host)),
+            Some(remote_note(edited)),
+            "edited = {edited}"
+        );
+    }
+}
+
+/// 5.2 / 7.2: `hew.library.list` and `describe` gain a `remote` object
+/// (additive), and an item without a note has none.
+#[test]
+fn list_and_describe_report_the_remote_note() {
+    let mut conn = new_conn();
+    let mut doc = Document::new();
+    let mut host = FakeHost::default();
+    host.seed(
+        "Components/chair.hew",
+        noted_item_bytes("id-chair", "Chair", "component", &remote_note(true)),
+    );
+    host.seed(
+        "Components/plain.hew",
+        bare_item_bytes("id-plain", "Plain", "component"),
+    );
+    hello_attach(&mut conn, &mut doc, &mut host);
+
+    let list = call_ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        2,
+        "hew.library.list",
+        json!({}),
+    );
+    let items = list["items"].as_array().unwrap();
+    let chair = items.iter().find(|i| i["id"] == "id-chair").unwrap();
+    let plain = items.iter().find(|i| i["id"] == "id-plain").unwrap();
+    assert_eq!(chair["remote"], remote_note(true));
+    assert!(plain.get("remote").is_none_or(Value::is_null), "{plain}");
+
+    let described = call_ok(
+        &mut conn,
+        &mut doc,
+        &mut host,
+        3,
+        "hew.library.describe",
+        json!({"item": "id-chair"}),
+    );
+    assert_eq!(described["remote"], remote_note(true));
 }

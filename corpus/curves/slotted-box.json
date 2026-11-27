@@ -1,0 +1,250 @@
+{
+  "title": "A 120 x 80 x 30 mm box with a 60 x 16 x 12 mm stadium slot cut into its top",
+  "from": "A pocket with straight sides and half-circle ends: the rim where the slot meets the top face, the floor rim at the bottom of the pocket, and the box's own outer loop around it.",
+  "build": [
+    {
+      "method": "hew.sketch.draw_rect",
+      "as": "base",
+      "params": {"plane": {"ground": true}, "corner_a": [0, 0, 0], "corner_b": ["120mm", "80mm", 0]}
+    },
+    {
+      "method": "hew.solid.extrude",
+      "as": "box",
+      "params": {"region": {"$ref": "base#/region_id"}, "distance": "30mm"}
+    },
+    {
+      "method": "hew.sketch.draw_line",
+      "as": "s1",
+      "params": {
+        "plane": {"origin": [0, 0, "18mm"], "normal": [0, 0, 1]},
+        "points": [["38mm", "32mm", "18mm"], ["82mm", "32mm", "18mm"]]
+      }
+    },
+    {
+      "method": "hew.sketch.draw_arc",
+      "as": "s2",
+      "params": {
+        "plane": {"sketch": {"$ref": "s1#/sketch"}},
+        "center": ["82mm", "40mm", "18mm"],
+        "radius": "8mm",
+        "start_angle": -1.5707963267948966,
+        "end_angle": 1.5707963267948966
+      }
+    },
+    {
+      "method": "hew.sketch.draw_line",
+      "as": "s3",
+      "params": {
+        "plane": {"sketch": {"$ref": "s1#/sketch"}},
+        "points": [["82mm", "48mm", "18mm"], ["38mm", "48mm", "18mm"]]
+      }
+    },
+    {
+      "method": "hew.sketch.draw_arc",
+      "as": "s4",
+      "params": {
+        "plane": {"sketch": {"$ref": "s1#/sketch"}},
+        "center": ["38mm", "40mm", "18mm"],
+        "radius": "8mm",
+        "start_angle": 1.5707963267948966,
+        "end_angle": 4.71238898038469
+      }
+    },
+    {
+      "method": "hew.solid.extrude",
+      "as": "cutter",
+      "params": {"region": {"$ref": "s4#/region_id"}, "distance": "14mm"}
+    },
+    {
+      "method": "hew.solid.subtract",
+      "as": "slotted",
+      "params": {"a": {"$ref": "box#/object_id"}, "b": {"$ref": "cutter#/object_id"}}
+    }
+  ],
+  "cases": [
+    {
+      "id": "slot-rim-round",
+      "note": "The slot's wall is 12 mm tall, so nothing past 12 mm can exist on its rim; up to 11 mm fits.",
+      "method": "hew.solid.fillet",
+      "params": {
+        "edges": [
+          {
+            "face": {"object": {"$ref": "slotted#/result"}, "at": ["60mm", "10mm", "30mm"]},
+            "loop_near": ["60mm", "32mm", "30mm"]
+          }
+        ]
+      },
+      "sizes": ["0.1mm", "1mm", "3mm", "6mm", "11mm", "12mm", "13mm", "20mm"],
+      "fits_to": "11mm",
+      "never_above": "12mm",
+      "volume": "less"
+    },
+    {
+      "id": "slot-rim-chamfer",
+      "note": "The slot's wall is 12 mm tall, so nothing past 12 mm can exist on its rim; up to 11 mm fits.",
+      "method": "hew.solid.chamfer",
+      "params": {
+        "edges": [
+          {
+            "face": {"object": {"$ref": "slotted#/result"}, "at": ["60mm", "10mm", "30mm"]},
+            "loop_near": ["60mm", "32mm", "30mm"]
+          }
+        ]
+      },
+      "sizes": ["0.1mm", "1mm", "3mm", "6mm", "11mm", "12mm", "13mm", "20mm"],
+      "fits_to": "11mm",
+      "never_above": "12mm",
+      "volume": "less"
+    },
+    {
+      "id": "slot-floor-round",
+      "note": "Inside corner at the pocket floor, 16 mm wide with half-circle ends of radius 8 mm: the two side fillets meet at 8 mm, and the end arcs shrink to a point there. 7 mm fits, nothing past 8 mm can exist.",
+      "method": "hew.solid.fillet",
+      "params": {
+        "edges": [{"face": {"object": {"$ref": "slotted#/result"}, "at": ["60mm", "40mm", "18mm"]}}]
+      },
+      "sizes": ["0.1mm", "1mm", "3mm", "6mm", "7mm", "8mm", "9mm", "12mm"],
+      "fits_to": "7mm",
+      "never_above": "8mm",
+      "volume": "more"
+    },
+    {
+      "id": "outer-top-round",
+      "note": "The outer wall is 30 mm tall and the top face has 30 mm between the slot and the nearest end, so 29 mm fits and nothing past 30 mm can exist.",
+      "method": "hew.solid.fillet",
+      "params": {
+        "edges": [
+          {
+            "face": {"object": {"$ref": "slotted#/result"}, "at": ["60mm", "10mm", "30mm"]},
+            "loop_near": ["60mm", "0mm", "30mm"]
+          }
+        ]
+      },
+      "sizes": ["0.1mm", "1mm", "5mm", "10mm", "20mm", "27mm", "29mm", "30mm", "35mm"],
+      "fits_to": "29mm",
+      "never_above": "30mm",
+      "volume": "less"
+    },
+    {
+      "id": "outer-top-chamfer",
+      "note": "The outer wall is 30 mm tall and the top face has 30 mm between the slot and the nearest end, so 29 mm fits and nothing past 30 mm can exist.",
+      "method": "hew.solid.chamfer",
+      "params": {
+        "edges": [
+          {
+            "face": {"object": {"$ref": "slotted#/result"}, "at": ["60mm", "10mm", "30mm"]},
+            "loop_near": ["60mm", "0mm", "30mm"]
+          }
+        ]
+      },
+      "sizes": ["0.1mm", "1mm", "5mm", "10mm", "20mm", "27mm", "29mm", "30mm", "35mm"],
+      "fits_to": "29mm",
+      "never_above": "30mm",
+      "volume": "less"
+    },
+    {
+      "id": "seq-slot-2mm-then-outer-round",
+      "note": "Slot rim rounded at 2 mm first, then the outer top loop swept. The rim blend takes 2 mm of the 30 mm margin, so 27 mm fits; the 30 mm wall still caps it.",
+      "before": [
+        {
+          "method": "hew.solid.fillet",
+          "params": {
+            "edges": [
+              {
+                "face": {"object": {"$ref": "slotted#/result"}, "at": ["60mm", "10mm", "30mm"]},
+                "loop_near": ["60mm", "32mm", "30mm"]
+              }
+            ],
+            "radius": "2mm"
+          }
+        }
+      ],
+      "method": "hew.solid.fillet",
+      "params": {
+        "edges": [
+          {
+            "face": {"object": {"$ref": "slotted#/result"}, "at": ["60mm", "10mm", "30mm"]},
+            "loop_near": ["60mm", "0mm", "30mm"]
+          }
+        ]
+      },
+      "sizes": ["0.1mm", "1mm", "5mm", "10mm", "20mm", "27mm", "29mm", "30mm", "35mm"],
+      "fits_to": "27mm",
+      "never_above": "30mm",
+      "volume": "less"
+    },
+    {
+      "id": "seq-outer-2mm-then-slot-round",
+      "note": "Outer top loop rounded at 2 mm first, then the slot rim swept; the 12 mm slot wall is unchanged.",
+      "before": [
+        {
+          "method": "hew.solid.fillet",
+          "params": {
+            "edges": [
+              {
+                "face": {"object": {"$ref": "slotted#/result"}, "at": ["60mm", "10mm", "30mm"]},
+                "loop_near": ["60mm", "0mm", "30mm"]
+              }
+            ],
+            "radius": "2mm"
+          }
+        }
+      ],
+      "method": "hew.solid.fillet",
+      "params": {
+        "edges": [
+          {
+            "face": {"object": {"$ref": "slotted#/result"}, "at": ["60mm", "10mm", "30mm"]},
+            "loop_near": ["60mm", "32mm", "30mm"]
+          }
+        ]
+      },
+      "sizes": ["0.1mm", "1mm", "3mm", "6mm", "11mm", "12mm", "13mm", "20mm"],
+      "fits_to": "11mm",
+      "never_above": "12mm",
+      "volume": "less"
+    },
+    {
+      "id": "slot-and-outer-together-round",
+      "note": "Both loops in one operation at one size; the slot wall (12 mm) is the tighter limit.",
+      "method": "hew.solid.fillet",
+      "params": {
+        "edges": [
+          {
+            "face": {"object": {"$ref": "slotted#/result"}, "at": ["60mm", "10mm", "30mm"]},
+            "loop_near": ["60mm", "32mm", "30mm"]
+          },
+          {
+            "face": {"object": {"$ref": "slotted#/result"}, "at": ["60mm", "10mm", "30mm"]},
+            "loop_near": ["60mm", "0mm", "30mm"]
+          }
+        ]
+      },
+      "sizes": ["0.1mm", "1mm", "3mm", "6mm", "11mm", "12mm", "13mm", "20mm"],
+      "fits_to": "11mm",
+      "never_above": "12mm",
+      "volume": "less"
+    },
+    {
+      "id": "slot-and-outer-together-chamfer",
+      "note": "Both loops in one operation at one size; the slot wall (12 mm) is the tighter limit.",
+      "method": "hew.solid.chamfer",
+      "params": {
+        "edges": [
+          {
+            "face": {"object": {"$ref": "slotted#/result"}, "at": ["60mm", "10mm", "30mm"]},
+            "loop_near": ["60mm", "32mm", "30mm"]
+          },
+          {
+            "face": {"object": {"$ref": "slotted#/result"}, "at": ["60mm", "10mm", "30mm"]},
+            "loop_near": ["60mm", "0mm", "30mm"]
+          }
+        ]
+      },
+      "sizes": ["0.1mm", "1mm", "3mm", "6mm", "11mm", "12mm", "13mm", "20mm"],
+      "fits_to": "11mm",
+      "never_above": "12mm",
+      "volume": "less"
+    }
+  ]
+}

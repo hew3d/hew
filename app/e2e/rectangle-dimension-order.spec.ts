@@ -1,4 +1,5 @@
 import { test, expect, type Page } from '@playwright/test'
+import { inferenceChip } from './helpers/inferenceChip'
 
 /**
  * A rectangle's two numbers read width across the surface, then height up
@@ -61,14 +62,7 @@ async function click(page: Page, ctx: Ctx, w: [number, number, number]): Promise
 }
 
 /** The inference chip's text (`InferenceTooltip`), or '' when none is shown. */
-async function chip(page: Page): Promise<string> {
-  return page.evaluate(() =>
-    Array.from(document.querySelectorAll('div'))
-      .filter((d) => d.style.zIndex === '20' && d.style.pointerEvents === 'none')
-      .map((e) => e.textContent ?? '')
-      .join(' | '),
-  )
-}
+const chip = inferenceChip
 
 /** The docked VCB's value text for `label`. */
 async function vcb(page: Page, label: string): Promise<string> {

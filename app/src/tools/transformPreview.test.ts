@@ -1,6 +1,15 @@
 import { describe, it, expect } from 'vitest'
 import * as THREE from 'three'
-import { buildPreviewClone, buildSweptPrismPreview } from './transformPreview'
+import {
+  buildInstanceMemberPreviewClone,
+  buildInstancePreviewClone,
+  buildMultiPreviewClone,
+  buildPreviewClone,
+  buildSketchPreviewClone,
+  buildSweptPrismPreview,
+  isSessionGhost,
+  markSessionGhost,
+} from './transformPreview'
 
 /** Count vertices/triangles across all THREE.Mesh instances in an Object3D. */
 function meshTriangleCount(obj: THREE.Object3D): number {
@@ -109,5 +118,73 @@ describe('buildPreviewClone — drag ghosts are never section-clipped', () => {
     expect(cloneMat!.clippingPlanes).toBeNull()
     // The live source material is untouched.
     expect(mat.clippingPlanes).toHaveLength(1)
+  })
+})
+
+describe('every preview builder marks its root as session geometry (the sibling preview mirror reads the mark)', () => {
+  function objectsGroupWith(id: bigint): THREE.Group {
+    const objectsGroup = new THREE.Group()
+    const sub = new THREE.Group()
+    sub.name = `Object_${id}`
+    const geo = new THREE.BufferGeometry()
+    geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array([0, 0, 0, 1, 0, 0, 0, 1, 0]), 3))
+    sub.add(new THREE.Mesh(geo, new THREE.MeshBasicMaterial()))
+    objectsGroup.add(sub)
+    return objectsGroup
+  }
+  function instanceGroup(instanceId: bigint, memberId: bigint): THREE.Group {
+    const g = new THREE.Group()
+    g.matrixAutoUpdate = false
+    g.matrix.makeTranslation(3, 0, 0)
+    const face = new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), new THREE.MeshBasicMaterial())
+    face.name = `InstanceFace_${instanceId}_${memberId}_0`
+    g.add(face)
+    return g
+  }
+
+  it('markSessionGhost / isSessionGhost round-trip on the root only', () => {
+    const root = new THREE.Group()
+    const child = new THREE.Mesh()
+    root.add(child)
+    expect(isSessionGhost(root)).toBe(false)
+    expect(markSessionGhost(root)).toBe(root)
+    expect(isSessionGhost(root)).toBe(true)
+    expect(isSessionGhost(child)).toBe(false)
+  })
+
+  it('buildPreviewClone (Move/Rotate/Scale on a world object)', () => {
+    const clone = buildPreviewClone(objectsGroupWith(5n), 5n)
+    expect(clone).not.toBeNull()
+    expect(isSessionGhost(clone!)).toBe(true)
+  })
+
+  it('buildMultiPreviewClone (a group’s leaves)', () => {
+    const clone = buildMultiPreviewClone(objectsGroupWith(5n), [5n], [instanceGroup(9n, 1n)])
+    expect(clone).not.toBeNull()
+    expect(isSessionGhost(clone!)).toBe(true)
+  })
+
+  it('buildInstancePreviewClone (a component instance)', () => {
+    const clone = buildInstancePreviewClone(instanceGroup(9n, 1n))
+    expect(clone).not.toBeNull()
+    expect(isSessionGhost(clone!)).toBe(true)
+  })
+
+  it('buildInstanceMemberPreviewClone (one member through its instance)', () => {
+    const clone = buildInstanceMemberPreviewClone(instanceGroup(9n, 1n), 9n, 1n)
+    expect(clone).not.toBeNull()
+    expect(isSessionGhost(clone!)).toBe(true)
+  })
+
+  it('buildSketchPreviewClone (a sketch’s line work)', () => {
+    const clone = buildSketchPreviewClone([0, 0, 0, 1, 0, 0])
+    expect(clone).not.toBeNull()
+    expect(isSessionGhost(clone!)).toBe(true)
+  })
+
+  it('buildSweptPrismPreview (Push/Pull)', () => {
+    const prism = buildSweptPrismPreview([0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0], [0, 0, 1], 1)
+    expect(prism).not.toBeNull()
+    expect(isSessionGhost(prism!)).toBe(true)
   })
 })

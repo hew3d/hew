@@ -16,7 +16,7 @@ prefer otherwise.
 ## Scope
 
 The parts of Hew that handle untrusted input are the most valuable
-targets for review: the file importers (`.hew`, `.skp` via OpenSKP,
+targets for review: the file importers (`.hew`, `.skp` via Skpwright,
 `.dae`, `.gltf`) and anything else that parses bytes a user downloaded
 from the internet. Crashes on malformed input are ordinary bugs — file
 them as [issues](https://github.com/hew3d/hew/issues) — unless they are
@@ -24,7 +24,7 @@ exploitable (memory unsafety, resource exhaustion that survives the
 existing caps, sandbox or CSP escapes), in which case report them
 privately as above.
 
-Vulnerabilities in [OpenSKP](https://github.com/hew3d/openskp) can be
+Vulnerabilities in [Skpwright](https://github.com/hew3d/skpwright) can be
 reported the same way in that repository; if you are not sure where a
 `.skp` parsing issue belongs, report it here and it will be routed.
 

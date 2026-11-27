@@ -178,7 +178,7 @@ export const VIEW_LABEL: Record<PrintViewKind, string> = {
     return t`Front`
   },
   get back() {
-    return t`Back`
+    return t({ context: 'view', message: 'Back' })
   },
   get left() {
     return t`Left`

@@ -77,6 +77,7 @@
 //! `region_consume_undo_reversal_property_specs.rs`, per DEVELOPMENT.md's
 //! spec-first rule for cross-cutting restore-machinery changes.
 
+use kernel::trig;
 use kernel::{CurveGeom, Document, FollowMePath, Plane, Point3, SketchId, SketchRegionId, Vec3};
 
 fn only_region(doc: &Document, s: SketchId) -> SketchRegionId {
@@ -100,7 +101,7 @@ fn draw_circle_path(doc: &mut Document, center: Point3, radius: f64) -> FollowMe
     let ring: Vec<Point3> = (0..n)
         .map(|i| {
             let a = std::f64::consts::TAU * i as f64 / n as f64;
-            center + Vec3::new(radius * a.cos(), radius * a.sin(), 0.0)
+            center + Vec3::new(radius * trig::cos(a), radius * trig::sin(a), 0.0)
         })
         .collect();
     let sk = doc.sketch_mut(s).expect("sketch is live");

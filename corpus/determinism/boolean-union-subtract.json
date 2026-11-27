@@ -1,0 +1,14 @@
+{
+  "title": "Two overlapping boxes joined, then drilled by a cylinder",
+  "from": "Booleans: union and subtract, with a round cutter through a flat face.",
+  "build": [
+    {"method": "hew.sketch.draw_rect", "as": "a_base", "params": {"plane": {"ground": true}, "corner_a": [0, 0, 0], "corner_b": ["60mm", "60mm", 0]}},
+    {"method": "hew.solid.extrude", "as": "a", "params": {"region": {"$ref": "a_base#/region_id"}, "distance": "40mm"}},
+    {"method": "hew.sketch.draw_rect", "as": "b_base", "params": {"plane": {"ground": true}, "corner_a": ["40mm", "20mm", 0], "corner_b": ["100mm", "80mm", 0]}},
+    {"method": "hew.solid.extrude", "as": "b", "params": {"region": {"$ref": "b_base#/region_id"}, "distance": "25mm"}},
+    {"method": "hew.solid.union", "as": "joined", "params": {"a": {"$ref": "a#/object_id"}, "b": {"$ref": "b#/object_id"}}},
+    {"method": "hew.sketch.draw_circle", "as": "hole", "params": {"plane": {"ground": true}, "center": ["30mm", "30mm", 0], "radius": "9mm", "segments": 32}},
+    {"method": "hew.solid.extrude", "as": "drill", "params": {"region": {"$ref": "hole#/region_id"}, "distance": "40mm"}},
+    {"method": "hew.solid.subtract", "as": "drilled", "params": {"a": {"$ref": "joined#/result"}, "b": {"$ref": "drill#/object_id"}}}
+  ]
+}

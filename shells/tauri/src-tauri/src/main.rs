@@ -28,7 +28,18 @@ use tauri::{
 // (`read_font_file` takes an opaque token, never a path).
 mod fly_cursor;
 mod fonts;
+// How this copy was installed, and so how it updates. Only the updater reads
+// it; a build without it (no `updater` feature, or a preview build, see
+// build.rs) leaves it unused, which the module itself allows for.
+mod install_channel;
 mod menu_labels;
+// The Preview wall in the native menu: a production build prunes every
+// Preview feature's item (preview-features.json) before attaching it.
+mod preview_menu;
+// Shell code compiled only in a preview build: the plugin install commands.
+#[cfg(hew_preview)]
+mod preview_only;
+mod version;
 
 // The desktop half of `--live` (docs/agents/HEW_API.md §11.2): the local socket
 // transport, the discovery file, and the token gate. See live.rs's
@@ -49,181 +60,18 @@ mod save_panel;
 // The "Open on Phone" relay client + the server setting it is bound to
 // (Settings ▸ Advanced ▸ Server) — see its module doc for why the requests
 // live in Rust rather than behind an HTTP plugin scope.
+mod follow;
 mod relay_client;
+mod remote_fetch;
 mod report_client;
 
-// ---------------------------------------------------------------------------
-// In-app auto-updater (compiled in via the `updater` feature — see Cargo.toml).
-//
-// Talks to the signed `latest.json` published on GitHub Releases: a silent
-// check on launch, plus a manual "Check for Updates" menu item. The whole
-// flow lives shell-side — check, native confirm, download, restart prompt —
-// so the webview is granted no update-related capability, and a
-// `--no-default-features` build (Flathub/winget/AUR, which own their own
-// updates) drops the module, the menu item, and the launch check together.
-// ---------------------------------------------------------------------------
-#[cfg(feature = "updater")]
-mod updater {
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use tauri::{AppHandle, Manager};
-    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
-    use tauri_plugin_updater::UpdaterExt;
-
-    /// Single-flight guard (managed state). The silent launch check and the
-    /// manual "Check for Updates" run independently; without this, an update
-    /// that appears while the user also clicks the menu item would stack two
-    /// dialogs and — on accept — start two concurrent installs writing the same
-    /// target (the macOS bundle swap is not atomic). One flag serializes them.
-    #[derive(Default)]
-    pub struct UpdateGuard(pub AtomicBool);
-
-    /// Run an update check against the configured endpoint — at most one at a
-    /// time. A second call while one is in flight backs off: the launch check
-    /// silently, a manual click with a note.
-    ///
-    /// `interactive` splits the two entry points:
-    ///  - the manual menu item (`true`): always give feedback — report "up to
-    ///    date" and surface errors, so a click is never silent.
-    ///  - the launch check (`false`): stay quiet unless an update is actually
-    ///    available — no popup when current, no error dialog on an offline
-    ///    launch.
-    pub async fn run_check(app: AppHandle, interactive: bool) {
-        if app.state::<UpdateGuard>().0.swap(true, Ordering::SeqCst) {
-            if interactive {
-                let labels = crate::current_menu_labels(&app);
-                info_dialog(
-                    &app,
-                    labels.get("updater:in-progress-title"),
-                    labels.get("updater:in-progress-body"),
-                );
-            }
-            return;
-        }
-        check_and_install(app.clone(), interactive).await;
-        app.state::<UpdateGuard>().0.store(false, Ordering::SeqCst);
-    }
-
-    /// The check → prompt → download → restart flow itself; `run_check`
-    /// serializes calls to it.
-    async fn check_and_install(app: AppHandle, interactive: bool) {
-        let updater = match app.updater() {
-            Ok(updater) => updater,
-            Err(err) => {
-                if interactive {
-                    error_dialog(&app, &format!("Could not start the updater.\n\n{err}"));
-                }
-                return;
-            }
-        };
-        match updater.check().await {
-            Ok(Some(update)) => prompt_and_install(app, update).await,
-            Ok(None) => {
-                if interactive {
-                    info_dialog(
-                        &app,
-                        "You’re up to date",
-                        "Hew is running the latest version.",
-                    );
-                }
-            }
-            Err(err) => {
-                if interactive {
-                    error_dialog(&app, &format!("Could not check for updates.\n\n{err}"));
-                }
-            }
-        }
-    }
-
-    /// Offer the found update; on acceptance, download it and offer a restart.
-    /// Each prompt is a native modal, and the install replaces the running app
-    /// in place (the `.app` bundle on macOS, the NSIS install on Windows, the
-    /// AppImage on Linux).
-    async fn prompt_and_install(app: AppHandle, update: tauri_plugin_updater::Update) {
-        let labels = crate::current_menu_labels(&app);
-        let install = confirm(
-            &app,
-            labels.get("updater:available-title"),
-            &labels
-                .get("updater:available-body")
-                .replace("{version}", &update.version)
-                .replace("{current}", &update.current_version),
-            labels.get("updater:install"),
-            labels.get("updater:later"),
-        )
-        .await;
-        if !install {
-            return;
-        }
-        // Platform note: on macOS and Linux the install returns here and the
-        // restart below is offered (the user may choose "Later"). On Windows
-        // the plugin launches the NSIS/MSI installer and exits the process
-        // immediately, so the restart prompt is macOS/Linux-only in practice —
-        // the Windows path ends the app here. Autosave/crash-recovery covers a
-        // dirty document if that happens.
-        if let Err(err) = update
-            .download_and_install(|_chunk, _total| {}, || {})
-            .await
-        {
-            error_dialog(
-                &app,
-                &labels
-                    .get("updater:failed-body")
-                    .replace("{error}", &err.to_string()),
-            );
-            return;
-        }
-        let restart = confirm(
-            &app,
-            labels.get("updater:installed-title"),
-            labels.get("updater:installed-body"),
-            labels.get("updater:restart"),
-            labels.get("updater:later"),
-        )
-        .await;
-        if restart {
-            app.restart();
-        }
-    }
-
-    /// A modal OK/Cancel, run off the event loop: the dialog plugin forbids its
-    /// blocking API on the main thread (the file pickers take the same
-    /// `spawn_blocking` route). Returns true when the primary button is chosen.
-    async fn confirm(app: &AppHandle, title: &str, body: &str, ok: &str, cancel: &str) -> bool {
-        let app = app.clone();
-        let title = title.to_string();
-        let body = body.to_string();
-        let ok = ok.to_string();
-        let cancel = cancel.to_string();
-        tauri::async_runtime::spawn_blocking(move || {
-            app.dialog()
-                .message(body)
-                .title(title)
-                .kind(MessageDialogKind::Info)
-                .buttons(MessageDialogButtons::OkCancelCustom(ok, cancel))
-                .blocking_show()
-        })
-        .await
-        .unwrap_or(false)
-    }
-
-    /// A non-blocking informational dialog (no decision to wait on).
-    fn info_dialog(app: &AppHandle, title: &str, body: &str) {
-        app.dialog()
-            .message(body)
-            .title(title)
-            .kind(MessageDialogKind::Info)
-            .show(|_| {});
-    }
-
-    /// A non-blocking error dialog.
-    fn error_dialog(app: &AppHandle, body: &str) {
-        app.dialog()
-            .message(body)
-            .title("Update")
-            .kind(MessageDialogKind::Error)
-            .show(|_| {});
-    }
-}
+// The in-app updater and its update window: see the module doc in
+// updater.rs (the IPC contract lives there). `update_state` is the pure part
+// (update.json, the launch decision, the window's payload shapes) and builds
+// everywhere, because the "automatic updates" preference is read by Settings.
+mod update_state;
+#[cfg(hew_updater)]
+mod updater;
 
 /// Manually trigger an update check — the entry point for the in-app menu
 /// bar's "Check for Updates" item (Windows/Linux, where the webview drives the
@@ -231,18 +79,21 @@ mod updater {
 /// no-op when the updater was compiled out.
 #[tauri::command]
 async fn check_for_updates(app: tauri::AppHandle) {
-    #[cfg(feature = "updater")]
+    #[cfg(hew_updater)]
     updater::run_check(app, true).await;
-    #[cfg(not(feature = "updater"))]
+    #[cfg(not(hew_updater))]
     let _ = app;
 }
 
-/// Whether this build carries the auto-updater. The in-app menu bar shows the
-/// "Check for Updates" item only when true, so package-manager builds (which
-/// compile the updater out) never advertise an update path they don't have.
+/// Whether this build carries the update check. The in-app menu bar shows the
+/// "Check for Updates" item only when true. Every channel of a default
+/// production build has it (package-manager copies are told the command to
+/// run), so it is false only for a `--no-default-features` build, which no
+/// shipped package uses, and for a preview build (`HEW_PREVIEW=1`), which
+/// never updates itself (build.rs).
 #[tauri::command]
 fn updater_available() -> bool {
-    cfg!(feature = "updater")
+    cfg!(hew_updater)
 }
 
 // ---------------------------------------------------------------------------
@@ -425,18 +276,10 @@ fn effective_own_slot(app: &tauri::AppHandle, label: &str) -> String {
 /// an explicit user gesture.
 ///
 /// `read_dirs` approves a directory for listing and for reading its files
-/// (and one subdirectory level below it) — requested by `pick_open_path`'s
-/// `approve_dir` flag, which every import-format pick sets (their texture
-/// scan legitimately reads siblings like `textures/wood.png`, though only
-/// COLLADA's actually does) and which the unified Open dialog's pick also
-/// sets unconditionally, since the picked extension isn't known until the
-/// dialog resolves — so a plain `.hew` open now grants this too, unlike the
-/// narrower `.hew`-only open path. A real but bounded widening (read-only,
-/// scoped to a directory the user just navigated to via a native dialog);
-/// tightening `pick_open_path` to gate this on the resolved path's own
-/// extension, so a `.hew`/`.skp`/`.glb`/`.gltf`/`.stl` pick never grants it
-/// at all, is a reasonable follow-up but changes this trust boundary and
-/// hasn't been signed off.
+/// (and one subdirectory level below it). Only a native dialog pick of a
+/// COLLADA file grants this scope: its external texture scan needs siblings
+/// such as `textures/wood.png`. The renderer cannot request this authority
+/// for other formats.
 #[derive(Default)]
 struct ApprovedPaths {
     read_files: HashSet<PathBuf>,
@@ -473,22 +316,33 @@ struct MenuHandles {
 /// clipboard, cleared on quit. `None` until the first copy.
 struct ClipboardState(Mutex<Option<Vec<u8>>>);
 
-/// Store `bytes` as the shared desktop clipboard (Copy/Cut).
+/// Store the request body as the shared desktop clipboard (Copy/Cut). The
+/// bytes ride the raw IPC body, like `write_file_bytes`: a JSON byte array
+/// costs about four bytes of IPC per byte and stalls the webview on a large
+/// selection.
 #[tauri::command]
-fn clipboard_set(app: tauri::AppHandle, bytes: Vec<u8>) -> Result<(), String> {
+fn clipboard_set(app: tauri::AppHandle, request: tauri::ipc::Request<'_>) -> Result<(), String> {
+    let bytes = match request.body() {
+        tauri::ipc::InvokeBody::Raw(bytes) => bytes.clone(),
+        tauri::ipc::InvokeBody::Json(_) => {
+            return Err("clipboard_set expects a raw byte body".to_owned());
+        }
+    };
     let state = app.state::<ClipboardState>();
     let mut guard = state.0.lock().map_err(|e| e.to_string())?;
     *guard = Some(bytes);
     Ok(())
 }
 
-/// Read the shared desktop clipboard (Paste/Paste In Place) — `None` if
-/// nothing has been copied yet in this process.
+/// Read the shared desktop clipboard (Paste/Paste In Place) as a raw IPC
+/// response. An empty response means nothing has been copied yet in this
+/// process (a real copy is never empty: `.hew` item bytes start with a
+/// header).
 #[tauri::command]
-fn clipboard_get(app: tauri::AppHandle) -> Result<Option<Vec<u8>>, String> {
+fn clipboard_get(app: tauri::AppHandle) -> Result<tauri::ipc::Response, String> {
     let state = app.state::<ClipboardState>();
     let guard = state.0.lock().map_err(|e| e.to_string())?;
-    Ok(guard.clone())
+    Ok(tauri::ipc::Response::new(guard.clone().unwrap_or_default()))
 }
 
 /// Monotonic counter for extra document windows ("main-2", "main-3", …).
@@ -499,6 +353,30 @@ struct WindowCounter(u32);
 /// `take_pending_window_open` — the same one-shot shape as
 /// [`PendingRecovery`], just for a plain open instead of a recovery slot.
 struct PendingWindowOpen(HashMap<String, PendingWindowOpenEntry>);
+
+/// Which window asked for each `open_in_new_window` window: `new label ->
+/// opener label`. Unlike [`PendingWindowOpen`] the entry survives the new
+/// window's mount, so a refused open can hand its error back to the window
+/// that asked (`window_open_refused`). Entries drop with their window.
+struct WindowOpeners(HashMap<String, String>);
+
+/// What the shell does with the bookkeeping when a new window reports its
+/// open was refused: forget the window's opener entry and path claim, and
+/// say which window should show the error — `Some(opener)` when that opener
+/// is still alive, `None` when it is gone (the new window then stays and
+/// shows the error itself, but it still holds no file, so its claim goes
+/// too: a later open of the same path must not focus this blank window).
+/// A window with no opener entry is left as it is.
+fn settle_refused_open(
+    openers: &mut HashMap<String, String>,
+    paths: &mut HashMap<String, String>,
+    label: &str,
+    opener_alive: impl Fn(&str) -> bool,
+) -> Option<String> {
+    let opener = openers.remove(label)?;
+    paths.remove(label);
+    opener_alive(&opener).then_some(opener)
+}
 
 /// Which `.hew` file each document window currently has open (label →
 /// canonical path), reported by the webview through `set_document_path`
@@ -577,6 +455,17 @@ fn claim_document_path(app: &tauri::AppHandle, label: &str, path: &str) {
 fn set_document_dirty(app: tauri::AppHandle, window: tauri::WebviewWindow, dirty: bool) {
     if let Ok(mut docs) = app.state::<live::LiveApi>().docs.lock() {
         docs.set_dirty(window.label(), dirty);
+    }
+}
+
+/// Report this window's document's persistent id (`document_id`,
+/// HEW_FILE_FORMAT.md §2), or `None` when it has none — the live API's
+/// `hew.meta.documents` `document_id` field. The webview pushes it after
+/// every open and save, beside `set_document_path`.
+#[tauri::command]
+fn set_document_id(app: tauri::AppHandle, window: tauri::WebviewWindow, id: Option<String>) {
+    if let Ok(mut docs) = app.state::<live::LiveApi>().docs.lock() {
+        docs.set_document_id(window.label(), id);
     }
 }
 
@@ -1285,12 +1174,22 @@ fn set_window_title(
 /// "Known issues" note on `WebviewWindowBuilder::build`). The result is a
 /// zombie window: a frame with no content whose close button does nothing.
 /// An async command runs off the main thread, so the build can complete.
+///
+/// `window` is the window to cascade from; `None` (no window is open, as
+/// after an update restart closed every document and the install then
+/// failed) opens one at the configured default size, centered.
 async fn create_document_window(
     app: &tauri::AppHandle,
-    window: &tauri::WebviewWindow,
+    window: Option<&tauri::WebviewWindow>,
     recover_slot: Option<String>,
     focus: bool,
 ) -> Result<String, String> {
+    if recover_slot
+        .as_deref()
+        .is_some_and(|slot| !valid_recovery_slot(slot))
+    {
+        return Err("invalid recovery slot".into());
+    }
     let label = {
         let state = app.state::<Mutex<WindowCounter>>();
         let mut guard = state.lock().map_err(|e| e.to_string())?;
@@ -1302,23 +1201,30 @@ async fn create_document_window(
         let mut guard = state.lock().map_err(|e| e.to_string())?;
         guard.0.insert(label.clone(), slot);
     }
-    let scale = window.scale_factor().unwrap_or(1.0);
-    let size = window.inner_size().map_err(|e| e.to_string())?;
-    let pos = window.outer_position().map_err(|e| e.to_string())?;
     // Standard macOS document-window cascade offset.
     const CASCADE: f64 = 28.0;
     let builder =
         tauri::WebviewWindowBuilder::new(app, &label, tauri::WebviewUrl::App("index.html".into()))
             .title("Hew")
-            .focused(focus)
-            .inner_size(
-                f64::from(size.width) / scale,
-                f64::from(size.height) / scale,
-            )
-            .position(
-                f64::from(pos.x) / scale + CASCADE,
-                f64::from(pos.y) / scale + CASCADE,
-            );
+            .focused(focus);
+    let builder = match window {
+        Some(window) => {
+            let scale = window.scale_factor().unwrap_or(1.0);
+            let size = window.inner_size().map_err(|e| e.to_string())?;
+            let pos = window.outer_position().map_err(|e| e.to_string())?;
+            builder
+                .inner_size(
+                    f64::from(size.width) / scale,
+                    f64::from(size.height) / scale,
+                )
+                .position(
+                    f64::from(pos.x) / scale + CASCADE,
+                    f64::from(pos.y) / scale + CASCADE,
+                )
+        }
+        // tauri.conf.json's `main` window size.
+        None => builder.inner_size(1280.0, 800.0).center(),
+    };
     // Linux/WebKitGTK draws its own chrome (see the setup() note); Windows and
     // macOS keep native decorations.
     #[cfg(target_os = "linux")]
@@ -1337,7 +1243,7 @@ async fn new_window(
     window: tauri::WebviewWindow,
     recover_slot: Option<String>,
 ) -> Result<(), String> {
-    create_document_window(&app, &window, recover_slot, true).await?;
+    create_document_window(&app, Some(&window), recover_slot, true).await?;
     Ok(())
 }
 
@@ -1363,12 +1269,15 @@ async fn open_in_new_window(
             return focus_window_by_label(&app, &label);
         }
     }
-    let label = create_document_window(&app, &window, None, true).await?;
+    let label = create_document_window(&app, Some(&window), None, true).await?;
     // Propagate a lock failure (matches the sibling recover_slot insert in
     // create_document_window) rather than swallowing it: on a poisoned
     // mutex, silently returning Ok would leave the freshly opened window
     // blank forever — take_pending_window_open would find nothing to
     // deliver, and the caller would have no idea the open never happened.
+    if let Ok(mut openers) = app.state::<Mutex<WindowOpeners>>().lock() {
+        openers.0.insert(label.clone(), window.label().to_string());
+    }
     let state = app.state::<Mutex<PendingWindowOpen>>();
     let mut guard = state.lock().map_err(|e| e.to_string())?;
     guard.0.insert(
@@ -1380,6 +1289,63 @@ async fn open_in_new_window(
         },
     );
     Ok(())
+}
+
+/// What the opener window is told when the window it asked for could not
+/// open the file.
+#[derive(Clone, serde::Serialize)]
+struct WindowOpenRefused {
+    path: String,
+    as_copy: bool,
+    name: Option<String>,
+    message: String,
+    code: Option<String>,
+}
+
+/// A window made by `open_in_new_window` was refused its file (the kernel
+/// answered with an error and is still alive, so the window is still
+/// pristine). Hand the error back to the window that asked, focus it, and
+/// destroy this empty window. Returns `false`, leaving this window open, when
+/// the opener is gone: an error with no window to show it in is worse than
+/// an empty window, so the caller shows it here (its path claim is released
+/// either way, see [`settle_refused_open`]).
+#[tauri::command]
+fn window_open_refused(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    path: String,
+    as_copy: Option<bool>,
+    name: Option<String>,
+    message: String,
+    code: Option<String>,
+) -> bool {
+    let label = window.label().to_string();
+    let opener = {
+        let openers = app.state::<Mutex<WindowOpeners>>();
+        let paths = app.state::<Mutex<DocumentPaths>>();
+        let (Ok(mut openers), Ok(mut paths)) = (openers.lock(), paths.lock()) else {
+            return false;
+        };
+        settle_refused_open(&mut openers.0, &mut paths.0, &label, |l| {
+            app.get_webview_window(l).is_some()
+        })
+    };
+    let Some(opener) = opener else {
+        return false;
+    };
+    let payload = WindowOpenRefused {
+        path,
+        as_copy: as_copy.unwrap_or(false),
+        name,
+        message,
+        code,
+    };
+    let _ = app.emit_to(opener.as_str(), "window-open-refused", payload);
+    let _ = focus_window_by_label(&app, &opener);
+    // Destroy, not close: the close guard exists to protect a document and
+    // this one is pristine. `Destroyed` refreshes the window list.
+    let _ = window.destroy();
+    true
 }
 
 /// Claim (remove) the path queued by `open_in_new_window` for this window, if
@@ -1448,6 +1414,272 @@ fn relabel_menu_items(items: Vec<MenuItemKind<tauri::Wry>>, labels: &MenuLabels)
     }
 }
 
+/// The app command (`menuActionRef` payload) a native menu item dispatches,
+/// or `None` for an id the shell handles itself or that runs nothing.
+/// Shared by `on_menu_event` and `set_menu_accelerators`, so the keymap's
+/// command ids reach the same items a click does.
+fn menu_action_for(id: &str) -> Option<&'static str> {
+    Some(match id {
+        "app-settings" => "open-settings",
+        "file-new" => "new",
+        "file-open" => "open",
+        "file-import" => "import",
+        "file-import-image" => "import-image",
+        "file-export" => "export",
+        "file-print" => "print",
+        "file-open-on-phone" => "open-on-phone",
+        "file-save" => "save",
+        "file-save-as" => "save-as",
+        "file-revert" => "revert-to-saved",
+        "file-save-to-library" => "save-to-library-doc",
+        "file-purge-unused" => "purge-unused",
+        "file-close" => "close",
+        "edit-undo" => "undo",
+        "edit-redo" => "redo",
+        "edit-cut" => "edit-cut",
+        "edit-copy" => "edit-copy",
+        "edit-paste" => "edit-paste",
+        "edit-paste-in-place" => "edit-paste-in-place",
+        "edit-paste-independent" => "edit-paste-independent",
+        "edit-paste-linked" => "edit-paste-linked",
+        "edit-delete" => "edit-delete",
+        "edit-lock" => "edit-lock",
+        "edit-unlock-selected" => "edit-unlock-selected",
+        "edit-unlock-all" => "edit-unlock-all",
+        "edit-delete-guides" => "edit-delete-guides",
+        "edit-select-all" => "edit-select-all",
+        "edit-select-none" => "edit-select-none",
+        "edit-invert-selection" => "edit-invert-selection",
+        "edit-group" => "edit-group",
+        "edit-ungroup" => "edit-ungroup",
+        "edit-make-component" => "edit-make-component",
+        "edit-place-copy" => "edit-place-copy",
+        "edit-save-selection-to-library" => "save-to-library",
+        "edit-explode" => "edit-explode",
+        "edit-make-unique" => "edit-make-unique",
+        "edit-unlink" => "edit-unlink",
+        "edit-unlink-all" => "edit-unlink-all",
+        "edit-link-identical-copies" => "edit-link-identical-copies",
+        "edit-select-all-copies" => "edit-select-all-copies",
+        "edit-flip-red" => "edit-flip-red",
+        "edit-flip-green" => "edit-flip-green",
+        "edit-flip-blue" => "edit-flip-blue",
+        "edit-union" => "edit-union",
+        "edit-subtract" => "edit-subtract",
+        "edit-intersect" => "edit-intersect",
+        "object-make-solid" => "make-solid",
+        "object-smooth-off" => "smooth-off",
+        "object-smooth-1" => "smooth-1",
+        "object-smooth-2" => "smooth-2",
+        "object-smooth-3" => "smooth-3",
+        "object-bake-smooth" => "bake-smooth",
+        "object-soften-edges" => "soften-edges",
+        "object-model-health" => "model-health",
+        "view-axes" => "toggle-axes",
+        "view-part-axes" => "toggle-part-axes",
+        "view-reset-axes" => "reset-axes",
+        "view-grid" => "toggle-grid",
+        "view-guides" => "toggle-guides",
+        "view-tangent-edges" => "toggle-tangent-edges",
+        "view-section-plane" => "toggle-section-active",
+        "view-xray" => "toggle-xray",
+        "view-wireframe" => "toggle-wireframe",
+        "scenes-add" => "scenes-add",
+        "scenes-update" => "scenes-update",
+        "scenes-next" => "scenes-next",
+        "scenes-previous" => "scenes-previous",
+        "scenes-transitions" => "scenes-transitions",
+        "view-palette" => "open-palette",
+        "draw-rectangle" => "tool-rectangle",
+        "draw-circle" => "tool-circle",
+        "draw-polygon" => "tool-polygon",
+        "draw-arc" => "tool-arc",
+        "draw-line" => "tool-line",
+        "draw-3d-text" => "draw-3d-text",
+        "tool-select" => "tool-select",
+        "tool-paint" => "tool-paint",
+        "tool-position-texture" => "tool-position-texture",
+        "tool-move" => "tool-move",
+        "tool-rotate" => "tool-rotate",
+        "tool-scale" => "tool-scale",
+        "tool-flip" => "tool-flip",
+        "tool-pushpull" => "tool-pushpull",
+        "tool-follow-me" => "tool-follow-me",
+        "tool-revolve" => "tool-revolve",
+        "tool-loft" => "tool-loft",
+        "tool-deform-twist" => "tool-deform-twist",
+        "tool-deform-bend" => "tool-deform-bend",
+        "tool-deform-taper" => "tool-deform-taper",
+        "tool-deform-bend-path" => "tool-deform-bend-path",
+        "tool-offset" => "tool-offset",
+        "tool-fillet" => "tool-fillet",
+        "tool-chamfer" => "tool-chamfer",
+        "tool-path-array" => "tool-path-array",
+        "tool-shell" => "tool-shell",
+        "tool-project" => "tool-project",
+        "tool-eraser" => "tool-eraser",
+        "tool-tape-measure" => "tool-tape-measure",
+        "tool-dimension" => "tool-dimension",
+        "tool-protractor" => "tool-protractor",
+        "tool-slice" => "tool-slice",
+        "tool-section-plane" => "tool-section-plane",
+        "tool-edit-vertex" => "tool-edit-vertex",
+        "tool-axes" => "tool-axes",
+        "tool-text" => "tool-text",
+        "cam-orbit" => "tool-orbit",
+        "cam-pan" => "tool-pan",
+        "cam-zoom" => "tool-zoom",
+        "cam-position-camera" => "tool-position-camera",
+        "cam-walk" => "tool-walk",
+        "cam-look-around" => "tool-look-around",
+        "cam-fly" => "toggle-fly",
+        "cam-zoom-window" => "tool-zoom-window",
+        "cam-zoom-extents" => "zoom-extents",
+        "cam-parallel-projection" => "toggle-parallel-projection",
+        "cam-view-top" => "view-top",
+        "cam-view-bottom" => "view-bottom",
+        "cam-view-front" => "view-front",
+        "cam-view-back" => "view-back",
+        "cam-view-left" => "view-left",
+        "cam-view-right" => "view-right",
+        "cam-view-iso" => "view-iso",
+        "cam-view-home" => "view-home",
+        "view-compact-rail" => "toggle-compact-rail",
+        "view-tray" => "toggle-tray",
+        "view-dock" => "toggle-dock",
+        "win-model-info" => "toggle-model-info",
+        "win-materials" => "toggle-materials",
+        "win-components" => "toggle-components",
+        "win-tags" => "toggle-tags",
+        "win-scenes" => "toggle-scenes",
+        "win-changes" => "toggle-changes",
+        "win-object-info" => "toggle-object-info",
+        "win-library" => "toggle-library",
+        "win-debug-log" => "toggle-debug-log",
+        "help-report-bug" => "report-bug",
+        "help-sent-reports" => "sent-reports",
+        "help-guide" => "open-guide",
+        _ => return None,
+    })
+}
+
+/// Apply the keymap's accelerators (Settings ▸ Controls) to the native menu
+/// bar in place: `accelerators` maps an app command id to the accelerator
+/// its item should carry, `None` to carry none. Commands with no native item
+/// are ignored. Returns the command ids whose item took the new accelerator,
+/// so the webview leaves exactly those chords to the menu and handles every
+/// other one itself (a string the menu library cannot parse is refused).
+///
+/// macOS only: it is the one platform where the menu bar is attached; on
+/// Windows and Linux the menu library's accelerators would run before the
+/// webview, even while typing in a text field.
+#[tauri::command]
+fn set_menu_accelerators(
+    app: tauri::AppHandle,
+    accelerators: HashMap<String, Option<String>>,
+) -> Result<Vec<String>, String> {
+    let mut applied = Vec::new();
+    if !cfg!(target_os = "macos") {
+        return Ok(applied);
+    }
+    if let Some(menu) = app.menu() {
+        let items = menu.items().map_err(|e| e.to_string())?;
+        apply_menu_accelerators(items, &accelerators, &mut applied);
+        #[cfg(target_os = "macos")]
+        if let (Some(mtm), Ok(items)) = (objc2::MainThreadMarker::new(), menu.items()) {
+            if let Some(main_menu) = objc2_app_kit::NSApplication::sharedApplication(mtm).mainMenu()
+            {
+                clear_native_accelerators(&items, &main_menu, &accelerators);
+            }
+        }
+    }
+    Ok(applied)
+}
+
+/// Takes the key equivalent off every native item whose command now has no
+/// accelerator. The menu library only records a removed accelerator: its
+/// macOS `set_accelerator(None)` leaves the `NSMenuItem` untouched, so the
+/// old key would keep showing in the menu and firing the item. `ns_menu`
+/// mirrors `items` index for index; an item whose title differs from the
+/// Tauri item's is left alone rather than risk clearing the wrong one.
+#[cfg(target_os = "macos")]
+fn clear_native_accelerators(
+    items: &[MenuItemKind<tauri::Wry>],
+    ns_menu: &objc2_app_kit::NSMenu,
+    accelerators: &HashMap<String, Option<String>>,
+) {
+    use objc2_app_kit::NSEventModifierFlags;
+    use objc2_foundation::ns_string;
+    for (index, item) in items.iter().enumerate() {
+        let Some(ns_item) = ns_menu.itemAtIndex(index as isize) else {
+            return;
+        };
+        let (action, text) = match item {
+            MenuItemKind::MenuItem(i) => (menu_action_for(i.id().as_ref()), i.text()),
+            MenuItemKind::Check(i) => (menu_action_for(i.id().as_ref()), i.text()),
+            MenuItemKind::Submenu(sub) => {
+                if let (Some(ns_sub), Ok(children)) = (ns_item.submenu(), sub.items()) {
+                    clear_native_accelerators(&children, &ns_sub, accelerators);
+                }
+                continue;
+            }
+            _ => continue,
+        };
+        let Some(action) = action else {
+            continue;
+        };
+        if !matches!(accelerators.get(action), Some(None)) {
+            continue;
+        }
+        let same_item = text
+            .map(|t| t.replace('&', "") == ns_item.title().to_string())
+            .unwrap_or(false);
+        if same_item {
+            ns_item.setKeyEquivalent(ns_string!(""));
+            ns_item.setKeyEquivalentModifierMask(NSEventModifierFlags::empty());
+        }
+    }
+}
+
+fn apply_menu_accelerators(
+    items: Vec<MenuItemKind<tauri::Wry>>,
+    accelerators: &HashMap<String, Option<String>>,
+    applied: &mut Vec<String>,
+) {
+    for item in items {
+        let (id, result) = match &item {
+            MenuItemKind::MenuItem(i) => {
+                let Some(action) = menu_action_for(i.id().as_ref()) else {
+                    continue;
+                };
+                let Some(accel) = accelerators.get(action) else {
+                    continue;
+                };
+                (action, i.set_accelerator(accel.as_deref()))
+            }
+            MenuItemKind::Check(i) => {
+                let Some(action) = menu_action_for(i.id().as_ref()) else {
+                    continue;
+                };
+                let Some(accel) = accelerators.get(action) else {
+                    continue;
+                };
+                (action, i.set_accelerator(accel.as_deref()))
+            }
+            MenuItemKind::Submenu(sub) => {
+                if let Ok(children) = sub.items() {
+                    apply_menu_accelerators(children, accelerators, applied);
+                }
+                continue;
+            }
+            MenuItemKind::Predefined(_) | MenuItemKind::Icon(_) => continue,
+        };
+        if result.is_ok() {
+            applied.push(id.to_string());
+        }
+    }
+}
+
 /// Switch the native menu bar to `locale`'s labels in place — no rebuild,
 /// so ids, accelerators, check states, and enabled states all survive —
 /// and remember the locale so the next launch starts in it
@@ -1485,11 +1717,17 @@ fn set_menu_locale(app: tauri::AppHandle, locale: String) -> Result<(), String> 
         if let Some(window) = app.get_webview_window("library") {
             let _ = window.set_title(labels.get("win-library"));
         }
+        if let Some(window) = app.get_webview_window("update") {
+            let _ = window.set_title(labels.get("updater:window-title"));
+        }
         if let Some(state) = app.try_state::<Mutex<MenuLabels>>() {
             if let Ok(mut guard) = state.lock() {
                 *guard = labels;
             }
         }
+        // The relabel above reset Sent Reports to its plain form; put the
+        // unread count back (in the new language).
+        follow::refresh_menu_label(&app);
     }
     Ok(())
 }
@@ -1566,8 +1804,8 @@ fn sync_menu_state(
 //
 // One snapshot pair per document window in the app config dir:
 // recovery-<label>.hew (geometry bytes, the same format scene.save()
-// produces) and recovery-<label>.json (the RecoveryMeta JSON verbatim,
-// opaque to Rust — we never parse it here). The un-suffixed
+// produces) and recovery-<label>.json (the RecoveryMeta JSON). Metadata is
+// untrusted; claiming it can never grant a new filesystem permission. The un-suffixed
 // "recovery.hew"/"recovery.json" pair is the pre-multi-window legacy name,
 // listed under the reserved slot name "legacy".
 //
@@ -1584,6 +1822,58 @@ fn sync_menu_state(
 
 /// Reserved slot name for the legacy un-suffixed snapshot pair.
 const LEGACY_SLOT: &str = "legacy";
+
+/// Only labels generated for document windows, their deferred side-slots,
+/// and the legacy pair may be addressed through recovery commands.
+fn valid_recovery_slot(slot: &str) -> bool {
+    if slot == LEGACY_SLOT {
+        return true;
+    }
+    let label = slot.strip_suffix("-deferred").unwrap_or(slot);
+    if label == "main" {
+        return true;
+    }
+    label.strip_prefix("main-").is_some_and(|digits| {
+        !digits.is_empty()
+            && digits.bytes().all(|c| c.is_ascii_digit())
+            && digits.parse::<u32>().is_ok_and(|n| n > 0)
+    })
+}
+
+/// Keep a recovered document bound to its path only when native state already
+/// permits writing that path. Everything else recovers as an unsaved document
+/// and uses the normal Save As picker; metadata is never an authorization source.
+fn recovery_meta_for_approved_paths(
+    meta: Option<String>,
+    approved: &ApprovedPaths,
+) -> Option<String> {
+    let meta = meta?;
+    let mut value: serde_json::Value = serde_json::from_str(&meta).ok()?;
+    let object = value.as_object_mut()?;
+    let path_approved = object
+        .get("path")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|path| canonical_or_synthesized(Path::new(path)))
+        .is_some_and(|path| approved.write_files.contains(&path));
+    if path_approved {
+        return Some(meta);
+    }
+    object.insert("path".into(), serde_json::Value::Null);
+    serde_json::to_string(&value).ok()
+}
+
+/// [`recovery_meta_for_approved_paths`], plus whether it took a path away.
+fn claimed_recovery_meta(meta: Option<String>, approved: &ApprovedPaths) -> (Option<String>, bool) {
+    let had_path = recovery_meta_has_path(meta.as_deref());
+    let meta = recovery_meta_for_approved_paths(meta, approved);
+    let withheld = had_path && !recovery_meta_has_path(meta.as_deref());
+    (meta, withheld)
+}
+
+fn recovery_meta_has_path(meta: Option<&str>) -> bool {
+    meta.and_then(|meta| serde_json::from_str::<serde_json::Value>(meta).ok())
+        .is_some_and(|value| value["path"].is_string())
+}
 
 /// The `.hew`/`.json` file pair backing a snapshot slot. Pure path mapping —
 /// no filesystem access (unit-tested below).
@@ -1617,7 +1907,7 @@ fn slot_of_filename(name: &str) -> Option<String> {
     }
     let label = name.strip_prefix("recovery-")?.strip_suffix(".hew")?;
     // Never let a stray file alias the reserved legacy slot.
-    if label.is_empty() || label == LEGACY_SLOT {
+    if label == LEGACY_SLOT || !valid_recovery_slot(label) {
         return None;
     }
     Some(label.to_string())
@@ -1680,6 +1970,9 @@ struct RecoveryPayload {
     contents: Vec<u8>,
     meta: Option<String>,
     modified_ms: u64,
+    /// The snapshot named an original file that this session may not write,
+    /// so `meta` carries no path and the app has to say why.
+    path_withheld: bool,
 }
 
 /// Persist a recovery snapshot, overwriting any previous one from the same
@@ -1692,9 +1985,24 @@ struct RecoveryPayload {
 fn recovery_write(
     app: tauri::AppHandle,
     window: tauri::WebviewWindow,
-    contents: Vec<u8>,
-    meta: String,
+    request: tauri::ipc::Request<'_>,
 ) -> Result<(), String> {
+    // Raw IPC body (a JSON byte array costs about four bytes of IPC per
+    // snapshot byte and stalls the webview for seconds on a large model);
+    // the sidecar rides percent-encoded in the `meta` header.
+    let meta = request
+        .headers()
+        .get("meta")
+        .ok_or_else(|| "recovery_write: missing meta header".to_owned())?
+        .to_str()
+        .map_err(|_| "recovery_write: meta header is not valid ASCII".to_owned())?;
+    let meta = percent_decode(meta)?;
+    let contents = match request.body() {
+        tauri::ipc::InvokeBody::Raw(bytes) => bytes,
+        tauri::ipc::InvokeBody::Json(_) => {
+            return Err("recovery_write expects a raw byte body".to_owned());
+        }
+    };
     let Some(config_dir) = app.path().app_config_dir().ok() else {
         return Err("could not resolve app config dir".into());
     };
@@ -1702,7 +2010,7 @@ fn recovery_write(
     let slot = effective_own_slot(&app, window.label());
     let (hew_path, json_path) = slot_paths(&config_dir, &slot);
     write_atomic(&json_path, meta.as_bytes()).map_err(|e| e.to_string())?;
-    write_atomic(&hew_path, &contents).map_err(|e| e.to_string())?;
+    write_atomic(&hew_path, contents).map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -1753,7 +2061,7 @@ fn recovery_source_read(
     app: tauri::AppHandle,
     slot: String,
 ) -> Result<tauri::ipc::Response, String> {
-    if slot.is_empty() || slot.contains(['/', '\\']) || slot.contains("..") {
+    if !valid_recovery_slot(&slot) {
         return Err(format!("recovery_source_read: invalid slot {slot:?}"));
     }
     let config_dir = app
@@ -1821,15 +2129,18 @@ fn recovery_list(app: tauri::AppHandle) -> Vec<RecoveryEntry> {
 /// move is skipped entirely when the caller's own slot still holds someone
 /// else's undecided snapshot (it must never be clobbered; the caller's
 /// autosaves divert to the deferred side-slot in that case, so the adopted
-/// document is still protected). Recovering a document whose meta carries an
-/// original file path also approves that path for write, since Save on a
-/// recovered document writes back to it without a new dialog.
+/// document is still protected). An original file path is retained only when
+/// native state already approves writing it (for example, a persisted recent).
+/// Other snapshots recover as unsaved documents without granting file access.
 #[tauri::command]
 fn recovery_claim(
     app: tauri::AppHandle,
     window: tauri::WebviewWindow,
     slot: String,
 ) -> Option<RecoveryPayload> {
+    if !valid_recovery_slot(&slot) {
+        return None;
+    }
     let config_dir = app.path().app_config_dir().ok()?;
     let (src_hew, src_json) = slot_paths(&config_dir, &slot);
     let (dst_hew, dst_json) = slot_paths(&config_dir, window.label());
@@ -1842,7 +2153,11 @@ fn recovery_claim(
     let contents = std::fs::read(&src_hew).ok()?;
     // The sidecar may be missing (torn write on an old build) — the
     // geometry alone is still worth recovering.
-    let meta = std::fs::read_to_string(&src_json).ok();
+    let (meta, path_withheld) = {
+        let approved = app.state::<Mutex<ApprovedPaths>>();
+        let approved = approved.lock().ok()?;
+        claimed_recovery_meta(std::fs::read_to_string(&src_json).ok(), &approved)
+    };
     let mut own_slot_adopted = true;
     if src_hew != dst_hew {
         let dst_protected = app
@@ -1875,18 +2190,11 @@ fn recovery_claim(
             protected.0.remove(window.label());
         }
     }
-    // Save writes back to the recovered document's original path.
-    if let Some(meta_json) = &meta {
-        if let Ok(value) = serde_json::from_str::<serde_json::Value>(meta_json) {
-            if let Some(path) = value.get("path").and_then(|p| p.as_str()) {
-                approve_file(&app, Path::new(path), true);
-            }
-        }
-    }
     Some(RecoveryPayload {
         contents,
         meta,
         modified_ms,
+        path_withheld,
     })
 }
 
@@ -2080,11 +2388,8 @@ fn approve_file(app: &tauri::AppHandle, path: &Path, write: bool) {
 }
 
 /// Record read approval for a directory (listing + reading files in it and
-/// one level below it). Called by `pick_open_path` whenever its caller sets
-/// `approve_dir` — every import-format pick (whose COLLADA texture scan
-/// reads siblings of the picked model and `textures/`-style subfolders) and,
-/// since the unified Open dialog, every plain `.hew` pick too (see the
-/// `ApprovedPaths::read_dirs` doc comment for why, and the open follow-up).
+/// one level below it). Called only for a picked COLLADA file, whose texture
+/// scan reads siblings and `textures/`-style subfolders.
 fn approve_dir_reads(app: &tauri::AppHandle, dir: &Path) {
     let Ok(canon) = std::fs::canonicalize(dir) else {
         return;
@@ -2265,19 +2570,25 @@ struct DialogFilter {
     extensions: Vec<String>,
 }
 
+/// External texture lookup is needed only for COLLADA. Decide this from the
+/// path returned by the native picker, never a renderer-supplied scope flag.
+fn pick_needs_directory_reads(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("dae"))
+}
+
 /// Show the native open-file dialog and, when the user picks a file, record
 /// its approval before returning the path. Approval happens HERE, at the
 /// only place that knows a real dialog interaction occurred — the JS side
 /// merely receives the already-approved path. `write` additionally approves
 /// write-back (opening a .hew implies Save may later overwrite it);
-/// `approve_dir` extends read approval to the picked file's directory
-/// (import texture scans).
+/// A picked COLLADA file additionally approves sibling texture reads; other
+/// formats approve only the selected file.
 #[tauri::command]
 async fn pick_open_path(
     app: tauri::AppHandle,
     filters: Vec<DialogFilter>,
     write: bool,
-    approve_dir: bool,
 ) -> Option<String> {
     use tauri_plugin_dialog::DialogExt;
     let mut dialog = app.dialog().file();
@@ -2293,7 +2604,7 @@ async fn pick_open_path(
         .flatten()?;
     let path = picked.into_path().ok()?;
     approve_file(&app, &path, write);
-    if approve_dir {
+    if pick_needs_directory_reads(&path) {
         if let Some(dir) = path.parent() {
             approve_dir_reads(&app, dir);
         }
@@ -2371,14 +2682,18 @@ fn frontend_ready(app: tauri::AppHandle, window: tauri::WebviewWindow) {
     if let Ok(mut ready) = app.state::<Mutex<ReadyWindows>>().lock() {
         ready.0.insert(window.label().to_string());
     }
+    // Its live bridge is listening by now: tell it its document's id.
+    if is_document_window_label(window.label()) {
+        live_router::emit_document_id(&app, window.label());
+    }
 }
 /// Whether a window label names a DOCUMENT window — the windows that hold a
 /// model and can receive menu actions, file opens, and library actions.
-/// The settings window and the library browser window are auxiliary: they
+/// The settings window, the library browser window and the update window are auxiliary: they
 /// must never be the "active document" target, never appear in the Window
 /// menu's focus list, and never absorb a routed open.
 fn is_document_window_label(label: &str) -> bool {
-    label != "settings" && label != "library"
+    label != "settings" && label != "library" && label != "update"
 }
 
 /// The document window menu/open events should land in: the focused
@@ -2475,8 +2790,9 @@ async fn open_settings_window(app: tauri::AppHandle) -> Result<(), String> {
     if let Some(existing) = app.get_webview_window("settings") {
         return existing.set_focus().map_err(|e| e.to_string());
     }
-    // Fixed-size, per macOS Settings convention (HIG: settings windows
-    // aren't resizable; each pane determines its own compact height).
+    // Sized so the whole tab strip shows without scrolling, and resizable:
+    // translated tab labels and the longer panes need more room than any
+    // one fixed size gives them.
     let title = current_menu_labels(&app).get("window:settings").to_string();
     tauri::WebviewWindowBuilder::new(
         &app,
@@ -2484,8 +2800,9 @@ async fn open_settings_window(app: tauri::AppHandle) -> Result<(), String> {
         tauri::WebviewUrl::App("index.html#settings".into()),
     )
     .title(title)
-    .inner_size(520.0, 360.0)
-    .resizable(false)
+    .inner_size(760.0, 520.0)
+    .min_inner_size(520.0, 360.0)
+    .resizable(true)
     .minimizable(false)
     .maximizable(false)
     .build()
@@ -2826,14 +3143,29 @@ fn library_read(name: String) -> Result<tauri::ipc::Response, String> {
 /// Write a library item, creating the library folder — and, for a
 /// two-segment name, its category subfolder — on first use.
 #[tauri::command]
-fn library_write(app: tauri::AppHandle, name: String, contents: Vec<u8>) -> Result<(), String> {
+fn library_write(app: tauri::AppHandle, request: tauri::ipc::Request<'_>) -> Result<(), String> {
+    // Raw IPC body, name in the percent-encoded `name` header — the same
+    // shape as `write_file_bytes`, since an item can be a large model.
+    let name = request
+        .headers()
+        .get("name")
+        .ok_or_else(|| "library_write: missing name header".to_owned())?
+        .to_str()
+        .map_err(|_| "library_write: name header is not valid ASCII".to_owned())?;
+    let name = percent_decode(name)?;
+    let contents = match request.body() {
+        tauri::ipc::InvokeBody::Raw(bytes) => bytes,
+        tauri::ipc::InvokeBody::Json(_) => {
+            return Err("library_write expects a raw byte body".to_owned());
+        }
+    };
     let dir = library::LibraryDir::resolve(None);
-    library::write(&dir, &name, &contents)
-        .map_err(|e| format!("library_write failed for {name:?}: {e}"))?;
     // Content changed: every window's listing (an open Library window, the
-    // command palette's index in other document windows) refreshes off this.
-    let _ = app.emit("library-changed", ());
-    Ok(())
+    // command palette's index in other document windows) refreshes off the
+    // notice the helper raises on success.
+    library_write_to(&dir, &name, contents, &mut |event| {
+        let _ = app.emit(event, ());
+    })
 }
 
 /// Delete a library item. Deleting an already-absent file is not an error —
@@ -2881,6 +3213,32 @@ fn library_item_path(app: tauri::AppHandle, name: String) -> Result<String, Stri
     Ok(path.to_string_lossy().into_owned())
 }
 
+/// The library-relative name of `path` when it is an item inside `root`,
+/// else `None`. Both sides are canonicalized, so a symlinked folder or a
+/// case-insensitive volume cannot fool a prefix check.
+fn library_name_within(root: &std::path::Path, path: &std::path::Path) -> Option<String> {
+    let root = std::fs::canonicalize(root).ok()?;
+    let path = std::fs::canonicalize(path).ok()?;
+    let rel = path.strip_prefix(&root).ok()?;
+    let parts: Vec<String> = rel
+        .components()
+        .map(|c| c.as_os_str().to_str().map(str::to_owned))
+        .collect::<Option<_>>()?;
+    let name = parts.join("/");
+    library::valid_item_name(&name).then_some(name)
+}
+
+/// The library-relative name of `path` when it is an item inside the
+/// library folder, else `None`. A window opened on such a file edits the
+/// Library item in place (`App.tsx`'s `libraryEditRef`), and re-asks at
+/// save time, so a Library folder moved in Settings mid-edit falls back to
+/// an ordinary save.
+#[tauri::command]
+fn library_name_for_path(path: String) -> Option<String> {
+    let dir = library::LibraryDir::resolve(None);
+    library_name_within(dir.root(), std::path::Path::new(&path))
+}
+
 /// Read a cached thumbnail PNG by content-hash key. Errs with the literal
 /// string `"not_found"` when absent (vs. any other message on a real I/O
 /// failure) — the one signal `tauriLibraryStore.ts` treats as "no thumbnail
@@ -2903,6 +3261,166 @@ fn library_thumb_write(key: String, contents: Vec<u8>) -> Result<(), String> {
     let dir = library::LibraryDir::resolve(None);
     library::write_thumbnail(&dir, &key, &contents)
         .map_err(|e| format!("library_thumb_write failed for {key:?}: {e}"))
+}
+
+// ---------------------------------------------------------------------------
+// Sources file, source cache, notices and the edit registry
+// (docs/design/shared-library-sources.md 7.3).
+// ---------------------------------------------------------------------------
+
+/// App-wide event raised by an item write or delete.
+const LIBRARY_CHANGED_EVENT: &str = "library-changed";
+/// App-wide event raised by a `.sources.json` write (and by nothing else).
+const LIBRARY_SOURCES_CHANGED_EVENT: &str = "library-sources-changed";
+
+/// Raw bytes of `.sources.json`; `Err("not_found")` when absent (the same
+/// sentinel as `library_thumb_read`).
+#[tauri::command]
+fn library_sources_read() -> Result<tauri::ipc::Response, String> {
+    let dir = library::LibraryDir::resolve(None);
+    match library::read_sources(&dir) {
+        Ok(Some(bytes)) => Ok(tauri::ipc::Response::new(bytes)),
+        Ok(None) => Err("not_found".to_string()),
+        Err(e) => Err(format!("library_sources_read failed: {e}")),
+    }
+}
+
+/// The body of `library_sources_write`: `library::write_sources`, then
+/// `emit(LIBRARY_SOURCES_CHANGED_EVENT)` and never `library-changed`.
+/// A failed write emits nothing.
+fn library_sources_write_to(
+    dir: &library::LibraryDir,
+    source: &str,
+    entry: Option<&serde_json::Value>,
+    emit: &mut dyn FnMut(&str),
+) -> Result<(), String> {
+    library::write_sources(dir, source, entry)
+        .map_err(|e| format!("library_sources_write failed: {e}"))?;
+    emit(LIBRARY_SOURCES_CHANGED_EVENT);
+    Ok(())
+}
+
+/// Merge one source's entry into `.sources.json` (`entry: null` removes it).
+#[tauri::command]
+fn library_sources_write(
+    app: tauri::AppHandle,
+    source: String,
+    entry: Option<serde_json::Value>,
+) -> Result<(), String> {
+    let dir = library::LibraryDir::resolve(None);
+    library_sources_write_to(&dir, &source, entry.as_ref(), &mut |event| {
+        let _ = app.emit(event, ());
+    })
+}
+
+/// `.sources/<key>` bytes; `Err("not_found")` when absent.
+#[tauri::command]
+fn library_source_cache_read(key: String) -> Result<tauri::ipc::Response, String> {
+    let dir = library::LibraryDir::resolve(None);
+    match library::read_source_cache(&dir, &key) {
+        Ok(Some(bytes)) => Ok(tauri::ipc::Response::new(bytes)),
+        Ok(None) => Err("not_found".to_string()),
+        Err(e) => Err(format!("library_source_cache_read failed for {key:?}: {e}")),
+    }
+}
+
+/// Cache write; never emits any event.
+#[tauri::command]
+fn library_source_cache_write(key: String, contents: Vec<u8>) -> Result<(), String> {
+    let dir = library::LibraryDir::resolve(None);
+    library::write_source_cache(&dir, &key, &contents)
+        .map_err(|e| format!("library_source_cache_write failed for {key:?}: {e}"))
+}
+
+/// Delete one `.sources/<key>` cache entry (absent is fine); never emits any
+/// event.
+#[tauri::command]
+fn library_source_cache_remove(key: String) -> Result<(), String> {
+    let dir = library::LibraryDir::resolve(None);
+    library::remove_source_cache(&dir, &key)
+        .map_err(|e| format!("library_source_cache_remove failed for {key:?}: {e}"))
+}
+
+/// The body of `library_write`: `library::write` then
+/// `emit(LIBRARY_CHANGED_EVENT)` and nothing else; a failed write emits
+/// nothing.
+fn library_write_to(
+    dir: &library::LibraryDir,
+    name: &str,
+    bytes: &[u8],
+    emit: &mut dyn FnMut(&str),
+) -> Result<(), String> {
+    library::write(dir, name, bytes)
+        .map_err(|e| format!("library_write failed for {name:?}: {e}"))?;
+    emit(LIBRARY_CHANGED_EVENT);
+    Ok(())
+}
+
+/// The set of Library item names open for editing, per window. Registered
+/// by the window that opens an item; dropped when that window closes.
+#[derive(Default)]
+struct LibraryEditRegistry {
+    inner: std::sync::Mutex<Vec<(String, String)>>,
+}
+
+impl LibraryEditRegistry {
+    fn lock(&self) -> std::sync::MutexGuard<'_, Vec<(String, String)>> {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner())
+    }
+    /// Record that window `window` has item `name` open. Errs when `name`
+    /// is not a valid item name. Idempotent per (window, name).
+    fn register(&self, window: &str, name: &str) -> Result<(), String> {
+        if !library::valid_item_name(name) {
+            return Err(format!("library_edit_register: invalid item name {name:?}"));
+        }
+        let mut inner = self.lock();
+        let key = (window.to_string(), name.to_string());
+        if !inner.contains(&key) {
+            inner.push(key);
+        }
+        Ok(())
+    }
+    /// Remove one (window, name) registration; absent is not an error.
+    fn unregister(&self, window: &str, name: &str) {
+        self.lock().retain(|(w, n)| !(w == window && n == name));
+    }
+    /// Every name registered by any window: sorted, no duplicates.
+    fn names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.lock().iter().map(|(_, n)| n.clone()).collect();
+        names.sort();
+        names.dedup();
+        names
+    }
+    /// Drop every registration made by `window` (called when it closes).
+    fn drop_window(&self, window: &str) {
+        self.lock().retain(|(w, _)| w != window);
+    }
+}
+
+/// `library_edit_register(name)`: registry.register(window.label(), name).
+#[tauri::command]
+fn library_edit_register(
+    window: tauri::Window,
+    registry: tauri::State<'_, LibraryEditRegistry>,
+    name: String,
+) -> Result<(), String> {
+    registry.register(window.label(), &name)
+}
+
+/// `library_edit_unregister(name)`.
+#[tauri::command]
+fn library_edit_unregister(
+    window: tauri::Window,
+    registry: tauri::State<'_, LibraryEditRegistry>,
+    name: String,
+) {
+    registry.unregister(window.label(), &name);
+}
+
+/// `library_edit_list()`: `registry.names()`.
+#[tauri::command]
+fn library_edit_list(registry: tauri::State<'_, LibraryEditRegistry>) -> Vec<String> {
+    registry.names()
 }
 
 // ---------------------------------------------------------------------------
@@ -2947,7 +3465,124 @@ fn rebuild_recent_submenu(
 // Entry point
 // ---------------------------------------------------------------------------
 
+/// The one-line version string `hew --version` prints.
+fn version_line() -> String {
+    format!("hew {}", version::VERSION)
+}
+
+/// The `hew --help` page.
+fn help_text() -> String {
+    format!(
+        "{}\n\nUSAGE\n    hew [FILE]\n\nARGUMENTS\n    FILE          A .hew or .skp document to open\n\n\
+         OPTIONS\n    -h, --help       Print this help\n    -V, --version    Print the version\n",
+        version_line()
+    )
+}
+
+/// What the command line asks for before any window exists: the text to
+/// print for `-V`/`--version` or `-h`/`--help`, or `None` to start the app.
+/// Pure. Only a leading flag counts, so a document path that happens to
+/// follow another argument is never mistaken for one.
+fn cli_flag_output(args: &[String]) -> Option<String> {
+    match args.first().map(String::as_str)? {
+        "-V" | "--version" => Some(format!("{}\n", version_line())),
+        "-h" | "--help" => Some(help_text()),
+        _ => None,
+    }
+}
+
+/// Where `hew --flag` output goes, given what standard output is.
+#[cfg(any(windows, test))]
+#[derive(Debug, PartialEq, Eq)]
+enum CliSink {
+    /// Standard output is a pipe or file the caller handed us (a launcher or
+    /// package manager capturing the version): write there, never to a console.
+    Stdout,
+    /// No usable standard output (a console launch from a GUI-subsystem
+    /// binary): attach to the parent console and write to it.
+    ParentConsole,
+}
+
+/// The kind of thing standard output is, as far as the sink choice cares.
+#[cfg(any(windows, test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StdoutKind {
+    /// Null or invalid handle: nothing was inherited.
+    Missing,
+    /// A pipe or a disk file.
+    PipeOrFile,
+    /// A console, character device, or anything else.
+    Other,
+}
+
+/// Pure sink decision. Only a pipe or file is written to directly; writing
+/// to the console (`CONOUT$`) would bypass a redirected stream.
+#[cfg(any(windows, test))]
+fn cli_sink(kind: StdoutKind) -> CliSink {
+    match kind {
+        StdoutKind::PipeOrFile => CliSink::Stdout,
+        StdoutKind::Missing | StdoutKind::Other => CliSink::ParentConsole,
+    }
+}
+
+/// Classifies the process's standard output handle (Windows only).
+#[cfg(windows)]
+fn stdout_kind() -> StdoutKind {
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+    use windows_sys::Win32::Storage::FileSystem::{GetFileType, FILE_TYPE_DISK, FILE_TYPE_PIPE};
+    use windows_sys::Win32::System::Console::{GetStdHandle, STD_OUTPUT_HANDLE};
+    // SAFETY: GetStdHandle and GetFileType only read process/handle state; a
+    // null or invalid handle is checked before use.
+    unsafe {
+        let h = GetStdHandle(STD_OUTPUT_HANDLE);
+        if h.is_null() || h == INVALID_HANDLE_VALUE {
+            return StdoutKind::Missing;
+        }
+        match GetFileType(h) {
+            FILE_TYPE_PIPE | FILE_TYPE_DISK => StdoutKind::PipeOrFile,
+            _ => StdoutKind::Other,
+        }
+    }
+}
+
+/// Prints `text` where whoever ran `hew --flag` can see it. If standard
+/// output is a pipe or file, write there. Otherwise, on Windows, a
+/// GUI-subsystem binary has no console of its own, so attach to the parent's
+/// (best effort; nothing to attach to when launched from Explorer).
+fn print_cli_output(text: &str) {
+    use std::io::Write;
+    #[cfg(windows)]
+    {
+        if cli_sink(stdout_kind()) == CliSink::ParentConsole {
+            // SAFETY: AttachConsole takes a plain process-id constant.
+            let attached = unsafe {
+                windows_sys::Win32::System::Console::AttachConsole(
+                    windows_sys::Win32::System::Console::ATTACH_PARENT_PROCESS,
+                )
+            } != 0;
+            if attached {
+                if let Ok(mut con) = std::fs::OpenOptions::new().write(true).open("CONOUT$") {
+                    let _ = con.write_all(text.as_bytes());
+                    return;
+                }
+            }
+        }
+    }
+    let mut out = std::io::stdout();
+    let _ = out.write_all(text.as_bytes());
+    let _ = out.flush();
+}
+
 fn main() {
+    // `--version` / `--help` answer before any window or webview exists, so
+    // they work with no display and never reach a running copy through the
+    // single-instance plugin.
+    let cli_args: Vec<String> = std::env::args().skip(1).collect();
+    if let Some(text) = cli_flag_output(&cli_args) {
+        print_cli_output(&text);
+        return;
+    }
+
     // Check argv for a .hew or .skp path on Windows/Linux (best-effort, first launch).
     // macOS uses RunEvent::Opened (Apple event), so we skip argv there.
     let argv_path: Option<String> = {
@@ -2966,6 +3601,7 @@ fn main() {
         // fire before `setup` runs and needs somewhere to land (see
         // `deliver_open`). `setup` seeds it from argv on Windows/Linux.
         .manage(Mutex::new(PendingOpen(None)))
+        .manage(LibraryEditRegistry::default())
         // Single-instance guard, registered first (its docs require it): a
         // second launch — a Windows/Linux file-association double-click —
         // joins the running instance instead of spawning a second process
@@ -2990,7 +3626,7 @@ fn main() {
 
     // The updater plugin ships only in updater-enabled builds (the `updater`
     // feature); package-manager builds compile it out.
-    #[cfg(feature = "updater")]
+    #[cfg(hew_updater)]
     let builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
 
     // Register custom file-I/O commands.
@@ -3008,21 +3644,48 @@ fn main() {
             frontend_ready,
             new_window,
             open_in_new_window,
+            window_open_refused,
             take_pending_window_open,
             list_windows,
             focus_window,
             set_document_path,
             set_document_dirty,
+            set_document_id,
             focus_window_with_path,
             set_window_title,
             fly_cursor::set_fly_cursor_lock,
             open_settings_window,
             open_library_window,
+            #[cfg(hew_updater)]
+            updater::update_info,
+            #[cfg(hew_updater)]
+            updater::update_install,
+            #[cfg(hew_updater)]
+            updater::update_skip,
+            #[cfg(hew_updater)]
+            updater::update_remind,
+            #[cfg(hew_updater)]
+            updater::update_restart,
+            #[cfg(hew_updater)]
+            updater::update_copy_command,
+            #[cfg(hew_updater)]
+            updater::update_show_notes,
+            #[cfg(hew_updater)]
+            updater::update_ready_get,
+            #[cfg(hew_updater)]
+            updater::update_auto_get,
+            #[cfg(hew_updater)]
+            updater::update_auto_set,
+            #[cfg(hew_updater)]
+            updater::close_cancelled,
+            #[cfg(all(hew_updater, debug_assertions))]
+            updater::update_open_fixture,
             library_dispatch,
             library_push_placements,
             library_popup_menu,
             library_confirm,
             sync_menu_state,
+            set_menu_accelerators,
             set_menu_locale,
             clipboard_set,
             clipboard_get,
@@ -3037,8 +3700,17 @@ fn main() {
             library_delete,
             library_reveal,
             library_item_path,
+            library_name_for_path,
             library_thumb_read,
             library_thumb_write,
+            library_sources_read,
+            library_sources_write,
+            library_source_cache_read,
+            library_source_cache_write,
+            library_source_cache_remove,
+            library_edit_register,
+            library_edit_unregister,
+            library_edit_list,
             recovery_write,
             recovery_list,
             recovery_claim,
@@ -3064,7 +3736,72 @@ fn main() {
             relay_client::relay_put,
             relay_client::relay_peek,
             relay_client::relay_delete,
+            remote_fetch::remote_fetch,
             report_client::report_submit,
+            follow::follow_list,
+            follow::follow_check,
+            follow::follow_post,
+            follow::follow_seen,
+            follow::follow_attach,
+            follow::follow_forget,
+            #[cfg(hew_preview)]
+            preview_only::plugins::plugin_list,
+            #[cfg(hew_preview)]
+            preview_only::plugins::plugin_pick_package,
+            #[cfg(hew_preview)]
+            preview_only::plugins::plugin_pick_dir,
+            #[cfg(hew_preview)]
+            preview_only::plugins::plugin_stage_file,
+            #[cfg(hew_preview)]
+            preview_only::plugins::plugin_stage_dir,
+            #[cfg(hew_preview)]
+            preview_only::plugins::plugin_commit,
+            #[cfg(hew_preview)]
+            preview_only::plugins::plugin_set_enabled,
+            #[cfg(hew_preview)]
+            preview_only::plugins::plugin_set_grant,
+            #[cfg(hew_preview)]
+            preview_only::plugins::plugin_uninstall,
+            #[cfg(hew_preview)]
+            preview_only::plugins::plugin_rollback,
+            #[cfg(hew_preview)]
+            preview_only::plugins::plugin_read_file,
+            #[cfg(hew_preview)]
+            preview_only::plugins::plugin_storage_get,
+            #[cfg(hew_preview)]
+            preview_only::plugins::plugin_storage_set,
+            #[cfg(hew_preview)]
+            preview_only::plugins::plugin_storage_delete,
+            #[cfg(hew_preview)]
+            preview_only::plugins::plugin_storage_list,
+            #[cfg(hew_preview)]
+            preview_only::plugins::plugin_dev_mode,
+            #[cfg(hew_preview)]
+            preview_only::plugins::plugin_set_dev_mode,
+            #[cfg(hew_preview)]
+            preview_only::plugins::plugin_dev_review,
+            #[cfg(hew_preview)]
+            preview_only::plugins::plugin_dev_request,
+            #[cfg(hew_preview)]
+            preview_only::plugins::plugin_dev_request_dismiss,
+            #[cfg(hew_preview)]
+            preview_only::plugins::plugin_host_present,
+            #[cfg(hew_preview)]
+            preview_only::plugin_data::plugin_doc_storage_get,
+            #[cfg(hew_preview)]
+            preview_only::plugin_data::plugin_doc_storage_set,
+            #[cfg(hew_preview)]
+            preview_only::plugin_data::plugin_doc_storage_delete,
+            #[cfg(hew_preview)]
+            preview_only::plugin_data::plugin_doc_storage_list,
+            #[cfg(hew_preview)]
+            preview_only::plugin_data::plugin_report_state,
+            #[cfg(hew_preview)]
+            preview_only::plugin_data::plugin_activity_read,
+            #[cfg(hew_preview)]
+            preview_only::plugin_data::plugin_console_append,
+            #[cfg(hew_preview)]
+            preview_only::plugin_data::plugin_console_read,
         ])
         // Build and attach the native menu bar; wire menu-item clicks to
         // `menu-action` events emitted to the webview.
@@ -3143,7 +3880,7 @@ fn main() {
             let app_menu_builder =
                 SubmenuBuilder::with_id(handle, "submenu:app", lbl!("submenu:app"))
                     .item(&predef_about);
-            #[cfg(feature = "updater")]
+            #[cfg(hew_updater)]
             let app_menu_builder = app_menu_builder.item(
                 &MenuItemBuilder::with_id("app-check-updates", lbl!("app-check-updates"))
                     .build(handle)?,
@@ -3379,6 +4116,25 @@ fn main() {
                 lbl!("edit-paste-in-place"),
                 "Shift+CmdOrCtrl+V",
             )?;
+            // Linked copies: Paste independent (the explicit unlinked form) and
+            // Paste linked (the explicit linked form while "Copies are linked"
+            // is off). Both gate on the clipboard having content, like Paste.
+            let edit_paste_independent = gated_item(
+                handle,
+                &mut gated,
+                "edit-paste-independent",
+                lbl!("edit-paste-independent"),
+                None,
+                None,
+            )?;
+            let edit_paste_linked = gated_item(
+                handle,
+                &mut gated,
+                "edit-paste-linked",
+                lbl!("edit-paste-linked"),
+                None,
+                None,
+            )?;
             let edit_select_all = accel(
                 MenuItemBuilder::with_id("edit-select-all", lbl!("edit-select-all")),
                 Some("CmdOrCtrl+A"),
@@ -3464,6 +4220,91 @@ fn main() {
                 None,
                 None,
             )?;
+            let edit_unlink = gated_item(
+                handle,
+                &mut gated,
+                "edit-unlink",
+                lbl!("edit-unlink"),
+                None,
+                None,
+            )?;
+            let edit_unlink_all = gated_item(
+                handle,
+                &mut gated,
+                "edit-unlink-all",
+                lbl!("edit-unlink-all"),
+                None,
+                None,
+            )?;
+            // Lock (OW-1): Edit ▸ Lock and Unlock ▸ Selected / All. No
+            // accelerator, by design: locking is a deliberate act, and the
+            // shortcut policy keeps keys for what is used constantly.
+            let edit_lock = gated_item(
+                handle,
+                &mut gated,
+                "edit-lock",
+                lbl!("edit-lock"),
+                None,
+                None,
+            )?;
+            let edit_unlock_selected = gated_item(
+                handle,
+                &mut gated,
+                "edit-unlock-selected",
+                lbl!("edit-unlock-selected"),
+                None,
+                None,
+            )?;
+            let edit_unlock_all = gated_item(
+                handle,
+                &mut gated,
+                "edit-unlock-all",
+                lbl!("edit-unlock-all"),
+                None,
+                None,
+            )?;
+            let edit_link_identical_copies = gated_item(
+                handle,
+                &mut gated,
+                "edit-link-identical-copies",
+                lbl!("edit-link-identical-copies"),
+                None,
+                None,
+            )?;
+            let edit_select_all_copies = gated_item(
+                handle,
+                &mut gated,
+                "edit-select-all-copies",
+                lbl!("edit-select-all-copies"),
+                None,
+                None,
+            )?;
+            // Flip Along ▸ Red / Green / Blue: mirror the selection in place
+            // across the plane through its center whose normal is that axis.
+            let edit_flip_red = gated_item(
+                handle,
+                &mut gated,
+                "edit-flip-red",
+                lbl!("edit-flip-red"),
+                None,
+                None,
+            )?;
+            let edit_flip_green = gated_item(
+                handle,
+                &mut gated,
+                "edit-flip-green",
+                lbl!("edit-flip-green"),
+                None,
+                None,
+            )?;
+            let edit_flip_blue = gated_item(
+                handle,
+                &mut gated,
+                "edit-flip-blue",
+                lbl!("edit-flip-blue"),
+                None,
+                None,
+            )?;
             let edit_union = gated_item(
                 handle,
                 &mut gated,
@@ -3496,6 +4337,18 @@ fn main() {
                 &edit_explode,
                 &edit_save_selection_to_library,
                 &edit_make_unique,
+                &edit_unlink,
+                &edit_unlink_all,
+                &edit_lock,
+                &edit_unlock_selected,
+                &edit_unlock_all,
+                &edit_link_identical_copies,
+                &edit_select_all_copies,
+                &edit_flip_red,
+                &edit_flip_green,
+                &edit_flip_blue,
+                &edit_paste_independent,
+                &edit_paste_linked,
                 &edit_union,
                 &edit_subtract,
                 &edit_intersect,
@@ -3506,6 +4359,11 @@ fn main() {
             // Edit stays textbook HIG (undo block, delete/select block, then
             // the specialized guide cleanup); everything object-level lives in
             // the Object menu below.
+            let unlock_menu =
+                SubmenuBuilder::with_id(handle, "submenu:unlock", lbl!("submenu:unlock"))
+                    .item(&edit_unlock_selected)
+                    .item(&edit_unlock_all)
+                    .build()?;
             let edit_menu = SubmenuBuilder::with_id(handle, "submenu:edit", lbl!("submenu:edit"))
                 .item(&edit_undo)
                 .item(&edit_redo)
@@ -3514,11 +4372,16 @@ fn main() {
                 .item(&edit_copy)
                 .item(&edit_paste)
                 .item(&edit_paste_in_place)
+                .item(&edit_paste_independent)
+                .item(&edit_paste_linked)
                 .separator()
                 .item(&edit_delete)
                 .item(&edit_select_all)
                 .item(&edit_select_none)
                 .item(&edit_invert_selection)
+                .separator()
+                .item(&edit_lock)
+                .item(&unlock_menu)
                 .separator()
                 .item(&edit_delete_guides)
                 .build()?;
@@ -3542,6 +4405,88 @@ fn main() {
             let object_model_health =
                 MenuItemBuilder::with_id("object-model-health", lbl!("object-model-health"))
                     .build(handle)?;
+            // Smooth ▸ Off / 1 / 2 / 3 (check items reflecting the selection's
+            // level) / Bake Smooth, and Soften Edges… — selection-gated like
+            // the booleans (docs/design/true-curves-ui-organization.md
+            // section 6). The levels are check items so `sync_menu_state`
+            // reaches them through `checks`.
+            let object_smooth_off = check_item(
+                handle,
+                &mut checks,
+                "object-smooth-off",
+                lbl!("object-smooth-off"),
+                None,
+                None,
+            )?;
+            let object_smooth_1 = check_item(
+                handle,
+                &mut checks,
+                "object-smooth-1",
+                lbl!("object-smooth-1"),
+                None,
+                None,
+            )?;
+            let object_smooth_2 = check_item(
+                handle,
+                &mut checks,
+                "object-smooth-2",
+                lbl!("object-smooth-2"),
+                None,
+                None,
+            )?;
+            let object_smooth_3 = check_item(
+                handle,
+                &mut checks,
+                "object-smooth-3",
+                lbl!("object-smooth-3"),
+                None,
+                None,
+            )?;
+            let object_bake_smooth = gated_item(
+                handle,
+                &mut gated,
+                "object-bake-smooth",
+                lbl!("object-bake-smooth"),
+                None,
+                None,
+            )?;
+            let object_soften_edges = gated_item(
+                handle,
+                &mut gated,
+                "object-soften-edges",
+                lbl!("object-soften-edges"),
+                None,
+                None,
+            )?;
+            for item in [
+                &object_smooth_off,
+                &object_smooth_1,
+                &object_smooth_2,
+                &object_smooth_3,
+            ] {
+                let _ = item.set_enabled(false);
+            }
+            for item in [&object_bake_smooth, &object_soften_edges] {
+                let _ = item.set_enabled(false);
+            }
+            let object_smooth_menu = SubmenuBuilder::with_id(
+                handle,
+                "submenu:object-smooth",
+                lbl!("submenu:object-smooth"),
+            )
+            .item(&object_smooth_off)
+            .item(&object_smooth_1)
+            .item(&object_smooth_2)
+            .item(&object_smooth_3)
+            .separator()
+            .item(&object_bake_smooth)
+            .build()?;
+            let flip_along_menu =
+                SubmenuBuilder::with_id(handle, "submenu:flip-along", lbl!("submenu:flip-along"))
+                    .item(&edit_flip_red)
+                    .item(&edit_flip_green)
+                    .item(&edit_flip_blue)
+                    .build()?;
             let object_menu =
                 SubmenuBuilder::with_id(handle, "submenu:object", lbl!("submenu:object"))
                     .item(&edit_group)
@@ -3549,6 +4494,11 @@ fn main() {
                     .separator()
                     .item(&edit_make_component)
                     .item(&edit_make_unique)
+                    .item(&edit_unlink)
+                    .item(&edit_unlink_all)
+                    .item(&edit_link_identical_copies)
+                    .item(&edit_select_all_copies)
+                    .item(&flip_along_menu)
                     .item(&edit_place_copy)
                     .item(&edit_explode)
                     .item(&edit_save_selection_to_library)
@@ -3556,6 +4506,9 @@ fn main() {
                     .item(&edit_union)
                     .item(&edit_subtract)
                     .item(&edit_intersect)
+                    .separator()
+                    .item(&object_smooth_menu)
+                    .item(&object_soften_edges)
                     .separator()
                     .item(&object_make_solid)
                     .item(&object_model_health)
@@ -3569,6 +4522,15 @@ fn main() {
                 &mut checks,
                 "view-axes",
                 lbl!("view-axes"),
+                None,
+                None,
+            )?;
+            // Part Axes: the frame of the selected or edited component.
+            let view_part_axes = check_item(
+                handle,
+                &mut checks,
+                "view-part-axes",
+                lbl!("view-part-axes"),
                 None,
                 None,
             )?;
@@ -3593,6 +4555,14 @@ fn main() {
                 &mut checks,
                 "view-guides",
                 lbl!("view-guides"),
+                None,
+                None,
+            )?;
+            let view_tangent_edges = check_item(
+                handle,
+                &mut checks,
+                "view-tangent-edges",
+                lbl!("view-tangent-edges"),
                 None,
                 None,
             )?;
@@ -3805,9 +4775,11 @@ fn main() {
 
             let view_menu = SubmenuBuilder::with_id(handle, "submenu:view", lbl!("submenu:view"))
                 .item(&view_axes)
+                .item(&view_part_axes)
                 .item(&view_reset_axes)
                 .item(&view_grid)
                 .item(&view_guides)
+                .item(&view_tangent_edges)
                 .item(&view_section_plane)
                 .item(&view_xray)
                 .item(&view_wireframe)
@@ -3962,6 +4934,14 @@ fn main() {
                 Some("CmdOrCtrl+9"),
                 Some("S"),
             )?;
+            let tool_flip = check_item(
+                handle,
+                &mut checks,
+                "tool-flip",
+                lbl!("tool-flip"),
+                None,
+                None,
+            )?;
             let tool_pushpull = check_item(
                 handle,
                 &mut checks,
@@ -3979,6 +4959,56 @@ fn main() {
                 None,
             )?;
 
+            let tool_revolve = check_item(
+                handle,
+                &mut checks,
+                "tool-revolve",
+                lbl!("tool-revolve"),
+                None,
+                None,
+            )?;
+            let tool_loft = check_item(
+                handle,
+                &mut checks,
+                "tool-loft",
+                lbl!("tool-loft"),
+                None,
+                None,
+            )?;
+            // Deform is one tool in four modes; each mode is its own radio
+            // item, and only the running mode is checked.
+            let tool_deform_twist = check_item(
+                handle,
+                &mut checks,
+                "tool-deform-twist",
+                lbl!("tool-deform-twist"),
+                None,
+                None,
+            )?;
+            let tool_deform_bend = check_item(
+                handle,
+                &mut checks,
+                "tool-deform-bend",
+                lbl!("tool-deform-bend"),
+                None,
+                None,
+            )?;
+            let tool_deform_taper = check_item(
+                handle,
+                &mut checks,
+                "tool-deform-taper",
+                lbl!("tool-deform-taper"),
+                None,
+                None,
+            )?;
+            let tool_deform_bend_path = check_item(
+                handle,
+                &mut checks,
+                "tool-deform-bend-path",
+                lbl!("tool-deform-bend-path"),
+                None,
+                None,
+            )?;
             let tool_offset = check_item(
                 handle,
                 &mut checks,
@@ -3986,6 +5016,48 @@ fn main() {
                 lbl!("tool-offset"),
                 None,
                 Some("F"),
+            )?;
+            let tool_fillet = check_item(
+                handle,
+                &mut checks,
+                "tool-fillet",
+                lbl!("tool-fillet"),
+                None,
+                Some("Shift+F"),
+            )?;
+            let tool_chamfer =
+                MenuItemBuilder::with_id("tool-chamfer", lbl!("tool-chamfer")).build(handle)?;
+            let tool_path_array = check_item(
+                handle,
+                &mut checks,
+                "tool-path-array",
+                lbl!("tool-path-array"),
+                None,
+                None,
+            )?;
+            let tool_shell = check_item(
+                handle,
+                &mut checks,
+                "tool-shell",
+                lbl!("tool-shell"),
+                None,
+                None,
+            )?;
+            let tool_project = check_item(
+                handle,
+                &mut checks,
+                "tool-project",
+                lbl!("tool-project"),
+                None,
+                None,
+            )?;
+            let tool_eraser = check_item(
+                handle,
+                &mut checks,
+                "tool-eraser",
+                lbl!("tool-eraser"),
+                None,
+                Some("E"),
             )?;
             let tool_tape_measure = check_item(
                 handle,
@@ -4052,21 +5124,48 @@ fn main() {
                 None,
             )?;
 
-            // Grouped by job, so future tools have an obvious slot: select,
-            // transform (mirror/array variants land here), shape geometry
-            // (chamfer/fillet land here), measure & annotate, materials,
-            // model-space utilities.
+            // SketchUp's Tools order (docs/design/true-curves-ui-organization.md
+            // section 4): select and eraser, transform, the everyday shaping
+            // tools, then two submenus — Shape (tools that make or reshape a
+            // whole solid) and Deform (its four modes) — then the measure,
+            // annotate, and model-space utilities. Mirrors the web MenuBar.
+            let shape_menu =
+                SubmenuBuilder::with_id(handle, "submenu:shape", lbl!("submenu:shape"))
+                    .item(&tool_revolve)
+                    .item(&tool_loft)
+                    .item(&tool_shell)
+                    .item(&tool_project)
+                    .separator()
+                    .item(&tool_path_array)
+                    .build()?;
+            let deform_menu =
+                SubmenuBuilder::with_id(handle, "submenu:deform", lbl!("submenu:deform"))
+                    .item(&tool_deform_twist)
+                    .item(&tool_deform_bend)
+                    .item(&tool_deform_taper)
+                    .item(&tool_deform_bend_path)
+                    .build()?;
             let tools_menu =
                 SubmenuBuilder::with_id(handle, "submenu:tools", lbl!("submenu:tools"))
                     .item(&tool_select)
+                    .item(&tool_eraser)
+                    .item(&tool_paint)
+                    .item(&tool_position_texture)
                     .separator()
                     .item(&tool_move)
                     .item(&tool_rotate)
                     .item(&tool_scale)
+                    .item(&tool_flip)
                     .separator()
                     .item(&tool_pushpull)
                     .item(&tool_follow_me)
                     .item(&tool_offset)
+                    .item(&tool_fillet)
+                    .item(&tool_chamfer)
+                    .separator()
+                    .item(&shape_menu)
+                    .item(&deform_menu)
+                    .separator()
                     .item(&tool_slice)
                     .item(&tool_edit_vertex)
                     .separator()
@@ -4074,9 +5173,6 @@ fn main() {
                     .item(&tool_protractor)
                     .item(&tool_dimension)
                     .item(&tool_text)
-                    .separator()
-                    .item(&tool_paint)
-                    .item(&tool_position_texture)
                     .separator()
                     .item(&tool_axes)
                     .item(&tool_section_plane)
@@ -4193,6 +5289,8 @@ fn main() {
                 MenuItemBuilder::with_id("cam-view-right", lbl!("cam-view-right")).build(handle)?;
             let view_iso =
                 MenuItemBuilder::with_id("cam-view-iso", lbl!("cam-view-iso")).build(handle)?;
+            let view_home =
+                MenuItemBuilder::with_id("cam-view-home", lbl!("cam-view-home")).build(handle)?;
             let standard_views = SubmenuBuilder::with_id(
                 handle,
                 "submenu:standard-views",
@@ -4206,6 +5304,7 @@ fn main() {
             .item(&view_right)
             .separator()
             .item(&view_iso)
+            .item(&view_home)
             .build()?;
 
             let camera_menu =
@@ -4277,11 +5376,19 @@ fn main() {
             // plugin (the WelcomeScreen's guide-link pattern).
             let help_guide =
                 MenuItemBuilder::with_id("help-guide", lbl!("help-guide")).build(handle)?;
+            // Follow a bug report: opens the Sent Reports list. Relabeled
+            // "Sent Reports (n new)…" from follow.rs when replies are unread.
+            let help_sent_reports = MenuItemBuilder::with_id(
+                follow::MENU_ID,
+                follow::menu_text_with(lbl!("help-sent-reports"), lbl!("help-sent-reports-new"), 0),
+            )
+            .build(handle)?;
 
             let help_menu = SubmenuBuilder::with_id(handle, "submenu:help", lbl!("submenu:help"))
                 .item(&help_guide)
                 .separator()
                 .item(&help_report_bug)
+                .item(&help_sent_reports)
                 .item(&win_debug_log)
                 .build()?;
             // ----------------------------------------------------------------
@@ -4299,6 +5406,9 @@ fn main() {
                 .item(&window_menu)
                 .item(&help_menu)
                 .build()?;
+            // A production build holds no Preview feature's item
+            // (preview_menu.rs); a preview build keeps them all.
+            preview_menu::wall_off(&menu)?;
 
             // Attach the menu. macOS shows a single global menu bar owned by the
             // app, so the app-level menu is correct there.
@@ -4343,6 +5453,27 @@ fn main() {
             // fonts.rs's top-of-file doc comment for the token registry's
             // security role.
             app.manage(fonts::SystemFontState::default());
+            // The plugin install commands' picks, waiting installs and store
+            // folder (preview builds only, like the commands themselves).
+            #[cfg(hew_preview)]
+            app.manage(preview_only::plugins::PluginState::resolve(
+                handle
+                    .config()
+                    .app
+                    .security
+                    .csp
+                    .as_ref()
+                    .map(ToString::to_string)
+                    .as_deref(),
+                env!("HEW_PLUGIN_BOOT_HASH"),
+                handle.path().app_config_dir().ok().as_deref(),
+            ));
+            // The developer-folder watcher, once the state is there.
+            #[cfg(hew_preview)]
+            preview_only::plugins::start_watching(handle);
+            // The writer of each plugin's activity log, once a second at most.
+            #[cfg(hew_preview)]
+            preview_only::plugin_data::start_activity_writer(handle);
             // "Open on Phone" server setting + HTTP client — loaded once from
             // server.json; only `set_server_setting` ever changes it.
             app.manage(relay_client::RelayState::new(relay_client::load_setting(
@@ -4391,6 +5522,7 @@ fn main() {
             app.manage(Mutex::new(ActiveWindow(None)));
             app.manage(Mutex::new(PendingRecovery(HashMap::new())));
             app.manage(Mutex::new(PendingWindowOpen(HashMap::new())));
+            app.manage(Mutex::new(WindowOpeners(HashMap::new())));
             app.manage(Mutex::new(ProtectedSlots(HashSet::new())));
             app.manage(Mutex::new(WindowStateCache {
                 last_normal: None,
@@ -4441,12 +5573,20 @@ fn main() {
             // kick off the silent launch check (updater-enabled builds only):
             // quiet unless an update is actually available, at which point the
             // user is prompted to download and restart.
-            #[cfg(feature = "updater")]
+            #[cfg(hew_updater)]
             {
                 app.manage(updater::UpdateGuard::default());
+                app.manage(updater::Pending::default());
+                app.manage(updater::RestartPass::default());
+                #[cfg(debug_assertions)]
+                updater::spawn_fixture_from_env(handle);
                 let handle = handle.clone();
                 tauri::async_runtime::spawn(async move { updater::run_check(handle, false).await });
             }
+
+            // Follow a bug report (docs/design/follow-a-report.md §6.3): once
+            // per process, 15 s from now, poll followed reports that are due.
+            follow::spawn_launch_check(handle.clone());
 
             // `--live` (docs/agents/HEW_API.md §11.2): sweep stale discovery files
             // from a previous unclean exit, then bind this launch's own
@@ -4463,6 +5603,15 @@ fn main() {
         // transient and don't overwrite the primary window's saved state).
         .on_window_event(|window, event| {
             let app = window.app_handle();
+            // The person closing the update window on the open offer means
+            // "Remind Me Later" (updater::remind_on_close).
+            #[cfg(hew_updater)]
+            if window.label() == "update" {
+                if let tauri::WindowEvent::Destroyed = event {
+                    updater::on_window_closed(app);
+                }
+                return;
+            }
             match event {
                 tauri::WindowEvent::Focused(true) if is_document_window_label(window.label()) => {
                     if let Ok(mut active) = app.state::<Mutex<ActiveWindow>>().lock() {
@@ -4485,6 +5634,12 @@ fn main() {
                 }
                 tauri::WindowEvent::Destroyed => {
                     fly_cursor::unlock_if_locked(app, window);
+                    // A closed window no longer has any Library item open.
+                    app.state::<LibraryEditRegistry>()
+                        .drop_window(window.label());
+                    // The window's plugin host is gone with it.
+                    #[cfg(hew_preview)]
+                    preview_only::plugins::window_gone(app, window.label());
                     if let Ok(mut ready) = app.state::<Mutex<ReadyWindows>>().lock() {
                         ready.0.remove(window.label());
                     }
@@ -4520,6 +5675,15 @@ fn main() {
                             if let Some(settings) = app.get_webview_window("settings") {
                                 let _ = settings.close();
                             }
+                            // And the update window, except while a restart
+                            // is closing the documents: it shows that
+                            // restart's progress and its outcome. The
+                            // person did not close it, so this is not
+                            // "Remind Me Later".
+                            #[cfg(hew_updater)]
+                            if !updater::restart_pass_active(app) {
+                                updater::close_window_quietly(app);
+                            }
                         }
                     }
                     // A recovery window that dies before claiming leaves its
@@ -4533,7 +5697,16 @@ fn main() {
                     if let Ok(mut pending) = app.state::<Mutex<PendingWindowOpen>>().lock() {
                         pending.0.remove(window.label());
                     }
+                    if let Ok(mut openers) = app.state::<Mutex<WindowOpeners>>().lock() {
+                        openers.0.remove(window.label());
+                    }
                     refresh_window_list(app);
+                    // Last, once the shell no longer counts the window: a
+                    // running update restart moves on to the next one.
+                    #[cfg(hew_updater)]
+                    if is_document_window_label(window.label()) {
+                        updater::on_document_destroyed(app, window.label());
+                    }
                 }
                 _ => {}
             }
@@ -4620,124 +5793,41 @@ fn main() {
             // The macOS "Check for Updates…" item runs the whole flow shell-side
             // rather than emitting to the webview (Windows/Linux reach the same
             // `check_for_updates` command from the in-app menu bar).
-            #[cfg(feature = "updater")]
+            #[cfg(hew_updater)]
             if id == "app-check-updates" {
                 let app = app.clone();
                 tauri::async_runtime::spawn(async move { updater::run_check(app, true).await });
                 return;
             }
-            let action = match id {
-                "app-settings" => "open-settings",
-                "file-new" => "new",
-                "file-open" => "open",
-                "file-import" => "import",
-                "file-import-image" => "import-image",
-                "file-export" => "export",
-                "file-print" => "print",
-                "file-open-on-phone" => "open-on-phone",
-                "file-save" => "save",
-                "file-save-as" => "save-as",
-                "file-revert" => "revert-to-saved",
-                "file-save-to-library" => "save-to-library-doc",
-                "file-purge-unused" => "purge-unused",
-                "file-close" => "close",
-                "edit-undo" => "undo",
-                "edit-redo" => "redo",
-                "edit-cut" => "edit-cut",
-                "edit-copy" => "edit-copy",
-                "edit-paste" => "edit-paste",
-                "edit-paste-in-place" => "edit-paste-in-place",
-                "edit-delete" => "edit-delete",
-                "edit-delete-guides" => "edit-delete-guides",
-                "edit-select-all" => "edit-select-all",
-                "edit-select-none" => "edit-select-none",
-                "edit-invert-selection" => "edit-invert-selection",
-                "edit-group" => "edit-group",
-                "edit-ungroup" => "edit-ungroup",
-                "edit-make-component" => "edit-make-component",
-                "edit-place-copy" => "edit-place-copy",
-                "edit-save-selection-to-library" => "save-to-library",
-                "edit-explode" => "edit-explode",
-                "edit-make-unique" => "edit-make-unique",
-                "edit-union" => "edit-union",
-                "edit-subtract" => "edit-subtract",
-                "edit-intersect" => "edit-intersect",
-                "object-make-solid" => "make-solid",
-                "object-model-health" => "model-health",
-                "view-axes" => "toggle-axes",
-                "view-reset-axes" => "reset-axes",
-                "view-grid" => "toggle-grid",
-                "view-guides" => "toggle-guides",
-                "view-section-plane" => "toggle-section-active",
-                "view-xray" => "toggle-xray",
-                "view-wireframe" => "toggle-wireframe",
-                "scenes-add" => "scenes-add",
-                "scenes-update" => "scenes-update",
-                "scenes-next" => "scenes-next",
-                "scenes-previous" => "scenes-previous",
-                "scenes-transitions" => "scenes-transitions",
-                "view-palette" => "open-palette",
-                "draw-rectangle" => "tool-rectangle",
-                "draw-circle" => "tool-circle",
-                "draw-polygon" => "tool-polygon",
-                "draw-arc" => "tool-arc",
-                "draw-line" => "tool-line",
-                "draw-3d-text" => "draw-3d-text",
-                "tool-select" => "tool-select",
-                "tool-paint" => "tool-paint",
-                "tool-position-texture" => "tool-position-texture",
-                "tool-move" => "tool-move",
-                "tool-rotate" => "tool-rotate",
-                "tool-scale" => "tool-scale",
-                "tool-pushpull" => "tool-pushpull",
-                "tool-follow-me" => "tool-follow-me",
-                "tool-offset" => "tool-offset",
-                "tool-tape-measure" => "tool-tape-measure",
-                "tool-dimension" => "tool-dimension",
-                "tool-protractor" => "tool-protractor",
-                "tool-slice" => "tool-slice",
-                "tool-section-plane" => "tool-section-plane",
-                "tool-edit-vertex" => "tool-edit-vertex",
-                "tool-axes" => "tool-axes",
-                "tool-text" => "tool-text",
-                "cam-orbit" => "tool-orbit",
-                "cam-pan" => "tool-pan",
-                "cam-zoom" => "tool-zoom",
-                "cam-position-camera" => "tool-position-camera",
-                "cam-walk" => "tool-walk",
-                "cam-look-around" => "tool-look-around",
-                "cam-fly" => "toggle-fly",
-                "cam-zoom-window" => "tool-zoom-window",
-                "cam-zoom-extents" => "zoom-extents",
-                "cam-parallel-projection" => "toggle-parallel-projection",
-                "cam-view-top" => "view-top",
-                "cam-view-bottom" => "view-bottom",
-                "cam-view-front" => "view-front",
-                "cam-view-back" => "view-back",
-                "cam-view-left" => "view-left",
-                "cam-view-right" => "view-right",
-                "cam-view-iso" => "view-iso",
-                "view-compact-rail" => "toggle-compact-rail",
-                "view-tray" => "toggle-tray",
-                "view-dock" => "toggle-dock",
-                "win-model-info" => "toggle-model-info",
-                "win-materials" => "toggle-materials",
-                "win-components" => "toggle-components",
-                "win-tags" => "toggle-tags",
-                "win-scenes" => "toggle-scenes",
-                "win-changes" => "toggle-changes",
-                "win-object-info" => "toggle-object-info",
-                "win-library" => "toggle-library",
-                "win-debug-log" => "toggle-debug-log",
-                "help-report-bug" => "report-bug",
-                "help-guide" => "open-guide",
-                _ => return,
+            // A Preview feature's id cannot arrive from a production menu,
+            // which holds none; one that does anyway is dropped.
+            if preview_menu::blocks_event(id) {
+                return;
+            }
+            let Some(action) = menu_action_for(id) else {
+                return;
             };
             emit_to_active(app, "menu-action", action);
         })
         .build(tauri::generate_context!())
         .expect("error while building Hew desktop")
         .run(|app, event| {
+            // An update restart closes the document windows one by one; the
+            // last one closing must not end the app before the restart or
+            // the installer runs (updater.rs, "Restart"). Only the
+            // last-window exit (`code: None`) is held: the restart itself
+            // (RESTART_EXIT_CODE) cannot be prevented, and a fixture's
+            // `exit(0)` carries a code, so both reach the arm below.
+            #[cfg(hew_updater)]
+            if let tauri::RunEvent::ExitRequested {
+                code: None, api, ..
+            } = &event
+            {
+                if updater::restart_pass_active(app) {
+                    api.prevent_exit();
+                    return;
+                }
+            }
             // A quit that never routes through CloseRequested must still
             // capture the final main-window geometry. macOS Cmd+Q uses the
             // predefined Quit item's `terminate:` selector, which surfaces
@@ -4750,10 +5840,21 @@ fn main() {
                 if let Some(main_window) = app.get_webview_window("main") {
                     save_window_state(app, &main_window.as_ref().window_ref(), true);
                 }
+                // Quitting with the update offer open is not "Remind Me
+                // Later": the next launch shows it again.
+                #[cfg(hew_updater)]
+                updater::mark_quiet_close(app);
                 // "removes it on exit" (docs/agents/HEW_API.md §11.2) — a crash
                 // (no RunEvent at all) is instead cleaned up by the NEXT
                 // launch's live::start sweeping stale discovery files.
                 live::cleanup();
+                // The developer-folder watcher's thread is stopped and
+                // joined, so nothing is left polling.
+                #[cfg(hew_preview)]
+                preview_only::plugins::stop_watching(app);
+                // What the plugin activity writer still holds is written.
+                #[cfg(hew_preview)]
+                preview_only::plugin_data::stop_activity_writer(app);
             }
             // macOS: intercept "open document" Apple events (warm + cold
             // start). deliver_open emits to the active document window once
@@ -4888,6 +5989,69 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    #[test]
+    fn version_and_help_flags_answer_without_starting_the_app() {
+        let v = |a: &[&str]| cli_flag_output(&a.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+        for flag in ["-V", "--version"] {
+            assert_eq!(
+                v(&[flag]),
+                Some(format!("hew {}\n", crate::version::VERSION))
+            );
+        }
+        for flag in ["-h", "--help"] {
+            let help = v(&[flag]).expect("help text");
+            assert!(help.contains("USAGE") && help.contains("--version"));
+        }
+        assert_eq!(v(&[]), None);
+        assert_eq!(v(&["/tmp/a.hew"]), None);
+    }
+
+    #[test]
+    fn cli_output_goes_to_a_pipe_or_file_never_past_it_to_the_console() {
+        assert_eq!(cli_sink(StdoutKind::PipeOrFile), CliSink::Stdout);
+        assert_eq!(cli_sink(StdoutKind::Missing), CliSink::ParentConsole);
+        assert_eq!(cli_sink(StdoutKind::Other), CliSink::ParentConsole);
+    }
+
+    #[test]
+    fn refused_open_with_live_opener_clears_claim_and_entry() {
+        let mut openers = HashMap::from([("main-2".to_string(), "main".to_string())]);
+        let mut paths = HashMap::from([("main-2".to_string(), "/a.skp".to_string())]);
+        let got = settle_refused_open(&mut openers, &mut paths, "main-2", |l| l == "main");
+        assert_eq!(got.as_deref(), Some("main"));
+        assert!(openers.is_empty());
+        assert!(paths.is_empty());
+    }
+
+    #[test]
+    fn refused_open_with_opener_gone_clears_its_entry_and_claim() {
+        // The window stays to show the error, but it does not hold the
+        // file: a later open of the same path must not focus it.
+        let mut openers = HashMap::from([("main-2".to_string(), "main".to_string())]);
+        let mut paths = HashMap::from([
+            ("main-2".to_string(), "/a.skp".to_string()),
+            ("main-3".to_string(), "/b.hew".to_string()),
+        ]);
+        let got = settle_refused_open(&mut openers, &mut paths, "main-2", |_| false);
+        assert_eq!(got, None);
+        assert!(openers.is_empty());
+        assert_eq!(
+            paths,
+            HashMap::from([("main-3".to_string(), "/b.hew".to_string())])
+        );
+    }
+
+    #[test]
+    fn refused_open_without_an_opener_entry_is_a_no_op() {
+        let mut openers = HashMap::new();
+        let mut paths = HashMap::from([("main-2".to_string(), "/a.skp".to_string())]);
+        assert_eq!(
+            settle_refused_open(&mut openers, &mut paths, "main-2", |_| true),
+            None
+        );
+        assert_eq!(paths.len(), 1);
+    }
+
     // `write_file_bytes` itself needs a live `AppHandle` for its
     // `write_allowed` check, which a plain `#[test]` can't construct (see
     // the library_* tests below for the same limitation) — `percent_decode`
@@ -4927,6 +6091,124 @@ mod tests {
     fn percent_decode_rejects_a_truncated_or_invalid_escape() {
         assert!(percent_decode("abc%2").is_err());
         assert!(percent_decode("abc%zz").is_err());
+    }
+
+    #[test]
+    fn a_claim_reports_only_a_path_it_took_away() {
+        let approved = ApprovedPaths::default();
+        let claim = |meta: &str| claimed_recovery_meta(Some(meta.into()), &approved).1;
+        assert!(claim(r#"{"path":"/nowhere/house.hew"}"#));
+        assert!(!claim(r#"{"path":null}"#));
+        assert!(!claim("{}"));
+        assert!(!claim("not json"));
+        assert!(!claimed_recovery_meta(None, &approved).1);
+    }
+
+    #[test]
+    fn recovery_metadata_cannot_authorize_a_new_write_target() {
+        let dir = library_scratch_dir("recovery-authorization");
+        let path = dir.join("private.txt");
+        std::fs::write(&path, b"private").unwrap();
+        let approved = ApprovedPaths::default();
+        let meta = serde_json::json!({
+            "version": 1, "savedAt": 1, "name": "Recovered", "path": path,
+            "format": "hew"
+        });
+        let filtered = recovery_meta_for_approved_paths(Some(meta.to_string()), &approved).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&filtered).unwrap();
+        assert!(value["path"].is_null());
+        assert_eq!(value["name"], "Recovered");
+        assert!(approved.write_files.is_empty());
+        assert_eq!(std::fs::read(&path).unwrap(), b"private");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn recovery_preserves_only_a_previously_approved_write_target() {
+        let dir = library_scratch_dir("recovery-approved");
+        let path = dir.join("model.hew");
+        std::fs::write(&path, b"model").unwrap();
+        let mut approved = ApprovedPaths::default();
+        approved
+            .write_files
+            .insert(std::fs::canonicalize(&path).unwrap());
+        let meta = serde_json::json!({ "path": path, "name": "Model" }).to_string();
+        assert!(!claimed_recovery_meta(Some(meta.clone()), &approved).1);
+        assert_eq!(
+            recovery_meta_for_approved_paths(Some(meta.clone()), &approved),
+            Some(meta)
+        );
+        // A read-only approval (for example, an imported file) never becomes
+        // permission to overwrite it just because a snapshot names it.
+        approved.read_files = std::mem::take(&mut approved.write_files);
+        let filtered = recovery_meta_for_approved_paths(
+            Some(serde_json::json!({ "path": path }).to_string()),
+            &approved,
+        )
+        .unwrap();
+        assert!(serde_json::from_str::<serde_json::Value>(&filtered).unwrap()["path"].is_null());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn invalid_recovery_metadata_never_supplies_a_file_target() {
+        let approved = ApprovedPaths::default();
+        assert_eq!(recovery_meta_for_approved_paths(None, &approved), None);
+        for meta in ["not json", "[]", "null", "42"] {
+            assert_eq!(
+                recovery_meta_for_approved_paths(Some(meta.into()), &approved),
+                None
+            );
+        }
+        for meta in [r#"{"path":42,"name":"Model"}"#, r#"{"name":"Model"}"#] {
+            let filtered = recovery_meta_for_approved_paths(Some(meta.into()), &approved).unwrap();
+            let value: serde_json::Value = serde_json::from_str(&filtered).unwrap();
+            assert!(value["path"].is_null());
+            assert_eq!(value["name"], "Model");
+        }
+    }
+
+    #[test]
+    fn recovery_slots_accept_only_generated_document_slot_names() {
+        for slot in [
+            "main",
+            "main-2",
+            "main-deferred",
+            "main-23-deferred",
+            LEGACY_SLOT,
+        ] {
+            assert!(valid_recovery_slot(slot), "{slot}");
+        }
+        for slot in [
+            "",
+            "../main",
+            "main/../../secret",
+            "main\\secret",
+            "main-",
+            "main-0",
+            "main-2-extra",
+            "settings",
+            "main\0",
+        ] {
+            assert!(!valid_recovery_slot(slot), "{slot:?}");
+        }
+        assert_eq!(slot_of_filename("recovery-main-2-extra.hew"), None);
+    }
+
+    #[test]
+    fn only_collada_picks_grant_sibling_directory_reads() {
+        assert!(pick_needs_directory_reads(Path::new("/models/House.DAE")));
+        for path in [
+            "/models/house.hew",
+            "/models/house.skp",
+            "/models/house.glb",
+            "/models/house.gltf",
+            "/models/house.stl",
+            "/models/house.dae.txt",
+            "/models/house",
+        ] {
+            assert!(!pick_needs_directory_reads(Path::new(path)), "{path}");
+        }
     }
 
     #[test]
@@ -5123,6 +6405,107 @@ mod tests {
         dir
     }
 
+    #[test]
+    fn a_path_inside_the_library_folder_names_its_item() {
+        let root = library_scratch_dir("name-for-path");
+        std::fs::create_dir_all(root.join("Components")).unwrap();
+        std::fs::create_dir_all(root.join(".thumbnails")).unwrap();
+        for f in ["leg.hew", "Components/table.hew", ".thumbnails/x.hew"] {
+            std::fs::write(root.join(f), b"x").unwrap();
+        }
+        let outside = library_scratch_dir("name-for-path-outside");
+        std::fs::write(outside.join("leg.hew"), b"x").unwrap();
+        assert_eq!(
+            library_name_within(&root, &root.join("leg.hew")).as_deref(),
+            Some("leg.hew")
+        );
+        assert_eq!(
+            library_name_within(&root, &root.join("Components/table.hew")).as_deref(),
+            Some("Components/table.hew")
+        );
+        assert_eq!(library_name_within(&root, &outside.join("leg.hew")), None);
+        assert_eq!(
+            library_name_within(&root, &root.join(".thumbnails/x.hew")),
+            None
+        );
+        assert_eq!(library_name_within(&root, &root.join("missing.hew")), None);
+        #[cfg(unix)]
+        {
+            let link = outside.join("lib-link");
+            std::os::unix::fs::symlink(&root, &link).unwrap();
+            assert_eq!(
+                library_name_within(&root, &link.join("Components/table.hew")).as_deref(),
+                Some("Components/table.hew")
+            );
+        }
+        let _ = std::fs::remove_dir_all(&root);
+        let _ = std::fs::remove_dir_all(&outside);
+    }
+
+    #[test]
+    fn library_name_within_follows_the_shells_rules_for_odd_paths() {
+        let root = library_scratch_dir("name-odd");
+        std::fs::create_dir_all(root.join("Components/deep")).unwrap();
+        std::fs::create_dir_all(root.join(".hidden")).unwrap();
+        for f in [
+            "Components/table.hew",
+            "Components/deep/leg.hew",
+            ".hidden/a.hew",
+            "notes.txt",
+        ] {
+            std::fs::write(root.join(f), b"x").unwrap();
+        }
+        // A `..` path resolves before the prefix check, both ways.
+        assert_eq!(
+            library_name_within(&root, &root.join("Components/../Components/table.hew")).as_deref(),
+            Some("Components/table.hew")
+        );
+        assert_eq!(
+            library_name_within(&root, &root.join("Components/../../outside.hew")),
+            None
+        );
+        // Three segments are refused (an item is at most category/file).
+        assert_eq!(
+            library_name_within(&root, &root.join("Components/deep/leg.hew")),
+            None
+        );
+        // A dot-leading folder and a non-.hew file are not items.
+        assert_eq!(
+            library_name_within(&root, &root.join(".hidden/a.hew")),
+            None
+        );
+        assert_eq!(library_name_within(&root, &root.join("notes.txt")), None);
+        // The folder itself is not an item.
+        assert_eq!(library_name_within(&root, &root), None);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn library_name_within_accepts_a_symlinked_library_folder() {
+        let real = library_scratch_dir("name-symlink-real");
+        let holder = library_scratch_dir("name-symlink-holder");
+        std::fs::create_dir_all(real.join("Components")).unwrap();
+        std::fs::write(real.join("Components/table.hew"), b"x").unwrap();
+        let link = holder.join("Library");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        // Root given as the link, path given by the real folder, and back.
+        assert_eq!(
+            library_name_within(&link, &real.join("Components/table.hew")).as_deref(),
+            Some("Components/table.hew")
+        );
+        assert_eq!(
+            library_name_within(&link, &link.join("Components/table.hew")).as_deref(),
+            Some("Components/table.hew")
+        );
+        assert_eq!(
+            library_name_within(&real, &link.join("Components/table.hew")).as_deref(),
+            Some("Components/table.hew")
+        );
+        let _ = std::fs::remove_dir_all(&real);
+        let _ = std::fs::remove_dir_all(&holder);
+    }
+
     /// `library_list`/`library_read`/`library_write` (`main.rs`, above)
     /// are thin wrappers over `library::list`/`library::read`/
     /// `library::write` — this exercises the SAME crate-level calls those
@@ -5212,6 +6595,192 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    // ---- S9 oracle: sources file, source cache, notices, edit registry ----
+
+    fn sources_entry(source: &str) -> serde_json::Value {
+        serde_json::json!({
+            "source": source, "kind": "github", "name": "N", "followed": false,
+            "addedAt": "2026-11-23T00:00:00Z",
+            "lastCheck": { "at": "2026-11-23T00:00:00Z", "ok": true, "code": null },
+            "skipped": [], "kept": {}
+        })
+    }
+
+    /// `library_sources_read`/`library_source_cache_read`/`..._write`
+    /// delegate to the crate over `HEW_LIBRARY_DIR`, keep the `not_found`
+    /// sentinel, and refuse a bad cache key.
+    #[test]
+    fn library_sources_and_cache_commands_delegate_and_keep_the_not_found_sentinel() {
+        let _env = LIBRARY_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = library_scratch_dir("sources-cmds");
+        unsafe {
+            std::env::set_var("HEW_LIBRARY_DIR", &dir);
+        }
+
+        assert_eq!(library_sources_read().err().unwrap(), "not_found");
+        assert_eq!(
+            library_source_cache_read("catalog".into()).err().unwrap(),
+            "not_found"
+        );
+
+        // The command's body is `library::write_sources` through
+        // `library_sources_write_to`; the file lands in the folder root.
+        let lib_dir = library::LibraryDir::resolve(None);
+        library_sources_write_to(
+            &lib_dir,
+            "github:a/a",
+            Some(&sources_entry("github:a/a")),
+            &mut |_| {},
+        )
+        .unwrap();
+        assert!(dir.join(".sources.json").is_file());
+        assert!(library_sources_read().is_ok());
+
+        library_source_cache_write("catalog".into(), vec![1, 2, 3]).unwrap();
+        assert!(library_source_cache_read("catalog".into()).is_ok());
+        assert_eq!(
+            std::fs::read(dir.join(".sources/catalog")).unwrap(),
+            vec![1, 2, 3]
+        );
+
+        library_source_cache_remove("catalog".into()).unwrap();
+        assert!(!dir.join(".sources/catalog").exists());
+        // Absent is fine; a bad key is not.
+        library_source_cache_remove("catalog".into()).unwrap();
+        assert!(library_source_cache_remove("../escape".into()).is_err());
+
+        assert!(library_source_cache_write("../escape".into(), vec![]).is_err());
+        assert!(library_source_cache_read("a/b".into()).is_err());
+
+        unsafe {
+            std::env::remove_var("HEW_LIBRARY_DIR");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A sources write raises `library-sources-changed` once and never
+    /// `library-changed`; a failed one raises nothing.
+    #[test]
+    fn a_sources_write_emits_library_sources_changed_and_not_library_changed() {
+        let dir = library_scratch_dir("sources-notice");
+        let lib_dir = library::LibraryDir::at(dir.clone());
+        let mut emitted: Vec<String> = Vec::new();
+        library_sources_write_to(
+            &lib_dir,
+            "github:a/a",
+            Some(&sources_entry("github:a/a")),
+            &mut |e| emitted.push(e.to_string()),
+        )
+        .unwrap();
+        assert_eq!(emitted, vec!["library-sources-changed".to_string()]);
+        assert_eq!(LIBRARY_SOURCES_CHANGED_EVENT, "library-sources-changed");
+
+        // Removing an entry is also a sources change.
+        emitted.clear();
+        library_sources_write_to(&lib_dir, "github:a/a", None, &mut |e| {
+            emitted.push(e.to_string())
+        })
+        .unwrap();
+        assert_eq!(emitted, vec!["library-sources-changed".to_string()]);
+
+        // A write that fails (corrupt file) emits nothing.
+        std::fs::write(dir.join(".sources.json"), b"{broken").unwrap();
+        emitted.clear();
+        let r = library_sources_write_to(
+            &lib_dir,
+            "github:b/b",
+            Some(&sources_entry("github:b/b")),
+            &mut |e| emitted.push(e.to_string()),
+        );
+        assert!(r.is_err());
+        assert!(emitted.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An item write still raises only `library-changed`.
+    #[test]
+    fn an_item_write_still_emits_only_library_changed() {
+        let dir = library_scratch_dir("item-notice");
+        let lib_dir = library::LibraryDir::at(dir.clone());
+        let mut emitted: Vec<String> = Vec::new();
+        library_write_to(&lib_dir, "Models/x-abcdef.hew", b"bytes", &mut |e| {
+            emitted.push(e.to_string())
+        })
+        .unwrap();
+        assert_eq!(emitted, vec!["library-changed".to_string()]);
+        assert_eq!(LIBRARY_CHANGED_EVENT, "library-changed");
+        assert!(dir.join("Models/x-abcdef.hew").is_file());
+
+        // A refused name writes nothing and emits nothing.
+        emitted.clear();
+        assert!(
+            library_write_to(&lib_dir, ".sources.json", b"x", &mut |e| emitted
+                .push(e.to_string()))
+            .is_err()
+        );
+        assert!(emitted.is_empty());
+        assert!(!dir.join(".sources.json").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_edit_registry_lists_every_windows_names_sorted_without_duplicates() {
+        let reg = LibraryEditRegistry::default();
+        assert!(reg.names().is_empty());
+        reg.register("w1", "Models/b-000001.hew").unwrap();
+        reg.register("w2", "Components/a-000002.hew").unwrap();
+        reg.register("w1", "Models/b-000001.hew").unwrap(); // idempotent
+        reg.register("w2", "Models/b-000001.hew").unwrap(); // same item, second window
+        assert_eq!(
+            reg.names(),
+            vec![
+                "Components/a-000002.hew".to_string(),
+                "Models/b-000001.hew".to_string()
+            ]
+        );
+        reg.unregister("w1", "Models/b-000001.hew");
+        // w2 still has it open.
+        assert!(reg.names().contains(&"Models/b-000001.hew".to_string()));
+        reg.unregister("w2", "Models/b-000001.hew");
+        reg.unregister("w2", "Models/b-000001.hew"); // absent is fine
+        assert_eq!(reg.names(), vec!["Components/a-000002.hew".to_string()]);
+    }
+
+    #[test]
+    fn the_edit_registry_refuses_an_invalid_item_name() {
+        let reg = LibraryEditRegistry::default();
+        for bad in [
+            "../x.hew",
+            ".sources.json",
+            "NotACategory/x.hew",
+            "x.txt",
+            "",
+        ] {
+            assert!(reg.register("w1", bad).is_err(), "{bad}");
+        }
+        assert!(reg.names().is_empty());
+    }
+
+    #[test]
+    fn closing_a_window_drops_only_its_registrations() {
+        let reg = LibraryEditRegistry::default();
+        reg.register("w1", "Models/only-w1-000001.hew").unwrap();
+        reg.register("w1", "Models/shared-000002.hew").unwrap();
+        reg.register("w2", "Models/shared-000002.hew").unwrap();
+        reg.register("w2", "Models/only-w2-000003.hew").unwrap();
+        reg.drop_window("w1");
+        assert_eq!(
+            reg.names(),
+            vec![
+                "Models/only-w2-000003.hew".to_string(),
+                "Models/shared-000002.hew".to_string()
+            ]
+        );
+        reg.drop_window("w2");
+        assert!(reg.names().is_empty());
+        reg.drop_window("never-registered"); // harmless
+    }
+
     // `valid_library_item_name` itself moved to `crates/library`
     // (`library::valid_item_name`) in the switch to a shared on-disk-layout
     // crate (docs/design/v1.1-cycle.md's Lane B) — these regression cases
@@ -5261,5 +6830,85 @@ mod tests {
         assert!(!library::valid_item_name("Components/"));
         assert!(!library::valid_item_name("chair.txt"));
         assert!(!library::valid_item_name("Components//chair.hew"));
+    }
+
+    // A plugin package installs only through the Plugins pane's own picker.
+    // Nothing the operating system hands the app (a double-click, an "Open
+    // With", a second launch's arguments, a link) may carry one in. These
+    // run in every build, so adding such a route anywhere fails here.
+
+    #[test]
+    fn a_plugin_package_is_not_a_document() {
+        for name in [
+            "x.hewplugin",
+            "X.HEWPLUGIN",
+            "/tmp/a b/x.hewplugin",
+            "x.hewplugin.zip",
+            "x.hew.hewplugin",
+        ] {
+            assert!(!is_document_name(name), "{name}");
+        }
+        assert!(is_document_name("x.hew"));
+    }
+
+    #[test]
+    fn no_file_association_or_link_handler_reaches_the_app_for_a_plugin() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut configs = 0;
+        for entry in std::fs::read_dir(root).expect("the crate folder") {
+            let path = entry.expect("entry").path();
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            if !(name.starts_with("tauri") && name.ends_with(".conf.json")) {
+                continue;
+            }
+            configs += 1;
+            let text = std::fs::read_to_string(&path).expect("config");
+            let config: serde_json::Value = serde_json::from_str(&text).expect("config parses");
+            let associations = config["bundle"]["fileAssociations"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+            for association in &associations {
+                for ext in association["ext"].as_array().cloned().unwrap_or_default() {
+                    let ext = ext.as_str().unwrap_or_default().to_ascii_lowercase();
+                    assert!(
+                        ext.trim_start_matches('.') == "hew"
+                            || ext.trim_start_matches('.') == "skp",
+                        "{name} associates .{ext}: only models open from the system"
+                    );
+                }
+            }
+            // No URL scheme: no deep-link plugin configuration and no
+            // scheme list anywhere in the config.
+            let lower = text.to_ascii_lowercase();
+            for needle in [
+                "deep-link",
+                "deeplink",
+                "schemes",
+                "cfbundleurltypes",
+                "hewplugin",
+            ] {
+                assert!(!lower.contains(needle), "{name} mentions {needle}");
+            }
+        }
+        assert!(configs >= 2, "the Tauri configs were not found");
+        let manifest = std::fs::read_to_string(root.join("Cargo.toml")).expect("Cargo.toml");
+        assert!(
+            !manifest.contains("deep-link"),
+            "the shell must not take a deep-link plugin"
+        );
+        // A hand-written Info.plist could declare URL types the config does not.
+        for plist in ["Info.plist", "Info.macos.plist"] {
+            if let Ok(text) = std::fs::read_to_string(root.join(plist)) {
+                assert!(
+                    !text.contains("CFBundleURLTypes"),
+                    "{plist} declares a URL scheme"
+                );
+                assert!(
+                    !text.to_ascii_lowercase().contains("hewplugin"),
+                    "{plist} names packages"
+                );
+            }
+        }
     }
 }

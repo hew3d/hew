@@ -28,7 +28,7 @@ fn main() {
             // signed volume via divergence theorem over triangles
             let mut vol = 0.0f64;
             let p = &mesh.positions;
-            for t in mesh.indices.chunks_exact(3) {
+            for t in mesh.indices.as_chunks::<3>().0 {
                 let (a, b, c) = (t[0] as usize * 3, t[1] as usize * 3, t[2] as usize * 3);
                 let av = [p[a] as f64, p[a + 1] as f64, p[a + 2] as f64];
                 let bv = [p[b] as f64, p[b + 1] as f64, p[b + 2] as f64];

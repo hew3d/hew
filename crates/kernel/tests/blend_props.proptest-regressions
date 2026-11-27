@@ -1,0 +1,10 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 03e693b6434397b5564e5934153bed9341a4afb58179c112015c43998d539ef4 # shrinks to x = 0.2, y = 0.2, z = 0.2, mask = 10, frac = 0.05, n = 2, chamfer = false
+cc 3be86e362e62316a0017fd6db9b042ca2e6133393d491c1dc799f73f46e759bc # shrinks to x = 0.2, y = 0.2, z = 0.2, mask = 9, frac = 0.05, n = 2, chamfer = true
+cc 9940678597c9312a3ae431a133a137ab39a9fec56b19a841bd0671c4e5c54861 # shrinks to x = 0.2, y = 0.2, z = 0.2, mask = 5, frac = 0.05, n = 4, chamfer = false
+cc 1d0b64373e5c00362a69c86f3d4e9f4836d84f0ead9947e436dd85820cb56b51 # shrinks to x = 0.2, y = 0.2, z = 0.2, mask = 7, frac = 0.6301564928284561, n = 2, chamfer = false

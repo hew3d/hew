@@ -1,0 +1,12 @@
+# The browser smoke set: the specs a developer machine runs in place of the
+# whole chromium suite (scripts/verify-full.sh, scripts/verify-changed.sh).
+# Boot, the draw / push-pull / save / reload lifecycle, the test harness
+# itself, sessions, dirty state. One path per line, relative to app/.
+#
+# Keep it small. The whole suite runs in CI on every pull request and every
+# push to main; this set is what is worth waiting for before that.
+e2e/smoke.spec.ts
+e2e/web-smoke.spec.ts
+e2e/harness.spec.ts
+e2e/session.spec.ts
+e2e/dirty-state.spec.ts

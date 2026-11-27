@@ -18,8 +18,11 @@
 import { useState } from 'react'
 import { Trans, useLingui } from '@lingui/react/macro'
 import { TOOL_ICON_SVG } from '../tools/toolIcons'
-import { RAIL_GROUPS, TOOL_GROUP_LABELS, toolsInGroup, shortcutFor, toolLabel, type ToolName } from '../tools/toolRegistry'
-import { isMac } from '../platform'
+import { isPreviewTool, previewBuild } from '../preview'
+import { withPreviewTag } from '../preview/copy'
+import { RAIL_GROUPS, TOOL_GROUP_LABELS, toolsInGroup, toolSpec, toolLabel, type ToolName } from '../tools/toolRegistry'
+import { useKeymap } from '../keymap/useKeymap'
+import { railShortcutLabel } from '../keymap/keymap'
 import { InlineIcon } from './InlineIcon'
 import libraryBooksSvg from '@material-symbols/svg-400/outlined/library_books.svg?raw'
 import chevronLeftSvg from '@material-symbols/svg-400/outlined/chevron_left.svg?raw'
@@ -234,6 +237,13 @@ function KbdChip({ shortcut, active }: { shortcut: string; active: boolean }) {
   )
 }
 
+/** A rail button's tooltip: the name and key, plus the Preview tag on a
+ *  Preview feature's tool (preview builds only). */
+function railTitle(label: string, shortcut: string, preview: boolean): string {
+  const text = shortcut === '' ? label : `${label} (${shortcut})`
+  return preview ? withPreviewTag(text) : text
+}
+
 function ToolRow({
   name,
   active,
@@ -246,7 +256,7 @@ function ToolRow({
   onSelect: () => void
 }) {
   const [hovered, setHovered] = useState(false)
-  const shortcut = shortcutFor(name, isMac)
+  const shortcut = railShortcutLabel(toolSpec(name).actionId)
   const label = toolLabel(name)
 
   return (
@@ -255,7 +265,7 @@ function ToolRow({
       role="radio"
       aria-checked={active}
       aria-label={label}
-      title={shortcut === '' ? label : `${label} (${shortcut})`}
+      title={railTitle(label, shortcut, previewBuild && isPreviewTool(name))}
       onClick={onSelect}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
@@ -292,20 +302,18 @@ function ToolRow({
  * `ToolRow`, but keyed on `active`/`onSelect` directly rather than a
  * `ToolName` — the Library dialog is a viewport-level modal, not a
  * registry-driven tool, so it can't reuse `ToolRow`'s `TOOL_ICON_SVG` lookup
- * or `shortcutFor`. */
-// oxlint-disable-next-line lingui/no-unlocalized-strings -- keyboard shortcut label, not copy
-const LIBRARY_KBD = '⇧L'
-
+ * or the registry's `actionId` shortcut. */
 function LibraryRow({ active, narrow, onSelect }: { active: boolean; narrow: boolean; onSelect: () => void }) {
   const { t } = useLingui()
-  const libraryKbd = LIBRARY_KBD
+  // oxlint-disable-next-line lingui/no-unlocalized-strings -- command id
+  const libraryKbd = railShortcutLabel('open-library')
   const [hovered, setHovered] = useState(false)
   return (
     <button
       type="button"
       aria-pressed={active}
       aria-label={t`Library`}
-      title={t`Library (${libraryKbd})`}
+      title={libraryKbd === '' ? t`Library` : t`Library (${libraryKbd})`}
       onClick={onSelect}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
@@ -333,7 +341,7 @@ function LibraryRow({ active, narrow, onSelect }: { active: boolean; narrow: boo
           <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
             <Trans>Library</Trans>
           </span>
-          <KbdChip shortcut={LIBRARY_KBD} active={active} />
+          <KbdChip shortcut={libraryKbd} active={active} />
         </>
       )}
     </button>
@@ -352,6 +360,8 @@ export function ToolRail({
 }: ToolRailProps) {
   // Subscribes the rail to locale changes so tool names and headings re-resolve.
   const { t, i18n } = useLingui()
+  // …and to keymap changes, so every tool's shortcut chip stays true.
+  useKeymap()
   // Fallback chip text when the host gives no palette shortcut label.
   // oxlint-disable-next-line lingui/no-unlocalized-strings -- keyboard shortcut label, not copy
   const fallbackKbd = 'Ctrl K'

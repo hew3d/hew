@@ -12,7 +12,9 @@ import type { NodeRef } from '../panels/treeModel'
 import type { Scene as WasmScene } from '../wasm/loader'
 import type { Ray } from '../viewport/math'
 import { worldPerPixelPerspective } from '../viewport/math'
+import { followsViewPlane } from '../viewport/heldPointerReplay'
 import { clearPreview } from './transformPreview'
+import { behaviorEnabled } from '../preview'
 
 const RAY: Ray = { origin: [0, 0, 5], direction: [0, 0, -1] }
 
@@ -171,6 +173,16 @@ function makeTool(scene: WasmScene, selection: NodeRef[] = []) {
   const tool = new FollowMeTool(scene, preview, onCommit, onToast, onMeasurement, selection)
   return { tool, preview, onCommit, onToast, onMeasurement }
 }
+
+describe('FollowMeTool — no view-plane hover replay', () => {
+  it('does not follow the view, so an idle key (Escape mid-drag) replays no hover at the held pointer', () => {
+    // Escape mid-drag backs up to profile-pick; a replayed hover where the
+    // drag left the cursor (on the path, off the profile) would drop the
+    // armed profile's verdict from the status hint.
+    const { tool } = makeTool(makeWasmScene({}))
+    expect(followsViewPlane(tool)).toBe(false)
+  })
+})
 
 describe('FollowMeTool — path from preselection', () => {
   it('starts at pick-profile when sketch edges are preselected, and commits on a region click', () => {
@@ -891,6 +903,74 @@ describe('FollowMeTool — K4 merge fallback (corner/edge-only contact)', () => 
     expect(onToast.mock.calls[0][1]).toBeUndefined()
   })
 
+  it('an ArrangementFailed merge refusal falls back to the separate-birth commit too', () => {
+    const facePick = makeFacePick(30n, 31n)
+    const regionPick = makeRegionPick(20n, 21n)
+    const scene = makeWasmScene({ facePick, regionPick })
+    ;(scene as unknown as { follow_me_merged_around_face: unknown }).follow_me_merged_around_face =
+      vi.fn(() => {
+        throw new Error('ArrangementFailed: the boolean could not resolve where the operands meet')
+      })
+    const { tool, onCommit, onToast } = makeTool(scene)
+
+    tool.onPointerDown(null, RAY) // path: face loop
+    tool.setMergeModifier(true)
+    tool.onPointerDown(null, RAY) // profile, merge held — merge refuses, falls back
+
+    expect(scene.follow_me_merged_around_face).toHaveBeenCalledTimes(1)
+    expect(scene.follow_me_around_face).toHaveBeenCalledWith(20n, 21n, 30n, 31n, undefined, null)
+    expect(onCommit).toHaveBeenCalledWith(77n)
+    expect(onToast).toHaveBeenCalledTimes(1)
+    // The note does not claim the two only touch.
+    expect(onToast.mock.calls[0][0]).toMatch(/couldn't join.*separate object/i)
+    expect(onToast.mock.calls[0][0]).not.toMatch(/edge or corner/i)
+    expect(onToast.mock.calls[0][1]).toBeUndefined()
+  })
+
+  it('a ResultTooThin merge refusal falls back to the separate-birth commit too', () => {
+    const facePick = makeFacePick(30n, 31n)
+    const regionPick = makeRegionPick(20n, 21n)
+    const scene = makeWasmScene({ facePick, regionPick })
+    ;(scene as unknown as { follow_me_merged_around_face: unknown }).follow_me_merged_around_face =
+      vi.fn(() => {
+        throw new Error('ResultTooThin: refused')
+      })
+    const { tool, onCommit, onToast } = makeTool(scene)
+
+    tool.onPointerDown(null, RAY)
+    tool.setMergeModifier(true)
+    tool.onPointerDown(null, RAY)
+
+    expect(scene.follow_me_around_face).toHaveBeenCalledWith(20n, 21n, 30n, 31n, undefined, null)
+    expect(onCommit).toHaveBeenCalledWith(77n)
+    expect(onToast).toHaveBeenCalledTimes(1)
+    expect(onToast.mock.calls[0][0]).toMatch(/too thin.*separate object/i)
+    expect(onToast.mock.calls[0][0]).not.toMatch(/edge or corner|only touch/i)
+    expect(onToast.mock.calls[0][1]).toBeUndefined()
+  })
+
+  it('a OperandFaceNotFlat merge refusal falls back to the separate-birth commit too', () => {
+    const facePick = makeFacePick(30n, 31n)
+    const regionPick = makeRegionPick(20n, 21n)
+    const scene = makeWasmScene({ facePick, regionPick })
+    ;(scene as unknown as { follow_me_merged_around_face: unknown }).follow_me_merged_around_face =
+      vi.fn(() => {
+        throw new Error('OperandFaceNotFlat: refused')
+      })
+    const { tool, onCommit, onToast } = makeTool(scene)
+
+    tool.onPointerDown(null, RAY)
+    tool.setMergeModifier(true)
+    tool.onPointerDown(null, RAY)
+
+    expect(scene.follow_me_around_face).toHaveBeenCalledWith(20n, 21n, 30n, 31n, undefined, null)
+    expect(onCommit).toHaveBeenCalledWith(77n)
+    expect(onToast).toHaveBeenCalledTimes(1)
+    expect(onToast.mock.calls[0][0]).toMatch(/isn't flat enough.*separate object/i)
+    expect(onToast.mock.calls[0][0]).not.toMatch(/edge or corner|only touch/i)
+    expect(onToast.mock.calls[0][1]).toBeUndefined()
+  })
+
   it('the separate-birth fallback itself failing surfaces ITS OWN refusal, not the superseded merge one', () => {
     const facePick = makeFacePick(30n, 31n)
     const regionPick = makeRegionPick(20n, 21n)
@@ -937,7 +1017,7 @@ describe('FollowMeTool — K4 merge fallback (corner/edge-only contact)', () => 
     expect(onToast.mock.calls[0][1]).toBe('DegenerateContact')
   })
 
-  it('other merge refusals (not DegenerateContact) surface unchanged, no fallback attempted', () => {
+  it('other merge refusals (not a fallback code) surface unchanged, no fallback attempted', () => {
     const facePick = makeFacePick(30n, 31n)
     const regionPick = makeRegionPick(20n, 21n)
     const scene = makeWasmScene({
@@ -1070,7 +1150,28 @@ describe('FollowMeTool — solid-face PROFILES (design §3a)', () => {
     tool.onPointerDown(null, RAY) // path: face loop on object 30n
     ;(scene.pick_face as ReturnType<typeof vi.fn>).mockReturnValue(makeFacePick(40n, 41n))
     tool.onPointerMove(null, RAY) // hover a DIFFERENT object's face
-    expect(tool.statusHint()).toBe('Click this face to use it as the profile.')
+    // The twist invitation is the Preview option's; the plain cue is not.
+    const plain = 'Click this face to use it as the profile.'
+    expect(tool.statusHint()).toBe(behaviorEnabled('follow-me-twist') ? `${plain} Type 30deg to twist it or 40% to shrink its end.` : plain)
+  })
+
+  it('the hover over a face of a LOCKED solid says Locked and offers no profile', () => {
+    const facePick = makeFacePick(30n, 31n)
+    const scene = makeWasmScene({ facePick })
+    const s = scene as unknown as Record<string, unknown>
+    s.node_frozen = vi.fn((kind: number, id: bigint) => (kind === 0 && id === 40n ? { kind: 'object', id } : undefined))
+    s.node_locked = vi.fn((kind: number, id: bigint) => kind === 0 && id === 40n)
+    s.group_members = vi.fn(() => [])
+    s.definition_usage = vi.fn(() => 1)
+    const { tool } = makeTool(scene)
+    tool.onPointerDown(null, RAY) // path: face loop on object 30n
+    ;(scene.pick_face as ReturnType<typeof vi.fn>).mockReturnValue(makeFacePick(40n, 41n))
+    tool.onPointerMove(null, RAY) // hover the locked solid's face
+    expect(tool.statusHint()).toBe('Locked')
+    // Back on a free face, the normal cue returns.
+    ;(scene.pick_face as ReturnType<typeof vi.fn>).mockReturnValue(makeFacePick(50n, 51n))
+    tool.onPointerMove(null, RAY)
+    expect(tool.statusHint()).toContain('Click this face')
   })
 
   it('discloses the group-birth gap while editing a group (no group-birth surface on this route)', () => {
@@ -1394,11 +1495,13 @@ describe('FollowMeTool — start verdict, the other outcomes', () => {
     // at (0,1,0) — see followMeStart.ts's evaluateClosed corner-touch branch).
     // rectScene's DEFAULT region_boundary ring (all points at y = 0) sits
     // exactly AT the fold boundary and reads `ok` (see the companion
-    // "accepting" test below) — this ring instead straddles y up to 0.2,
-    // decisively over the (0,0,0) corner's wrong flank (the fold test
-    // measures `-p.y`, so y > 0 folds back over the corner into the swept
-    // material), so it must read `refused`/`corner-overhang`.
-    const overhangRing = new Float32Array([0, 0.2, 0, 0, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0.2, 0])
+    // "accepting" test below) — this ring instead straddles the corner, y
+    // from -0.2 to 0.2: part of it beyond the corner, part hanging back over
+    // the incoming flank (the fold test measures `-p.y`), which folds into
+    // the swept material, so it must read `refused`/`corner-overhang`. (A
+    // ring wholly at y > 0 hangs INSIDE the loop and is a legal rebate seam
+    // now, #75 — see followMeStart.test.ts.)
+    const overhangRing = new Float32Array([0, -0.2, 0, 0, 0.2, 0, 0, 0.2, 0.2, 0, -0.2, 0.2])
     const scene = rectScene([0, 0, 0, 1, 0, 0], overhangRing) // plane x = 0, through (0,0,0)
     const { tool, onToast } = makeTool(scene)
     tool.onPointerDown(null, RAY) // pick the rectangle as the path

@@ -1194,3 +1194,21 @@ fn shellexpand_tilde(p: &str) -> String {
     }
     p.to_string()
 }
+
+// ─────────────────────────────── asset without dates ─────────────────────────
+
+/// Some exporters omit the schema-required `<created>`/`<modified>` inside
+/// `<asset>`. They are metadata only, so the file must still import.
+#[test]
+fn asset_without_created_and_modified_still_imports() {
+    let text = String::from_utf8(fixture("box_closed.dae")).expect("utf8 fixture");
+    let stripped = text
+        .replace("<created>2024-01-01</created>", "")
+        .replace("<modified>2024-01-01</modified>", "");
+    assert!(!stripped.contains("<created>") && !stripped.contains("<modified>"));
+    let DaeScene { scene, .. } =
+        import(stripped.as_bytes(), &empty_images()).expect("import without asset dates");
+    let mut doc = Document::new();
+    let (report, _) = doc.ingest(scene, Vec::new()).expect("ingest");
+    assert_eq!(report.objects_created, 1);
+}

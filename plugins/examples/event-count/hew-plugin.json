@@ -1,0 +1,26 @@
+{
+  "manifest": 1,
+  "id": "com.example.event-count",
+  "name": "Event Count",
+  "version": "0.1.0",
+  "description": "Starts when the model changes, and counts the changes it is told about.",
+  "api": 1,
+  "main": "dist/background.js",
+  "permissions": ["model.read"],
+  "activation": ["on_command", "on_event"],
+  "contributes": {
+    "events": ["document_changed"],
+    "commands": [
+      {
+        "id": "status",
+        "class": "read_only",
+        "summary": "Says why the plugin started, and what changes it has been told about.",
+        "result": {
+          "type": "object",
+          "properties": { "activation": {}, "received": {}, "generations": {}, "stored": {} },
+          "additionalProperties": false
+        }
+      }
+    ]
+  }
+}

@@ -54,6 +54,12 @@ use crate::transform::Transform;
 /// 4×f64 center xyz + radius when present). Absent in v1-v4 files → all
 /// `Edge::curve = None`. An imprinted circle awaiting its push-through
 /// persists its identity here (the true-curves design, playtest fix C3).
+/// v5 → v6: per-face optional SOFT flags ([`crate::topo::Edge::soft`])
+/// appended after each face's hole loops and BEFORE the edge-curve block —
+/// a `u8` "any" flag (0 = no soft edge on this face; 1 = one `u8` per outer
+/// edge then per hole edge follows). A shared edge's two flags are OR'd on
+/// load. Absent in v1-v5 files → no soft edges. Sweep facet seams persist
+/// here.
 /// v6 → v7: per-face optional regular-polygon claims
 /// ([`crate::topo::Edge::polygon`]) appended AFTER each face's edge-curve
 /// block, in the same shape (a `u8` "any" flag; when 1, for every outer
@@ -66,7 +72,59 @@ use crate::transform::Transform;
 /// the dense material id (`u32`). A face without back paint grows by the
 /// one flag byte. Absent in
 /// v1-v7 buffers → all `Face::back_material = None`.
-pub const GEOMETRY_FORMAT_VERSION: u32 = 8;
+/// v8 → v9: per-face and per-edge attribute dictionaries
+/// ([`crate::topo::Face::attrs`], [`crate::topo::Edge::attrs`]), appended
+/// AFTER each face's back-paint block: a `u8` flag and, when 1, a `u32`
+/// byte length and the face's dictionary as UTF-8 JSON (namespace → key →
+/// value, the manifest `attrs` shape); then a `u8` "any" flag for the
+/// face's edges and, when 1, one (flag + optional length + JSON) entry per
+/// outer edge then per hole edge. A face without dictionaries grows by the
+/// two flag bytes. Absent in v1-v8 buffers → no dictionaries.
+/// v9 → v10: three more analytic surface classes, the blend tag and the
+/// crease flag (the true-curves design). The per-face surface byte becomes a
+/// kind (0 none, 1 cylinder, 2 sphere + 4×f64 center xyz radius, 3 torus +
+/// 8×f64 center xyz axis xyz major minor, 4 cone + 7×f64 apex xyz axis xyz
+/// half-angle); after the dictionary blocks each face appends its CREASE
+/// flags (the soft block's shape: a `u8` "any" flag, then a `u8` per outer
+/// edge then per hole edge) and its blend tag (`u8` flag, then `u32` id,
+/// `u8` kind 0 fillet / 1 chamfer / 2 profile, `u8` role 0 strip / 1 corner
+/// / 2 runout). A face carrying neither grows by two zero bytes. A shared
+/// edge's two crease flags must agree. Absent in v1-v9 buffers → no
+/// creases, no blend tags, and only cylinder claims.
+/// v10 → v11: each face's plane ([`crate::topo::Face::plane`]), right after
+/// its hole loops: a `u8` flag, and when 1 the unit normal and offset
+/// (4×f64). 0 means the face's plane is the loader's refit from the outer
+/// ring ([`outer_ring_plane`]); 1 means it is the stored plane. The writer
+/// omits a plane the refit gives bit for bit, and one the reader would
+/// refuse (so that face reopens as v10 refit it). Only an invalid state
+/// carries such a plane: [`Object::validate`] rejects a face off its plane
+/// (`FaceGeometryNotPlanar`) and one whose plane fails
+/// [`stored_plane_fault`] against its outer ring's refit
+/// (`FacePlaneInvalid`), so no operation commits one. The reader uses the
+/// stored plane, so a face reopens on exactly the plane it was validated
+/// against. Absent in v1-v10 buffers → the refit, with the fixed fallback
+/// list of [`legacy_face_plane`] for a face whose points stray from it.
+pub const GEOMETRY_FORMAT_VERSION: u32 = 11;
+
+/// The geometry buffer version at which each face's plane is stored.
+pub(crate) const FACE_PLANE_GEOMETRY_VERSION: u32 = 11;
+
+/// The geometry buffer version [`Document::state_hash`](crate::Document::state_hash)
+/// encodes an Object with when that Object carries no face or edge
+/// dictionary and no v10 curve data (and the manifest's `geometry_version`
+/// it hashes): the [`HASHED_FORMAT_VERSION`] rule applied to the geometry
+/// buffer, so the v9 and v10 bumps move only the hashes of documents whose
+/// solids carry what those versions added. An Object that carries a
+/// dictionary hashes as v9, one that carries curve data as v10.
+pub(crate) const HASHED_GEOMETRY_VERSION: u32 = 8;
+
+/// The geometry buffer version at which face and edge attribute
+/// dictionaries were introduced.
+pub(crate) const ELEMENT_ATTRS_GEOMETRY_VERSION: u32 = 9;
+
+/// The geometry buffer version at which sphere, torus and cone surface
+/// claims, crease flags and blend tags were introduced.
+pub(crate) const CURVES_GEOMETRY_VERSION: u32 = 10;
 
 /// Version of the `.hew` container / `manifest.json` shape (independent of the
 /// geometry buffer version). Bump on any manifest-shape change and extend
@@ -251,7 +309,199 @@ pub const GEOMETRY_FORMAT_VERSION: u32 = 8;
 /// document whose guides are all whole lines writes the same manifest as
 /// v21 apart from the version. Gated by [`GUIDE_SPAN_MIN_VERSION`].
 /// Geometry buffer unchanged.
-pub const MANIFEST_FORMAT_VERSION: u32 = 22;
+/// **v23**: `sketches[].detached` — the sketch is a detached shape
+/// (`Sketch::detached`): drawing that takes part in no plane arrangement,
+/// never object-owned. Optional and omitted when false, so a document with
+/// no detached sketch writes the same manifest as v22 apart from the
+/// version. Gated by [`DETACHED_SKETCH_MIN_VERSION`]; a reader also rejects
+/// `detached` together with `owner_object`. Geometry buffer unchanged.
+/// **v24**: `guides[].dash` (a guide line's 16-bit stipple mask, omitted
+/// at the default `0x3333`); `camera.image_width` and `camera.aspect_ratio`
+/// (a Match Photo camera's image width in meters and held ratio, top-level
+/// and in `scenes[].camera`); and the section and guide settings of a
+/// `view_style` (`section_cut_color`, `section_cut_width`, `section_fill`,
+/// `section_fill_color`, `active_section_color`, `guides_color`,
+/// `guides_hidden`). Each is optional and omitted when unset, so a
+/// document using none of them writes the same manifest as v23 apart from
+/// the version. Gated by [`GUIDE_DASH_MIN_VERSION`],
+/// [`CAMERA_IMAGE_MIN_VERSION`] and [`VIEW_STYLE_SECTION_MIN_VERSION`].
+/// Geometry buffer unchanged.
+/// **v25**: `geo` — the document's coordinate reference system (name,
+/// origin easting/northing/height, x axis, scale, datum, projection, zone,
+/// unit and the file's registry and calibration ids). Optional and omitted
+/// when the model has none, so a document without one writes the same
+/// manifest as v24 apart from the version. Gated by [`GEO_MIN_VERSION`].
+/// Geometry buffer unchanged.
+/// **v26**: `materials[].pbr` — a material's physically based properties
+/// (metallic and roughness factors, normal and occlusion strengths, and up
+/// to four map images stored as `textures/pbr_<material>_<slot>.<ext>`).
+/// Optional and omitted for a plain material, so a document without one
+/// writes the same manifest as v25 apart from the version. Gated by
+/// [`PBR_MIN_VERSION`]. Geometry buffer unchanged.
+/// **v27**: `instances[].material` — a placement's own material (dense
+/// `materials[]` id), which a member face shows when neither the face nor
+/// its Object's base is painted, the nearest painted placement winning
+/// (HEW_FILE_FORMAT.md §4.4). Optional and omitted when absent, so a
+/// document with no painted placement writes the same manifest as v26
+/// apart from the version. Gated by [`INSTANCE_MATERIAL_MIN_VERSION`].
+/// Geometry buffer unchanged.
+/// **v28**: geometry buffer v9 (per-face and per-edge attribute
+/// dictionaries, HEW_FILE_FORMAT.md §3). The manifest shape is unchanged
+/// apart from `format_version` and `geometry_version`.
+/// **v29**: `document_id` — a UUID (lowercase, hyphenated) that identifies
+/// the document across saves, minted from host randomness on the first
+/// save and never changed after (HEW_FILE_FORMAT.md §2). Optional and
+/// omitted when absent, so a document that was never given one writes the
+/// same manifest as v28 apart from the version. Gated by
+/// [`DOCUMENT_ID_MIN_VERSION`]; `Document::state_hash` never writes it.
+/// Geometry buffer unchanged.
+/// **v30**: `sketches[].curves[].kind = "smooth"` — an entry with no
+/// `center` and no `radius` for a chain drawn as a circle or arc that lost
+/// its circle to a non-similarity transform and still shades smooth when
+/// extruded or swept (E1, the true-curves design). Every other entry keeps
+/// its center and radius, so a document with no such chain writes the same
+/// manifest as v29 apart from the version. Gated by
+/// [`SMOOTH_CHAIN_MIN_VERSION`]. Geometry buffer v10 (surface kinds 2–4,
+/// crease flags, blend tags).
+/// **v31**: `objects[].blends[]` — what each blend on the object replaced
+/// ([`crate::blend::BlendRecord`]: the blend's spec with its edges as
+/// segments, the loops it trimmed as the ring it left and the ring it
+/// replaced, the faces it consumed, the untagged pieces it left that replay
+/// takes away whole, the marks of the edges it removed), so Remove and
+/// Resize replay stored geometry. Omitted for an object with no blend, so
+/// such a document writes the same manifest as v30 apart from the version.
+/// Gated by [`BLEND_RECORDS_MIN_VERSION`]. Geometry buffer unchanged.
+/// **v32**: `objects[].imported` and `sketches[].imported` — the object
+/// was built from a foreign file's mesh, or the sketch is a foreign file's
+/// drawing, and the user has not drawn on it since: a viewer shows its
+/// lines as the source's, not as drawing made in Hew. Optional and omitted
+/// when false, so a document with nothing imported writes the same manifest
+/// as v31 apart from the version; a file older than v32 loads with nothing
+/// marked (no retroactive marking). Gated by [`IMPORTED_MIN_VERSION`].
+/// The same version also marks geometry buffer v11 (each face's plane
+/// stored, HEW_FILE_FORMAT.md §3), introduced with it: a v32 manifest
+/// names `geometry_version` 11.
+/// **v33**: `objects[].locked`, `groups[].locked` and
+/// `components[].locked` (OW-1) — the person locked the Object, the
+/// group, or the shape every copy of a component places: nothing changes
+/// on it until it is unlocked. An instance has no lock of its own; it is
+/// locked when its definition is. Optional and omitted when false, so a
+/// document with nothing locked writes the same manifest as v32 apart
+/// from the version (and hashes as before, [`HASHED_FORMAT_VERSION`]); a
+/// file older than v33 loads with nothing locked. Gated by
+/// [`LOCKED_MIN_VERSION`]. Geometry buffer unchanged.
+pub const MANIFEST_FORMAT_VERSION: u32 = 33;
+
+/// The manifest version at which `objects[].locked`, `groups[].locked`
+/// and `components[].locked` were introduced. A file declaring an older
+/// version that sets any of them is rejected (reject-not-repair).
+pub(crate) const LOCKED_MIN_VERSION: u32 = 33;
+
+/// The manifest version at which `objects[].imported` and
+/// `sketches[].imported` were introduced. A file declaring an older version
+/// that sets either is rejected (reject-not-repair).
+pub(crate) const IMPORTED_MIN_VERSION: u32 = 32;
+
+/// The manifest version at which `materials[].pbr` was introduced. A file
+/// declaring an older version that carries one is rejected
+/// (reject-not-repair).
+pub(crate) const PBR_MIN_VERSION: u32 = 26;
+
+/// The manifest version at which `geo` was introduced. A file declaring an
+/// older version that carries one is rejected (reject-not-repair).
+pub(crate) const GEO_MIN_VERSION: u32 = 25;
+
+/// The manifest version at which `camera.image_width` and
+/// `camera.aspect_ratio` (top-level and in `scenes[].camera`) were
+/// introduced. A file declaring an older version that carries either is
+/// malformed for its own declared version and rejected.
+pub(crate) const CAMERA_IMAGE_MIN_VERSION: u32 = 24;
+
+/// The manifest version at which the section and guide fields of a
+/// `view_style` (`section_*`, `active_section_color`, `guides_*`) were
+/// introduced. A file declaring an older version that carries one is
+/// malformed for its own declared version and rejected.
+pub(crate) const VIEW_STYLE_SECTION_MIN_VERSION: u32 = 24;
+
+/// The manifest version at which `guides[].dash` was introduced. A file
+/// declaring an older version that carries it is malformed for its own
+/// declared version and rejected (reject-not-repair).
+pub(crate) const GUIDE_DASH_MIN_VERSION: u32 = 24;
+
+/// The manifest version at which `sketches[].detached` was introduced. A
+/// file declaring an older version that sets it is malformed for its own
+/// declared version and rejected (reject-not-repair).
+pub(crate) const DETACHED_SKETCH_MIN_VERSION: u32 = 23;
+
+/// The `format_version` `Document::state_hash` encodes with, whatever the
+/// writer's own version: the hash is a digest of the document's state,
+/// frozen into replay fixtures and bug-report recordings, so a format bump
+/// that adds an optional field changes the hash only of a document that
+/// uses the field. Pinned at the version current when this rule began. The
+/// pin moves only on a non-additive change to an existing field, and then
+/// the replay fixtures are regenerated deliberately in a commit that says
+/// so; an additive optional field never moves it, so the hashed bytes may
+/// claim v22 while carrying a later field, which is harmless (they are
+/// hashed, never loaded).
+pub(crate) const HASHED_FORMAT_VERSION: u32 = 22;
+
+/// The manifest version at which the top-level `document_id` was
+/// introduced. A file declaring an older version that carries one is
+/// malformed for its own declared version and rejected (reject-not-repair).
+pub(crate) const DOCUMENT_ID_MIN_VERSION: u32 = 29;
+
+/// Deserializes a member that is present in the JSON, `null` included, as
+/// `Some(..)`; with `#[serde(default)]` an absent member stays `None`.
+fn deserialize_present<'de, D>(deserializer: D) -> Result<Option<Option<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer).map(Some)
+}
+
+/// A document id as manifest text: lowercase hyphenated `8-4-4-4-12` hex.
+pub(crate) fn document_id_text(id: &[u8; 16]) -> String {
+    let mut s = String::with_capacity(36);
+    for (i, b) in id.iter().enumerate() {
+        if matches!(i, 4 | 6 | 8 | 10) {
+            s.push('-');
+        }
+        s.push_str(&format!("{b:02x}"));
+    }
+    s
+}
+
+/// Parses manifest `document_id` text: exactly 36 characters, `8-4-4-4-12`
+/// lowercase hex. Anything else is `None` (the caller rejects the file).
+pub(crate) fn parse_document_id(text: &str) -> Option<[u8; 16]> {
+    let b = text.as_bytes();
+    if b.len() != 36 {
+        return None;
+    }
+    let mut out = [0u8; 16];
+    let mut nibbles = 0usize;
+    for (i, &c) in b.iter().enumerate() {
+        if matches!(i, 8 | 13 | 18 | 23) {
+            if c != b'-' {
+                return None;
+            }
+            continue;
+        }
+        let v = match c {
+            b'0'..=b'9' => c - b'0',
+            b'a'..=b'f' => c - b'a' + 10,
+            _ => return None,
+        };
+        out[nibbles / 2] |= if nibbles.is_multiple_of(2) { v << 4 } else { v };
+        nibbles += 1;
+    }
+    Some(out)
+}
+
+/// The manifest version at which `instances[].material` was introduced. A
+/// file declaring an older version that carries one is malformed for its
+/// own declared version and rejected (reject-not-repair).
+pub(crate) const INSTANCE_MATERIAL_MIN_VERSION: u32 = 27;
 
 /// The manifest version at which `sketches[].tags` was introduced. A file
 /// declaring an older version that carries one is malformed for its own
@@ -272,6 +522,20 @@ pub(crate) const GUIDE_TAGS_MIN_VERSION: u32 = 21;
 /// introduced. A file declaring an older version that carries either is
 /// malformed for its own declared version and rejected (reject-not-repair).
 pub(crate) const GUIDE_SPAN_MIN_VERSION: u32 = 22;
+/// First manifest version whose `sketches[].curves[]` may hold a
+/// `kind: "smooth"` entry (no center, no radius): a chain drawn as a circle
+/// or arc that lost its circle to a non-similarity transform and still
+/// shades smooth when extruded (E1, the true-curves design).
+pub(crate) const SMOOTH_CHAIN_MIN_VERSION: u32 = 30;
+/// First manifest version whose `objects[]` entries may carry `blends[]`
+/// (the stored restoration of each blend). A file declaring an older
+/// version that carries one is malformed for its own declared version and
+/// rejected (reject-not-repair).
+pub(crate) const BLEND_RECORDS_MIN_VERSION: u32 = 31;
+/// The largest `seq` a blend record may carry in a file (2^30): the order
+/// counter has room for every later blend and every boolean's offset
+/// without reaching `u32::MAX`.
+pub(crate) const MAX_BLEND_SEQ: u32 = 1 << 30;
 
 /// The manifest version at which `camera.parallel_height` (the height a
 /// parallel view spans at its target, `camera.rs`), the top-level
@@ -422,6 +686,63 @@ fn attrs_from_dto(dto: &AttrsDto, what: &str) -> Result<crate::attr::AttrDict, L
         }
     }
     Ok(dict)
+}
+
+/// A face or edge dictionary's v9 geometry-buffer bytes: the manifest
+/// `attrs` JSON shape, compact. Deterministic (`BTreeMap` order end to
+/// end), so equal dictionaries always write equal bytes.
+fn attr_dict_json(dict: &crate::attr::AttrDict) -> Vec<u8> {
+    serde_json::to_vec(&attrs_to_dto(dict)).expect("a validated dictionary serializes")
+}
+
+/// Reads one v9 dictionary entry (`u8` flag, then `u32` length and UTF-8
+/// JSON when the flag is 1). Validated as strictly as a live write: every
+/// namespace and key non-empty, every namespace holding a key, every value
+/// representable ([`crate::attr::AttrValue::from_json`]). A present entry
+/// with no namespace is malformed (the writer never emits one).
+fn read_attr_dict(r: &mut ByteReader<'_>) -> Result<Option<crate::attr::AttrDict>, DecodeError> {
+    match r.read_u8()? {
+        0 => return Ok(None),
+        1 => {}
+        _ => {
+            return Err(DecodeError::Corrupt {
+                offset: r.pos - 1,
+                what: "attribute dictionary flag must be 0 or 1",
+            });
+        }
+    }
+    let len = r.read_u32()? as usize;
+    let start = r.pos;
+    let bytes = r.read_slice(len)?;
+    let corrupt = |what: &'static str| DecodeError::Corrupt {
+        offset: start,
+        what,
+    };
+    let dto: AttrsDto = serde_json::from_slice(bytes)
+        .map_err(|_| corrupt("attribute dictionary is not valid JSON"))?;
+    if dto.is_empty() {
+        return Err(corrupt("attribute dictionary is empty"));
+    }
+    let mut dict = crate::attr::AttrDict::new();
+    for (ns, entries) in dto {
+        if ns.is_empty() {
+            return Err(corrupt("attribute dictionary has an empty namespace"));
+        }
+        if entries.is_empty() {
+            return Err(corrupt("attribute namespace holds no key"));
+        }
+        let mut out = BTreeMap::new();
+        for (key, value) in entries {
+            if key.is_empty() {
+                return Err(corrupt("attribute dictionary has an empty key"));
+            }
+            let parsed = crate::attr::AttrValue::from_json(&value)
+                .map_err(|_| corrupt("attribute value is not representable"))?;
+            out.insert(key, parsed);
+        }
+        dict.insert(ns, out);
+    }
+    Ok(Some(dict))
 }
 
 /// Sentinel `u32` standing in for `None` wherever a material id is written in a
@@ -587,6 +908,121 @@ fn ring_cmp(a: &[Point3], b: &[Point3]) -> std::cmp::Ordering {
 /// faces first, then frames compared elementwise (`s`, `t`, `u0`, `v0`) by
 /// `total_cmp` — the same bit-exact order positions use, so `-0.0`/`0.0` and
 /// NaN payloads cannot make the sort non-total.
+/// A surface claim as the geometry buffer writes it (v10 face block): the
+/// kind byte (1 cylinder, 2 sphere, 3 torus, 4 cone) and the payload f64s in
+/// wire order. One table, shared by the encoder and the canonical sort.
+fn surface_wire(s: &crate::topo::SurfaceRef) -> (u8, Vec<f64>) {
+    use crate::topo::SurfaceRef;
+    match *s {
+        SurfaceRef::Cylinder {
+            axis_point: p,
+            axis: a,
+            radius,
+        } => (1, vec![p.x, p.y, p.z, a.x, a.y, a.z, radius]),
+        SurfaceRef::Sphere { center: c, radius } => (2, vec![c.x, c.y, c.z, radius]),
+        SurfaceRef::Torus {
+            center: c,
+            axis: a,
+            major_radius,
+            minor_radius,
+        } => (
+            3,
+            vec![c.x, c.y, c.z, a.x, a.y, a.z, major_radius, minor_radius],
+        ),
+        SurfaceRef::Cone {
+            apex: p,
+            axis: a,
+            half_angle,
+        } => (4, vec![p.x, p.y, p.z, a.x, a.y, a.z, half_angle]),
+    }
+}
+
+/// Number of payload f64s a surface kind byte carries (v10), `None` for a
+/// kind outside 1..=4.
+fn surface_payload_len(kind: u8) -> Option<usize> {
+    match kind {
+        1 => Some(7),
+        2 => Some(4),
+        3 => Some(8),
+        4 => Some(7),
+        _ => None,
+    }
+}
+
+/// Rebuilds and checks a decoded surface claim from its kind byte and
+/// payload: the parameter invariants that need no geometry (unit axes within
+/// [`tol::NORMAL_DIRECTION`], finite radii, sphere radius and both torus
+/// radii `> POINT_MERGE`, cone half-angle in `(0, π/2)`). The face-level
+/// invariants run in `validate()` after the rebuild.
+fn surface_from_wire(kind: u8, c: &[f64]) -> Result<crate::topo::SurfaceRef, &'static str> {
+    use crate::topo::SurfaceRef;
+    let unit = |x: f64, y: f64, z: f64| {
+        let v = Vec3::new(x, y, z);
+        ((v.length() - 1.0).abs() <= crate::tol::NORMAL_DIRECTION).then_some(v)
+    };
+    match kind {
+        1 => Ok(SurfaceRef::Cylinder {
+            axis_point: Point3::new(c[0], c[1], c[2]),
+            axis: Vec3::new(c[3], c[4], c[5]),
+            radius: c[6],
+        }),
+        2 => {
+            if !(c[3].is_finite() && c[3] > crate::tol::POINT_MERGE) {
+                return Err("sphere radius out of range");
+            }
+            Ok(SurfaceRef::Sphere {
+                center: Point3::new(c[0], c[1], c[2]),
+                radius: c[3],
+            })
+        }
+        3 => {
+            let axis = unit(c[3], c[4], c[5]).ok_or("torus axis is not a unit vector")?;
+            if !(c[6].is_finite() && c[6] > crate::tol::POINT_MERGE) {
+                return Err("torus major radius out of range");
+            }
+            if !(c[7].is_finite() && c[7] > crate::tol::POINT_MERGE) {
+                return Err("torus minor radius out of range");
+            }
+            Ok(SurfaceRef::Torus {
+                center: Point3::new(c[0], c[1], c[2]),
+                axis,
+                major_radius: c[6],
+                minor_radius: c[7],
+            })
+        }
+        4 => {
+            let axis = unit(c[3], c[4], c[5]).ok_or("cone axis is not a unit vector")?;
+            if !(c[6] > 0.0 && c[6] < std::f64::consts::FRAC_PI_2) {
+                return Err("cone half-angle out of range");
+            }
+            Ok(SurfaceRef::Cone {
+                apex: Point3::new(c[0], c[1], c[2]),
+                axis,
+                half_angle: c[6],
+            })
+        }
+        _ => Err("surface kind out of range"),
+    }
+}
+
+/// Wire value of a [`crate::topo::BlendKind`] (v10).
+fn blend_kind_wire(k: crate::topo::BlendKind) -> u8 {
+    match k {
+        crate::topo::BlendKind::Fillet => 0,
+        crate::topo::BlendKind::Chamfer => 1,
+        crate::topo::BlendKind::Profile => 2,
+    }
+}
+
+/// Wire value of a [`crate::topo::BlendRole`] (v10).
+fn blend_role_wire(r: crate::topo::BlendRole) -> u8 {
+    match r {
+        crate::topo::BlendRole::Strip => 0,
+        crate::topo::BlendRole::Corner => 1,
+        crate::topo::BlendRole::Runout => 2,
+    }
+}
+
 fn uv_frame_cmp(a: &Option<UvFrame>, b: &Option<UvFrame>) -> std::cmp::Ordering {
     fn key(f: &UvFrame) -> [f64; 8] {
         [f.s.x, f.s.y, f.s.z, f.t.x, f.t.y, f.t.z, f.u0, f.v0]
@@ -625,19 +1061,304 @@ fn canonical_rotation(ring: &[Point3]) -> usize {
     best
 }
 
-/// The plane a face's outer loop gets when a file is opened: Newell's
+/// The plane a face's outer loop refits to when a file is opened: Newell's
 /// best-fit plane ([`Plane::from_polygon`]) through the ring in the order
-/// the writer emits it (rotated to its canonical start). It fails when the
-/// ring encloses too little area for a normal — twice the area under
-/// [`crate::tol::NORMALIZE_MIN_LENGTH`] m². The loader decodes every face
-/// with it and [`Object::validate`] requires every live face to pass it, so
-/// one predicate decides both and no committed state can be one the file
+/// the writer emits it (rotated to its canonical start). The Newell vector
+/// `n` is twice the enclosed area; the ring spans a plane when `|n|` is at
+/// least [`crate::tol::NORMALIZE_MIN_LENGTH`] m², or when its width (`|n|`
+/// over half its perimeter) is at least [`crate::tol::MIN_FACE_WIDTH`], or,
+/// on an `imported` object (one held to the import planarity tolerance),
+/// for a smaller ring when every edge is at least
+/// [`crate::tol::SMALL_RING_MIN_EDGE`] and `n`, taken about the ring's first
+/// vertex, is at least [`crate::tol::SMALL_RING_MIN_SHAPE`] times the
+/// perimeter squared. Every test reads the ring's own shape, so moving a
+/// face never changes the verdict beyond rounding. (A boolean cutting a
+/// dense scan's facets can leave a sub-micron triangle whose normal is
+/// perfectly well defined. On native geometry the area and width floors
+/// stand: a drawn corner that small stays drawing.)
+/// The loader refits every face with it (the plane of a face whose file
+/// omits it, and the winding a stored plane must face with) and
+/// [`Object::validate`] requires every live face to pass it, so one
+/// predicate decides both and no committed state can be one the file
 /// format cannot reopen.
-pub(crate) fn outer_ring_plane(ring: &[Point3]) -> Result<Plane, crate::math::MathError> {
+pub(crate) fn outer_ring_plane(
+    ring: &[Point3],
+    imported: bool,
+) -> Result<Plane, crate::math::MathError> {
+    let rotated = canonical_ring(ring);
+    Plane::from_polygon(&rotated).or_else(|e| {
+        if imported {
+            small_ring_plane(&rotated).ok_or(e)
+        } else {
+            Err(e)
+        }
+    })
+}
+
+/// [`outer_ring_plane`] without the width and small-ring allowances: the
+/// plane only when the ring encloses at least the area cutoff. The blend
+/// planner uses it to judge a shrinking cap collapsed to a point (closed by
+/// a pole), which is a question of size, not of what a file can reopen.
+pub(crate) fn outer_ring_area_plane(ring: &[Point3]) -> Result<Plane, crate::math::MathError> {
+    Plane::from_polygon_import(&canonical_ring(ring))
+}
+
+/// The plane to give a face fit from its own outer ring `outer`, whose
+/// other boundary points (its holes') are `holes`: the plane a file refits
+/// from that ring ([`outer_ring_plane`], with the imported allowance when
+/// `tol` is the import tolerance) when every point lies within `tol` of it,
+/// so a file need not store the plane; otherwise Newell's fit over the ring
+/// in its own order ([`Plane::from_polygon`]), the plane such a face always
+/// had. Far from the origin the two can differ by more than the tolerance,
+/// and either may be the one the face's points fit.
+pub(crate) fn own_ring_plane(
+    outer: &[Point3],
+    holes: &[Point3],
+    tol: f64,
+) -> Result<Plane, crate::math::MathError> {
+    let refit = outer_ring_plane(outer, tol > crate::tol::PLANE_DIST);
+    match refit {
+        Ok(refit)
+            if outer
+                .iter()
+                .chain(holes)
+                .all(|&p| refit.signed_distance(p).abs() <= tol) =>
+        {
+            Ok(refit)
+        }
+        // A ring only the imported allowance gives a plane keeps that one.
+        _ => Plane::from_polygon(outer).or_else(|e| refit.map_err(|_| e)),
+    }
+}
+
+/// `ring` rotated to its canonical start ([`canonical_rotation`]).
+fn canonical_ring(ring: &[Point3]) -> Vec<Point3> {
     let start = canonical_rotation(ring);
     let n = ring.len();
-    let rotated: Vec<Point3> = (0..n).map(|k| ring[(start + k) % n]).collect();
-    Plane::from_polygon(&rotated)
+    (0..n).map(|k| ring[(start + k) % n]).collect()
+}
+
+/// [`outer_ring_plane`]'s plane for a ring under the area cutoff, when its
+/// edges and shape allow one (Newell's accumulation as in
+/// [`Plane::from_polygon`], about the first vertex, scaled before
+/// normalizing).
+fn small_ring_plane(ring: &[Point3]) -> Option<Plane> {
+    if ring.len() < 3 {
+        return None;
+    }
+    let o = ring[0];
+    let mut nv = crate::math::Vec3::ZERO;
+    let mut centroid = crate::math::Vec3::ZERO;
+    let mut perimeter = 0.0;
+    for (i, &p) in ring.iter().enumerate() {
+        let q = ring[(i + 1) % ring.len()];
+        let edge = (q - p).length();
+        if edge.is_nan() || edge < crate::tol::SMALL_RING_MIN_EDGE {
+            return None;
+        }
+        let (a, b) = (p - o, q - o);
+        nv.x += (a.y - b.y) * (a.z + b.z);
+        nv.y += (a.z - b.z) * (a.x + b.x);
+        nv.z += (a.x - b.x) * (a.y + b.y);
+        centroid = centroid + a;
+        perimeter += edge;
+    }
+    let len = nv.length();
+    if len.is_nan() || len < crate::tol::SMALL_RING_MIN_SHAPE * perimeter * perimeter {
+        return None;
+    }
+    let largest = nv.x.abs().max(nv.y.abs()).max(nv.z.abs());
+    let centroid = o + centroid / (ring.len() as f64);
+    Plane::from_point_normal(centroid, nv / largest).ok()
+}
+
+/// What is wrong with `plane` as the stored plane of a face whose outer
+/// ring refits to `refit` ([`outer_ring_plane`]), or `None` when nothing
+/// is: the normal and offset are finite, the normal is unit length within
+/// [`crate::tol::NORMAL_DIRECTION`], and it lies on the same side as the
+/// ring's Newell vector (the face's winding) whenever that refit is finite.
+/// The v11 reader rejects a stored plane that fails this, and the writer
+/// stores none that does: a face carrying such a plane is written for the
+/// refit, so it reopens as a v10 file refit it.
+pub(crate) fn stored_plane_fault(plane: &Plane, refit: &Plane) -> Option<&'static str> {
+    let n = plane.normal();
+    if !(n.x.is_finite() && n.y.is_finite() && n.z.is_finite() && plane.offset().is_finite()) {
+        return Some("stored face plane is not finite");
+    }
+    if (n.length() - 1.0).abs() > crate::tol::NORMAL_DIRECTION {
+        return Some("stored face plane normal is not a unit vector");
+    }
+    // A ring so large its Newell vector overflows its length has no refit
+    // (`Plane::from_polygon` refuses it), so it never reaches here. Only a
+    // refit with a non-finite normal is skipped.
+    let w = refit.normal();
+    if w.x.is_finite() && w.y.is_finite() && w.z.is_finite() && n.dot(w) <= 0.0 {
+        return Some("stored face plane faces against its outer loop's winding");
+    }
+    None
+}
+
+/// Whether a face whose outer ring refits to `refit` ([`outer_ring_plane`])
+/// and whose boundary points (outer ring and holes) are `points` reopens on
+/// `plane` when a file stores it: the reader accepts it
+/// ([`stored_plane_fault`]) and every point lies within `tol` of it. The
+/// writer stores a plane only when this holds, a pre-v11 reader takes a
+/// fallback plane only when it does, and a transform maps a face onto one
+/// only when it does, so the three agree on which planes a file keeps.
+pub(crate) fn face_plane_reopens(
+    plane: &Plane,
+    refit: &Plane,
+    points: impl IntoIterator<Item = Point3>,
+    tol: f64,
+) -> bool {
+    stored_plane_fault(plane, refit).is_none()
+        && points
+            .into_iter()
+            .all(|p| plane.signed_distance(p).abs() <= tol)
+}
+
+/// The most vertices a ring may have for the largest-triple candidate of
+/// [`legacy_face_plane`]: the search is cubic in the ring's length, and a
+/// crafted file of many long rings that all miss the refit would otherwise
+/// hang the reader (64 vertices is about 42,000 triples a face; 512 was
+/// about 22 million), so a longer ring skips that candidate.
+const LEGACY_TRIPLE_MAX_RING: usize = 64;
+
+/// The plane a face of a pre-v11 buffer reopens on. Those buffers do not
+/// store planes, so the reader refits one from the outer ring (`refit`,
+/// [`outer_ring_plane`]). When some boundary point (`points`: the outer
+/// ring's and every hole's) strays from it beyond `tol`, the file never
+/// said which plane the face had, so a fixed, ordered list of other
+/// candidates is tried: the least-squares plane through the outer ring,
+/// then the plane through the ring's largest-area vertex triple. The first
+/// that holds every point within `tol`, oriented with the ring's winding,
+/// is the face's plane. No point moves. When none fits, `refit` comes
+/// back and the validator rejects the face as not flat, as it always has.
+pub(crate) fn legacy_face_plane(
+    refit: Plane,
+    outer: &[Point3],
+    points: &[Point3],
+    tol: f64,
+) -> Plane {
+    let fits = |plane: &Plane| {
+        points
+            .iter()
+            .all(|&p| plane.signed_distance(p).abs() <= tol)
+    };
+    if fits(&refit) {
+        return refit;
+    }
+    let ring = canonical_ring(outer);
+    let winding = refit.normal();
+    // A candidate normal turned to the winding's side, through `at`.
+    let oriented = |normal: Vec3, at: Vec3| -> Option<Plane> {
+        let len = normal.length();
+        if !(len.is_finite() && len > 0.0) {
+            return None;
+        }
+        let unit = normal / len;
+        let side = unit.dot(winding);
+        let unit = if side > 0.0 {
+            unit
+        } else if side < 0.0 {
+            -unit
+        } else {
+            return None;
+        };
+        Plane::from_unit_normal_offset(unit, unit.dot(at)).ok()
+    };
+    [
+        least_squares_normal(&ring, winding),
+        largest_triple_normal(&ring),
+    ]
+    .into_iter()
+    .flatten()
+    .filter_map(|(normal, at)| oriented(normal, at))
+    .find(|plane| face_plane_reopens(plane, &refit, points.iter().copied(), tol))
+    .unwrap_or(refit)
+}
+
+/// The least-squares plane through `ring` as `(normal, a point on it)`:
+/// heights along `axis` (the ring's Newell normal) fitted as a linear
+/// function of the two in-plane coordinates about the ring's centroid.
+/// `None` when the fit is singular.
+fn least_squares_normal(ring: &[Point3], axis: Vec3) -> Option<(Vec3, Vec3)> {
+    // An in-plane frame: the world axis least aligned with `axis`, crossed.
+    let (ax, ay, az) = (axis.x.abs(), axis.y.abs(), axis.z.abs());
+    let pick = if ax <= ay && ax <= az {
+        Vec3::new(1.0, 0.0, 0.0)
+    } else if ay <= az {
+        Vec3::new(0.0, 1.0, 0.0)
+    } else {
+        Vec3::new(0.0, 0.0, 1.0)
+    };
+    let u = axis.cross(pick).normalized().ok()?;
+    let v = axis.cross(u);
+    let count = ring.len() as f64;
+    let centroid = ring
+        .iter()
+        .fold(Vec3::new(0.0, 0.0, 0.0), |s, p| s + p.to_vec())
+        / count;
+    let (mut sxx, mut sxy, mut syy, mut sx, mut sy) = (0.0, 0.0, 0.0, 0.0, 0.0);
+    let (mut sxh, mut syh, mut sh) = (0.0, 0.0, 0.0);
+    for p in ring {
+        let q = p.to_vec() - centroid;
+        let (x, y, h) = (q.dot(u), q.dot(v), q.dot(axis));
+        sxx += x * x;
+        sxy += x * y;
+        syy += y * y;
+        sx += x;
+        sy += y;
+        sxh += x * h;
+        syh += y * h;
+        sh += h;
+    }
+    // [sxx sxy sx; sxy syy sy; sx sy n] [a b d]ᵀ = [sxh syh sh]ᵀ, by Cramer.
+    let det3 = |m: [[f64; 3]; 3]| {
+        m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
+            - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
+            + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0])
+    };
+    let m = [[sxx, sxy, sx], [sxy, syy, sy], [sx, sy, count]];
+    let rhs = [sxh, syh, sh];
+    let det = det3(m);
+    if !(det.is_finite() && det != 0.0) {
+        return None;
+    }
+    let with = |col: usize| {
+        let mut c = m;
+        for (row, r) in c.iter_mut().zip(rhs) {
+            row[col] = r;
+        }
+        det3(c) / det
+    };
+    let (a, b, d) = (with(0), with(1), with(2));
+    let normal = axis - u * a - v * b;
+    Some((normal, centroid + axis * d))
+}
+
+/// The normal of the vertex triple of `ring` spanning the largest area,
+/// as `(normal, one of its vertices)`: the first such triple in ring order
+/// on a tie. `None` for a ring longer than [`LEGACY_TRIPLE_MAX_RING`] or
+/// one whose triples span no area.
+fn largest_triple_normal(ring: &[Point3]) -> Option<(Vec3, Vec3)> {
+    let n = ring.len();
+    if n > LEGACY_TRIPLE_MAX_RING {
+        return None;
+    }
+    let mut best: Option<(f64, Vec3, Vec3)> = None;
+    for i in 0..n {
+        for j in i + 1..n {
+            for k in j + 1..n {
+                let cross = (ring[j] - ring[i]).cross(ring[k] - ring[i]);
+                let area = cross.length_squared();
+                if area > best.map_or(0.0, |b| b.0) {
+                    best = Some((area, cross, ring[i].to_vec()));
+                }
+            }
+        }
+    }
+    best.map(|(_, normal, at)| (normal, at))
 }
 
 impl Object {
@@ -649,11 +1370,51 @@ impl Object {
     /// (the same id space the manifest uses). For a material-free object the
     /// closure is never invoked. `None` materials are written as [`NO_MATERIAL`].
     pub fn encode(&self, material_dense: &impl Fn(MaterialId) -> u32) -> Vec<u8> {
+        self.encode_version(material_dense, GEOMETRY_FORMAT_VERSION)
+    }
+
+    /// True when the Object carries anything only a v10 buffer can hold: a
+    /// sphere, torus or cone claim, a crease flag, or a blend tag. Such an
+    /// Object is always written at v10 or later, so nothing is ever dropped.
+    fn has_curve_geometry(&self) -> bool {
+        self.faces.values().any(|f| {
+            f.blend.is_some()
+                || matches!(
+                    f.surface,
+                    Some(
+                        crate::topo::SurfaceRef::Sphere { .. }
+                            | crate::topo::SurfaceRef::Torus { .. }
+                            | crate::topo::SurfaceRef::Cone { .. }
+                    )
+                )
+        }) || self.edges.values().any(|e| e.crease)
+    }
+
+    /// [`Object::encode`] at a given buffer `version`: the current one for a
+    /// save, or [`HASHED_GEOMETRY_VERSION`] for a `state_hash` of an Object
+    /// without dictionaries or curve data (the v8 layout is the v9 layout
+    /// without the dictionary blocks, and v9 is v10 without the crease and
+    /// blend blocks). An Object that carries a dictionary is always written
+    /// at v9 or later, and one that carries curve data at v10 or later, so
+    /// nothing is ever dropped. Face planes (v11) are not part of a hash:
+    /// the v8 to v10 layouts omit them.
+    pub(crate) fn encode_version(
+        &self,
+        material_dense: &impl Fn(MaterialId) -> u32,
+        version: u32,
+    ) -> Vec<u8> {
+        let version = if self.has_curve_geometry() {
+            version.max(CURVES_GEOMETRY_VERSION)
+        } else if self.has_element_attrs() {
+            version.max(ELEMENT_ATTRS_GEOMETRY_VERSION)
+        } else {
+            version
+        };
         let mut buf = Vec::new();
 
         // --- header ---
         buf.extend_from_slice(GEOMETRY_MAGIC);
-        buf.extend_from_slice(&GEOMETRY_FORMAT_VERSION.to_le_bytes());
+        buf.extend_from_slice(&version.to_le_bytes());
 
         // watertight byte
         let wt_byte: u8 = match self.watertight {
@@ -736,6 +1497,26 @@ impl Object {
             outer_soft: Vec<bool>,
             /// Per-hole-edge SOFT flags (v6), paired like `hole_curves`.
             hole_soft: Vec<Vec<bool>>,
+            /// The face's attribute dictionary as its emitted JSON bytes
+            /// (v9), `None` for none. Participates in the sort key.
+            attrs: Option<Vec<u8>>,
+            /// Per-outer-edge dictionaries (v9) as emitted JSON, canonical
+            /// order as `outer_curves`. Participates in the sort key.
+            outer_attrs: Vec<Option<Vec<u8>>>,
+            /// Per-hole-edge dictionaries (v9), paired like `hole_curves`.
+            hole_attrs: Vec<Vec<Option<Vec<u8>>>>,
+            /// Per-outer-edge CREASE flags (v10), canonical order as
+            /// `outer_soft`. Participates in the sort key (appended last).
+            outer_crease: Vec<bool>,
+            /// Per-hole-edge CREASE flags (v10), paired like `hole_soft`.
+            hole_crease: Vec<Vec<bool>>,
+            /// The blend tag (v10). Participates in the sort key (last).
+            blend: Option<crate::topo::BlendTag>,
+            /// The face's plane when it is stored (v11): `None` when the
+            /// loader's refit from the outer ring gives it bit for bit, and
+            /// always `None` below v11. Participates in the sort key (after
+            /// the v10 payloads).
+            plane: Option<Plane>,
             /// Ordinal of the owning connected component (derived from twin
             /// adjacency, NOT the stored shell list, which may lump
             /// disconnected components together); replaced by the
@@ -744,39 +1525,39 @@ impl Object {
         }
 
         // Ordering over an analytic surface claim (present sorts after absent,
-        // then by axis_point, axis, radius) — another emitted payload, so a
-        // coincident face differing only in its surface must not tie.
+        // then by the wire kind byte, then the payload f64s in wire order) —
+        // another emitted payload, so a coincident face differing only in its
+        // surface must not tie. Cylinders compare exactly as before v9.
         fn surface_cmp(
             a: &Option<crate::topo::SurfaceRef>,
             b: &Option<crate::topo::SurfaceRef>,
         ) -> std::cmp::Ordering {
-            fn key(s: &crate::topo::SurfaceRef) -> [f64; 7] {
-                let crate::topo::SurfaceRef::Cylinder {
-                    axis_point,
-                    axis,
-                    radius,
-                } = s;
-                [
-                    axis_point.x,
-                    axis_point.y,
-                    axis_point.z,
-                    axis.x,
-                    axis.y,
-                    axis.z,
-                    *radius,
-                ]
-            }
             match (a, b) {
                 (None, None) => std::cmp::Ordering::Equal,
                 (None, Some(_)) => std::cmp::Ordering::Less,
                 (Some(_), None) => std::cmp::Ordering::Greater,
-                (Some(sa), Some(sb)) => key(sa)
-                    .iter()
-                    .zip(key(sb))
-                    .map(|(x, y)| x.total_cmp(&y))
-                    .find(|o| *o != std::cmp::Ordering::Equal)
-                    .unwrap_or(std::cmp::Ordering::Equal),
+                (Some(sa), Some(sb)) => {
+                    let (ka, pa) = surface_wire(sa);
+                    let (kb, pb) = surface_wire(sb);
+                    ka.cmp(&kb).then_with(|| {
+                        pa.iter()
+                            .zip(&pb)
+                            .map(|(x, y)| x.total_cmp(y))
+                            .find(|o| *o != std::cmp::Ordering::Equal)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
+                }
             }
+        }
+        // Ordering over a blend tag: absent first, then id, kind, role.
+        fn blend_cmp(
+            a: &Option<crate::topo::BlendTag>,
+            b: &Option<crate::topo::BlendTag>,
+        ) -> std::cmp::Ordering {
+            let key = |t: &Option<crate::topo::BlendTag>| {
+                t.map(|t| (t.id.0, blend_kind_wire(t.kind), blend_role_wire(t.role)))
+            };
+            key(a).cmp(&key(b))
         }
         // Ordering over a per-edge circle-claim sequence: length, then each
         // entry (present sorts after absent, then center xyz, radius).
@@ -852,6 +1633,38 @@ impl Object {
                     }
                     std::cmp::Ordering::Equal
                 })
+                // Dictionaries (v9): the face's bytes, then its edges'
+                // byte sequences (absent sorts before present, present
+                // compares lexicographically).
+                .then_with(|| a.attrs.cmp(&b.attrs))
+                .then_with(|| a.outer_attrs.cmp(&b.outer_attrs))
+                .then_with(|| a.hole_attrs.cmp(&b.hole_attrs))
+                // v10 payloads, appended at the END of the key so every v9
+                // buffer sorts exactly as it did.
+                .then_with(|| a.outer_crease.cmp(&b.outer_crease))
+                .then_with(|| a.hole_crease.cmp(&b.hole_crease))
+                .then_with(|| blend_cmp(&a.blend, &b.blend))
+                // The stored plane (v11): omitted before stored, stored by
+                // normal then offset. Last, so below v11 (always omitted)
+                // the order is the v10 order.
+                .then_with(|| plane_cmp(&a.plane, &b.plane))
+        }
+        fn plane_cmp(a: &Option<Plane>, b: &Option<Plane>) -> std::cmp::Ordering {
+            let key = |p: &Plane| {
+                let n = p.normal();
+                [n.x, n.y, n.z, p.offset()]
+            };
+            match (a, b) {
+                (None, None) => std::cmp::Ordering::Equal,
+                (None, Some(_)) => std::cmp::Ordering::Less,
+                (Some(_), None) => std::cmp::Ordering::Greater,
+                (Some(pa), Some(pb)) => key(pa)
+                    .iter()
+                    .zip(key(pb))
+                    .map(|(x, y)| x.total_cmp(&y))
+                    .find(|o| *o != std::cmp::Ordering::Equal)
+                    .unwrap_or(std::cmp::Ordering::Equal),
+            }
         }
 
         // Connected components over faces, via twin adjacency (union-find).
@@ -937,6 +1750,18 @@ impl Object {
                 })
                 .collect()
         };
+        let loop_edge_attrs =
+            |loop_id: crate::ids::LoopId, verts: &[crate::ids::VertexId]| -> Vec<Option<Vec<u8>>> {
+                verts
+                    .iter()
+                    .map(|&v| {
+                        self.loop_half_edges(loop_id)
+                            .find(|&h| self.half_edges[h].origin == v)
+                            .and_then(|h| self.attr_dict(self.edges[self.half_edges[h].edge].attrs))
+                            .map(attr_dict_json)
+                    })
+                    .collect()
+            };
         let loop_edge_soft =
             |loop_id: crate::ids::LoopId, verts: &[crate::ids::VertexId]| -> Vec<bool> {
                 verts
@@ -948,7 +1773,30 @@ impl Object {
                     })
                     .collect()
             };
+        let loop_edge_crease =
+            |loop_id: crate::ids::LoopId, verts: &[crate::ids::VertexId]| -> Vec<bool> {
+                verts
+                    .iter()
+                    .map(|&v| {
+                        self.loop_half_edges(loop_id)
+                            .find(|&h| self.half_edges[h].origin == v)
+                            .is_some_and(|h| self.edges[self.half_edges[h].edge].crease)
+                    })
+                    .collect()
+            };
 
+        // The planarity tolerance the reader gives this Object: the buffer
+        // stores only whether it is imported.
+        let reopen_tol = if self.planarity_tol > crate::tol::PLANE_DIST {
+            crate::tol::IMPORT_PLANE_DIST
+        } else {
+            crate::tol::PLANE_DIST
+        };
+        // Faces written for the refit though they carry another plane, or
+        // without the analytic-surface claim they carry, because the reader
+        // would refuse it: only an invalid state has one (reported once
+        // below).
+        let left_to_refit = std::cell::Cell::new(0usize);
         let mut canonical_faces: Vec<CanonicalFace> = self
             .faces
             .iter()
@@ -957,6 +1805,8 @@ impl Object {
                 let outer_curves = loop_edge_curves(face.outer_loop, &outer_verts);
                 let outer_soft = loop_edge_soft(face.outer_loop, &outer_verts);
                 let outer_polys = loop_edge_polys(face.outer_loop, &outer_verts);
+                let outer_crease = loop_edge_crease(face.outer_loop, &outer_verts);
+                let outer_attrs = loop_edge_attrs(face.outer_loop, &outer_verts);
                 // Build each hole with its edge-curves, then sort the whole
                 // triple by ring so the curves stay paired with their hole.
                 type HoleFull = (
@@ -965,6 +1815,8 @@ impl Object {
                     Vec<Option<crate::sketch::CurveGeom>>,
                     Vec<bool>,
                     Vec<Option<crate::sketch::CurveGeom>>,
+                    Vec<bool>,
+                    Vec<Option<Vec<u8>>>,
                 );
                 let mut holes_full: Vec<HoleFull> = face
                     .inner_loops
@@ -974,23 +1826,83 @@ impl Object {
                         let hc = loop_edge_curves(il, &hv);
                         let hs = loop_edge_soft(il, &hv);
                         let hp = loop_edge_polys(il, &hv);
-                        (hv, hr, hc, hs, hp)
+                        let hk = loop_edge_crease(il, &hv);
+                        let ha = loop_edge_attrs(il, &hv);
+                        (hv, hr, hc, hs, hp, hk, ha)
                     })
                     .collect();
                 holes_full.sort_by(|a, b| ring_cmp(&a.1, &b.1));
                 let holes: Vec<(Vec<crate::ids::VertexId>, Vec<Point3>)> = holes_full
                     .iter()
-                    .map(|(v, r, _, _, _)| (v.clone(), r.clone()))
+                    .map(|(v, r, ..)| (v.clone(), r.clone()))
                     .collect();
                 let hole_curves: Vec<Vec<Option<crate::sketch::CurveGeom>>> =
-                    holes_full.iter().map(|(_, _, c, _, _)| c.clone()).collect();
-                let hole_polys: Vec<Vec<Option<crate::sketch::CurveGeom>>> =
-                    holes_full.iter().map(|(_, _, _, _, p)| p.clone()).collect();
+                    holes_full.iter().map(|(_, _, c, ..)| c.clone()).collect();
+                let hole_polys: Vec<Vec<Option<crate::sketch::CurveGeom>>> = holes_full
+                    .iter()
+                    .map(|(_, _, _, _, p, ..)| p.clone())
+                    .collect();
+                let hole_crease: Vec<Vec<bool>> = holes_full
+                    .iter()
+                    .map(|(_, _, _, _, _, k, _)| k.clone())
+                    .collect();
+                let hole_attrs: Vec<Vec<Option<Vec<u8>>>> =
+                    holes_full.iter().map(|(.., a)| a.clone()).collect();
                 let hole_soft: Vec<Vec<bool>> = holes_full
                     .into_iter()
-                    .map(|(_, _, _, sflags, _)| sflags)
+                    .map(|(_, _, _, sflags, ..)| sflags)
                     .collect();
+                // Stored unless the loader's refit gives it bit for bit, and
+                // only when the reader accepts it: a plane its own points
+                // stray from (a state the validator rejects) is left to the
+                // refit, which reopens such a face as a v10 file always has.
+                // A ring with no refit fails the reader either way.
+                let mut written_short = false;
+                let boundary = || {
+                    outer_ring
+                        .iter()
+                        .chain(holes.iter().flat_map(|(_, ring)| ring))
+                        .copied()
+                };
+                let (plane, reopen_plane) = if version < FACE_PLANE_GEOMETRY_VERSION {
+                    (None, None)
+                } else {
+                    match outer_ring_plane(&outer_ring, reopen_tol > crate::tol::PLANE_DIST) {
+                        Ok(refit) if refit.same_bits(&face.plane) => (None, Some(refit)),
+                        Ok(refit)
+                            if !face_plane_reopens(&face.plane, &refit, boundary(), reopen_tol) =>
+                        {
+                            written_short = true;
+                            (None, Some(refit))
+                        }
+                        _ => (Some(face.plane), Some(face.plane)),
+                    }
+                };
+                // An analytic-surface claim is written only when the reader's
+                // validator accepts it on the plane the face reopens on
+                // (`surface::validate_face_claim`, the check it runs on each
+                // face's claim alone): a claim its geometry has drifted from
+                // (an invalid state, e.g. a rotation far from the origin) is
+                // dropped, so the face reopens as a plain facet instead of
+                // making the whole file unreadable. Faces without a claim
+                // (every imported mesh face) skip the check.
+                let surface = match (face.surface, reopen_plane) {
+                    (Some(claim), Some(on)) => {
+                        let points: Vec<Point3> = boundary().collect();
+                        if crate::surface::validate_face_claim(&claim, &on, &points, reopen_tol) {
+                            Some(claim)
+                        } else {
+                            written_short = true;
+                            None
+                        }
+                    }
+                    (claim, _) => claim,
+                };
+                if written_short {
+                    left_to_refit.set(left_to_refit.get() + 1);
+                }
                 CanonicalFace {
+                    plane,
                     outer_verts,
                     outer_ring,
                     holes,
@@ -1003,17 +1915,32 @@ impl Object {
                         None => NO_MATERIAL,
                     },
                     uv_frame: face.uv_frame,
-                    surface: face.surface,
+                    surface,
                     outer_curves,
                     hole_curves,
                     outer_polys,
                     hole_polys,
                     outer_soft,
                     hole_soft,
+                    outer_crease,
+                    hole_crease,
+                    blend: face.blend,
+                    attrs: self.attr_dict(face.attrs).map(attr_dict_json),
+                    outer_attrs,
+                    hole_attrs,
                     shell: component_ordinal[fid],
                 }
             })
             .collect();
+        if left_to_refit.get() > 0 {
+            tracing::warn!(
+                target: "kernel::save",
+                faces = left_to_refit.get(),
+                "faces written without their plane or surface claim: it is not one \
+                 the reader accepts (a point strays from it, it fails the stored-plane \
+                 checks, or the face's geometry disagrees with its claimed surface)"
+            );
+        }
 
         // Faces on DIFFERENT components can tie on the full face key
         // (coincident components), and resolving such ties per-face would
@@ -1053,7 +1980,21 @@ impl Object {
             cf.shell = component_rank[cf.shell];
         }
 
-        canonical_faces.sort_by(|a, b| face_key_cmp(a, b).then_with(|| a.shell.cmp(&b.shell)));
+        // Sorted by index, then moved into place once: a face's record is
+        // large, and a sort that moves records costs more than the
+        // comparisons on a mesh of half a million faces. The sort is
+        // stable, so ties keep their order exactly as sorting the records
+        // would.
+        let mut order: Vec<usize> = (0..canonical_faces.len()).collect();
+        order.sort_by(|&i, &j| {
+            let (a, b) = (&canonical_faces[i], &canonical_faces[j]);
+            face_key_cmp(a, b).then_with(|| a.shell.cmp(&b.shell))
+        });
+        let mut slots: Vec<Option<CanonicalFace>> = canonical_faces.into_iter().map(Some).collect();
+        let canonical_faces: Vec<CanonicalFace> = order
+            .into_iter()
+            .map(|i| slots[i].take().expect("each index once"))
+            .collect();
 
         // Vertex order: first appearance in the canonical face walk. Valid
         // topology references every vertex from some loop; any vertex that
@@ -1128,23 +2069,17 @@ impl Object {
                 }
             }
 
-            // per-face analytic surface (v4): u8 flag (0=none, 1=cylinder)
-            // + 7×f64 LE (axis_point xyz, unit axis xyz, radius).
+            // per-face analytic surface (v4; kinds 2–4 v10): u8 kind
+            // (0 none, 1 cylinder, 2 sphere, 3 torus, 4 cone) + the class's
+            // f64 payload, LE, in `surface_wire` order.
             match cf.surface {
                 None => buf.push(0u8),
-                Some(crate::topo::SurfaceRef::Cylinder {
-                    axis_point,
-                    axis,
-                    radius,
-                }) => {
-                    buf.push(1u8);
-                    buf.extend_from_slice(&axis_point.x.to_le_bytes());
-                    buf.extend_from_slice(&axis_point.y.to_le_bytes());
-                    buf.extend_from_slice(&axis_point.z.to_le_bytes());
-                    buf.extend_from_slice(&axis.x.to_le_bytes());
-                    buf.extend_from_slice(&axis.y.to_le_bytes());
-                    buf.extend_from_slice(&axis.z.to_le_bytes());
-                    buf.extend_from_slice(&radius.to_le_bytes());
+                Some(sr) => {
+                    let (kind, payload) = surface_wire(&sr);
+                    buf.push(kind);
+                    for c in payload {
+                        buf.extend_from_slice(&c.to_le_bytes());
+                    }
                 }
             }
 
@@ -1163,6 +2098,22 @@ impl Object {
                 buf.extend_from_slice(&hole_vertex_count.to_le_bytes());
                 for &vid in hole_verts {
                     buf.extend_from_slice(&vertex_index[vid].to_le_bytes());
+                }
+            }
+
+            // per-face plane (v11): u8 flag (0 = the loader's refit from
+            // the outer ring is the plane bit for bit, 1 = stored) + the
+            // unit normal xyz and offset as 4×f64 LE.
+            if version >= FACE_PLANE_GEOMETRY_VERSION {
+                match cf.plane {
+                    None => buf.push(0u8),
+                    Some(p) => {
+                        buf.push(1u8);
+                        let n = p.normal();
+                        for c in [n.x, n.y, n.z, p.offset()] {
+                            buf.extend_from_slice(&c.to_le_bytes());
+                        }
+                    }
                 }
             }
 
@@ -1263,6 +2214,72 @@ impl Object {
                 buf.push(1u8);
                 buf.extend_from_slice(&cf.back_mat_id.to_le_bytes());
             }
+
+            if version < ELEMENT_ATTRS_GEOMETRY_VERSION {
+                continue;
+            }
+            // per-face attribute dictionary (v9): u8 flag + u32 length +
+            // UTF-8 JSON, after the back paint.
+            let write_dict = |buf: &mut Vec<u8>, d: &Option<Vec<u8>>| match d {
+                None => buf.push(0u8),
+                Some(bytes) => {
+                    buf.push(1u8);
+                    buf.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+                    buf.extend_from_slice(bytes);
+                }
+            };
+            write_dict(&mut buf, &cf.attrs);
+            // per-edge dictionaries (v9): a u8 "any" flag; when 1, one
+            // dictionary entry per outer edge then per hole edge, in the
+            // canonical order the other per-edge blocks use.
+            let any_attrs = cf
+                .outer_attrs
+                .iter()
+                .chain(cf.hole_attrs.iter().flatten())
+                .any(Option::is_some);
+            if !any_attrs {
+                buf.push(0u8);
+            } else {
+                buf.push(1u8);
+                for d in cf.outer_attrs.iter().chain(cf.hole_attrs.iter().flatten()) {
+                    write_dict(&mut buf, d);
+                }
+            }
+
+            if version < CURVES_GEOMETRY_VERSION {
+                continue;
+            }
+            // per-face CREASE flags (v10): the soft block's shape — a u8
+            // "any" flag, and when 1 one u8 per outer edge then per hole edge.
+            let any_crease = cf
+                .outer_crease
+                .iter()
+                .chain(cf.hole_crease.iter().flatten())
+                .any(|&f| f);
+            if !any_crease {
+                buf.push(0u8);
+            } else {
+                buf.push(1u8);
+                for &f in cf
+                    .outer_crease
+                    .iter()
+                    .chain(cf.hole_crease.iter().flatten())
+                {
+                    buf.push(u8::from(f));
+                }
+            }
+
+            // per-face blend tag (v10): u8 flag, and when 1 the u32 id, u8
+            // kind, u8 role.
+            match cf.blend {
+                None => buf.push(0u8),
+                Some(t) => {
+                    buf.push(1u8);
+                    buf.extend_from_slice(&t.id.0.to_le_bytes());
+                    buf.push(blend_kind_wire(t.kind));
+                    buf.push(blend_role_wire(t.role));
+                }
+            }
         }
 
         buf
@@ -1348,16 +2365,16 @@ impl Object {
         }
 
         // --- faces ---
-        type FaceSpec = (
-            Vec<usize>,
-            Vec<Vec<usize>>,
-            Plane,
-            crate::material::FaceMaterial,
-            Option<UvFrame>,
-            Option<crate::topo::SurfaceRef>,
-        );
+        use crate::build::FaceSpec;
         let face_count = r.read_u32()? as usize;
         let mut face_specs: Vec<FaceSpec> = Vec::with_capacity(face_count);
+        // v9 per-edge dictionaries, parallel to `face_specs`: `(outer,
+        // per-hole)`, empty lists when the face's edges carry none.
+        type FaceDicts = (
+            Vec<Option<crate::attr::AttrDict>>,
+            Vec<Vec<Option<crate::attr::AttrDict>>>,
+        );
+        let mut edge_dicts: Vec<FaceDicts> = Vec::with_capacity(face_count);
         // v5 per-face edge-curve claims, parallel to `face_specs` (in the same
         // face order `from_faces_with_holes` rebuilds them, so a positional zip
         // stamps them back after the build). `(outer_edge_curves, per-hole
@@ -1373,6 +2390,9 @@ impl Object {
         let mut edge_curves: Vec<FaceCurves> = Vec::with_capacity(face_count);
         let mut edge_polys: Vec<FaceCurves> = Vec::with_capacity(face_count);
         let mut backs: Vec<crate::material::FaceMaterial> = Vec::with_capacity(face_count);
+        // v10 per-face crease flags and blend tags, parallel to `face_specs`.
+        let mut edge_crease: Vec<FaceFlags> = Vec::with_capacity(face_count);
+        let mut blends: Vec<Option<crate::topo::BlendTag>> = Vec::with_capacity(face_count);
 
         for _ in 0..face_count {
             let mat_raw = r.read_u32()?;
@@ -1447,6 +2467,23 @@ impl Object {
                     })
                 } else if flag == 0 {
                     None
+                } else if version >= CURVES_GEOMETRY_VERSION {
+                    // v10: kinds 2–4 (sphere, torus, cone).
+                    let len = surface_payload_len(flag).ok_or(DecodeError::Corrupt {
+                        offset: r.pos - 1,
+                        what: "surface kind out of range",
+                    })?;
+                    let start = r.pos;
+                    let mut payload = Vec::with_capacity(len);
+                    for _ in 0..len {
+                        payload.push(r.read_f64()?);
+                    }
+                    Some(surface_from_wire(flag, &payload).map_err(|what| {
+                        DecodeError::Corrupt {
+                            offset: start,
+                            what,
+                        }
+                    })?)
                 } else {
                     return Err(DecodeError::Corrupt {
                         offset: r.pos - 1,
@@ -1476,12 +2513,16 @@ impl Object {
                 outer.push(vi);
             }
 
-            // Recompute face plane from outer-loop vertices (HEW_FILE_FORMAT.md).
+            // Refit the face plane from the outer-loop vertices
+            // (HEW_FILE_FORMAT.md): the plane of a pre-v11 face, and of a v11
+            // face that does not store one; its winding is the side a stored
+            // plane must face.
             let outer_pts: Vec<Point3> = outer.iter().map(|&i| positions[i]).collect();
-            let plane = outer_ring_plane(&outer_pts).map_err(|_| DecodeError::Corrupt {
-                offset: r.pos,
-                what: "outer loop vertices do not span a plane",
-            })?;
+            let refit = outer_ring_plane(&outer_pts, planarity_tol > crate::tol::PLANE_DIST)
+                .map_err(|_| DecodeError::Corrupt {
+                    offset: r.pos,
+                    what: "outer loop vertices do not span a plane",
+                })?;
 
             let hole_count = r.read_u32()? as usize;
             let mut holes = Vec::with_capacity(hole_count);
@@ -1506,6 +2547,43 @@ impl Object {
                 }
                 holes.push(hole);
             }
+
+            // v11: the face's plane (flag + optional unit normal and
+            // offset), right after the hole loops. Before v11 the refit,
+            // or the first of the fixed fallbacks that fits the face.
+            let plane = if version >= FACE_PLANE_GEOMETRY_VERSION {
+                match r.read_u8()? {
+                    0 => refit,
+                    1 => {
+                        let at = r.pos;
+                        let (nx, ny, nz) = (r.read_f64()?, r.read_f64()?, r.read_f64()?);
+                        let offset = r.read_f64()?;
+                        let normal = Vec3::new(nx, ny, nz);
+                        let corrupt = |what| DecodeError::Corrupt { offset: at, what };
+                        let plane =
+                            Plane::from_unit_normal_offset(normal, offset).map_err(|_| {
+                                corrupt("stored face plane normal is not a unit vector")
+                            })?;
+                        if let Some(what) = stored_plane_fault(&plane, &refit) {
+                            return Err(corrupt(what));
+                        }
+                        plane
+                    }
+                    _ => {
+                        return Err(DecodeError::Corrupt {
+                            offset: r.pos - 1,
+                            what: "face plane flag must be 0 or 1",
+                        });
+                    }
+                }
+            } else {
+                let points: Vec<Point3> = outer
+                    .iter()
+                    .chain(holes.iter().flatten())
+                    .map(|&i| positions[i])
+                    .collect();
+                legacy_face_plane(refit, &outer_pts, &points, planarity_tol)
+            };
 
             // v6: per-face SOFT flags, appended after the hole loops and
             // BEFORE the edge-curve block (write order). A u8 "any" flag;
@@ -1637,12 +2715,140 @@ impl Object {
             };
             backs.push(back);
 
-            face_specs.push((outer, holes, plane, face_material, uv_frame, surface));
+            // v9: the face's dictionary, then its edges'.
+            let (face_dict, dicts) = if version >= ELEMENT_ATTRS_GEOMETRY_VERSION {
+                let face_dict = read_attr_dict(&mut r)?;
+                let any = r.read_u8()?;
+                let dicts: FaceDicts = match any {
+                    0 => (Vec::new(), Vec::new()),
+                    1 => {
+                        let mut oa = Vec::with_capacity(outer.len());
+                        for _ in 0..outer.len() {
+                            oa.push(read_attr_dict(&mut r)?);
+                        }
+                        let mut ha = Vec::with_capacity(holes.len());
+                        for hole in &holes {
+                            let mut this = Vec::with_capacity(hole.len());
+                            for _ in 0..hole.len() {
+                                this.push(read_attr_dict(&mut r)?);
+                            }
+                            ha.push(this);
+                        }
+                        (oa, ha)
+                    }
+                    _ => {
+                        return Err(DecodeError::Corrupt {
+                            offset: r.pos - 1,
+                            what: "edge dictionaries flag must be 0 or 1",
+                        });
+                    }
+                };
+                (face_dict.unwrap_or_default(), dicts)
+            } else {
+                (crate::attr::AttrDict::new(), (Vec::new(), Vec::new()))
+            };
+            edge_dicts.push(dicts);
+
+            // v10: per-face CREASE flags (the soft block's shape) then the
+            // blend tag (u8 flag [+ u32 id, u8 kind, u8 role]).
+            let (outer_crease, hole_crease) = if version >= CURVES_GEOMETRY_VERSION {
+                let any = r.read_u8()?;
+                if any == 0 {
+                    (Vec::new(), Vec::new())
+                } else if any == 1 {
+                    let read_flag = |r: &mut ByteReader<'_>| -> Result<bool, DecodeError> {
+                        match r.read_u8()? {
+                            0 => Ok(false),
+                            1 => Ok(true),
+                            _ => Err(DecodeError::Corrupt {
+                                offset: r.pos - 1,
+                                what: "crease flag must be 0 or 1",
+                            }),
+                        }
+                    };
+                    let mut os = Vec::with_capacity(outer.len());
+                    for _ in 0..outer.len() {
+                        os.push(read_flag(&mut r)?);
+                    }
+                    let mut hs = Vec::with_capacity(holes.len());
+                    for hole in &holes {
+                        let mut this = Vec::with_capacity(hole.len());
+                        for _ in 0..hole.len() {
+                            this.push(read_flag(&mut r)?);
+                        }
+                        hs.push(this);
+                    }
+                    (os, hs)
+                } else {
+                    return Err(DecodeError::Corrupt {
+                        offset: r.pos - 1,
+                        what: "crease flag must be 0 or 1",
+                    });
+                }
+            } else {
+                (Vec::new(), Vec::new())
+            };
+            edge_crease.push((outer_crease, hole_crease));
+            let blend = if version >= CURVES_GEOMETRY_VERSION {
+                match r.read_u8()? {
+                    0 => None,
+                    1 => {
+                        let id = r.read_u32()?;
+                        let kind = match r.read_u8()? {
+                            0 => crate::topo::BlendKind::Fillet,
+                            1 => crate::topo::BlendKind::Chamfer,
+                            2 => crate::topo::BlendKind::Profile,
+                            _ => {
+                                return Err(DecodeError::Corrupt {
+                                    offset: r.pos - 1,
+                                    what: "blend kind out of range",
+                                });
+                            }
+                        };
+                        let role = match r.read_u8()? {
+                            0 => crate::topo::BlendRole::Strip,
+                            1 => crate::topo::BlendRole::Corner,
+                            2 => crate::topo::BlendRole::Runout,
+                            _ => {
+                                return Err(DecodeError::Corrupt {
+                                    offset: r.pos - 1,
+                                    what: "blend role out of range",
+                                });
+                            }
+                        };
+                        Some(crate::topo::BlendTag {
+                            id: crate::topo::BlendId(id),
+                            kind,
+                            role,
+                        })
+                    }
+                    _ => {
+                        return Err(DecodeError::Corrupt {
+                            offset: r.pos - 1,
+                            what: "blend flag must be 0 or 1",
+                        });
+                    }
+                }
+            } else {
+                None
+            };
+            blends.push(blend);
+
+            face_specs.push((
+                outer,
+                holes,
+                plane,
+                face_material,
+                uv_frame,
+                surface,
+                face_dict,
+            ));
         }
 
         // Rebuild topology via the existing builder path.
         let mut obj = Object::from_faces_with_holes(&positions, &face_specs);
         obj.set_built_back_materials(&backs);
+        obj.set_built_blends(&blends);
         obj.default_material = base_material;
         // Restore the per-object planarity gate before validating, so an imported
         // object's near-planar faces are held to IMPORT_PLANE_DIST, not the
@@ -1735,6 +2941,85 @@ impl Object {
             }
         }
 
+        // Restore per-edge dictionaries (v9), positionally like the claims
+        // above. Every loop edge is written by each face it bounds, so a
+        // shared edge is read twice and the two entries must agree exactly
+        // (both absent, or equal dictionaries); anything else is a tampered
+        // file, rejected rather than resolved by write order.
+        if version >= ELEMENT_ATTRS_GEOMETRY_VERSION {
+            let mut seen: SecondaryMap<crate::ids::EdgeId, Option<crate::attr::AttrDict>> =
+                SecondaryMap::new();
+            for (fid, (outer_dicts, hole_dicts)) in face_ids.iter().copied().zip(&edge_dicts) {
+                let outer_loop = obj.faces[fid].outer_loop;
+                let inner_loops = obj.faces[fid].inner_loops.clone();
+                let loops = std::iter::once((outer_loop, outer_dicts))
+                    .chain(inner_loops.iter().copied().zip(hole_dicts.iter()));
+                for (loop_id, dicts) in loops {
+                    let hes: Vec<_> = obj.loop_half_edges(loop_id).collect();
+                    for (k, h) in hes.into_iter().enumerate() {
+                        let d = dicts.get(k).cloned().flatten();
+                        let e = obj.half_edges[h].edge;
+                        match seen.get(e) {
+                            Some(prior) if *prior != d => {
+                                return Err(DecodeError::Corrupt {
+                                    offset: r.pos,
+                                    what: "shared edge has disagreeing attribute dictionaries",
+                                });
+                            }
+                            Some(_) => {}
+                            None => {
+                                seen.insert(e, d);
+                            }
+                        }
+                    }
+                }
+            }
+            for (e, d) in seen {
+                if let Some(d) = d {
+                    obj.set_edge_attrs(e, d);
+                }
+            }
+        }
+
+        // Restore per-edge CREASE flags (v10), positionally. Unlike soft (OR'd
+        // for compatibility), the two faces of a shared edge must agree: a
+        // face with no crease block states "no crease" for each of its edges.
+        if version >= CURVES_GEOMETRY_VERSION {
+            let mut seen: SecondaryMap<crate::ids::EdgeId, bool> = SecondaryMap::new();
+            for (fid, (outer_crease, hole_crease)) in face_ids.iter().copied().zip(&edge_crease) {
+                let outer_loop = obj.faces[fid].outer_loop;
+                let inner_loops = obj.faces[fid].inner_loops.clone();
+                let empty: Vec<bool> = Vec::new();
+                let loops = std::iter::once((outer_loop, outer_crease)).chain(
+                    inner_loops
+                        .iter()
+                        .copied()
+                        .enumerate()
+                        .map(|(i, l)| (l, hole_crease.get(i).unwrap_or(&empty))),
+                );
+                for (loop_id, flags) in loops {
+                    let hes: Vec<_> = obj.loop_half_edges(loop_id).collect();
+                    for (k, h) in hes.into_iter().enumerate() {
+                        let flag = flags.get(k).copied().unwrap_or(false);
+                        let e = obj.half_edges[h].edge;
+                        if let Some(&prior) = seen.get(e) {
+                            if prior != flag {
+                                return Err(DecodeError::Corrupt {
+                                    offset: r.pos,
+                                    what: "shared edge has disagreeing crease flags",
+                                });
+                            }
+                        } else {
+                            seen.insert(e, flag);
+                        }
+                        if flag {
+                            obj.edges[e].crease = true;
+                        }
+                    }
+                }
+            }
+        }
+
         // Validate the rebuilt topology (rule 4: validate, never repair).
         obj.validate().map_err(DecodeError::InvalidTopology)?;
 
@@ -1762,6 +3047,17 @@ pub(crate) struct Manifest {
     pub geometry_version: u32,
     pub app: String,
     pub app_version: String,
+    /// A UUID (lowercase, hyphenated) that identifies this document across
+    /// saves (manifest v29+). Absent (outer `None`) → the document has no id
+    /// yet (every pre-v29 file). A member that is present but `null`
+    /// (`Some(None)`) is kept distinct from an absent one so decode rejects
+    /// it: only a valid id may appear.
+    #[serde(
+        default,
+        deserialize_with = "deserialize_present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub document_id: Option<Option<String>>,
     pub materials: Vec<MaterialDto>,
     pub objects: Vec<ObjectDto>,
     pub groups: Vec<GroupDto>,
@@ -1802,6 +3098,11 @@ pub(crate) struct Manifest {
     /// the frame differs from [`AxesFrame::IDENTITY`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub axes: Option<AxesFrameDto>,
+    /// The document's coordinate reference system (manifest v25+;
+    /// `geo.rs`). Absent → the model has no place on a map, the only
+    /// possibility before this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub geo: Option<GeoReferenceDto>,
     /// Dimension/leader-text annotations (manifest v13+). Absent/empty in
     /// v1-v12 files → no annotations.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1867,6 +3168,12 @@ pub(crate) struct SceneDto {
     /// The look the Scene captures (manifest v19+; §4.15's shape).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub view_style: Option<ViewStyleDto>,
+    /// The Scene's own transition time and delay in seconds; absent = the
+    /// document's own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transition_s: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delay_s: Option<f64>,
 }
 
 /// serde's default `Option<Option<T>>` handling collapses an explicit
@@ -1890,6 +3197,84 @@ pub(crate) struct AxesFrameDto {
     pub y: [f64; 3],
 }
 
+/// A document-level geo-reference (manifest v25+; `geo.rs`). Empty text
+/// fields and an absent unit factor are omitted.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct GeoReferenceDto {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub name: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
+    pub easting: f64,
+    pub northing: f64,
+    pub height: f64,
+    pub x_axis: [f64; 2],
+    pub scale: f64,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub geodetic_datum: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub vertical_datum: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub map_projection: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub map_zone: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub map_unit: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub map_unit_metres: Option<f64>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub tgl_id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub calibration_file_name: String,
+}
+
+fn encode_geo(g: &crate::geo::GeoReference) -> GeoReferenceDto {
+    GeoReferenceDto {
+        name: g.name.clone(),
+        description: g.description.clone(),
+        easting: g.easting,
+        northing: g.northing,
+        height: g.height,
+        x_axis: g.x_axis,
+        scale: g.scale,
+        geodetic_datum: g.geodetic_datum.clone(),
+        vertical_datum: g.vertical_datum.clone(),
+        map_projection: g.map_projection.clone(),
+        map_zone: g.map_zone.clone(),
+        map_unit: g.map_unit.clone(),
+        map_unit_metres: g.map_unit_metres,
+        tgl_id: g.tgl_id.clone(),
+        calibration_file_name: g.calibration_file_name.clone(),
+    }
+}
+
+/// Decodes the manifest's `geo`, rejecting (never repairing) a record
+/// whose numbers fail [`crate::geo::GeoReference::validate`].
+fn decode_geo(dto: &GeoReferenceDto) -> Result<crate::geo::GeoReference, LoadError> {
+    let g = crate::geo::GeoReference {
+        name: dto.name.clone(),
+        description: dto.description.clone(),
+        easting: dto.easting,
+        northing: dto.northing,
+        height: dto.height,
+        x_axis: dto.x_axis,
+        scale: dto.scale,
+        geodetic_datum: dto.geodetic_datum.clone(),
+        vertical_datum: dto.vertical_datum.clone(),
+        map_projection: dto.map_projection.clone(),
+        map_zone: dto.map_zone.clone(),
+        map_unit: dto.map_unit.clone(),
+        map_unit_metres: dto.map_unit_metres,
+        tgl_id: dto.tgl_id.clone(),
+        calibration_file_name: dto.calibration_file_name.clone(),
+    };
+    g.validate().map_err(|e| LoadError::MalformedManifest {
+        what: format!("geo: {e}"),
+    })?;
+    Ok(g)
+}
+
 /// The working camera view (manifest v13+; docs/design/camera.md §5). NOT
 /// undoable (`camera.rs`'s module doc) — saved on document save, applied on
 /// load, never touching `Document::undo`/`redo`.
@@ -1908,6 +3293,13 @@ pub(crate) struct CameraDto {
     pub eye: [f64; 3],
     pub target: [f64; 3],
     pub up: [f64; 3],
+    /// The Match Photo image width in meters (manifest v24+); omitted when
+    /// unset. See [`crate::camera::CameraState::image_width`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub image_width: Option<f64>,
+    /// The held width-to-height ratio (manifest v24+); omitted when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aspect_ratio: Option<f64>,
 }
 
 /// How the document asks to be shown (manifest v19+; `style.rs`): the
@@ -1920,6 +3312,57 @@ pub(crate) struct ViewStyleDto {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ground: Option<[u8; 3]>,
     pub axes: bool,
+    /// The section cut's outline color (manifest v24+); each of the
+    /// fields below is optional and omitted when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub section_cut_color: Option<[u8; 3]>,
+    /// The cut outline's width in pixels (v24+).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub section_cut_width: Option<u32>,
+    /// Whether a cut face is filled (v24+).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub section_fill: Option<bool>,
+    /// The fill's color (v24+).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub section_fill_color: Option<[u8; 3]>,
+    /// The color of the plane that is cutting (v24+).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_section_color: Option<[u8; 3]>,
+    /// The guides' color (v24+).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guides_color: Option<[u8; 3]>,
+    /// Whether the style hides guides (v24+).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guides_hidden: Option<bool>,
+}
+
+impl ViewStyleDto {
+    /// Whether the style says anything a v24 manifest introduced.
+    fn has_v24_fields(&self) -> bool {
+        self.section_cut_color.is_some()
+            || self.section_cut_width.is_some()
+            || self.section_fill.is_some()
+            || self.section_fill_color.is_some()
+            || self.active_section_color.is_some()
+            || self.guides_color.is_some()
+            || self.guides_hidden.is_some()
+    }
+}
+
+/// Rejects (never drops) a style field a manifest's own version predates.
+fn check_view_style_version(
+    dto: &ViewStyleDto,
+    format_version: u32,
+    whose: &str,
+) -> Result<(), LoadError> {
+    if format_version < VIEW_STYLE_SECTION_MIN_VERSION && dto.has_v24_fields() {
+        return Err(LoadError::MalformedManifest {
+            what: format!(
+                "{whose} view_style carries section or guide settings in a v{format_version} manifest (introduced at v{VIEW_STYLE_SECTION_MIN_VERSION})"
+            ),
+        });
+    }
+    Ok(())
 }
 
 fn encode_view_style(v: crate::style::ViewStyle) -> ViewStyleDto {
@@ -1928,6 +3371,13 @@ fn encode_view_style(v: crate::style::ViewStyle) -> ViewStyleDto {
         sky: v.sky,
         ground: v.ground,
         axes: v.axes,
+        section_cut_color: v.section.cut_color,
+        section_cut_width: v.section.cut_width,
+        section_fill: v.section.fill,
+        section_fill_color: v.section.fill_color,
+        active_section_color: v.section.active_color,
+        guides_color: v.guides_color,
+        guides_hidden: v.guides_hidden,
     }
 }
 
@@ -1937,6 +3387,15 @@ fn decode_view_style(v: &ViewStyleDto) -> crate::style::ViewStyle {
         sky: v.sky,
         ground: v.ground,
         axes: v.axes,
+        section: crate::style::SectionLook {
+            cut_color: v.section_cut_color,
+            cut_width: v.section_cut_width,
+            fill: v.section_fill,
+            fill_color: v.section_fill_color,
+            active_color: v.active_section_color,
+        },
+        guides_color: v.guides_color,
+        guides_hidden: v.guides_hidden,
     }
 }
 
@@ -2002,6 +3461,10 @@ pub(crate) struct GuideDto {
     /// line only (manifest v22+): where the line ends, as `from`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub to: Option<f64>,
+    /// line only (manifest v24+): the stipple mask, bit 0 first along the
+    /// line; omitted for the default dashed `0x3333`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dash: Option<u16>,
 }
 
 /// A dimension/leader-text annotation entry (manifest v13+, HEW_FILE_FORMAT.md
@@ -2106,6 +3569,116 @@ pub(crate) struct MaterialDto {
     pub color: [u8; 4],
     #[serde(skip_serializing_if = "Option::is_none")]
     pub texture: Option<TextureDto>,
+    /// Physically based properties (manifest v26+); omitted when plain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pbr: Option<PbrDto>,
+}
+
+/// A material's physically based properties (manifest v26+).
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PbrDto {
+    pub metallic: f32,
+    pub roughness: f32,
+    pub normal_scale: f32,
+    pub occlusion_strength: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metallic_map: Option<PbrMapDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub roughness_map: Option<PbrMapDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub normal_map: Option<PbrMapDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub occlusion_map: Option<PbrMapDto>,
+}
+
+/// One physically based map: the zip path of its verbatim image bytes and
+/// their codec (`"png"` or `"jpg"`).
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PbrMapDto {
+    pub asset: String,
+    pub format: String,
+}
+
+/// The file extension and manifest token of an image codec.
+fn image_ext(f: ImageFormat) -> &'static str {
+    match f {
+        ImageFormat::Png => "png",
+        ImageFormat::Jpeg => "jpg",
+    }
+}
+
+fn parse_image_format(token: &str) -> Option<ImageFormat> {
+    match token {
+        "png" => Some(ImageFormat::Png),
+        "jpg" | "jpeg" => Some(ImageFormat::Jpeg),
+        _ => None,
+    }
+}
+
+/// Encodes a material's properties, pushing each map's bytes onto `assets`.
+fn encode_pbr(
+    p: &crate::material::Pbr,
+    index: usize,
+    assets: &mut Vec<(String, Vec<u8>)>,
+) -> PbrDto {
+    let mut map = |slot: &str, m: &Option<crate::material::PbrMap>| {
+        m.as_ref().map(|m| {
+            let ext = image_ext(m.format);
+            let path = format!("textures/pbr_{index}_{slot}.{ext}");
+            assets.push((path.clone(), m.image.clone()));
+            PbrMapDto {
+                asset: path,
+                format: ext.to_string(),
+            }
+        })
+    };
+    PbrDto {
+        metallic: p.metallic,
+        roughness: p.roughness,
+        normal_scale: p.normal_scale,
+        occlusion_strength: p.occlusion_strength,
+        metallic_map: map("metallic", &p.metallic_map),
+        roughness_map: map("roughness", &p.roughness_map),
+        normal_map: map("normal", &p.normal_map),
+        occlusion_map: map("occlusion", &p.occlusion_map),
+    }
+}
+
+/// Decodes a material's properties, reading each map through `read`.
+/// Rejects numbers [`Pbr::is_valid`](crate::material::Pbr::is_valid) refuses
+/// and an unknown codec, never repairing them.
+fn decode_pbr(
+    dto: &PbrDto,
+    mut read: impl FnMut(&str) -> Result<Vec<u8>, LoadError>,
+) -> Result<crate::material::Pbr, LoadError> {
+    let mut map = |m: &Option<PbrMapDto>| -> Result<Option<crate::material::PbrMap>, LoadError> {
+        let Some(m) = m else { return Ok(None) };
+        let format = parse_image_format(&m.format).ok_or_else(|| LoadError::MalformedManifest {
+            what: format!("unknown pbr map format '{}'", m.format),
+        })?;
+        Ok(Some(crate::material::PbrMap {
+            image: read(&m.asset)?,
+            format,
+        }))
+    };
+    let p = crate::material::Pbr {
+        metallic: dto.metallic,
+        roughness: dto.roughness,
+        normal_scale: dto.normal_scale,
+        occlusion_strength: dto.occlusion_strength,
+        metallic_map: map(&dto.metallic_map)?,
+        roughness_map: map(&dto.roughness_map)?,
+        normal_map: map(&dto.normal_map)?,
+        occlusion_map: map(&dto.occlusion_map)?,
+    };
+    if !p.is_valid() {
+        return Err(LoadError::MalformedManifest {
+            what: "a material's pbr values are out of range".to_string(),
+        });
+    }
+    Ok(p)
 }
 
 /// A texture entry inside a material.
@@ -2148,6 +3721,705 @@ pub(crate) struct ObjectDto {
     /// USER-hidden view state (manifest v6+). Absent in v1-v5 → visible.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub hidden: bool,
+    /// What each blend on the object replaced (manifest v31+), ascending
+    /// blend id. Absent/empty → every blend restores by derivation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blends: Vec<BlendRecordDto>,
+    /// Built from a foreign file's mesh and not drawn on since (manifest
+    /// v32+). Omitted when false; `true` in an older file is rejected.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub imported: bool,
+    /// Locked by the person (manifest v33+, OW-1). Omitted when false;
+    /// `true` in an older file is rejected.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub locked: bool,
+}
+
+/// What one blend replaced on its object (`objects[].blends[]`, manifest
+/// v31+; [`crate::blend::BlendRecord`]). Lengths are meters, points are
+/// `[x, y, z]` in the object's frame.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct BlendRecordDto {
+    /// The blend id its faces carry in the geometry buffer.
+    pub id: u32,
+    /// The order the object's blends were made in.
+    pub seq: u32,
+    /// The blend as it was asked for.
+    pub spec: StoredSpecDto,
+    /// The loops the blend trimmed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trimmed: Vec<LoopEditDto>,
+    /// The faces the blend replaced whole (consumed, or cut into `pieces`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub consumed: Vec<StoredFaceDto>,
+    /// The untagged faces the blend left that replay takes away whole, each
+    /// as its rings, outer first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pieces: Vec<Vec<Vec<[f64; 3]>>>,
+    /// The marks of the edges the blend removed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub marks: Vec<MarkDto>,
+}
+
+/// A blend's spec with its edges as segments.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct StoredSpecDto {
+    /// Each picked edge's two ends.
+    pub edges: Vec<[[f64; 3]; 2]>,
+    /// The cross-section, as the Hew API spells it.
+    pub profile: crate::blend::BlendProfile,
+    /// The plane of an asymmetric chamfer's primary face.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub primary: Option<PlaneDto>,
+    /// How three-way corners are built.
+    #[serde(default)]
+    pub corners: crate::blend::CornerStyle,
+    /// Stopped blends: distances from each chain end.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stops: Option<crate::blend::BlendStops>,
+    /// Variable radius handles.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub handles: Vec<crate::blend::RadiusHandle>,
+}
+
+/// A plane as its unit normal and offset (`normal · p = offset` on it),
+/// the kernel's own representation, so it round-trips exactly.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct PlaneDto {
+    pub normal: [f64; 3],
+    pub offset: f64,
+}
+
+/// One loop a blend trimmed: the ring it left and the ring it replaced.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct LoopEditDto {
+    pub after: Vec<[f64; 3]>,
+    pub before: Vec<[f64; 3]>,
+}
+
+/// A face a blend consumed whole, with the attributes it had.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct StoredFaceDto {
+    pub outer: Vec<[f64; 3]>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub holes: Vec<Vec<[f64; 3]>>,
+    /// Dense material id, as `base_material`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub material: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub back_material: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uv_frame: Option<UvFrameDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub surface: Option<SurfaceDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blend: Option<BlendTagDto>,
+    /// The face's attribute dictionary (namespace → key → value, the
+    /// shape of `objects[].attrs`); omitted for none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attrs: Option<AttrsDto>,
+}
+
+/// A face's UV frame (§3.1's `uv_frame`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct UvFrameDto {
+    pub s: [f64; 3],
+    pub t: [f64; 3],
+    pub u0: f64,
+    pub v0: f64,
+}
+
+/// An analytic surface claim (§3.1's `surface`), by kind.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub(crate) enum SurfaceDto {
+    Cylinder {
+        axis_point: [f64; 3],
+        axis: [f64; 3],
+        radius: f64,
+    },
+    Sphere {
+        center: [f64; 3],
+        radius: f64,
+    },
+    Torus {
+        center: [f64; 3],
+        axis: [f64; 3],
+        major_radius: f64,
+        minor_radius: f64,
+    },
+    Cone {
+        apex: [f64; 3],
+        axis: [f64; 3],
+        half_angle: f64,
+    },
+}
+
+/// A blend tag (§3.1): `kind` is `fillet`, `chamfer` or `profile`; `role`
+/// is `strip`, `corner` or `runout`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct BlendTagDto {
+    pub id: u32,
+    pub kind: String,
+    pub role: String,
+}
+
+/// The marks of one edge a blend removed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct MarkDto {
+    pub a: [f64; 3],
+    pub b: [f64; 3],
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub soft: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub crease: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub curve: Option<CircleDto>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub polygon: Option<CircleDto>,
+}
+
+/// A circle claim: center and radius.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct CircleDto {
+    pub center: [f64; 3],
+    pub radius: f64,
+}
+
+fn arr(p: Point3) -> [f64; 3] {
+    [p.x, p.y, p.z]
+}
+
+fn varr(v: Vec3) -> [f64; 3] {
+    [v.x, v.y, v.z]
+}
+
+fn pt(a: [f64; 3]) -> Point3 {
+    Point3::new(a[0], a[1], a[2])
+}
+
+fn surface_to_dto(s: &crate::topo::SurfaceRef) -> SurfaceDto {
+    use crate::topo::SurfaceRef;
+    match *s {
+        SurfaceRef::Cylinder {
+            axis_point,
+            axis,
+            radius,
+        } => SurfaceDto::Cylinder {
+            axis_point: arr(axis_point),
+            axis: varr(axis),
+            radius,
+        },
+        SurfaceRef::Sphere { center, radius } => SurfaceDto::Sphere {
+            center: arr(center),
+            radius,
+        },
+        SurfaceRef::Torus {
+            center,
+            axis,
+            major_radius,
+            minor_radius,
+        } => SurfaceDto::Torus {
+            center: arr(center),
+            axis: varr(axis),
+            major_radius,
+            minor_radius,
+        },
+        SurfaceRef::Cone {
+            apex,
+            axis,
+            half_angle,
+        } => SurfaceDto::Cone {
+            apex: arr(apex),
+            axis: varr(axis),
+            half_angle,
+        },
+    }
+}
+
+/// The surface's kind byte and payload in wire order, so the decode checks
+/// of the geometry buffer (`surface_from_wire`) apply to the manifest's
+/// copy too.
+fn surface_dto_wire(s: &SurfaceDto) -> (u8, Vec<f64>) {
+    match *s {
+        SurfaceDto::Cylinder {
+            axis_point: p,
+            axis: a,
+            radius,
+        } => (1, vec![p[0], p[1], p[2], a[0], a[1], a[2], radius]),
+        SurfaceDto::Sphere { center: c, radius } => (2, vec![c[0], c[1], c[2], radius]),
+        SurfaceDto::Torus {
+            center: c,
+            axis: a,
+            major_radius,
+            minor_radius,
+        } => (
+            3,
+            vec![
+                c[0],
+                c[1],
+                c[2],
+                a[0],
+                a[1],
+                a[2],
+                major_radius,
+                minor_radius,
+            ],
+        ),
+        SurfaceDto::Cone {
+            apex: p,
+            axis: a,
+            half_angle,
+        } => (4, vec![p[0], p[1], p[2], a[0], a[1], a[2], half_angle]),
+    }
+}
+
+fn blend_kind_name(k: crate::topo::BlendKind) -> &'static str {
+    match k {
+        crate::topo::BlendKind::Fillet => "fillet",
+        crate::topo::BlendKind::Chamfer => "chamfer",
+        crate::topo::BlendKind::Profile => "profile",
+    }
+}
+
+fn blend_role_name(r: crate::topo::BlendRole) -> &'static str {
+    match r {
+        crate::topo::BlendRole::Strip => "strip",
+        crate::topo::BlendRole::Corner => "corner",
+        crate::topo::BlendRole::Runout => "runout",
+    }
+}
+
+fn circle_to_dto(c: &crate::sketch::CurveGeom) -> CircleDto {
+    CircleDto {
+        center: arr(c.center),
+        radius: c.radius,
+    }
+}
+
+/// The records of the blends `obj`'s faces carry, ascending id, as manifest
+/// entries; `material_dense` maps a live material id to its dense id.
+pub(crate) fn blend_records_to_dtos(
+    obj: &Object,
+    material_dense: &impl Fn(MaterialId) -> u32,
+) -> Vec<BlendRecordDto> {
+    let present: std::collections::BTreeSet<crate::topo::BlendId> = obj
+        .faces()
+        .values()
+        .filter_map(|f| f.blend.map(|t| t.id))
+        .collect();
+    let dense = |m: crate::material::FaceMaterial| m.map(material_dense);
+    obj.blend_records()
+        .iter()
+        .filter(|(id, _)| present.contains(id))
+        .map(|(id, rec)| BlendRecordDto {
+            id: id.0,
+            seq: rec.seq,
+            spec: StoredSpecDto {
+                edges: rec
+                    .spec
+                    .edges
+                    .iter()
+                    .map(|&(a, b)| [arr(a), arr(b)])
+                    .collect(),
+                profile: rec.spec.profile.clone(),
+                primary: rec.spec.primary.map(|p| PlaneDto {
+                    normal: varr(p.normal()),
+                    offset: p.offset(),
+                }),
+                corners: rec.spec.corners,
+                stops: rec.spec.stops,
+                handles: rec.spec.handles.clone(),
+            },
+            trimmed: rec
+                .trimmed
+                .iter()
+                .map(|e| LoopEditDto {
+                    after: e.after.iter().copied().map(arr).collect(),
+                    before: e.before.iter().copied().map(arr).collect(),
+                })
+                .collect(),
+            consumed: rec
+                .consumed
+                .iter()
+                .map(|f| StoredFaceDto {
+                    outer: f.outer.iter().copied().map(arr).collect(),
+                    holes: f
+                        .holes
+                        .iter()
+                        .map(|h| h.iter().copied().map(arr).collect())
+                        .collect(),
+                    material: dense(f.attrs.material),
+                    back_material: dense(f.attrs.back_material),
+                    uv_frame: f.attrs.uv_frame.map(|u| UvFrameDto {
+                        s: varr(u.s),
+                        t: varr(u.t),
+                        u0: u.u0,
+                        v0: u.v0,
+                    }),
+                    surface: f.attrs.surface.as_ref().map(surface_to_dto),
+                    blend: f.attrs.blend.map(|t| BlendTagDto {
+                        id: t.id.0,
+                        kind: blend_kind_name(t.kind).to_string(),
+                        role: blend_role_name(t.role).to_string(),
+                    }),
+                    attrs: (!f.dict.is_empty()).then(|| attrs_to_dto(&f.dict)),
+                })
+                .collect(),
+            pieces: rec
+                .pieces
+                .iter()
+                .map(|f| {
+                    f.iter()
+                        .map(|r| r.iter().copied().map(arr).collect())
+                        .collect()
+                })
+                .collect(),
+            marks: rec
+                .marks
+                .iter()
+                .map(|m| MarkDto {
+                    a: arr(m.a),
+                    b: arr(m.b),
+                    soft: m.meta.soft,
+                    crease: m.meta.crease,
+                    curve: m.meta.curve.as_ref().map(circle_to_dto),
+                    polygon: m.meta.polygon.as_ref().map(circle_to_dto),
+                })
+                .collect(),
+        })
+        .collect()
+}
+
+/// Checks one manifest blend record for `object` against its own shape:
+/// finite numbers, loops of three points or more, at least one edge,
+/// sizes that are positive, material ids inside the palette, a surface that
+/// passes the geometry buffer's own checks, tag names that exist. Whether
+/// the record still fits its geometry is decided when it is used.
+fn check_blend_record_dto(
+    object: u32,
+    dto: &BlendRecordDto,
+    mat_count: usize,
+) -> Result<(), LoadError> {
+    let bad = |what: String| LoadError::MalformedManifest {
+        what: format!("object {object} blend {}: {what}", dto.id),
+    };
+    let finite3 = |a: &[f64; 3]| a.iter().all(|x| x.is_finite());
+    let ring = |r: &[[f64; 3]], name: &str| -> Result<(), LoadError> {
+        if r.len() < 3 {
+            return Err(bad(format!("{name} has fewer than 3 points")));
+        }
+        if !r.iter().all(finite3) {
+            return Err(bad(format!("{name} has a non-finite coordinate")));
+        }
+        Ok(())
+    };
+    let len = |x: f64, name: &str| -> Result<(), LoadError> {
+        if !(x.is_finite() && x > 0.0) {
+            return Err(bad(format!("{name} is not a positive finite length")));
+        }
+        Ok(())
+    };
+    let mat = |m: Option<u32>, name: &str| -> Result<(), LoadError> {
+        if let Some(m) = m
+            && m as usize >= mat_count
+        {
+            return Err(bad(format!("{name} id {m} out of range")));
+        }
+        Ok(())
+    };
+    // Room for every later blend and every boolean's offset.
+    if dto.seq > MAX_BLEND_SEQ {
+        return Err(bad(format!("seq {} is past {MAX_BLEND_SEQ}", dto.seq)));
+    }
+    if dto.spec.edges.is_empty() {
+        return Err(bad("spec names no edges".to_string()));
+    }
+    if !dto.spec.edges.iter().all(|[a, b]| finite3(a) && finite3(b)) {
+        return Err(bad("spec edge has a non-finite coordinate".to_string()));
+    }
+    {
+        use crate::blend::{BlendProfile, ProfileSeg};
+        let facets = |n: u32, lo: u32, name: &str| -> Result<(), LoadError> {
+            if !(lo..=96).contains(&n) {
+                return Err(bad(format!("{name} {n} outside {lo} to 96")));
+            }
+            Ok(())
+        };
+        match &dto.spec.profile {
+            BlendProfile::Round { radius, segments } | BlendProfile::Cove { radius, segments } => {
+                len(*radius, "radius")?;
+                facets(*segments, 2, "segments")?;
+            }
+            BlendProfile::Chamfer {
+                setback_a,
+                setback_b,
+            } => {
+                len(*setback_a, "setback_a")?;
+                len(*setback_b, "setback_b")?;
+            }
+            BlendProfile::Bullnose { segments } => facets(*segments, 2, "segments")?,
+            BlendProfile::Custom {
+                shape,
+                width,
+                arc_segments,
+            } => {
+                len(*width, "width")?;
+                facets(*arc_segments, 1, "arc_segments")?;
+                len(shape.b, "profile b")?;
+                for seg in &shape.segs {
+                    let ok = match seg {
+                        ProfileSeg::Line { to } => to.iter().all(|x| x.is_finite()),
+                        ProfileSeg::Arc { to, center, .. } => {
+                            to.iter().chain(center.iter()).all(|x| x.is_finite())
+                        }
+                    };
+                    if !ok {
+                        return Err(bad(
+                            "profile segment has a non-finite coordinate".to_string()
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    if let Some(p) = &dto.spec.primary
+        && !(finite3(&p.normal)
+            && p.offset.is_finite()
+            && (Vec3::new(p.normal[0], p.normal[1], p.normal[2]).length() - 1.0).abs()
+                <= crate::tol::NORMAL_DIRECTION)
+    {
+        return Err(bad(
+            "primary plane needs a unit normal and a finite offset".to_string()
+        ));
+    }
+    if let Some(s) = &dto.spec.stops
+        && !(s.start.is_finite() && s.start >= 0.0 && s.end.is_finite() && s.end >= 0.0)
+    {
+        return Err(bad("stops are not finite and non-negative".to_string()));
+    }
+    for h in &dto.spec.handles {
+        if !(h.at.is_finite() && h.at >= 0.0) {
+            return Err(bad(
+                "handle position is not finite and non-negative".to_string()
+            ));
+        }
+        len(h.radius, "handle radius")?;
+    }
+    for e in &dto.trimmed {
+        ring(&e.after, "trimmed loop (after)")?;
+        ring(&e.before, "trimmed loop (before)")?;
+    }
+    for f in &dto.consumed {
+        ring(&f.outer, "consumed face outer loop")?;
+        for h in &f.holes {
+            ring(h, "consumed face hole")?;
+        }
+        mat(f.material, "consumed face material")?;
+        mat(f.back_material, "consumed face back material")?;
+        if let Some(u) = &f.uv_frame
+            && !(finite3(&u.s) && finite3(&u.t) && u.u0.is_finite() && u.v0.is_finite())
+        {
+            return Err(bad("consumed face uv_frame is not finite".to_string()));
+        }
+        if let Some(s) = &f.surface {
+            let (kind, payload) = surface_dto_wire(s);
+            if !payload.iter().all(|x| x.is_finite()) {
+                return Err(bad("consumed face surface is not finite".to_string()));
+            }
+            surface_from_wire(kind, &payload)
+                .map_err(|what| bad(format!("consumed face surface: {what}")))?;
+        }
+        if let Some(t) = &f.blend {
+            if !matches!(t.kind.as_str(), "fillet" | "chamfer" | "profile") {
+                return Err(bad(format!("consumed face blend kind {:?}", t.kind)));
+            }
+            if !matches!(t.role.as_str(), "strip" | "corner" | "runout") {
+                return Err(bad(format!("consumed face blend role {:?}", t.role)));
+            }
+        }
+    }
+    for f in &dto.pieces {
+        if f.is_empty() {
+            return Err(bad("piece has no loops".to_string()));
+        }
+        for r in f {
+            ring(r, "piece loop")?;
+        }
+    }
+    for m in &dto.marks {
+        if !(finite3(&m.a) && finite3(&m.b)) {
+            return Err(bad("mark has a non-finite coordinate".to_string()));
+        }
+        for (c, name) in [(&m.curve, "mark curve"), (&m.polygon, "mark polygon")] {
+            if let Some(c) = c {
+                if !finite3(&c.center) {
+                    return Err(bad(format!("{name} center is not finite")));
+                }
+                if !(c.radius.is_finite() && c.radius > crate::tol::POINT_MERGE) {
+                    return Err(bad(format!("{name} radius out of range")));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The manifest's blend records for one object as the kernel's, with live
+/// material ids; `dense_material` maps a dense id back to the live one.
+///
+/// # Errors
+/// `MalformedManifest` for a material id the palette lacks or a duplicate
+/// blend id (the shape checks ran at decode).
+pub(crate) fn blend_records_from_dtos(
+    object: u32,
+    dtos: &[BlendRecordDto],
+    dense_material: &impl Fn(u32) -> Option<MaterialId>,
+) -> Result<BTreeMap<crate::topo::BlendId, crate::blend::BlendRecord>, LoadError> {
+    use crate::blend::{BlendRecord, LoopEdit, StoredFace, StoredMark, StoredSpec};
+    use crate::topo::{BlendId, BlendKind, BlendRole, BlendTag, FaceAttrs, SurfaceRef};
+    let mut out = BTreeMap::new();
+    for dto in dtos {
+        let bad = |what: String| LoadError::MalformedManifest {
+            what: format!("object {object} blend {}: {what}", dto.id),
+        };
+        let mat = |m: Option<u32>| -> Result<crate::material::FaceMaterial, LoadError> {
+            match m {
+                None => Ok(None),
+                Some(d) => dense_material(d)
+                    .map(Some)
+                    .ok_or_else(|| bad(format!("material id {d} out of range"))),
+            }
+        };
+        let circle = |c: &Option<CircleDto>| {
+            c.as_ref().map(|c| crate::sketch::CurveGeom {
+                center: pt(c.center),
+                radius: c.radius,
+            })
+        };
+        let surface = |s: &SurfaceDto| -> Result<SurfaceRef, LoadError> {
+            let (kind, payload) = surface_dto_wire(s);
+            surface_from_wire(kind, &payload).map_err(|what| bad(what.to_string()))
+        };
+        let primary = match &dto.spec.primary {
+            None => None,
+            Some(p) => Some(
+                Plane::from_unit_normal_offset(
+                    Vec3::new(p.normal[0], p.normal[1], p.normal[2]),
+                    p.offset,
+                )
+                .map_err(|_| bad("primary plane normal is not a unit vector".to_string()))?,
+            ),
+        };
+        let mut consumed = Vec::with_capacity(dto.consumed.len());
+        for f in &dto.consumed {
+            let blend = match &f.blend {
+                None => None,
+                Some(t) => Some(BlendTag {
+                    id: BlendId(t.id),
+                    kind: match t.kind.as_str() {
+                        "fillet" => BlendKind::Fillet,
+                        "chamfer" => BlendKind::Chamfer,
+                        "profile" => BlendKind::Profile,
+                        other => return Err(bad(format!("blend kind {other:?}"))),
+                    },
+                    role: match t.role.as_str() {
+                        "strip" => BlendRole::Strip,
+                        "corner" => BlendRole::Corner,
+                        "runout" => BlendRole::Runout,
+                        other => return Err(bad(format!("blend role {other:?}"))),
+                    },
+                }),
+            };
+            // A present dictionary holds something: the writer omits an
+            // empty one (reject-not-repair).
+            let dict = match &f.attrs {
+                None => crate::attr::AttrDict::new(),
+                Some(d) => {
+                    let dict = attrs_from_dto(d, &format!("object {object} blend {}", dto.id))?;
+                    if dict.is_empty() || d.values().any(|e| e.is_empty()) {
+                        return Err(bad("consumed face attrs holds no key".to_string()));
+                    }
+                    dict
+                }
+            };
+            consumed.push(StoredFace {
+                outer: f.outer.iter().copied().map(pt).collect(),
+                holes: f
+                    .holes
+                    .iter()
+                    .map(|h| h.iter().copied().map(pt).collect())
+                    .collect(),
+                attrs: FaceAttrs {
+                    material: mat(f.material)?,
+                    back_material: mat(f.back_material)?,
+                    uv_frame: f.uv_frame.as_ref().map(|u| UvFrame {
+                        s: Vec3::new(u.s[0], u.s[1], u.s[2]),
+                        t: Vec3::new(u.t[0], u.t[1], u.t[2]),
+                        u0: u.u0,
+                        v0: u.v0,
+                    }),
+                    surface: f.surface.as_ref().map(&surface).transpose()?,
+                    blend,
+                    // The dictionary rides by value in `dict`.
+                    attrs: crate::topo::AttrSlot::NONE,
+                },
+                dict,
+            });
+        }
+        let rec = BlendRecord {
+            seq: dto.seq,
+            spec: StoredSpec {
+                edges: dto
+                    .spec
+                    .edges
+                    .iter()
+                    .map(|[a, b]| (pt(*a), pt(*b)))
+                    .collect(),
+                profile: dto.spec.profile.clone(),
+                primary,
+                corners: dto.spec.corners,
+                stops: dto.spec.stops,
+                handles: dto.spec.handles.clone(),
+            },
+            trimmed: dto
+                .trimmed
+                .iter()
+                .map(|e| LoopEdit {
+                    after: e.after.iter().copied().map(pt).collect(),
+                    before: e.before.iter().copied().map(pt).collect(),
+                })
+                .collect(),
+            consumed,
+            pieces: dto
+                .pieces
+                .iter()
+                .map(|f| {
+                    f.iter()
+                        .map(|r| r.iter().copied().map(pt).collect())
+                        .collect()
+                })
+                .collect(),
+            marks: dto
+                .marks
+                .iter()
+                .map(|m| StoredMark {
+                    a: pt(m.a),
+                    b: pt(m.b),
+                    meta: crate::patch::EdgeMeta {
+                        soft: m.soft,
+                        crease: m.crease,
+                        curve: circle(&m.curve),
+                        polygon: circle(&m.polygon),
+                    },
+                })
+                .collect(),
+        };
+        if out.insert(BlendId(dto.id), rec).is_some() {
+            return Err(bad("duplicate blend id".to_string()));
+        }
+    }
+    Ok(out)
 }
 
 /// A merge group entry.
@@ -2182,6 +4454,11 @@ pub(crate) struct GroupDto {
     /// smuggled field and rejected.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner: Option<u32>,
+    /// Locked by the person (manifest v33+, OW-1): everything inside is
+    /// frozen with it. Omitted when false; `true` in an older file is
+    /// rejected.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub locked: bool,
 }
 
 /// A component definition.
@@ -2210,6 +4487,12 @@ pub(crate) struct ComponentDto {
     /// Optional definition name (manifest v2+). Absent in v1 files → `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// The shape is locked (manifest v33+, OW-1): every instance of it is
+    /// locked, and its contents are frozen everywhere it is placed. An
+    /// instance carries no lock of its own. Omitted when false; `true` in
+    /// an older file is rejected.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub locked: bool,
 }
 
 /// A component instance.
@@ -2246,6 +4529,11 @@ pub(crate) struct InstanceDto {
     /// smuggled field and rejected.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner: Option<u32>,
+    /// The placement's own material (manifest v27+): a dense material id.
+    /// Absent → none. Presence in a pre-v27 file is a smuggled field and
+    /// rejected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub material: Option<u32>,
 }
 
 /// A first-class sketch.
@@ -2289,6 +4577,16 @@ pub(crate) struct SketchDto {
     /// object-owned — every sketch before v17.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_object: Option<u32>,
+    /// A detached shape (manifest v23+, `Sketch::detached`): drawing that
+    /// takes part in no plane arrangement. Omitted when false; `true` in an
+    /// older file, or together with `owner_object`, is rejected.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub detached: bool,
+    /// A foreign file's drawing the user has not drawn in since (manifest
+    /// v32+, `Sketch::imported`). Omitted when false; `true` in an older
+    /// file is rejected.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub imported: bool,
     /// The GROUP the sketch is drawn in (manifest v19+): the dense
     /// `groups[]` id of the group that holds it — a `.skp` group of edges,
     /// or lines drawn while editing a group. The sketch keeps its frame
@@ -2338,10 +4636,13 @@ pub(crate) struct SketchRegionDto {
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct SketchCurveDto {
     pub id: u32,
-    /// Circle center, on the sketch plane.
-    pub center: [f64; 3],
-    /// Circle radius in meters (> 0).
-    pub radius: f64,
+    /// Circle center, on the sketch plane. Absent exactly for a `"smooth"`
+    /// entry (manifest v30).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub center: Option<[f64; 3]>,
+    /// Circle radius in meters (> 0). Absent exactly for a `"smooth"` entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub radius: Option<f64>,
     /// What the circle claims about the chain (manifest v12+): absent or
     /// `"circle"` — the chain's edges are chord facets approximating it — or
     /// `"polygon"` — the edges ARE the geometry and the circle is only their
@@ -2356,6 +4657,10 @@ pub(crate) struct SketchCurveDto {
 /// Circles write no token at all, so v12 files are byte-identical to v11 for
 /// every document that contains no polygon.
 pub(crate) const CURVE_KIND_POLYGON: &str = "polygon";
+/// The `SketchCurveDto::kind` token for a chain with no analytic record that
+/// shades smooth (E1, manifest v30): drawn as a circle or arc, it lost its
+/// circle to a non-similarity transform. Carries no center and no radius.
+pub(crate) const CURVE_KIND_SMOOTH: &str = "smooth";
 /// The explicit token for [`crate::sketch::SketchCurveKind::Circle`]. Never
 /// written (absence means circle), but accepted on load so a hand-written or
 /// third-party manifest can be explicit.
@@ -2464,7 +4769,8 @@ pub(crate) type GroupSaveRow = (
 );
 
 /// Serialization row for an instance:
-/// (id, def, pose, name, tags, owner definition — v15 nested components).
+/// (id, def, pose, name, tags, owner definition — v15 nested components,
+/// own material — v27).
 pub(crate) type InstanceSaveRow = (
     InstanceId,
     ComponentId,
@@ -2472,6 +4778,7 @@ pub(crate) type InstanceSaveRow = (
     Option<String>,
     Vec<Vec<String>>,
     Option<ComponentId>,
+    Option<MaterialId>,
 );
 
 /// Data that document.rs extracts from its private fields and hands off to
@@ -2480,6 +4787,18 @@ pub(crate) struct DocSaveData {
     /// The manifest's `app_version`: the writing release for a real save, a
     /// fixed placeholder for `Document::state_hash`.
     pub app_version: &'static str,
+    /// The manifest's `format_version`: [`MANIFEST_FORMAT_VERSION`] for a
+    /// real save, a fixed placeholder for `Document::state_hash`
+    /// ([`HASHED_FORMAT_VERSION`]).
+    pub format_version: u32,
+    /// The geometry buffer version: [`GEOMETRY_FORMAT_VERSION`] for a real
+    /// save, [`HASHED_GEOMETRY_VERSION`] for `Document::state_hash` (each
+    /// Object with dictionaries still encodes at the version that carries
+    /// them, [`Object::encode_version`]).
+    pub geometry_version: u32,
+    /// The manifest's `document_id` (manifest v29+): the document's id for
+    /// a real save, always `None` for `Document::state_hash`.
+    pub document_id: Option<[u8; 16]>,
     pub materials: Vec<(MaterialId, Material)>,
     pub world_objects: Vec<(ObjectId, Object)>,
     pub def_objects: Vec<(ObjectId, Object, ComponentId)>,
@@ -2504,6 +4823,8 @@ pub(crate) struct DocSaveData {
     pub guides: Vec<(GuideId, Guide)>,
     /// Each guide's tag paths, parallel to `guides` (manifest v21+).
     pub guide_tags: Vec<Vec<Vec<String>>>,
+    /// Each guide's dash (manifest v24+), parallel to `guides`.
+    pub guide_dashes: Vec<crate::guide::GuideDash>,
     /// Live annotations, in slotmap key order: `(id, value, detached)`.
     pub annotations: Vec<(AnnotationId, Annotation, bool)>,
     /// Each annotation's tag paths, parallel to `annotations`.
@@ -2519,7 +4840,19 @@ pub(crate) struct DocSaveData {
     /// USER-hidden flags keyed by id (manifest v6), same key spaces as the
     /// name/tag maps.
     pub obj_hidden: std::collections::BTreeSet<ObjectId>,
+    /// Objects built from a foreign file's mesh and not drawn on since
+    /// (manifest v32+), same key space as `obj_hidden`.
+    pub obj_imported: std::collections::BTreeSet<ObjectId>,
+    /// Locked objects (manifest v33+, OW-1), same key space as
+    /// `obj_hidden`. Only live rows are looked up, so a tombstone's flag
+    /// never serializes.
+    pub obj_locked: std::collections::BTreeSet<ObjectId>,
     pub group_hidden: std::collections::BTreeSet<GroupId>,
+    /// Locked groups (manifest v33+).
+    pub group_locked: std::collections::BTreeSet<GroupId>,
+    /// Locked component definitions (manifest v33+). An instance has no
+    /// lock of its own: it is locked when its definition is.
+    pub component_locked: std::collections::BTreeSet<ComponentId>,
     pub instance_hidden: std::collections::BTreeSet<InstanceId>,
     /// The working camera view at last save (manifest v13+; docs/design/
     /// camera.md §5), or `None` if none was ever set — NOT undoable (see
@@ -2530,6 +4863,8 @@ pub(crate) struct DocSaveData {
     pub view_style: Option<crate::style::ViewStyle>,
     /// Movable drawing axes (manifest v13+, tool-parity design §4).
     pub axes: AxesFrame,
+    /// The coordinate reference system (manifest v25+; `geo.rs`).
+    pub geo: Option<crate::geo::GeoReference>,
     /// Per-entity stable ids (manifest v14+, docs/agents/HEW_API.md §5.1) — the
     /// document's whole table; `encode_document` looks up only the live
     /// rows above, so tombstoned/orphaned entries never serialize.
@@ -2626,7 +4961,7 @@ pub(crate) fn encode_document(data: DocSaveData) -> Vec<u8> {
     // One buffer per object (world + def), in ascending dense id order.
     let mut geometry_buffers: Vec<Vec<u8>> = Vec::with_capacity(all_objects.len());
     for (_, obj) in &all_objects {
-        geometry_buffers.push(obj.encode(&material_dense));
+        geometry_buffers.push(obj.encode_version(&material_dense, data.geometry_version));
     }
 
     // ── 3. Collect texture assets ─────────────────────────────────────────
@@ -2656,6 +4991,10 @@ pub(crate) fn encode_document(data: DocSaveData) -> Vec<u8> {
             name: mat.name.clone(),
             color: [mat.color.r, mat.color.g, mat.color.b, mat.color.a],
             texture: tex_dto,
+            pbr: mat
+                .pbr
+                .as_ref()
+                .map(|p| encode_pbr(p, i, &mut texture_entries)),
         });
     }
 
@@ -2663,7 +5002,7 @@ pub(crate) fn encode_document(data: DocSaveData) -> Vec<u8> {
     let obj_dtos: Vec<ObjectDto> = all_objects
         .iter()
         .enumerate()
-        .map(|(i, (oid, _))| {
+        .map(|(i, (oid, obj))| {
             // Find base_material: check world_objects first, then def_objects.
             let base_mat = data
                 .world_objects
@@ -2686,6 +5025,9 @@ pub(crate) fn encode_document(data: DocSaveData) -> Vec<u8> {
                 name: data.obj_names.get(oid).cloned().flatten(),
                 tags: data.obj_tags.get(oid).cloned().unwrap_or_default(),
                 hidden: data.obj_hidden.contains(oid),
+                blends: blend_records_to_dtos(obj, &material_dense),
+                imported: data.obj_imported.contains(oid),
+                locked: data.obj_locked.contains(oid),
             }
         })
         .collect();
@@ -2703,6 +5045,7 @@ pub(crate) fn encode_document(data: DocSaveData) -> Vec<u8> {
             tags: tags.clone(),
             hidden: data.group_hidden.contains(gid),
             owner: owner_def.as_ref().map(|cid| comp_to_dense[cid]),
+            locked: data.group_locked.contains(gid),
         })
         .collect();
 
@@ -2721,6 +5064,7 @@ pub(crate) fn encode_document(data: DocSaveData) -> Vec<u8> {
                 .map(|m| MemberDto::Node(node_to_dto(m)))
                 .collect(),
             name: name.clone(),
+            locked: data.component_locked.contains(cid),
         })
         .collect();
 
@@ -2728,17 +5072,20 @@ pub(crate) fn encode_document(data: DocSaveData) -> Vec<u8> {
         .instances
         .iter()
         .enumerate()
-        .map(|(i, (iid, def, pose, name, tags, owner_def))| InstanceDto {
-            id: i as u32,
-            sid: sid_for(crate::document::EntityRef::Instance(*iid)),
-            attrs: attrs_for(crate::document::EntityRef::Instance(*iid)),
-            def: comp_to_dense[def],
-            pose: pose.to_affine(),
-            name: name.clone(),
-            tags: tags.clone(),
-            hidden: data.instance_hidden.contains(iid),
-            owner: owner_def.as_ref().map(|cid| comp_to_dense[cid]),
-        })
+        .map(
+            |(i, (iid, def, pose, name, tags, owner_def, material))| InstanceDto {
+                id: i as u32,
+                sid: sid_for(crate::document::EntityRef::Instance(*iid)),
+                attrs: attrs_for(crate::document::EntityRef::Instance(*iid)),
+                def: comp_to_dense[def],
+                pose: pose.to_affine(),
+                name: name.clone(),
+                tags: tags.clone(),
+                hidden: data.instance_hidden.contains(iid),
+                owner: owner_def.as_ref().map(|cid| comp_to_dense[cid]),
+                material: material.map(material_dense),
+            },
+        )
         .collect();
 
     let sketch_dtos: Vec<SketchDto> = data
@@ -2792,6 +5139,11 @@ pub(crate) fn encode_document(data: DocSaveData) -> Vec<u8> {
                 tags: data.guide_tags.get(i).cloned().unwrap_or_default(),
                 from: span.from,
                 to: span.to,
+                dash: data
+                    .guide_dashes
+                    .get(i)
+                    .filter(|d| !d.is_default())
+                    .map(|d| d.mask()),
             },
             Guide::Point { position } => GuideDto {
                 id: i as u32,
@@ -2803,6 +5155,7 @@ pub(crate) fn encode_document(data: DocSaveData) -> Vec<u8> {
                 tags: data.guide_tags.get(i).cloned().unwrap_or_default(),
                 from: None,
                 to: None,
+                dash: None,
             },
         })
         .collect();
@@ -2871,11 +5224,15 @@ pub(crate) fn encode_document(data: DocSaveData) -> Vec<u8> {
     let root_dtos: Vec<NodeRefDto> = data.roots.iter().map(&node_to_dto).collect();
 
     let manifest = Manifest {
-        format_version: MANIFEST_FORMAT_VERSION,
+        format_version: data.format_version,
         consumed: Vec::new(),
-        geometry_version: GEOMETRY_FORMAT_VERSION,
+        geometry_version: data.geometry_version,
         app: "hew".to_string(),
         app_version: data.app_version.to_string(),
+        document_id: data
+            .document_id
+            .as_ref()
+            .map(|id| Some(document_id_text(id))),
         materials: mat_dtos,
         objects: obj_dtos,
         groups: group_dtos,
@@ -2911,6 +5268,7 @@ pub(crate) fn encode_document(data: DocSaveData) -> Vec<u8> {
                 y: [data.axes.y.x, data.axes.y.y, data.axes.y.z],
             })
         },
+        geo: data.geo.as_ref().map(encode_geo),
         section_plane: data.section_plane.map(encode_section_plane),
         scenes: encode_scenes(&data),
     };
@@ -3004,15 +5362,27 @@ fn encode_sketch(sk: &Sketch) -> SketchDto {
             // `curve_analytic`, NOT `curve_geom`: the latter is circle-only
             // by contract, and a polygon's center is exactly what this record
             // has to carry across a save/load.
-            sk.curve_analytic(cid).map(|a| SketchCurveDto {
-                id: dense,
-                center: [a.geom.center.x, a.geom.center.y, a.geom.center.z],
-                radius: a.geom.radius,
-                kind: match a.kind {
-                    crate::sketch::SketchCurveKind::Circle => None,
-                    crate::sketch::SketchCurveKind::Polygon => Some(CURVE_KIND_POLYGON.to_string()),
-                },
-            })
+            match sk.curve_analytic(cid) {
+                Some(a) => Some(SketchCurveDto {
+                    id: dense,
+                    center: Some([a.geom.center.x, a.geom.center.y, a.geom.center.z]),
+                    radius: Some(a.geom.radius),
+                    kind: match a.kind {
+                        crate::sketch::SketchCurveKind::Circle => None,
+                        crate::sketch::SketchCurveKind::Polygon => {
+                            Some(CURVE_KIND_POLYGON.to_string())
+                        }
+                    },
+                }),
+                // An analytic-less chain marked smooth (E1, manifest v30).
+                None if sk.curve_is_smooth(cid) => Some(SketchCurveDto {
+                    id: dense,
+                    center: None,
+                    radius: None,
+                    kind: Some(CURVE_KIND_SMOOTH.to_string()),
+                }),
+                None => None,
+            }
         })
         .collect();
     curve_dtos.sort_by_key(|c| c.id);
@@ -3028,8 +5398,10 @@ fn encode_sketch(sk: &Sketch) -> SketchDto {
         curves: curve_dtos,
         owner: None,
         owner_object: None, // patched by the caller (`encode_document`), like `id`
-        owner_group: None,  // likewise
-        tags: Vec::new(),   // likewise
+        detached: sk.detached(),
+        imported: sk.imported(),
+        owner_group: None, // patched by the caller, like `owner_object`
+        tags: Vec::new(),  // likewise
     }
 }
 
@@ -3171,10 +5543,16 @@ pub(crate) struct DocLoadRaw {
     /// The manifest's declared `format_version` — gates version-specific
     /// load behavior (the pre-v11 retroactive consumption).
     pub format_version: u32,
+    /// The document's id (manifest v29+; `None` for older files or a
+    /// document never given one). Shape-validated by decode.
+    pub document_id: Option<[u8; 16]>,
     pub materials: Vec<Material>,
     pub geom_buffers: Vec<Vec<u8>>,
     /// base_material dense id for each object (None = no base material).
     pub obj_base_materials: Vec<Option<u32>>,
+    /// Each object's blend records (manifest v31+), parallel to
+    /// `geom_buffers`; empty for an object with none or a pre-v31 file.
+    pub obj_blends: Vec<Vec<BlendRecordDto>>,
     pub groups: Vec<Vec<NodeRefDto>>,
     /// v15+: full member NodeRefs per definition (validated shapes; a
     /// pre-v15 file's bare-int members arrive here as object refs — the
@@ -3205,6 +5583,8 @@ pub(crate) struct DocLoadRaw {
     /// Each guide's tag paths (manifest v21+), parallel to `guides`; empty
     /// for none.
     pub guide_tags: Vec<Vec<Vec<String>>>,
+    /// Each guide's dash (manifest v24+), parallel to `guides`.
+    pub guide_dashes: Vec<crate::guide::GuideDash>,
     /// Annotations (manifest v13+), in manifest dense-id order, with
     /// `detached`. Anchor node references stay dense (`RawAnchor::node`,
     /// unresolved) until `Document::load` maps them to live ids — the same
@@ -3222,6 +5602,9 @@ pub(crate) struct DocLoadRaw {
     pub group_names: Vec<Option<String>>,
     pub component_names: Vec<Option<String>>,
     pub instance_names: Vec<Option<String>>,
+    /// Each instance's own material (manifest v27+), a dense material id,
+    /// in dense order; `None` for none (and for every older file).
+    pub instance_materials: Vec<Option<u32>>,
     /// Tag lists per object/group/instance, in dense order (manifest v3+; empty
     /// for v1/v2 files — `#[serde(default)]` fills them in).
     pub obj_tags: Vec<Vec<Vec<String>>>,
@@ -3232,6 +5615,14 @@ pub(crate) struct DocLoadRaw {
     /// USER-hidden flags per object/group/instance dense id (manifest v6+;
     /// all false for older files).
     pub obj_hidden: Vec<bool>,
+    /// Imported flags per object dense id (manifest v32+; all false for
+    /// older files).
+    pub obj_imported: Vec<bool>,
+    /// Lock flags per object, group and component dense id (manifest
+    /// v33+; all false for older files).
+    pub obj_locked: Vec<bool>,
+    pub group_locked: Vec<bool>,
+    pub component_locked: Vec<bool>,
     pub group_hidden: Vec<bool>,
     pub instance_hidden: Vec<bool>,
     /// The working camera view at last save (manifest v13+; `None` for
@@ -3243,6 +5634,9 @@ pub(crate) struct DocLoadRaw {
     /// Movable drawing axes (manifest v13+; [`AxesFrame::IDENTITY`] for
     /// older files or a v13+ file that never moved them).
     pub axes: AxesFrame,
+    /// The coordinate reference system (manifest v25+; `None` for older
+    /// files or a model with no place on a map).
+    pub geo: Option<crate::geo::GeoReference>,
     /// Per-entity stable ids (manifest v14+, docs/agents/HEW_API.md §5.1), each
     /// vector parallel to its entity collection in dense order; tag sids
     /// parallel to `tag_meta`. ALL EMPTY for pre-v14 files (the loader
@@ -3309,6 +5703,33 @@ pub(crate) fn decode_document_raw(bytes: &[u8]) -> Result<DocLoadRaw, LoadError>
         });
     }
 
+    // The document id (manifest v29+): a smuggled one below its version is
+    // rejected like every other gated field, and a present one must be
+    // UUID text exactly as the writer emits it.
+    let document_id = match &manifest.document_id {
+        None => None,
+        Some(_) if manifest.format_version < DOCUMENT_ID_MIN_VERSION => {
+            return Err(LoadError::MalformedManifest {
+                what: format!(
+                    "a v{} manifest must not carry document_id (introduced at v{})",
+                    manifest.format_version, DOCUMENT_ID_MIN_VERSION
+                ),
+            });
+        }
+        Some(None) => {
+            return Err(LoadError::MalformedManifest {
+                what: "document_id is not a UUID".to_string(),
+            });
+        }
+        Some(Some(text)) => {
+            Some(
+                parse_document_id(text).ok_or_else(|| LoadError::MalformedManifest {
+                    what: "document_id is not a UUID".to_string(),
+                })?,
+            )
+        }
+    };
+
     let obj_count = manifest.objects.len();
     let mat_count = materials_count_validate(&manifest)?;
 
@@ -3334,11 +5755,26 @@ pub(crate) fn decode_document_raw(bytes: &[u8]) -> Result<DocLoadRaw, LoadError>
         } else {
             None
         };
+        let pbr = match &mat_dto.pbr {
+            Some(dto) => {
+                if manifest.format_version < PBR_MIN_VERSION {
+                    return Err(LoadError::MalformedManifest {
+                        what: format!(
+                            "material '{}' carries pbr in a v{} manifest (introduced at v{})",
+                            mat_dto.name, manifest.format_version, PBR_MIN_VERSION
+                        ),
+                    });
+                }
+                Some(decode_pbr(dto, |path| zip_read_entry(&mut zip, path))?)
+            }
+            None => None,
+        };
         let c = mat_dto.color;
         materials.push(Material {
             name: mat_dto.name.clone(),
             color: crate::material::Rgba8::rgba(c[0], c[1], c[2], c[3]),
             texture,
+            pbr,
         });
     }
 
@@ -3346,17 +5782,39 @@ pub(crate) fn decode_document_raw(bytes: &[u8]) -> Result<DocLoadRaw, LoadError>
     let mut geom_buffers: Vec<Vec<u8>> = Vec::with_capacity(obj_count);
     let mut obj_base_materials: Vec<Option<u32>> = Vec::with_capacity(obj_count);
     let mut obj_names: Vec<Option<String>> = Vec::with_capacity(obj_count);
+    let mut obj_blends: Vec<Vec<BlendRecordDto>> = Vec::with_capacity(obj_count);
     for obj_dto in &manifest.objects {
         let buf = zip_read_entry(&mut zip, &obj_dto.geometry)?;
         geom_buffers.push(buf);
         obj_base_materials.push(obj_dto.base_material);
         obj_names.push(obj_dto.name.clone());
+        // Blend records (manifest v31+): version-gated like every sibling
+        // field, and checked for shape here; whether a record still fits
+        // its geometry is decided when it is used, never at load.
+        if !obj_dto.blends.is_empty() && manifest.format_version < BLEND_RECORDS_MIN_VERSION {
+            return Err(LoadError::MalformedManifest {
+                what: format!(
+                    "object {} carries blend records in a v{} manifest (introduced at v{})",
+                    obj_dto.id, manifest.format_version, BLEND_RECORDS_MIN_VERSION
+                ),
+            });
+        }
+        let mut ids = std::collections::BTreeSet::new();
+        for rec in &obj_dto.blends {
+            check_blend_record_dto(obj_dto.id, rec, mat_count)?;
+            if !ids.insert(rec.id) {
+                return Err(LoadError::MalformedManifest {
+                    what: format!("object {} blend {}: duplicate blend id", obj_dto.id, rec.id),
+                });
+            }
+        }
+        obj_blends.push(obj_dto.blends.clone());
     }
 
     // Decode sketches.
     let mut sketches: Vec<Sketch> = Vec::with_capacity(manifest.sketches.len());
     for sk_dto in &manifest.sketches {
-        let sk = decode_sketch(sk_dto, mat_count)?;
+        let sk = decode_sketch(sk_dto, mat_count, manifest.format_version)?;
         sketches.push(sk);
     }
     // `SketchOwner` (manifest v13+; absent/`None` in older files → world).
@@ -3374,7 +5832,29 @@ pub(crate) fn decode_document_raw(bytes: &[u8]) -> Result<DocLoadRaw, LoadError>
     // Decode guides (manifest v4+; absent in v1-v3 files → empty).
     let mut guides: Vec<Guide> = Vec::with_capacity(manifest.guides.len());
     let mut guide_tags: Vec<Vec<Vec<String>>> = Vec::with_capacity(manifest.guides.len());
+    let mut guide_dashes: Vec<crate::guide::GuideDash> = Vec::with_capacity(manifest.guides.len());
     for guide_dto in &manifest.guides {
+        // A guide's dash (manifest v24+): version-gated, line-only.
+        if guide_dto.dash.is_some() {
+            if manifest.format_version < GUIDE_DASH_MIN_VERSION {
+                return Err(LoadError::MalformedManifest {
+                    what: format!(
+                        "guide {} carries a dash in a v{} manifest (introduced at v{})",
+                        guide_dto.id, manifest.format_version, GUIDE_DASH_MIN_VERSION
+                    ),
+                });
+            }
+            if guide_dto.kind != "line" {
+                return Err(LoadError::MalformedManifest {
+                    what: format!("guide {} is not a line but carries a dash", guide_dto.id),
+                });
+            }
+        }
+        guide_dashes.push(
+            guide_dto
+                .dash
+                .map_or_else(crate::guide::GuideDash::default, crate::guide::GuideDash),
+        );
         // A guide's stretch (manifest v22+): version-gated like its tags.
         if (guide_dto.from.is_some() || guide_dto.to.is_some())
             && manifest.format_version < GUIDE_SPAN_MIN_VERSION
@@ -3458,6 +5938,7 @@ pub(crate) fn decode_document_raw(bytes: &[u8]) -> Result<DocLoadRaw, LoadError>
     // Validate manifest references.
     validate_manifest_references(&manifest, obj_count, mat_count)?;
     let axes = decode_axes(&manifest)?;
+    let geo = manifest.geo.as_ref().map(decode_geo).transpose()?;
 
     // Decode the camera block (manifest v13+; already confirmed absent for
     // older declared versions by `validate_manifest_references`).
@@ -3547,9 +6028,62 @@ pub(crate) fn decode_document_raw(bytes: &[u8]) -> Result<DocLoadRaw, LoadError>
         }
     }
 
+    if manifest.format_version < LOCKED_MIN_VERSION {
+        let locked = manifest
+            .objects
+            .iter()
+            .find(|o| o.locked)
+            .map(|o| format!("object {}", o.id))
+            .or_else(|| {
+                manifest
+                    .groups
+                    .iter()
+                    .find(|g| g.locked)
+                    .map(|g| format!("group {}", g.id))
+            })
+            .or_else(|| {
+                manifest
+                    .components
+                    .iter()
+                    .find(|c| c.locked)
+                    .map(|c| format!("component {}", c.id))
+            });
+        if let Some(what) = locked {
+            return Err(LoadError::MalformedManifest {
+                what: format!(
+                    "{what} is locked in a v{} manifest (introduced at v{})",
+                    manifest.format_version, LOCKED_MIN_VERSION
+                ),
+            });
+        }
+    }
+
+    if manifest.format_version < IMPORTED_MIN_VERSION
+        && let Some(o) = manifest.objects.iter().find(|o| o.imported)
+    {
+        return Err(LoadError::MalformedManifest {
+            what: format!(
+                "object {} is imported in a v{} manifest (introduced at v{})",
+                o.id, manifest.format_version, IMPORTED_MIN_VERSION
+            ),
+        });
+    }
+
     let group_names = manifest.groups.iter().map(|g| g.name.clone()).collect();
     let component_names = manifest.components.iter().map(|c| c.name.clone()).collect();
     let instance_names = manifest.instances.iter().map(|i| i.name.clone()).collect();
+    // Instance materials (v27+): gated like every sibling field.
+    if manifest.format_version < INSTANCE_MATERIAL_MIN_VERSION
+        && let Some(i) = manifest.instances.iter().find(|i| i.material.is_some())
+    {
+        return Err(LoadError::MalformedManifest {
+            what: format!(
+                "instance {} carries a material but declares format v{} (introduced at v{INSTANCE_MATERIAL_MIN_VERSION})",
+                i.id, manifest.format_version
+            ),
+        });
+    }
+    let instance_materials = manifest.instances.iter().map(|i| i.material).collect();
     let obj_tags: Vec<Vec<Vec<String>>> = manifest.objects.iter().map(|o| o.tags.clone()).collect();
     let group_tags: Vec<Vec<Vec<String>>> =
         manifest.groups.iter().map(|g| g.tags.clone()).collect();
@@ -3732,7 +6266,9 @@ pub(crate) fn decode_document_raw(bytes: &[u8]) -> Result<DocLoadRaw, LoadError>
     let doc_attrs = take_attrs("document", 0, &manifest.attrs)?;
 
     Ok(DocLoadRaw {
+        obj_blends,
         format_version: manifest.format_version,
+        document_id,
         materials,
         geom_buffers,
         obj_base_materials,
@@ -3752,6 +6288,7 @@ pub(crate) fn decode_document_raw(bytes: &[u8]) -> Result<DocLoadRaw, LoadError>
         sketch_tags,
         guides,
         guide_tags,
+        guide_dashes,
         annotations,
         annotation_tags,
         consumed: manifest.consumed.clone(),
@@ -3759,6 +6296,7 @@ pub(crate) fn decode_document_raw(bytes: &[u8]) -> Result<DocLoadRaw, LoadError>
         group_names,
         component_names,
         instance_names,
+        instance_materials,
         obj_tags,
         group_tags,
         instance_tags,
@@ -3768,11 +6306,16 @@ pub(crate) fn decode_document_raw(bytes: &[u8]) -> Result<DocLoadRaw, LoadError>
             .map(|t| (t.path.clone(), t.hidden))
             .collect(),
         obj_hidden: manifest.objects.iter().map(|o| o.hidden).collect(),
+        obj_imported: manifest.objects.iter().map(|o| o.imported).collect(),
+        obj_locked: manifest.objects.iter().map(|o| o.locked).collect(),
+        group_locked: manifest.groups.iter().map(|g| g.locked).collect(),
+        component_locked: manifest.components.iter().map(|c| c.locked).collect(),
         group_hidden: manifest.groups.iter().map(|g| g.hidden).collect(),
         instance_hidden: manifest.instances.iter().map(|i| i.hidden).collect(),
         camera,
         view_style,
         axes,
+        geo,
         material_sids,
         obj_sids,
         group_sids,
@@ -3928,6 +6471,29 @@ fn validate_manifest_references(
         {
             return Err(LoadError::DanglingReference {
                 what: format!("sketch {} owner object id {} out of range", sk.id, owner),
+            });
+        }
+        if sk.imported && manifest.format_version < IMPORTED_MIN_VERSION {
+            return Err(LoadError::MalformedManifest {
+                what: format!(
+                    "sketch {} is imported in a v{} manifest (introduced at v{})",
+                    sk.id, manifest.format_version, IMPORTED_MIN_VERSION
+                ),
+            });
+        }
+        if sk.detached && manifest.format_version < DETACHED_SKETCH_MIN_VERSION {
+            return Err(LoadError::MalformedManifest {
+                what: format!(
+                    "sketch {} is detached in a v{} manifest (introduced at v{})",
+                    sk.id, manifest.format_version, DETACHED_SKETCH_MIN_VERSION
+                ),
+            });
+        }
+        // A detached sketch is never object-owned (invariant I9): a file
+        // claiming both is malformed, never resolved by dropping either.
+        if sk.detached && sk.owner_object.is_some() {
+            return Err(LoadError::MalformedManifest {
+                what: format!("sketch {} is both detached and owned by an object", sk.id),
             });
         }
         if sk.owner_group.is_some() && manifest.format_version < VIEW_MIN_VERSION {
@@ -4115,6 +6681,16 @@ fn validate_manifest_references(
         });
     }
 
+    // `geo` is a v25+ concept (`geo.rs`): same both-directions posture.
+    if manifest.geo.is_some() && manifest.format_version < GEO_MIN_VERSION {
+        return Err(LoadError::MalformedManifest {
+            what: format!(
+                "a v{} manifest must not carry geo (introduced at v{})",
+                manifest.format_version, GEO_MIN_VERSION
+            ),
+        });
+    }
+
     // `section_plane` / `scenes` are v16+ concepts (docs/design/scenes.md):
     // same both-directions posture — a pre-v16 file carrying either is
     // malformed for its own declared version, never honored.
@@ -4138,6 +6714,10 @@ fn validate_manifest_references(
                 manifest.format_version, VIEW_MIN_VERSION
             ),
         });
+    }
+
+    if let Some(style) = &manifest.view_style {
+        check_view_style_version(style, manifest.format_version, "the document's")?;
     }
 
     let _ = mat_count; // used above
@@ -4172,7 +6752,11 @@ fn materials_count_validate(manifest: &Manifest) -> Result<usize, LoadError> {
 /// Structural sketch reconstruction: inserts vertices, edges, and regions
 /// directly without re-tracing the geometry (which would churn region ids
 /// and break the `consumed` mapping).
-pub(crate) fn decode_sketch(dto: &SketchDto, _mat_count: usize) -> Result<Sketch, LoadError> {
+pub(crate) fn decode_sketch(
+    dto: &SketchDto,
+    _mat_count: usize,
+    format_version: u32,
+) -> Result<Sketch, LoadError> {
     let [nx, ny, nz, offset] = dto.plane;
     let normal = Vec3::new(nx, ny, nz);
     // Reconstructed verbatim (not via `from_point_normal`, which renormalizes
@@ -4186,7 +6770,8 @@ pub(crate) fn decode_sketch(dto: &SketchDto, _mat_count: usize) -> Result<Sketch
         }
     })?;
 
-    let mut sk = Sketch::reconstruct(plane);
+    let mut sk = Sketch::reconstruct(plane, dto.detached);
+    sk.set_imported(dto.imported);
 
     // Insert vertices in dense id order.
     let mut vert_ids: Vec<SketchVertexId> = Vec::with_capacity(dto.vertices.len());
@@ -4200,14 +6785,49 @@ pub(crate) fn decode_sketch(dto: &SketchDto, _mat_count: usize) -> Result<Sketch
     // Analytic curve definitions (manifest v10+), keyed by dense curve id.
     // Validated up front: a non-positive radius, or an entry for a dense id
     // no edge references (checked after the edge pass), is a malformed file.
+    // A `"smooth"` entry (v30) carries no geometry: the chain inserts with
+    // no analytic record and joins the sketch's smooth set (E1).
     let mut curve_geoms: std::collections::BTreeMap<u32, crate::sketch::CurveAnalytic> =
         std::collections::BTreeMap::new();
+    let mut smooth_ids: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
     for c in &dto.curves {
-        if !c.radius.is_finite() || c.radius <= crate::tol::POINT_MERGE {
+        if c.kind.as_deref() == Some(CURVE_KIND_SMOOTH) {
+            if format_version < SMOOTH_CHAIN_MIN_VERSION {
+                return Err(LoadError::MalformedManifest {
+                    what: format!(
+                        "sketch {} curve {}: smooth curve entry in a pre-v30 manifest",
+                        dto.id, c.id
+                    ),
+                });
+            }
+            if c.center.is_some() || c.radius.is_some() {
+                return Err(LoadError::MalformedManifest {
+                    what: format!(
+                        "sketch {} curve {}: a smooth curve entry carries no center or radius",
+                        dto.id, c.id
+                    ),
+                });
+            }
+            if curve_geoms.contains_key(&c.id) || !smooth_ids.insert(c.id) {
+                return Err(LoadError::MalformedManifest {
+                    what: format!("sketch {} curve {} appears twice", dto.id, c.id),
+                });
+            }
+            continue;
+        }
+        let (Some(center), Some(radius)) = (c.center, c.radius) else {
+            return Err(LoadError::MalformedManifest {
+                what: format!(
+                    "sketch {} curve {} is missing its center or radius",
+                    dto.id, c.id
+                ),
+            });
+        };
+        if !radius.is_finite() || radius <= crate::tol::POINT_MERGE {
             return Err(LoadError::MalformedManifest {
                 what: format!(
                     "sketch {} curve {} has degenerate radius {}",
-                    dto.id, c.id, c.radius
+                    dto.id, c.id, radius
                 ),
             });
         }
@@ -4228,18 +6848,19 @@ pub(crate) fn decode_sketch(dto: &SketchDto, _mat_count: usize) -> Result<Sketch
                 });
             }
         };
-        if curve_geoms
-            .insert(
-                c.id,
-                crate::sketch::CurveAnalytic {
-                    geom: crate::sketch::CurveGeom {
-                        center: Point3::new(c.center[0], c.center[1], c.center[2]),
-                        radius: c.radius,
+        if smooth_ids.contains(&c.id)
+            || curve_geoms
+                .insert(
+                    c.id,
+                    crate::sketch::CurveAnalytic {
+                        geom: crate::sketch::CurveGeom {
+                            center: Point3::new(center[0], center[1], center[2]),
+                            radius,
+                        },
+                        kind,
                     },
-                    kind,
-                },
-            )
-            .is_some()
+                )
+                .is_some()
         {
             return Err(LoadError::MalformedManifest {
                 what: format!("sketch {} curve {} appears twice", dto.id, c.id),
@@ -4285,7 +6906,11 @@ pub(crate) fn decode_sketch(dto: &SketchDto, _mat_count: usize) -> Result<Sketch
                 }
                 if ci == curve_ids.len() {
                     let geom = curve_geoms.get(&(ci as u32)).copied();
-                    curve_ids.push(sk.insert_curve_raw(geom));
+                    let cid = sk.insert_curve_raw(geom);
+                    if smooth_ids.contains(&(ci as u32)) {
+                        sk.mark_curve_smooth(cid);
+                    }
+                    curve_ids.push(cid);
                 }
                 Some(curve_ids[ci])
             }
@@ -4303,6 +6928,7 @@ pub(crate) fn decode_sketch(dto: &SketchDto, _mat_count: usize) -> Result<Sketch
     // ids are precisely 0..curve_ids.len().
     if let Some(dangling) = curve_geoms
         .keys()
+        .chain(smooth_ids.iter())
         .copied()
         .find(|&id| id as usize >= curve_ids.len())
     {
@@ -4452,6 +7078,8 @@ fn encode_camera(state: CameraState) -> CameraDto {
         eye: [state.eye.x, state.eye.y, state.eye.z],
         target: [state.target.x, state.target.y, state.target.z],
         up: [state.up.x, state.up.y, state.up.z],
+        image_width: state.image_width,
+        aspect_ratio: state.aspect_ratio,
     }
 }
 
@@ -4505,6 +7133,25 @@ fn decode_camera(dto: &CameraDto, format_version: u32) -> Result<CameraState, Lo
         Some(h) => h,
         None => CameraState::height_at_target(eye, target, dto.fov_deg),
     };
+    // The image width and ratio (v24+): version-gated, finite and positive.
+    for (name, v) in [
+        ("image_width", dto.image_width),
+        ("aspect_ratio", dto.aspect_ratio),
+    ] {
+        let Some(v) = v else { continue };
+        if format_version < CAMERA_IMAGE_MIN_VERSION {
+            return Err(LoadError::MalformedManifest {
+                what: format!(
+                    "a v{format_version} manifest must not carry camera.{name} (introduced at v{CAMERA_IMAGE_MIN_VERSION})"
+                ),
+            });
+        }
+        if !v.is_finite() || v <= 0.0 {
+            return Err(LoadError::MalformedManifest {
+                what: format!("camera.{name} must be finite and positive"),
+            });
+        }
+    }
     Ok(CameraState {
         projection,
         fov_deg: dto.fov_deg,
@@ -4512,6 +7159,8 @@ fn decode_camera(dto: &CameraDto, format_version: u32) -> Result<CameraState, Lo
         eye,
         target,
         up,
+        image_width: dto.image_width,
+        aspect_ratio: dto.aspect_ratio,
     })
 }
 
@@ -4598,6 +7247,8 @@ fn encode_scenes(data: &DocSaveData) -> Vec<SceneDto> {
                 guides: d.guides,
             }),
             view_style: scene.view_style.map(encode_view_style),
+            transition_s: scene.transition_s,
+            delay_s: scene.delay_s,
         })
         .collect()
 }
@@ -4631,6 +7282,24 @@ fn decode_scene(dto: &SceneDto, format_version: u32) -> Result<crate::scenes::Sc
             ),
         });
     }
+    if let Some(style) = &dto.view_style {
+        check_view_style_version(style, format_version, &format!("scene '{}'s", dto.name))?;
+    }
+    // Timing is finite and not negative (HEW_FILE_FORMAT.md): the setters
+    // and the import path hold it, so a manifest that says otherwise is
+    // hand-edited, not repaired.
+    for (field, value) in [("transition_s", dto.transition_s), ("delay_s", dto.delay_s)] {
+        if let Some(v) = value
+            && !(v.is_finite() && v >= 0.0)
+        {
+            return Err(LoadError::MalformedManifest {
+                what: format!(
+                    "scene '{}' has {field} {v}, which is not a finite, non-negative number of seconds",
+                    dto.name
+                ),
+            });
+        }
+    }
     Ok(crate::scenes::Scene {
         sid: dto.sid,
         name: dto.name.clone(),
@@ -4651,6 +7320,8 @@ fn decode_scene(dto: &SceneDto, format_version: u32) -> Result<crate::scenes::Sc
             guides: d.guides,
         }),
         view_style: dto.view_style.as_ref().map(decode_view_style),
+        transition_s: dto.transition_s,
+        delay_s: dto.delay_s,
     })
 }
 
@@ -4658,12 +7329,41 @@ fn decode_scene(dto: &SceneDto, format_version: u32) -> Result<crate::scenes::Sc
 mod camera_manifest_tests {
     use super::*;
 
+    /// A scene's timing must be finite and not negative, as documented: a
+    /// manifest carrying anything else is refused typed, and valid timing
+    /// (zero included) decodes.
+    #[test]
+    fn scene_timing_that_is_negative_or_not_finite_refuses_typed() {
+        let scene = |extra: &str| -> SceneDto {
+            serde_json::from_str(&format!(r#"{{"sid":1,"name":"A"{extra}}}"#)).unwrap()
+        };
+        for bad in [r#","transition_s":-5.0"#, r#","delay_s":-2.0"#] {
+            match decode_scene(&scene(bad), 20) {
+                Err(LoadError::MalformedManifest { what }) => {
+                    assert!(what.contains("seconds"), "wrong reason: {what}");
+                }
+                other => panic!("{bad}: expected MalformedManifest, got {other:?}"),
+            }
+        }
+        for v in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let mut dto = scene("");
+            dto.transition_s = Some(v);
+            assert!(matches!(
+                decode_scene(&dto, 20),
+                Err(LoadError::MalformedManifest { .. })
+            ));
+        }
+        let ok = decode_scene(&scene(r#","transition_s":0.0,"delay_s":2.5"#), 20).unwrap();
+        assert_eq!((ok.transition_s, ok.delay_s), (Some(0.0), Some(2.5)));
+    }
+
     fn empty_manifest(format_version: u32, camera: Option<CameraDto>) -> Manifest {
         Manifest {
             format_version,
             geometry_version: GEOMETRY_FORMAT_VERSION,
             app: "hew".to_string(),
             app_version: "0.1.0".to_string(),
+            document_id: None,
             materials: Vec::new(),
             objects: Vec::new(),
             groups: Vec::new(),
@@ -4677,6 +7377,7 @@ mod camera_manifest_tests {
             camera,
             view_style: None,
             axes: None,
+            geo: None,
             annotations: Vec::new(),
             attrs: BTreeMap::new(),
             section_plane: None,
@@ -4692,6 +7393,8 @@ mod camera_manifest_tests {
             eye: [0.0, 0.0, 5.0],
             target: [0.0, 0.0, 0.0],
             up: [0.0, 0.0, 1.0],
+            image_width: None,
+            aspect_ratio: None,
         }
     }
 
@@ -4742,6 +7445,8 @@ mod camera_manifest_tests {
                 eye: Point3::new(1.0, 2.0, 3.0),
                 target: Point3::new(-1.0, 0.5, 0.0),
                 up: Vec3::new(0.0, 0.0, 1.0),
+                image_width: None,
+                aspect_ratio: None,
             };
             let dto = encode_camera(state);
             let decoded = decode_camera(&dto, MANIFEST_FORMAT_VERSION)
@@ -4976,6 +7681,16 @@ impl<'a> ByteReader<'a> {
         Ok(v)
     }
 
+    fn read_slice(&mut self, len: usize) -> Result<&'a [u8], DecodeError> {
+        let end = self.pos.checked_add(len).ok_or(DecodeError::Truncated)?;
+        if end > self.data.len() {
+            return Err(DecodeError::Truncated);
+        }
+        let out = &self.data[self.pos..end];
+        self.pos = end;
+        Ok(out)
+    }
+
     fn read_u32(&mut self) -> Result<u32, DecodeError> {
         let bytes = self.read_bytes::<4>()?;
         Ok(u32::from_le_bytes(bytes))
@@ -5045,9 +7760,9 @@ pub struct ItemSummary {
     /// name of a component item, and the fallback title for a file whose
     /// `hew.library` metadata has none.
     pub first_component_name: Option<String>,
-    /// The first component definition's STABLE id, as a decimal string —
-    /// what `Document::stamp_library_source` needs as `def_sid` to mark a
-    /// saved item's source definition for later idempotent re-insert.
+    /// The first component definition's STABLE id, as a decimal string.
+    /// It names one definition only: a save links each of its definitions
+    /// to its own id through `Document::library_save_def_sids`.
     pub first_component_sid: Option<String>,
     /// The first root node's display name, if any — the title fallback for
     /// group- and model-shaped items.
@@ -5058,6 +7773,10 @@ pub struct ItemSummary {
     pub doc_attrs: serde_json::Value,
     /// Per-material swatch rows, in manifest (dense-id) order.
     pub material_entries: Vec<MaterialSummary>,
+    /// The file is a profile: exactly one world sketch with no regions
+    /// whose edges form one open chain (every interior vertex of degree 2,
+    /// two ends of degree 1). Drives the `profile` library category.
+    pub profile_chain_only: bool,
 }
 
 /// Reads an [`ItemSummary`] from `.hew` bytes — `manifest.json` (plus, for
@@ -5153,13 +7872,21 @@ fn read_item_summary_impl<R: Read + Seek>(
                     }
                 }
             };
-            let content_hash = texture.ok().map(|texture| {
+            // A material whose properties cannot be read also loses its badge.
+            let pbr: Result<Option<crate::material::Pbr>, ()> = match &m.pbr {
+                None => Ok(None),
+                Some(dto) => decode_pbr(dto, |path| zip_read_entry(&mut zip, path))
+                    .map(Some)
+                    .map_err(|_| ()),
+            };
+            let content_hash = texture.ok().zip(pbr.ok()).map(|(texture, pbr)| {
                 let mat = crate::material::Material {
                     name: m.name.clone(),
                     color: crate::material::Rgba8::rgba(
                         m.color[0], m.color[1], m.color[2], m.color[3],
                     ),
                     texture,
+                    pbr,
                 };
                 crate::material::material_content_hash(&mat).to_string()
             });
@@ -5174,6 +7901,7 @@ fn read_item_summary_impl<R: Read + Seek>(
         })
         .collect();
 
+    let profile_chain_only = manifest_is_profile_chain(&manifest);
     Ok(ItemSummary {
         format_version: manifest.format_version,
         objects: manifest.objects.len(),
@@ -5198,7 +7926,75 @@ fn read_item_summary_impl<R: Read + Seek>(
         doc_attrs: serde_json::to_value(&manifest.attrs)
             .expect("attribute dictionaries are JSON by construction"),
         material_entries,
+        profile_chain_only,
     })
+}
+
+/// Whether the manifest holds exactly one world sketch, with no regions,
+/// whose edges make one open chain.
+fn manifest_is_profile_chain(m: &Manifest) -> bool {
+    let mut world = m
+        .sketches
+        .iter()
+        .filter(|s| s.owner.is_none() && s.owner_object.is_none() && s.owner_group.is_none());
+    let (Some(sk), None) = (world.next(), world.next()) else {
+        return false;
+    };
+    // Nothing else in the file: no objects, components, instances, groups,
+    // guides or annotations.
+    if !m.objects.is_empty()
+        || !m.components.is_empty()
+        || !m.instances.is_empty()
+        || !m.groups.is_empty()
+        || !m.guides.is_empty()
+        || !m.annotations.is_empty()
+    {
+        return false;
+    }
+    if !sk.regions.is_empty() || sk.edges.is_empty() {
+        return false;
+    }
+    let mut degree: std::collections::BTreeMap<u32, u32> = std::collections::BTreeMap::new();
+    for e in &sk.edges {
+        if e.from == e.to {
+            return false;
+        }
+        *degree.entry(e.from).or_default() += 1;
+        *degree.entry(e.to).or_default() += 1;
+    }
+    let ends = degree.values().filter(|&&d| d == 1).count();
+    if ends != 2 || degree.values().any(|&d| d > 2) {
+        return false;
+    }
+    // One connected chain: walking from an end reaches every edge.
+    let start = *degree
+        .iter()
+        .find(|&(_, &d)| d == 1)
+        .map(|(v, _)| v)
+        .unwrap_or(&0);
+    let mut seen = std::collections::BTreeSet::new();
+    let mut at = start;
+    let mut used = std::collections::BTreeSet::new();
+    seen.insert(at);
+    loop {
+        let next = sk.edges.iter().enumerate().find_map(|(i, e)| {
+            if used.contains(&i) {
+                return None;
+            }
+            if e.from == at {
+                Some((i, e.to))
+            } else if e.to == at {
+                Some((i, e.from))
+            } else {
+                None
+            }
+        });
+        let Some((i, to)) = next else { break };
+        used.insert(i);
+        at = to;
+        seen.insert(at);
+    }
+    used.len() == sk.edges.len()
 }
 
 /// Reads one named zip entry from `.hew` bytes verbatim — the on-demand
@@ -5367,4 +8163,351 @@ fn read_claim_block(
         hc.push(this);
     }
     Ok((oc, hc))
+}
+
+#[cfg(test)]
+mod small_ring_tests {
+    use super::*;
+
+    fn tri(o: [f64; 3], s: f64) -> Vec<Point3> {
+        vec![
+            Point3::new(o[0], o[1], o[2]),
+            Point3::new(o[0] + s, o[1], o[2]),
+            Point3::new(o[0], o[1] + 2.0 * s, o[2] + 0.5 * s),
+        ]
+    }
+
+    #[test]
+    fn a_sub_micron_triangle_spans_a_plane() {
+        let ring = tri([0.0127, 0.0126, 0.0045], 4e-7);
+        let p = outer_ring_plane(&ring, true).expect("well defined");
+        for q in &ring {
+            assert!(p.signed_distance(*q).abs() <= crate::tol::PLANE_DIST);
+        }
+        let expect = Plane::from_polygon(&tri([0.0, 0.0, 0.0], 1.0)).unwrap();
+        assert!((p.normal() - expect.normal()).length() < 1e-6);
+    }
+
+    #[test]
+    fn a_collinear_ring_does_not() {
+        let ring = vec![
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(1e-7, 0.0, 0.0),
+            Point3::new(3e-7, 0.0, 0.0),
+        ];
+        assert!(outer_ring_plane(&ring, true).is_err());
+    }
+
+    #[test]
+    fn moving_a_small_ring_keeps_its_verdict() {
+        for s in [4e-7, 2e-8] {
+            assert!(outer_ring_plane(&tri([0.0127, 0.0126, 0.0045], s), true).is_ok());
+            assert!(outer_ring_plane(&tri([1700.0, -2300.0, 900.0], s), true).is_ok());
+        }
+        for s in [3e-9, 5e-10] {
+            assert!(outer_ring_plane(&tri([0.0127, 0.0126, 0.0045], s), true).is_err());
+            assert!(outer_ring_plane(&tri([1700.0, -2300.0, 900.0], s), true).is_err());
+        }
+    }
+
+    /// Native geometry has no small-ring allowance: a ring under the area
+    /// floor keeps a plane only by the width floor
+    /// ([`crate::tol::MIN_FACE_WIDTH`]), which the 0.4 µm triangle (about
+    /// 0.3 µm wide) clears. A sliver with long enough edges and shape for
+    /// the imported allowance but narrower than 10 nm has none natively.
+    #[test]
+    fn native_geometry_keeps_the_area_and_width_floors() {
+        assert!(outer_ring_plane(&tri([0.0127, 0.0126, 0.0045], 4e-7), false).is_ok());
+        assert!(outer_ring_plane(&tri([0.0127, 0.0126, 0.0045], 2e-6), false).is_ok());
+        let sliver = vec![
+            Point3::new(0.0127, 0.0126, 0.0045),
+            Point3::new(0.0127 + 1e-6, 0.0126, 0.0045),
+            Point3::new(0.0127 + 5e-7, 0.0126 + 5e-9, 0.0045),
+        ];
+        assert!(outer_ring_plane(&sliver, true).is_ok());
+        assert!(outer_ring_plane(&sliver, false).is_err());
+    }
+
+    #[test]
+    fn a_small_sliver_does_not_span_a_plane() {
+        let ring = vec![
+            Point3::new(0.0, 0.0, 0.0),
+            Point3::new(1e-6, 0.0, 0.0),
+            Point3::new(5e-7, 1e-13, 0.0),
+        ];
+        assert!(outer_ring_plane(&ring, true).is_err());
+    }
+}
+
+#[cfg(test)]
+mod face_plane_writer_tests {
+    use crate::math::{Plane, Point3, Vec3};
+    use crate::topo::Object;
+
+    fn cube() -> Object {
+        let positions: Vec<Point3> = [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [1.0, 0.0, 1.0],
+            [1.0, 1.0, 1.0],
+            [0.0, 1.0, 1.0],
+        ]
+        .into_iter()
+        .map(|[x, y, z]| Point3::new(x, y, z))
+        .collect();
+        let faces: Vec<Vec<usize>> = vec![
+            vec![4, 5, 6, 7],
+            vec![0, 3, 2, 1],
+            vec![0, 1, 5, 4],
+            vec![1, 2, 6, 5],
+            vec![2, 3, 7, 6],
+            vec![3, 0, 4, 7],
+        ];
+        Object::from_polygons(&positions, &faces).unwrap()
+    }
+
+    /// A face carrying a plane the reader would refuse (its points 10 nm
+    /// off it, or the plane facing against its loop's winding: states only
+    /// an invalid object has) is written for the refit, flag 0, as if it
+    /// carried the refit: the buffer is the plain cube's bytes, it reopens
+    /// valid, and it saves to the same bytes again.
+    #[test]
+    fn a_plane_the_reader_would_refuse_is_written_as_the_refit() {
+        let plain = cube().encode(&|_| 0);
+        let mut obj = cube();
+        let ids: Vec<_> = obj.faces.keys().collect();
+        let top = ids
+            .iter()
+            .copied()
+            .find(|&f| obj.faces[f].plane.normal().z > 0.5)
+            .unwrap();
+        let bottom = ids
+            .iter()
+            .copied()
+            .find(|&f| obj.faces[f].plane.normal().z < -0.5)
+            .unwrap();
+        obj.faces[top].plane =
+            Plane::from_unit_normal_offset(Vec3::new(0.0, 0.0, 1.0), 1.0 + 1e-8).unwrap();
+        obj.faces[bottom].plane = obj.faces[bottom].plane.flipped();
+        assert!(obj.validate().is_err(), "the state is invalid");
+        let bytes = obj.encode(&|_| 0);
+        assert_eq!(bytes, plain, "both faces written as flag 0");
+        let back = Object::decode(&bytes, &|_| None).unwrap();
+        back.validate().unwrap();
+        assert_eq!(back.encode(&|_| 0), bytes, "re-saves to the same bytes");
+    }
+
+    /// A face carrying an analytic-surface claim its geometry disagrees
+    /// with (a state only an invalid object has, e.g. after a rotation far
+    /// from the origin) is written without the claim: the buffer is the
+    /// plain cube's bytes, it reopens valid instead of refusing the whole
+    /// file, and it saves to the same bytes again. A claim the geometry
+    /// does agree with is kept through the same round trip.
+    #[test]
+    fn a_surface_claim_the_reader_would_refuse_is_written_without_it() {
+        use crate::topo::SurfaceRef;
+        let plain = cube().encode(&|_| 0);
+        let mut obj = cube();
+        let ids: Vec<_> = obj.faces.keys().collect();
+        let top = ids
+            .iter()
+            .copied()
+            .find(|&f| obj.faces[f].plane.normal().z > 0.5)
+            .unwrap();
+        let bottom = ids
+            .iter()
+            .copied()
+            .find(|&f| obj.faces[f].plane.normal().z < -0.5)
+            .unwrap();
+        // The top's corners sit between 9 and 10 m from this axis
+        // (sqrt(81 + 1) to sqrt(100 + 1)), far past its 1 mm radius.
+        obj.faces[top].surface = Some(SurfaceRef::Cylinder {
+            axis_point: Point3::new(10.0, 10.0, 0.0),
+            axis: Vec3::new(1.0, 0.0, 0.0),
+            radius: 0.001,
+        });
+        assert!(obj.validate().is_err(), "the state is invalid");
+        let bytes = obj.encode(&|_| 0);
+        assert_eq!(bytes, plain, "the lying claim is not written");
+        let back = Object::decode(&bytes, &|_| None).unwrap();
+        back.validate().unwrap();
+        assert!(back.faces.values().all(|f| f.surface.is_none()));
+        assert_eq!(back.encode(&|_| 0), bytes, "re-saves to the same bytes");
+
+        // A claim the bottom's chord facet satisfies survives.
+        let mut kept = cube();
+        let claim = SurfaceRef::Cylinder {
+            axis_point: Point3::new(0.0, 0.5, 0.5),
+            axis: Vec3::new(1.0, 0.0, 0.0),
+            radius: 2.0,
+        };
+        kept.faces[bottom].surface = Some(claim);
+        kept.validate().unwrap();
+        let bytes = kept.encode(&|_| 0);
+        assert_ne!(bytes, plain);
+        let back = Object::decode(&bytes, &|_| None).unwrap();
+        back.validate().unwrap();
+        assert_eq!(
+            back.faces
+                .values()
+                .filter(|f| f.surface == Some(claim))
+                .count(),
+            1
+        );
+    }
+
+    /// A tracing subscriber that keeps the `faces` count of every
+    /// `kernel::save` warning.
+    struct SaveWarnings(std::sync::Arc<std::sync::Mutex<Vec<u64>>>);
+
+    impl tracing::Subscriber for SaveWarnings {
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn enter(&self, _: &tracing::span::Id) {}
+        fn exit(&self, _: &tracing::span::Id) {}
+        fn event(&self, event: &tracing::Event<'_>) {
+            struct Faces(Option<u64>);
+            impl tracing::field::Visit for Faces {
+                fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+                    if field.name() == "faces" {
+                        self.0 = Some(value);
+                    }
+                }
+                fn record_debug(&mut self, _: &tracing::field::Field, _: &dyn std::fmt::Debug) {}
+            }
+            if event.metadata().target() == "kernel::save" {
+                let mut v = Faces(None);
+                event.record(&mut v);
+                self.0.lock().unwrap().extend(v.0);
+            }
+        }
+    }
+
+    /// A 4 x 4 x 1 block with a 1 x 1 square tunnel through it: ten faces,
+    /// the top and bottom each holding one hole.
+    fn tunnelled_block() -> Object {
+        let p = |x: f64, y: f64, z: f64| Point3::new(x, y, z);
+        let mut positions = Vec::new();
+        for z in [0.0, 1.0] {
+            positions.extend([
+                p(-2.0, -2.0, z),
+                p(2.0, -2.0, z),
+                p(2.0, 2.0, z),
+                p(-2.0, 2.0, z),
+            ]);
+        }
+        for z in [0.0, 1.0] {
+            positions.extend([
+                p(-0.5, -0.5, z),
+                p(0.5, -0.5, z),
+                p(0.5, 0.5, z),
+                p(-0.5, 0.5, z),
+            ]);
+        }
+        let faces: Vec<Vec<usize>> = vec![
+            vec![4, 5, 6, 7],
+            vec![0, 3, 2, 1],
+            vec![0, 1, 5, 4],
+            vec![1, 2, 6, 5],
+            vec![2, 3, 7, 6],
+            vec![3, 0, 4, 7],
+            vec![8, 12, 13, 9],
+            vec![9, 13, 14, 10],
+            vec![10, 14, 15, 11],
+            vec![11, 15, 12, 8],
+        ];
+        let mut holes = vec![Vec::new(); faces.len()];
+        holes[0] = vec![vec![12, 15, 14, 13]];
+        holes[1] = vec![vec![8, 9, 10, 11]];
+        Object::from_polygons_with_holes(&positions, &faces, &holes).unwrap()
+    }
+
+    /// A face's hole points are part of the check on its surface claim, and
+    /// a face that loses both its plane and its claim is counted once in the
+    /// save warning. The block's top carries a torus claim whose tube runs
+    /// through the four outer corners (so the claim holds for the outer
+    /// ring alone) but not through the hole's corners; its plane is also
+    /// 10 nm off its points, so the writer drops the plane too. The bottom
+    /// loses only its plane. The file opens, the top reopens a plain facet,
+    /// and the warning counts two faces, not three.
+    #[test]
+    fn a_hole_that_fails_a_claim_drops_it_and_the_face_is_counted_once() {
+        use crate::topo::SurfaceRef;
+        let plain = tunnelled_block();
+        plain.validate().unwrap();
+        let plain_bytes = plain.encode(&|_| 0);
+
+        let mut obj = tunnelled_block();
+        let ids: Vec<_> = obj.faces.keys().collect();
+        let top = ids
+            .iter()
+            .copied()
+            .find(|&f| obj.faces[f].plane.normal().z > 0.5)
+            .unwrap();
+        let bottom = ids
+            .iter()
+            .copied()
+            .find(|&f| obj.faces[f].plane.normal().z < -0.5)
+            .unwrap();
+        let claim = SurfaceRef::Torus {
+            center: Point3::new(0.0, 0.0, 1.0),
+            axis: Vec3::new(0.0, 0.0, 1.0),
+            major_radius: 8.0_f64.sqrt(),
+            minor_radius: 0.01,
+        };
+        let tol = obj.planarity_tol;
+        let outer: Vec<Point3> = obj.loop_positions(obj.faces[top].outer_loop).collect();
+        let hole: Vec<Point3> = obj.loop_positions(obj.faces[top].inner_loops[0]).collect();
+        let both: Vec<Point3> = outer.iter().chain(&hole).copied().collect();
+        let plane = obj.faces[top].plane;
+        assert!(
+            crate::surface::validate_face_claim(&claim, &plane, &outer, tol),
+            "the claim holds for the outer ring alone"
+        );
+        assert!(
+            !crate::surface::validate_face_claim(&claim, &plane, &both, tol),
+            "and fails once the hole's points are counted"
+        );
+        obj.faces[top].surface = Some(claim);
+        obj.faces[top].plane =
+            Plane::from_unit_normal_offset(Vec3::new(0.0, 0.0, 1.0), 1.0 + 1e-8).unwrap();
+        obj.faces[bottom].plane = obj.faces[bottom].plane.flipped();
+        assert!(obj.validate().is_err(), "the state is invalid");
+
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let bytes = tracing::subscriber::with_default(SaveWarnings(seen.clone()), || {
+            // A parallel test can register the warning's callsite while no
+            // subscriber is installed on its thread, which caches the callsite
+            // as disabled for everyone. Creating a dispatcher makes tracing
+            // recompute every callsite against all live subscribers, this
+            // thread's included. A registration that lands after that
+            // recompute can still hide the first warning, so write again
+            // (the bytes do not change) until it is heard.
+            let mut bytes = Vec::new();
+            for _ in 0..8 {
+                drop(tracing::Dispatch::new(
+                    tracing::subscriber::NoSubscriber::default(),
+                ));
+                bytes = obj.encode(&|_| 0);
+                if !seen.lock().unwrap().is_empty() {
+                    break;
+                }
+            }
+            bytes
+        });
+        assert_eq!(bytes, plain_bytes, "written as the plain block");
+        assert_eq!(*seen.lock().unwrap(), vec![2], "two faces, each once");
+        let back = Object::decode(&bytes, &|_| None).unwrap();
+        back.validate().unwrap();
+        assert!(back.faces.values().all(|f| f.surface.is_none()));
+    }
 }

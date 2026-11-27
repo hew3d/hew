@@ -46,6 +46,13 @@
 //! that names an instance, which does not exist yet. Adding one is
 //! additive future work, not a behavior change here.
 //!
+//! `detached: true` (detached shapes §5) draws the shape as ONE new
+//! detached sketch instead: on a face's plane (the face is left whole) or a
+//! new plane, through [`kernel::Document::draft_detached_new`], taking part
+//! in no arrangement; its result is the sketch shape `{sketch, region_ids,
+//! …}` whatever the target. A sketch target refuses it: the sketch named is
+//! the drawing being continued, and its own flag decides.
+//!
 //! There are no circle/rect/arc/polygon primitives in the kernel — every
 //! shape is faceted here into a chain of `Sketch::add_segment` calls (or,
 //! on a face, a `Vec<Point3>` path/loop), circles/arcs/polygons in
@@ -59,6 +66,7 @@ use super::{CmdError, Ctx, Handler};
 use crate::ids;
 use crate::locate::{self, PlaneTarget};
 use crate::refusal::Refusal;
+use kernel::trig;
 use kernel::{
     CurveGeom, EntityRef, Plane, Point3, SketchCurveId, SketchCurveKind, SketchId, SketchRegionId,
     Vec3,
@@ -66,7 +74,7 @@ use kernel::{
 use serde_json::Value;
 
 /// This namespace's slice of the handler table.
-pub fn handler(name: &str) -> Option<Handler> {
+pub(crate) fn handler(name: &str) -> Option<Handler> {
     Some(match name {
         "hew.sketch.draw_line" => draw_line,
         "hew.sketch.draw_rect" => draw_rect,
@@ -96,6 +104,63 @@ fn unknown_entity(id: &str) -> CmdError {
 
 fn sketch_err(e: kernel::SketchError) -> CmdError {
     CmdError::from(kernel::DocumentError::Sketch(e))
+}
+
+/// How far (meters) a drawn point may miss an open end of the same sketch
+/// and still be taken for a rounded copy of it. A heuristic about client
+/// input (a JSON pretty-printer or a `round(v, 6)` leaves ~1e-7 m gaps), not
+/// a kernel tolerance: the kernel merges only within `tol::POINT_MERGE`, and
+/// a chain that stops short of that leaves the profile open with no symptom
+/// but an empty `region_ids`.
+const ENDPOINT_NEAR_MISS_M: f64 = 1e-4;
+
+/// Refuses `endpoint_near_miss` when one of `pts` lies farther than
+/// `tol::POINT_MERGE` but no farther than [`ENDPOINT_NEAR_MISS_M`] from an
+/// open end (a vertex of exactly one edge) the sketch already had. Runs
+/// before any segment is added, so nothing changes on a refusal. Points
+/// created by the same command are not compared against each other.
+fn check_endpoint_near_miss(ctx: &Ctx, sketch: SketchId, pts: &[Point3]) -> Result<(), CmdError> {
+    let Some(s) = ctx.doc.sketch(sketch) else {
+        return Ok(());
+    };
+    let mut degree: std::collections::BTreeMap<kernel::SketchVertexId, u32> =
+        std::collections::BTreeMap::new();
+    for (_, e) in s.edges() {
+        *degree.entry(e.from).or_insert(0) += 1;
+        *degree.entry(e.to).or_insert(0) += 1;
+    }
+    let mut worst: Option<(f64, Point3)> = None;
+    for (id, v) in s.vertices() {
+        if degree.get(&id).copied() != Some(1) {
+            continue;
+        }
+        for p in pts {
+            let gap = (*p - v.position).length();
+            if gap > kernel::tol::POINT_MERGE
+                && gap <= ENDPOINT_NEAR_MISS_M
+                && worst.is_none_or(|(g, _)| gap < g)
+            {
+                worst = Some((gap, v.position));
+            }
+        }
+    }
+    let Some((gap, nearest)) = worst else {
+        return Ok(());
+    };
+    Err(CmdError::Refusal(
+        Refusal::api(
+            "endpoint_near_miss",
+            &format!(
+                "This point misses an existing endpoint by {:.3} micrometers. Send coordinates \
+                 at full precision, or use that endpoint exactly.",
+                gap * 1e6
+            ),
+        )
+        .with_detail(serde_json::json!({
+            "gap": gap,
+            "nearest": [nearest.x, nearest.y, nearest.z],
+        })),
+    ))
 }
 
 /// Commits a resolved plane spec (docs/agents/HEW_API.md §7) to a concrete
@@ -129,6 +194,59 @@ fn commit_target(ctx: &mut Ctx, target: PlaneTarget) -> Result<(SketchId, Plane)
     }
 }
 
+/// The plane a `detached: true` draw lands on: a face's, or a new plane's.
+/// A sketch target refuses `detached` (invalid params): the sketch named
+/// is the drawing being continued, and its own flag decides (detached
+/// shapes D10).
+fn detached_plane(ctx: &Ctx, target: &PlaneTarget) -> Result<Plane, CmdError> {
+    match *target {
+        PlaneTarget::NewPlane(plane) => Ok(plane),
+        PlaneTarget::Face(face) => draft::face_plane(ctx, face),
+        PlaneTarget::Sketch(_) => Err(CmdError::Params(
+            "detached is decided by the sketch; omit it for a sketch target".into(),
+        )),
+    }
+}
+
+/// Whether a draw takes the detached path: `detached: true`, or a face of
+/// a locked (frozen) Object whatever `detached` says (OW-1, v1.5 owner's
+/// items D1): the face is not cut, and the shape is a separate drawing
+/// that pulls into a new Object. A face of a member of a frozen
+/// definition still refuses `locked_node` there (the frame is frozen).
+fn draws_detached(ctx: &Ctx, detached: Option<bool>, target: &PlaneTarget) -> bool {
+    detached == Some(true)
+        || matches!(*target, PlaneTarget::Face(f) if ctx.doc.face_draw_detaches(f.object))
+}
+
+/// Draws `runs` as one new detached sketch on the target's plane
+/// ([`detached_plane`] resolved it) and answers the sketch result shape.
+fn draw_detached(
+    ctx: &mut Ctx,
+    target: PlaneTarget,
+    label: &str,
+    runs: Vec<Run>,
+) -> Result<Value, CmdError> {
+    let (sketch, curve, closed) = match target {
+        PlaneTarget::Face(face) => draft::draw_detached_on_face(ctx, face, label, runs)?,
+        PlaneTarget::NewPlane(plane) => draft::draw_detached(ctx, plane, None, label, runs)?,
+        PlaneTarget::Sketch(_) => {
+            return Err(CmdError::Internal(
+                "draw_detached called with a sketch target — detached_plane refuses it first"
+                    .into(),
+            ));
+        }
+    };
+    // Every region of the new sketch is new.
+    let regions: Vec<SketchRegionId> = ctx
+        .doc
+        .sketch(sketch)
+        .map(|sk| sk.regions().keys().collect())
+        .unwrap_or_default();
+    let mut out = draw_result(ctx, sketch, &regions, curve);
+    closed.annotate(ctx, &mut out);
+    Ok(out)
+}
+
 /// `n` evenly spaced points around a circle's circumference in `plane`'s
 /// own (u, v) frame — the closed vertex ring `draw_circle`/`draw_polygon`
 /// face mode imprints as a loop, and (chorded pairwise) the same
@@ -138,7 +256,7 @@ fn ring_points(plane: &Plane, center: Point3, radius: f64, n: usize) -> Vec<Poin
     (0..n)
         .map(|i| {
             let a = std::f64::consts::TAU * i as f64 / n as f64;
-            center + u * (radius * a.cos()) + v * (radius * a.sin())
+            center + u * (radius * trig::cos(a)) + v * (radius * trig::sin(a))
         })
         .collect()
 }
@@ -158,7 +276,7 @@ fn arc_points(
     (0..=n)
         .map(|i| {
             let a = start_angle + sweep * i as f64 / n as f64;
-            center + u * (radius * a.cos()) + v * (radius * a.sin())
+            center + u * (radius * trig::cos(a)) + v * (radius * trig::sin(a))
         })
         .collect()
 }
@@ -261,6 +379,8 @@ pub(super) fn draw_line(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError
     struct P {
         plane: Value,
         points: Vec<Value>,
+        #[serde(default)]
+        detached: Option<bool>,
     }
     let p: P = parse_params(params)?;
     if p.points.len() < 2 {
@@ -273,12 +393,18 @@ pub(super) fn draw_line(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError
         .map(|v| locate::resolve_point(ctx, v))
         .collect::<Result<_, _>>()?;
 
+    if draws_detached(ctx, p.detached, &target) {
+        detached_plane(ctx, &target)?;
+        return draw_detached(ctx, target, "Draw line", vec![Run::plain(pts)]);
+    }
+
     if let PlaneTarget::Face(face_ref) = target {
         return draft::draw_on_face(ctx, face_ref, "Draw line", vec![Run::plain(pts)]);
     }
     let (sketch, _plane) = commit_target(ctx, target)?;
+    check_endpoint_near_miss(ctx, sketch, &pts)?;
 
-    let reports = super::run_sketch_gesture(ctx, sketch, |s| {
+    let (reports, closed) = super::run_drawing_gesture(ctx, sketch, |s| {
         let mut reports = Vec::with_capacity(pts.len() - 1);
         for w in pts.windows(2) {
             reports.push(s.add_segment(w[0], w[1]).map_err(sketch_err)?);
@@ -287,7 +413,9 @@ pub(super) fn draw_line(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError
     })?;
 
     let regions = net_created_regions(&reports);
-    Ok(draw_result(ctx, sketch, &regions, None))
+    let mut out = draw_result(ctx, sketch, &regions, None);
+    closed.annotate(ctx, &mut out);
+    Ok(out)
 }
 
 pub(super) fn draw_rect(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
@@ -297,11 +425,19 @@ pub(super) fn draw_rect(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError
         plane: Value,
         corner_a: Value,
         corner_b: Value,
+        #[serde(default)]
+        detached: Option<bool>,
     }
     let p: P = parse_params(params)?;
     let target = locate::resolve_plane(ctx, &p.plane)?;
     let a = locate::resolve_point(ctx, &p.corner_a)?;
     let b = locate::resolve_point(ctx, &p.corner_b)?;
+
+    if draws_detached(ctx, p.detached, &target) {
+        let plane = detached_plane(ctx, &target)?;
+        let ring = draft::closed(rect_corners(&plane, a, b).to_vec());
+        return draw_detached(ctx, target, "Draw rectangle", vec![Run::plain(ring)]);
+    }
 
     if let PlaneTarget::Face(face_ref) = target {
         let plane = draft::face_plane(ctx, face_ref)?;
@@ -313,7 +449,7 @@ pub(super) fn draw_rect(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError
     let [a, p2, b, p4] = rect_corners(&plane, a, b);
     let loop_pts = [a, p2, b, p4, a];
 
-    let reports = super::run_sketch_gesture(ctx, sketch, |s| {
+    let (reports, closed) = super::run_drawing_gesture(ctx, sketch, |s| {
         let mut reports = Vec::with_capacity(4);
         for w in loop_pts.windows(2) {
             reports.push(s.add_segment(w[0], w[1]).map_err(sketch_err)?);
@@ -322,7 +458,9 @@ pub(super) fn draw_rect(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError
     })?;
 
     let regions = net_created_regions(&reports);
-    Ok(draw_result(ctx, sketch, &regions, None))
+    let mut out = draw_result(ctx, sketch, &regions, None);
+    closed.annotate(ctx, &mut out);
+    Ok(out)
 }
 
 pub(super) fn draw_circle(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {
@@ -334,6 +472,8 @@ pub(super) fn draw_circle(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdErr
         radius: f64,
         #[serde(default)]
         segments: Option<usize>,
+        #[serde(default)]
+        detached: Option<bool>,
     }
     let p: P = parse_params(params)?;
     let n = match p.segments {
@@ -359,6 +499,12 @@ pub(super) fn draw_circle(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdErr
         radius: p.radius,
     };
 
+    if draws_detached(ctx, p.detached, &target) {
+        let plane = detached_plane(ctx, &target)?;
+        let ring = draft::closed(ring_points(&plane, center, p.radius, n));
+        let runs = vec![Run::curve(ring, geom, SketchCurveKind::Circle)];
+        return draw_detached(ctx, target, "Draw circle", runs);
+    }
     if let PlaneTarget::Face(face_ref) = target {
         let plane = draft::face_plane(ctx, face_ref)?;
         let ring = draft::closed(ring_points(&plane, center, p.radius, n));
@@ -372,7 +518,7 @@ pub(super) fn draw_circle(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdErr
     let (sketch, plane) = commit_target(ctx, target)?;
     let ring = ring_points(&plane, center, p.radius, n);
 
-    let (curve, reports) = super::run_sketch_gesture(ctx, sketch, |s| {
+    let ((curve, reports), closed) = super::run_drawing_gesture(ctx, sketch, |s| {
         let curve = s.begin_curve_with(geom).map_err(sketch_err)?;
         let mut reports = Vec::with_capacity(n);
         for i in 0..n {
@@ -386,7 +532,9 @@ pub(super) fn draw_circle(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdErr
     })?;
 
     let regions = net_created_regions(&reports);
-    Ok(draw_result(ctx, sketch, &regions, Some(curve)))
+    let mut out = draw_result(ctx, sketch, &regions, Some(curve));
+    closed.annotate(ctx, &mut out);
+    Ok(out)
 }
 
 /// How a drawn arc's ends are closed (mirrors the UI Arc tool's Alt-cycled
@@ -430,6 +578,8 @@ pub(super) fn draw_arc(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError>
         segments: Option<usize>,
         #[serde(default)]
         close: Option<String>,
+        #[serde(default)]
+        detached: Option<bool>,
     }
     let p: P = parse_params(params)?;
     let close = ArcClose::parse(p.close.as_deref())?;
@@ -531,39 +681,46 @@ pub(super) fn draw_arc(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError>
         radius: p.radius,
     };
 
-    if let PlaneTarget::Face(face_ref) = target {
-        let plane = draft::face_plane(ctx, face_ref)?;
-        let mut pts = arc_points(&plane, center, p.radius, p.start_angle, sweep, n);
+    // The face-mode (and detached) runs: a full turn is one closed curve
+    // run; otherwise the arc's own chain carries its circle and the closing
+    // edges of a pie or segment are plain lines, so the shape keeps its arc
+    // on a face as it does on the ground.
+    let arc_runs = |plane: &Plane| -> Vec<Run> {
+        let mut pts = arc_points(plane, center, p.radius, p.start_angle, sweep, n);
         let circle = SketchCurveKind::Circle;
         if closes_a_full_turn {
             pts.pop(); // last point coincides with the first at a full turn
-            let ring = draft::closed(pts);
-            return draft::draw_on_face(
-                ctx,
-                face_ref,
-                "Draw arc",
-                vec![Run::curve(ring, geom, circle)],
-            );
+            return vec![Run::curve(draft::closed(pts), geom, circle)];
         }
-        // The arc's own chain carries its circle; the closing edges of a
-        // pie or segment are plain lines, so the shape keeps its arc on a
-        // face as it does on the ground.
         let first = pts[0];
         let last = pts[pts.len() - 1];
-        let runs = match close {
+        match close {
             ArcClose::Open => vec![Run::curve(pts, geom, circle)],
             ArcClose::Segment => vec![Run::curve(pts, geom, circle), Run::plain(vec![last, first])],
             ArcClose::Pie => vec![
                 Run::curve(pts, geom, circle),
                 Run::plain(vec![last, center, first]),
             ],
-        };
-        return draft::draw_on_face(ctx, face_ref, "Draw arc", runs);
+        }
+    };
+    if draws_detached(ctx, p.detached, &target) {
+        let plane = detached_plane(ctx, &target)?;
+        let runs = arc_runs(&plane);
+        return draw_detached(ctx, target, "Draw arc", runs);
+    }
+    if let PlaneTarget::Face(face_ref) = target {
+        let plane = draft::face_plane(ctx, face_ref)?;
+        return draft::draw_on_face(ctx, face_ref, "Draw arc", arc_runs(&plane));
     }
     let (sketch, plane) = commit_target(ctx, target)?;
     let pts = arc_points(&plane, center, p.radius, p.start_angle, sweep, n);
+    let mut checked = pts.clone();
+    if close == ArcClose::Pie {
+        checked.push(center);
+    }
+    check_endpoint_near_miss(ctx, sketch, &checked)?;
 
-    let (curve, reports) = super::run_sketch_gesture(ctx, sketch, |s| {
+    let ((curve, reports), closed) = super::run_drawing_gesture(ctx, sketch, |s| {
         let curve = s.begin_curve_with(geom).map_err(sketch_err)?;
         let mut reports = Vec::with_capacity(n);
         for w in pts.windows(2) {
@@ -592,7 +749,9 @@ pub(super) fn draw_arc(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError>
     })?;
 
     let regions = net_created_regions(&reports);
-    Ok(draw_result(ctx, sketch, &regions, Some(curve)))
+    let mut out = draw_result(ctx, sketch, &regions, Some(curve));
+    closed.annotate(ctx, &mut out);
+    Ok(out)
 }
 
 /// The most sides `hew.sketch.draw_polygon` accepts — the Polygon tool's own
@@ -608,6 +767,8 @@ pub(super) fn draw_polygon(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdEr
         center: Value,
         radius: f64,
         sides: usize,
+        #[serde(default)]
+        detached: Option<bool>,
     }
     let p: P = parse_params(params)?;
     if p.sides < 3 {
@@ -634,6 +795,12 @@ pub(super) fn draw_polygon(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdEr
     };
     let n = p.sides;
 
+    if draws_detached(ctx, p.detached, &target) {
+        let plane = detached_plane(ctx, &target)?;
+        let ring = draft::closed(ring_points(&plane, center, p.radius, n));
+        let runs = vec![Run::curve(ring, geom, SketchCurveKind::Polygon)];
+        return draw_detached(ctx, target, "Draw polygon", runs);
+    }
     if let PlaneTarget::Face(face_ref) = target {
         let plane = draft::face_plane(ctx, face_ref)?;
         let ring = draft::closed(ring_points(&plane, center, p.radius, n));
@@ -647,7 +814,7 @@ pub(super) fn draw_polygon(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdEr
     let (sketch, plane) = commit_target(ctx, target)?;
     let ring = ring_points(&plane, center, p.radius, n);
 
-    let (curve, reports) = super::run_sketch_gesture(ctx, sketch, |s| {
+    let ((curve, reports), closed) = super::run_drawing_gesture(ctx, sketch, |s| {
         let curve = s
             .begin_curve_with_kind(geom, SketchCurveKind::Polygon)
             .map_err(sketch_err)?;
@@ -663,7 +830,9 @@ pub(super) fn draw_polygon(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdEr
     })?;
 
     let regions = net_created_regions(&reports);
-    Ok(draw_result(ctx, sketch, &regions, Some(curve)))
+    let mut out = draw_result(ctx, sketch, &regions, Some(curve));
+    closed.annotate(ctx, &mut out);
+    Ok(out)
 }
 
 pub(super) fn offset(ctx: &mut Ctx, params: &Value) -> Result<Value, CmdError> {

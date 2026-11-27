@@ -55,7 +55,7 @@ test('draw → push/pull → save/reload preserves state and renders', async ({
     const box = h.drawBox([0, 0, 0], [2, 2, 0], 2)
     const pick = h.pickFace([1, 1, 10], [0, 0, -1]) // ray straight down onto the top face
     h.pushPull(pick!.object, pick!.face, 1)
-    return { box, count: h.getObjectCount(), hash: h.getStateHash() }
+    return { box, count: h.getObjectCount(), hash: h.getModelStateHash() }
   })
   expect(drawn.count).toBe(1)
 
@@ -71,7 +71,7 @@ test('draw → push/pull → save/reload preserves state and renders', async ({
     const h = window.__hew_test!
     const bytes = h.save()
     h.load(bytes)
-    return { count: h.getObjectCount(), hash: h.getStateHash(), bytes: bytes.length }
+    return { count: h.getObjectCount(), hash: h.getModelStateHash(), bytes: bytes.length }
   })
   expect(reloaded.bytes).toBeGreaterThan(0)
   expect(reloaded.count).toBe(drawn.count)

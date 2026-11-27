@@ -32,11 +32,11 @@ use kernel::{
 pub const MAX_PIXELS: u64 = 64_000_000;
 
 /// The shortest side a placed picture may have, in meters (one
-/// micrometer). The kernel builds no face whose plane it cannot find
-/// (twice its area under `tol::NORMALIZE_MIN_LENGTH`, so under 5e-13 m²),
-/// and a picture with both sides at least this long has at least twice
-/// that area; a smaller placement is refused instead of silently placing
-/// nothing.
+/// micrometer). Below the kernel's area floor (twice the area under
+/// `tol::NORMALIZE_MIN_LENGTH`, so under 5e-13 m²) a face keeps its plane
+/// only if it is at least `tol::MIN_FACE_WIDTH` wide; a picture with both
+/// sides at least this long clears the area floor outright. A smaller
+/// placement is refused instead of silently placing nothing.
 pub const MIN_SIDE: f64 = 1e-6;
 
 /// The longest side a placed picture may have, in meters (1,000 km). Past
@@ -565,7 +565,13 @@ pub fn import(
         scenes: Vec::new(),
         section: None,
         view_style: None,
-        extra: Default::default(),
+        // A picture is Hew's own construction, not a foreign file's mesh:
+        // nothing it builds is marked imported.
+        extra: kernel::ImportSceneExtra {
+            native: true,
+            ..Default::default()
+        },
+        geo: None,
     };
     check(&scene)?;
     Ok(ImageImport {

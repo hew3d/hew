@@ -3,7 +3,7 @@
  * dismissal, plus the persisted show-on-startup setting module.
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, fireEvent } from '@testing-library/react'
 import {
   WelcomeScreen,
@@ -26,6 +26,28 @@ function makeProps() {
     onUnitChange: vi.fn(),
   }
 }
+
+describe('WelcomeScreen beta note', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('shows the beta line with the version when built as a beta', () => {
+    vi.stubGlobal('__HEW_BETA__', true)
+    vi.stubGlobal('__HEW_VERSION__', '1.3.1+beta.deadbeef')
+    render(<WelcomeScreen {...makeProps()} />)
+    expect(screen.getByTestId('welcome-beta-note')).toHaveTextContent(
+      'Beta build 1.3.1+beta.deadbeef. Files saved here may not open in the released Hew.',
+    )
+  })
+
+  it('shows nothing extra in a normal build', () => {
+    vi.stubGlobal('__HEW_BETA__', false)
+    render(<WelcomeScreen {...makeProps()} />)
+    expect(screen.queryByTestId('welcome-beta-note')).toBeNull()
+    expect(screen.queryByText(/Beta build/)).toBeNull()
+  })
+})
 
 describe('WelcomeScreen', () => {
   it('renders the dialog with both bundled samples and the guide link', () => {

@@ -1,35 +1,37 @@
-// Verify-gate completeness check for shipped catalogs (docs/LOCALIZATION.md).
+// Coverage report for shipped catalogs (docs/LOCALIZATION.md).
 //
-// A locale is offered to users only when every message in its catalog has
-// a translation. `lingui compile --strict` cannot express "strict for the
-// shipped locales, lenient for the ones still being translated", so this
-// reads the .po files directly: any entry in a SHIPPED locale's catalog
-// whose msgstr is empty fails the gate. The source locale is exempt (its
-// msgstr is its msgid by definition).
+// A shipped locale may lag behind the source: new and reworded messages
+// arrive untranslated and show in English until a translator catches up,
+// so an untranslated entry never fails the gate. This prints how much of
+// each shipped catalog is translated, which is what a release looks at
+// before asking translators for an update. The source locale is exempt
+// (its msgstr is its msgid by definition).
 //
-// Run from app/: `node scripts/i18n-check.mjs`.
+//   node scripts/i18n-check.mjs          one coverage line per locale
+//   node scripts/i18n-check.mjs --list   also every untranslated message
+//
+// Run from app/. A shipped locale whose catalog cannot be read or holds
+// no messages still fails: that is a broken checkout, not a lagging one.
+// The logic lives in po.mjs (`coverageReport`) so a test can drive it.
 
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, resolve } from 'node:path'
 import { SHIPPED_LOCALES, SOURCE_LOCALE } from '../src/i18n/locales.ts'
-import { parsePo } from './po.mjs'
+import { coverageReport } from './po.mjs'
+
+const args = process.argv.slice(2)
+const unknown = args.filter((a) => a !== '--list')
+if (unknown.length > 0) {
+  console.error(`i18n-check: unknown argument ${unknown.join(' ')} (the only flag is --list)`)
+  process.exit(2)
+}
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
-
-let failed = false
-for (const locale of SHIPPED_LOCALES) {
-  if (locale === SOURCE_LOCALE) continue
-  const path = resolve(root, 'src/locales', locale, 'messages.po')
-  const entries = parsePo(readFileSync(path, 'utf8'))
-  const missing = entries.filter((e) => e.untranslated)
-  if (missing.length > 0) {
-    failed = true
-    console.error(`i18n-check: ${locale} is shipped but ${missing.length} of ${entries.length} messages are untranslated:`)
-    for (const e of missing.slice(0, 20)) console.error(`  ${JSON.stringify(e.msgid)}`)
-    if (missing.length > 20) console.error(`  … and ${missing.length - 20} more`)
-  } else {
-    console.log(`i18n-check: ${locale} complete (${entries.length} messages)`)
-  }
-}
-if (failed) process.exit(1)
+const report = coverageReport({
+  locales: SHIPPED_LOCALES.filter((l) => l !== SOURCE_LOCALE),
+  read: (locale) => readFileSync(resolve(root, 'src/locales', locale, 'messages.po'), 'utf8'),
+  list: args.includes('--list'),
+})
+for (const line of report.lines) (line.error ? console.error : console.log)(line.text)
+if (report.failed) process.exit(1)

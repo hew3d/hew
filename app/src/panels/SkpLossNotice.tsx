@@ -1,7 +1,7 @@
 /**
  * SkpLossNotice — the non-blocking notice shown when a SketchUp file could
- * not hold everything exactly (`simplified` from `Scene.save_skp` /
- * `export_skp`). A small dismissible card, not a modal: the save has
+ * not hold everything exactly (`simplified` and `writer_notes` from
+ * `Scene.save_skp` / `export_skp`). A small dismissible card, not a modal: the save has
  * already happened.
  *
  * For a Save / Save As it offers "Save a .hew copy" (written through the Save
@@ -16,6 +16,10 @@ import { isComposingKey } from '../input/keyboard'
 export interface SkpLossNoticeData {
   /** What the file could not hold exactly, as short phrases. */
   simplified: string[]
+  /** What the older SketchUp release's format could not hold at all (the
+   * writer's own notes, one entry per kind), as short phrases; empty when
+   * nothing was left out. */
+  writerNotes: string[]
   /** Offer the "Save a .hew copy" button (Save / Save As; not Export). */
   offerHewCopy: boolean
 }
@@ -97,14 +101,30 @@ export function SkpLossNotice({ notice, onSaveHewCopy, onDismiss }: SkpLossNotic
       <div style={HEADING_STYLE}>
         <Trans>The SketchUp file can&rsquo;t hold everything exactly</Trans>
       </div>
-      <div style={BODY_STYLE}>
-        <Trans>Some parts of this model were simplified in the SketchUp file:</Trans>
-      </div>
-      <ul style={LIST_STYLE}>
-        {notice.simplified.map((item, i) => (
-          <li key={i}>{item}</li>
-        ))}
-      </ul>
+      {notice.simplified.length > 0 && (
+        <>
+          <div style={BODY_STYLE}>
+            <Trans>Some parts of this model were simplified in the SketchUp file:</Trans>
+          </div>
+          <ul style={LIST_STYLE}>
+            {notice.simplified.map((item, i) => (
+              <li key={i}>{item}</li>
+            ))}
+          </ul>
+        </>
+      )}
+      {notice.writerNotes.length > 0 && (
+        <>
+          <div style={BODY_STYLE}>
+            <Trans>This SketchUp format left out:</Trans>
+          </div>
+          <ul style={LIST_STYLE} data-testid="skp-loss-writer-notes">
+            {notice.writerNotes.map((item, i) => (
+              <li key={i}>{item}</li>
+            ))}
+          </ul>
+        </>
+      )}
       <div style={BUTTON_ROW_STYLE}>
         {notice.offerHewCopy && (
           <button style={BUTTON_STYLE} onClick={onSaveHewCopy} data-testid="skp-loss-hew-copy">

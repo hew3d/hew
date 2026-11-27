@@ -8,7 +8,7 @@
 //!   definition-owned sketches into WORLD-owned geometry at the instance's
 //!   pose (SAME `ObjectId`/`SketchId`s — a move, not `explode_instance`'s
 //!   copy), and hides every live instance of that definition; refuses typed
-//!   on a non-similarity or mirrored pose, or a second session.
+//!   on a non-similarity pose (mirrors are fine), or a second session.
 //! - the user edits the (now plain world) members with the ordinary tool
 //!   set; `close_explode_session` folds them back — unbaking a touched
 //!   member, restoring an untouched one from its pristine snapshot
@@ -27,6 +27,7 @@
 //! - the cycle and depth gates on placing a definition mid-session read the
 //!   whole frame stack, not just the innermost frame.
 
+use kernel::trig;
 use kernel::{
     ComponentId, Document, DocumentError, InstanceId, KernelOp, NodeId, ObjectId, Plane, Point3,
     Transform, Vec3,
@@ -344,12 +345,99 @@ fn drift_measurement_over_100_open_close_cycles() {
 // --------------------------------------------------------------- spec 4
 
 /// **Pose gate**: a non-uniformly-scaled pose refuses typed; a mirrored
-/// pose refuses typed; a uniform-scaled + rotated pose (a similarity with
-/// positive determinant) opens.
+/// pose opens (a reflection is a similarity with a free sign) and a member
+/// edit folds back at the mirror of the edit; a uniform-scaled + rotated pose
+/// opens.
+/// Opens a session on a mirrored instance, shifts `member_a` by +3 in y and
+/// closes.
+fn mirrored_session_edit(doc: &mut Document, instance: kernel::InstanceId, member_a: ObjectId) {
+    doc.transform_instance(instance, &Transform::scale(Vec3::new(-1.0, 1.0, 1.0)))
+        .expect("mirror the instance");
+    doc.open_explode_session(instance).expect("open mirrored");
+    doc.transform_object(member_a, &Transform::translation(Vec3::new(0.0, 3.0, 0.0)))
+        .expect("edit a member");
+    doc.close_explode_session().expect("close");
+}
+
 #[test]
-fn pose_gate_refuses_non_similarity_and_mirror_but_opens_a_similarity() {
+fn mirrored_session_edit_lands_in_the_shared_definition() {
     let mut doc = Document::new();
-    let (_component, instance, _a, _b) = two_member_component(&mut doc);
+    let (component, instance, member_a, _member_b) = two_member_component(&mut doc);
+    let before: Vec<Point3> = doc
+        .object(member_a)
+        .unwrap()
+        .vertices()
+        .values()
+        .map(|v| v.position)
+        .collect();
+    let (plain, _) = doc
+        .place_instance(component, Transform::translation(Vec3::new(10.0, 0.0, 0.0)))
+        .expect("a plain second placement");
+    mirrored_session_edit(&mut doc, instance, member_a);
+    // The definition itself moved by +3 in y (the mirror leaves y alone).
+    // Every placement shares that geometry, so the plain placement shows the
+    // same edit un-mirrored: its pose is untouched and its world geometry is
+    // the definition's own.
+    let after = doc.object(member_a).unwrap();
+    let mut want: Vec<Point3> = before
+        .iter()
+        .map(|p| *p + Vec3::new(0.0, 3.0, 0.0))
+        .collect();
+    let mut got: Vec<Point3> = after.vertices().values().map(|v| v.position).collect();
+    let key = |p: &Point3| (p.x, p.y, p.z);
+    want.sort_by(|a, b| key(a).partial_cmp(&key(b)).unwrap());
+    got.sort_by(|a, b| key(a).partial_cmp(&key(b)).unwrap());
+    for (g, w) in got.iter().zip(&want) {
+        assert!(g.approx_eq(*w, 1e-9), "{g:?} vs {w:?}");
+    }
+    let plain_pose = doc
+        .instance_pose(plain)
+        .expect("plain placement still live");
+    assert!(
+        plain_pose.determinant() > 0.0,
+        "the plain placement stays unmirrored"
+    );
+    let plain_world: Vec<Point3> = got.iter().map(|p| plain_pose.apply_point(*p)).collect();
+    let min = |f: fn(&Point3) -> f64| plain_world.iter().map(f).fold(f64::MAX, f64::min);
+    let max = |f: fn(&Point3) -> f64| plain_world.iter().map(f).fold(f64::MIN, f64::max);
+    // Member A started at x 0..2, y 0..2; the edit moved it to y 3..5, and
+    // the plain placement (shifted +10 in x) shows it there, unmirrored.
+    assert!((min(|p| p.y) - 3.0).abs() < 1e-9 && (max(|p| p.y) - 5.0).abs() < 1e-9);
+    assert!((min(|p| p.x) - 10.0).abs() < 1e-9 && (max(|p| p.x) - 12.0).abs() < 1e-9);
+    assert!(after.signed_volume() > 0.0);
+}
+
+#[test]
+fn mirrored_session_survives_undo_redo_and_reopen() {
+    let mut doc = Document::new();
+    let (_component, instance, member_a, _member_b) = two_member_component(&mut doc);
+    let start = doc.save();
+    let depth0 = doc.undo_depth();
+    mirrored_session_edit(&mut doc, instance, member_a);
+    let end = doc.save();
+    let steps = doc.undo_depth() - depth0;
+    assert!(steps >= 3, "mirror, open+edit, close are separate steps");
+    for _ in 0..steps {
+        doc.undo().expect("undo");
+    }
+    assert_eq!(doc.save(), start, "undo restores the exact bytes");
+    for _ in 0..steps {
+        doc.redo().expect("redo");
+    }
+    assert_eq!(doc.save(), end, "redo re-applies the exact bytes");
+    let back = Document::load(&end).expect("reopen");
+    assert_eq!(back.save(), end);
+    for oid in back.visible_object_ids() {
+        let o = back.object(oid).unwrap();
+        o.validate().expect("valid after reopen");
+        assert!(o.signed_volume() > 0.0);
+    }
+}
+
+#[test]
+fn pose_gate_refuses_non_similarity_and_opens_mirrors() {
+    let mut doc = Document::new();
+    let (_component, instance, member_a, member_b) = two_member_component(&mut doc);
 
     // Non-uniform scale: refused typed.
     doc.transform_instance(instance, &Transform::scale(Vec3::new(1.0, 2.0, 1.0)))
@@ -362,13 +450,67 @@ fn pose_gate_refuses_non_similarity_and_mirror_but_opens_a_similarity() {
     doc.transform_instance(instance, &Transform::scale(Vec3::new(1.0, 0.5, 1.0)))
         .expect("undo the non-uniform scale");
 
-    // Mirror: refused typed.
-    doc.transform_instance(instance, &Transform::scale(Vec3::new(-1.0, 1.0, 1.0)))
+    // Mirror: opens. Members become plain world objects at their mirrored
+    // positions; an edit then folds back so the posed instance shows the
+    // mirror of the edit.
+    let mirror = Transform::scale(Vec3::new(-1.0, 1.0, 1.0));
+    doc.transform_instance(instance, &mirror)
         .expect("compose a mirror");
-    assert_eq!(
-        doc.open_explode_session(instance).unwrap_err(),
-        DocumentError::ExplodeSessionPoseUnsupported
-    );
+    doc.open_explode_session(instance)
+        .expect("a mirrored pose opens a session");
+    assert_eq!(doc.explode_session_instance(), Some(instance));
+    for m in [member_a, member_b] {
+        let o = doc.object(m).expect("member live in the session");
+        assert!(o.validate().is_ok());
+        assert_eq!(o.watertight(), kernel::WatertightState::Watertight);
+        assert!(o.signed_volume() > 0.0, "session member is outward-facing");
+    }
+    let local_before = {
+        // Definition-frame positions are the mirror of the session's world ones.
+        let w = doc.object(member_a).unwrap();
+        w.vertices()
+            .values()
+            .map(|v| mirror.apply_point(v.position))
+            .collect::<Vec<_>>()
+    };
+    let shift = Vec3::new(0.0, 3.0, 0.0);
+    doc.transform_object(member_a, &Transform::translation(shift))
+        .expect("edit a member inside the session");
+    let world_after = doc.object(member_a).unwrap().clone();
+    doc.close_explode_session().expect("close mirrored session");
+    assert_eq!(doc.explode_session_instance(), None);
+    // The instance shows the mirror of the edit: pose * folded-back local
+    // position equals the edited world position, to 1e-9.
+    let pose = doc.instance_pose(instance).expect("instance is back");
+    let folded = doc
+        .object(member_a)
+        .expect("member is a definition member again");
+    assert!(folded.validate().is_ok());
+    assert_eq!(folded.watertight(), kernel::WatertightState::Watertight);
+    assert!(folded.signed_volume() > 0.0);
+    for (vid, v) in world_after.vertices().iter() {
+        let local = folded
+            .vertices()
+            .get(vid)
+            .expect("vertex id survives")
+            .position;
+        let shown = pose.apply_point(local);
+        assert!(
+            shown.approx_eq(v.position, 1e-9),
+            "shown {shown:?} vs edited world {:?}",
+            v.position
+        );
+    }
+    // And the definition-frame geometry moved by the mirror of the edit
+    // (mirror leaves y alone, so +3 in y).
+    let mut want: Vec<_> = local_before.iter().map(|p| *p + shift).collect();
+    let mut got: Vec<_> = folded.vertices().values().map(|v| v.position).collect();
+    let key = |p: &Point3| (p.x, p.y, p.z);
+    want.sort_by(|a, b| key(a).partial_cmp(&key(b)).unwrap());
+    got.sort_by(|a, b| key(a).partial_cmp(&key(b)).unwrap());
+    for (g, w) in got.iter().zip(&want) {
+        assert!(g.approx_eq(*w, 1e-9), "{g:?} vs {w:?}");
+    }
     // A pure axis mirror is its own inverse.
     doc.transform_instance(instance, &Transform::scale(Vec3::new(-1.0, 1.0, 1.0)))
         .expect("undo the mirror");
@@ -406,8 +548,8 @@ fn analytic_cylinder_metadata_survives_a_session_round_trip() {
         let pt = |i: usize| {
             let a = (i % n) as f64 / n as f64 * std::f64::consts::TAU;
             Point3::new(
-                center.x + radius * a.cos(),
-                center.y + radius * a.sin(),
+                center.x + radius * trig::cos(a),
+                center.y + radius * trig::sin(a),
                 0.0,
             )
         };
@@ -500,48 +642,147 @@ fn deleting_a_member_mid_session_drops_it_from_membership_at_close() {
 
 // --------------------------------------------------------------- spec 7
 
-/// **Sibling handling**: two instances of the same definition — opening a
-/// session through one hides BOTH; closing makes both visible again, both
-/// reflecting the session's edit (shared geometry, one definition).
+/// Maps a point through a placement's transform and returns `(x, y, z)`.
+fn map(t: &Transform, x: f64, y: f64, z: f64) -> (f64, f64, f64) {
+    let p = t.apply_point(Point3::new(x, y, z));
+    (p.x, p.y, p.z)
+}
+
+/// Max corner z of `object` seen through `t`.
+fn top_z_through(doc: &Document, object: ObjectId, t: &Transform) -> f64 {
+    doc.object(object)
+        .expect("object is live")
+        .vertices()
+        .iter()
+        .map(|(_, v)| t.apply_point(v.position).z)
+        .fold(f64::MIN, f64::max)
+}
+
+/// **Live sibling placements** (ARCHITECTURE.md 2.11): two instances of
+/// one definition — opening a session through one hides ONLY the entered
+/// instance; the sibling stays live and its expanded placements are the
+/// session's world objects seen through the session's inverse pose and
+/// then the sibling's own pose, so an edit inside the session shows on the
+/// sibling as it happens. Undoing the edit reverts the sibling; undoing
+/// the open restores the plain definition render; closing folds the edit
+/// into the definition every placement shares.
 #[test]
-fn opening_through_one_instance_hides_every_sibling_and_the_edit_is_shared() {
+fn opening_through_one_instance_keeps_every_sibling_live_and_showing_the_edit() {
     let mut doc = Document::new();
-    let (component, instance_a, member_a, _member_b) = two_member_component(&mut doc);
+    let (component, instance_a, member_a, member_b) = two_member_component(&mut doc);
+    let shift = Vec3::new(20.0, 0.0, 0.0);
     let (instance_b, _) = doc
-        .place_instance(component, Transform::translation(Vec3::new(20.0, 0.0, 0.0)))
+        .place_instance(component, Transform::translation(shift))
         .expect("place a sibling instance");
 
     assert!(doc.instance_ids().contains(&instance_a));
     assert!(doc.instance_ids().contains(&instance_b));
 
-    doc.open_explode_session(instance_a).expect("open");
-    assert!(
-        !doc.instance_ids().contains(&instance_a),
-        "entered instance hidden"
-    );
+    // Enter the SHIFTED placement, so the session's pose is not identity
+    // and the sibling's inverse mapping is actually exercised.
+    doc.open_explode_session(instance_b).expect("open");
     assert!(
         !doc.instance_ids().contains(&instance_b),
-        "sibling hidden too"
+        "the entered instance hides"
+    );
+    assert!(
+        doc.instance_ids().contains(&instance_a),
+        "the sibling stays live"
+    );
+    assert_eq!(doc.instances_of(component), vec![instance_a]);
+    assert_eq!(doc.session_placements(), vec![instance_a]);
+
+    // The members are world objects at the entered pose (x in [20, 22]).
+    let baked = doc.object(member_a).expect("live");
+    let min_x = baked
+        .vertices()
+        .iter()
+        .map(|(_, v)| v.position.x)
+        .fold(f64::MAX, f64::min);
+    assert!(
+        (min_x - 20.0).abs() < 1e-9,
+        "member baked to the entered pose"
     );
 
-    let top = face_matching(&doc, member_a, Vec3::new(0.0, 0.0, 1.0));
-    doc.apply_object_op(
-        member_a,
-        KernelOp::PushPull {
-            face: top,
-            distance: 0.4,
-        },
-    )
-    .expect("edit the shared member");
+    // The sibling's expanded placements are exactly the session's world
+    // objects, each through the inverse session pose (identity sibling
+    // pose composes to just that inverse).
+    let placements = doc.expanded_def_placements(component);
+    assert_eq!(
+        placements.iter().map(|(o, _)| *o).collect::<Vec<_>>(),
+        vec![member_a, member_b]
+    );
+    for (_, local) in &placements {
+        let (x, y, z) = map(local, 20.0, 0.0, 0.0);
+        assert!(x.abs() < 1e-9 && y.abs() < 1e-9 && z.abs() < 1e-9);
+    }
+    assert_eq!(
+        doc.expanded_def_placements_shown(component),
+        vec![true, true]
+    );
+    // Through the sibling's own pose the member sits where the sibling is.
+    let world = doc.expanded_placements();
+    assert_eq!(world.len(), 2);
+    for (o, t, i) in &world {
+        assert_eq!(*i, instance_a);
+        assert!(*o == member_a || *o == member_b);
+        assert!((top_z_through(&doc, *o, t) - 1.0).abs() < 1e-9);
+    }
 
+    // Edit inside the session: the sibling shows the raised top at once.
+    let top = face_matching(&doc, member_a, Vec3::new(0.0, 0.0, 1.0));
+    let (_, change) = doc
+        .apply_object_op(
+            member_a,
+            KernelOp::PushPull {
+                face: top,
+                distance: 0.4,
+            },
+        )
+        .expect("edit the shared member");
+    let mut completed = change;
+    doc.complete_change(&mut completed);
+    assert!(
+        completed.instances_touched.contains(&instance_a),
+        "the sibling is reported touched by a session edit"
+    );
+    let (_, t, _) = doc
+        .expanded_placements()
+        .into_iter()
+        .find(|(o, _, _)| *o == member_a)
+        .expect("the sibling places member a");
+    assert!((top_z_through(&doc, member_a, &t) - 1.4).abs() < 1e-9);
+
+    // Abort the edit: the sibling reverts with it.
+    doc.undo().expect("undo the push/pull");
+    let (_, t, _) = doc
+        .expanded_placements()
+        .into_iter()
+        .find(|(o, _, _)| *o == member_a)
+        .expect("the sibling places member a");
+    assert!((top_z_through(&doc, member_a, &t) - 1.0).abs() < 1e-9);
+
+    // Abort the session: both instances live, the plain definition back.
+    // The sibling rendered the session's world geometry a moment ago, so
+    // the undo reports it touched (the render/inference layers re-pull it).
+    let change = doc.undo().expect("undo the open");
+    assert!(change.instances_touched.contains(&instance_a));
+    assert_eq!(doc.explode_session_instance(), None);
+    assert!(doc.instance_ids().contains(&instance_a));
+    assert!(doc.instance_ids().contains(&instance_b));
+    assert!(doc.session_placements().is_empty());
+    let world = doc.expanded_placements();
+    assert_eq!(world.len(), 4);
+    for (o, t, _) in &world {
+        assert!((top_z_through(&doc, *o, t) - 1.0).abs() < 1e-9);
+    }
+
+    // Redo the open and the edit, close: every placement shares the edit.
+    doc.redo().expect("redo the open");
+    doc.redo().expect("redo the push/pull");
     doc.close_explode_session().expect("close");
     assert!(doc.instance_ids().contains(&instance_a));
-    assert!(
-        doc.instance_ids().contains(&instance_b),
-        "sibling visible again"
-    );
-    // Both instances place the SAME definition, so both already reflect the
-    // edit — there is only one copy of the geometry to look at.
+    assert!(doc.instance_ids().contains(&instance_b));
     let members = doc.def_members(component).expect("live");
     let edited_top = face_matching(&doc, members[0], Vec3::new(0.0, 0.0, 1.0));
     let z = doc.object(members[0]).expect("live").faces()[edited_top]
@@ -550,6 +791,488 @@ fn opening_through_one_instance_hides_every_sibling_and_the_edit_is_shared() {
     assert!(
         (z.abs() - 1.4).abs() < 1e-9,
         "the push/pull is visible on the shared definition"
+    );
+}
+
+/// **An emptied close with a GROUPED sibling** (adversarial-review
+/// finding): the siblings tombstoned with the emptied definition leave
+/// their groups' member lists (a group never lists a hidden member), an
+/// annotation anchored to one detaches, and undo restores the list, the
+/// anchor's liveness, and the siblings exactly; redo re-empties; the saved
+/// document reopens at every step.
+#[test]
+fn an_emptied_close_splices_a_grouped_sibling_out_of_its_group_and_undo_restores_it() {
+    let mut doc = Document::new();
+    let (component, instance, member_a, member_b) = two_member_component(&mut doc);
+    let (sibling, _) = doc
+        .place_instance(component, Transform::translation(Vec3::new(10.0, 0.0, 0.0)))
+        .expect("sibling");
+    let other = build_box(&mut doc, 30.0, 0.0, 0.0, 31.0, 1.0, 1.0);
+    let (group, _) = doc
+        .group_nodes(&[NodeId::Instance(sibling), NodeId::Object(other)])
+        .expect("group the sibling with a plain box");
+    let note = doc
+        .add_leader_text(
+            kernel::Anchor {
+                node: Some(NodeId::Instance(sibling)),
+                point: Point3::new(10.0, 0.0, 1.0),
+            },
+            Vec3::new(0.2, 0.2, 0.0),
+            "sibling note".to_string(),
+        )
+        .expect("a note anchored to the sibling");
+    assert_eq!(doc.annotation_detached(note), Some(false));
+    let members_before = doc.group_members(group).expect("group is live");
+
+    doc.open_explode_session(instance).expect("open");
+    doc.delete_node(NodeId::Object(member_a)).expect("delete a");
+    doc.delete_node(NodeId::Object(member_b)).expect("delete b");
+    doc.close_explode_session()
+        .expect("close empties the definition");
+
+    assert!(doc.def_members(component).is_none(), "definition gone");
+    assert!(
+        !doc.instance_ids().contains(&sibling),
+        "sibling gone with it"
+    );
+    assert_eq!(
+        doc.group_members(group),
+        Some(vec![NodeId::Object(other)]),
+        "the group no longer lists the tombstoned sibling"
+    );
+    assert_eq!(
+        doc.annotation_detached(note),
+        Some(true),
+        "the note detached"
+    );
+    Document::load(&doc.save()).expect("the saved document reopens");
+
+    doc.undo().expect("undo the close");
+    assert_eq!(doc.explode_session_instance(), Some(instance));
+    assert!(doc.instance_ids().contains(&sibling));
+    assert_eq!(doc.group_members(group), Some(members_before.clone()));
+    assert_eq!(doc.annotation_detached(note), Some(false));
+    Document::load(&doc.save_for_persistence()).expect("the autosave bytes reopen");
+
+    doc.redo().expect("redo the close");
+    assert!(!doc.instance_ids().contains(&sibling));
+    assert_eq!(doc.group_members(group), Some(vec![NodeId::Object(other)]));
+    assert_eq!(doc.annotation_detached(note), Some(true));
+    Document::load(&doc.save()).expect("reopens after redo");
+
+    doc.undo().expect("undo close");
+    doc.undo().expect("undo delete b");
+    doc.undo().expect("undo delete a");
+    doc.undo().expect("undo open");
+    assert_eq!(doc.group_members(group), Some(members_before));
+    assert_eq!(
+        doc.def_members(component).expect("live"),
+        vec![member_a, member_b]
+    );
+    Document::load(&doc.save()).expect("reopens fully undone");
+}
+
+/// **Sibling placements carry the session's drawing** (ARCHITECTURE.md
+/// 2.11): the definition's own sketch, baked to the world at open, and a
+/// free sketch drawn mid-session both render on a sibling through the
+/// inverse session pose (`def_rendered_sketches`); after close the
+/// definition's sketches are its own again, at identity.
+#[test]
+fn a_sibling_renders_the_definition_sketch_and_mid_session_drawing() {
+    let mut doc = Document::new();
+    let (component, instance_a, _a, _b) = two_member_component(&mut doc);
+    let (instance_b, _) = doc
+        .place_instance(component, Transform::translation(Vec3::new(20.0, 0.0, 0.0)))
+        .expect("sibling");
+    // A def-owned sketch: a square drawn on the ground inside instance A.
+    let (def_sketch, _) = doc
+        .begin_sketch_on_plane_in_instance(instance_a, ground())
+        .expect("def sketch");
+    draw_rect(
+        &mut doc,
+        def_sketch,
+        [
+            Point3::new(8.0, 0.0, 0.0),
+            Point3::new(9.0, 0.0, 0.0),
+            Point3::new(9.0, 1.0, 0.0),
+            Point3::new(8.0, 1.0, 0.0),
+        ],
+    );
+    let (closed, frame) = doc.def_rendered_sketches(component).expect("live");
+    assert_eq!(closed, vec![def_sketch]);
+    assert_eq!(frame, Transform::IDENTITY);
+
+    // Enter the SHIFTED placement: the def sketch bakes to x in [28, 29].
+    doc.open_explode_session(instance_b).expect("open");
+    let (rendered, frame) = doc.def_rendered_sketches(component).expect("live");
+    assert_eq!(
+        rendered,
+        vec![def_sketch],
+        "the baked def sketch still renders"
+    );
+    let p = frame.apply_point(Point3::new(28.0, 0.0, 0.0));
+    assert!(
+        (p.x - 8.0).abs() < 1e-9 && p.y.abs() < 1e-9,
+        "the frame is the inverse session pose"
+    );
+    let baked_min_x = doc
+        .sketch(def_sketch)
+        .expect("live")
+        .vertices()
+        .iter()
+        .map(|(_, v)| v.position.x)
+        .fold(f64::MAX, f64::min);
+    assert!(
+        (baked_min_x - 28.0).abs() < 1e-9,
+        "baked to the entered pose"
+    );
+
+    // Draw a free sketch mid-session, as a recorded gesture (the app's
+    // path): a sibling renders it too — while it is still a fresh,
+    // unrecorded sketch, and once its gesture is on the history.
+    let drawn = doc.add_sketch(ground());
+    doc.begin_sketch_gesture(drawn).expect("gesture");
+    draw_rect(
+        &mut doc,
+        drawn,
+        [
+            Point3::new(25.0, 3.0, 0.0),
+            Point3::new(26.0, 3.0, 0.0),
+            Point3::new(26.0, 4.0, 0.0),
+            Point3::new(25.0, 4.0, 0.0),
+        ],
+    );
+    let (rendered, _) = doc.def_rendered_sketches(component).expect("live");
+    assert!(
+        rendered.contains(&def_sketch) && rendered.contains(&drawn),
+        "a fresh mid-session sketch renders on the sibling"
+    );
+    doc.end_sketch_gesture(drawn).expect("gesture recorded");
+    let (rendered, _) = doc.def_rendered_sketches(component).expect("live");
+    assert!(rendered.contains(&def_sketch) && rendered.contains(&drawn));
+    assert!(doc.session_placements().contains(&instance_a));
+
+    doc.close_explode_session().expect("close");
+    let (after, frame) = doc.def_rendered_sketches(component).expect("live");
+    assert_eq!(frame, Transform::IDENTITY);
+    let mut after_sorted = after.clone();
+    after_sorted.sort();
+    let mut expected = vec![def_sketch, drawn];
+    expected.sort();
+    assert_eq!(
+        after_sorted, expected,
+        "both are the definition's own sketches now"
+    );
+    let _ = instance_a;
+}
+
+/// **The frame's own drawing, as one query** (`session_frame_sketches`):
+/// while a component frame is innermost it is exactly the set a sibling
+/// renders (`def_rendered_sketches`) — the baked definition sketch, a
+/// free sketch drawn mid-session, an owned sketch of a member — and never
+/// a free sketch drawn before the open. Empty with no frame open; a group
+/// frame's own drawing is specified in `group_sketch_specs.rs`.
+#[test]
+fn the_session_frame_sketches_are_the_sibling_rendered_set() {
+    let mut doc = Document::new();
+    // Drawn as a recorded gesture (the app's path), so it is history
+    // before the open, not a fresh sketch.
+    let outside = doc.add_sketch(ground());
+    doc.begin_sketch_gesture(outside).expect("gesture");
+    draw_rect(
+        &mut doc,
+        outside,
+        [
+            Point3::new(-5.0, 0.0, 0.0),
+            Point3::new(-4.0, 0.0, 0.0),
+            Point3::new(-4.0, 1.0, 0.0),
+            Point3::new(-5.0, 1.0, 0.0),
+        ],
+    );
+    doc.end_sketch_gesture(outside).expect("gesture recorded");
+    let (component, instance, member_a, _b) = two_member_component(&mut doc);
+    let (def_sketch, _) = doc
+        .begin_sketch_on_plane_in_instance(instance, ground())
+        .expect("def sketch");
+    draw_rect(
+        &mut doc,
+        def_sketch,
+        [
+            Point3::new(8.0, 0.0, 0.0),
+            Point3::new(9.0, 0.0, 0.0),
+            Point3::new(9.0, 1.0, 0.0),
+            Point3::new(8.0, 1.0, 0.0),
+        ],
+    );
+    assert!(doc.session_frame_sketches().is_empty(), "no frame open");
+
+    doc.open_explode_session(instance).expect("open");
+    // An owned sketch on member A's top face (z = 1).
+    let top = Plane::from_polygon(&[
+        Point3::new(0.0, 0.0, 1.0),
+        Point3::new(1.0, 0.0, 1.0),
+        Point3::new(0.0, 1.0, 1.0),
+    ])
+    .expect("top plane");
+    let owned = doc.add_sketch(top);
+    doc.set_sketch_object_owner(owned, Some(member_a))
+        .expect("owned by member A");
+    let drawn = doc.add_sketch(ground());
+    let frame = doc.session_frame_sketches();
+    let (rendered, _) = doc.def_rendered_sketches(component).expect("live");
+    assert_eq!(frame, rendered, "one set, shared with the sibling render");
+    for s in [def_sketch, owned, drawn] {
+        assert!(frame.contains(&s), "{s:?} is the frame's drawing");
+    }
+    assert!(!frame.contains(&outside), "pre-session drawing is context");
+
+    doc.close_explode_session().expect("close");
+    assert!(doc.session_frame_sketches().is_empty(), "closed");
+
+    // A group frame's own drawing is its own (group_sketch_specs.rs): the
+    // component frame's drawing and the pre-session line stay out of it.
+    let c = build_box(&mut doc, 10.0, 0.0, 0.0, 11.0, 1.0, 1.0);
+    let d = build_box(&mut doc, 12.0, 0.0, 0.0, 13.0, 1.0, 1.0);
+    let (group, _) = doc
+        .group_nodes(&[NodeId::Object(c), NodeId::Object(d)])
+        .expect("group");
+    doc.open_group_session(group).expect("open group");
+    let in_group = doc.add_sketch(ground());
+    let frame = doc.session_frame_sketches();
+    // (A fresh sketch minted before the open and never drawn into, like
+    // `drawn` above, rides along by the fresh-sketch rule; it is empty,
+    // so there is nothing in it to pick.)
+    assert!(frame.contains(&in_group), "group frame: its own drawing");
+    for s in [outside, def_sketch, owned] {
+        assert!(!frame.contains(&s), "{s:?} is not the group frame's");
+    }
+}
+
+/// **Make Unique honors the session scope** (KB-36): with a session open, an
+/// instance of an unrelated definition is outside it and refuses
+/// `ExplodeSessionScope`, document untouched; with no session it still
+/// works.
+#[test]
+fn make_unique_refuses_an_out_of_scope_instance_mid_session() {
+    let mut doc = Document::new();
+    let (_component, instance_a, _a, _b) = two_member_component(&mut doc);
+    let lone = build_box(&mut doc, 40.0, 0.0, 0.0, 41.0, 1.0, 1.0);
+    let (_other_def, outside, _) = doc
+        .make_component(&[NodeId::Object(lone)])
+        .expect("make_component");
+
+    doc.open_explode_session(instance_a).expect("open");
+    let before = doc.save_for_persistence();
+    assert_eq!(
+        doc.make_unique(outside).unwrap_err(),
+        DocumentError::ExplodeSessionScope
+    );
+    assert_eq!(
+        doc.save_for_persistence(),
+        before,
+        "the document is untouched"
+    );
+
+    doc.close_explode_session().expect("close");
+    doc.make_unique(outside)
+        .expect("with no session open it is fine");
+}
+
+/// **A sibling is not an operand while its definition is on loan**: the
+/// definition-level surfaces addressed through a live sibling (or by
+/// component id) refuse typed with `ExplodeSessionOpen`, document
+/// untouched — its members are world objects right now, and editing them
+/// as def-local content would corrupt them. Painting a face the sibling
+/// shows is fine: it reaches the one shared object.
+#[test]
+fn a_live_sibling_refuses_definition_level_ops_mid_session() {
+    let mut doc = Document::new();
+    let (component, instance_a, member_a, _b) = two_member_component(&mut doc);
+    let (instance_b, _) = doc
+        .place_instance(component, Transform::translation(Vec3::new(20.0, 0.0, 0.0)))
+        .expect("place a sibling instance");
+    doc.open_explode_session(instance_a).expect("open");
+    let before = doc.save_for_persistence();
+
+    assert_eq!(
+        doc.transform_instance(
+            instance_b,
+            &Transform::translation(Vec3::new(0.0, 1.0, 0.0))
+        )
+        .unwrap_err(),
+        DocumentError::ExplodeSessionOpen
+    );
+    assert_eq!(
+        doc.make_unique(instance_b).unwrap_err(),
+        DocumentError::ExplodeSessionOpen
+    );
+    assert_eq!(
+        doc.transform_def_member(
+            instance_b,
+            member_a,
+            &Transform::translation(Vec3::new(0.0, 1.0, 0.0))
+        )
+        .unwrap_err(),
+        DocumentError::ExplodeSessionOpen
+    );
+    let top = face_matching(&doc, member_a, Vec3::new(0.0, 0.0, 1.0));
+    assert_eq!(
+        doc.apply_def_op(
+            component,
+            member_a,
+            KernelOp::PushPull {
+                face: top,
+                distance: 0.4
+            }
+        )
+        .unwrap_err(),
+        DocumentError::ExplodeSessionOpen
+    );
+    assert_eq!(
+        doc.delete_def_member(component, member_a).unwrap_err(),
+        DocumentError::ExplodeSessionOpen
+    );
+    assert_eq!(
+        doc.begin_sketch_on_plane_in_instance(instance_b, ground())
+            .unwrap_err(),
+        DocumentError::ExplodeSessionOpen
+    );
+    assert_eq!(doc.save_for_persistence(), before, "nothing moved");
+
+    doc.close_explode_session().expect("close");
+    doc.transform_instance(
+        instance_b,
+        &Transform::translation(Vec3::new(0.0, 1.0, 0.0)),
+    )
+    .expect("a sibling is an ordinary instance again after close");
+}
+
+/// **Nested frames**: a definition B placed inside definition A, with two
+/// world placements of A. Entering A's first placement and then drilling
+/// into B's surfaced instance stacks two frames. A's live sibling renders
+/// B's content THROUGH both frames — the inner frame's world geometry
+/// through the inner inverse pose, then the outer inverse, then its own
+/// pose — so an edit on a B member shows on the sibling of A at once.
+#[test]
+fn a_sibling_of_the_outer_frame_shows_an_edit_made_two_frames_deep() {
+    let mut doc = Document::new();
+    let inner = build_box(&mut doc, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0);
+    let (def_b, inst_b, _) = doc
+        .make_component(&[NodeId::Object(inner)])
+        .expect("inner component");
+    let outer = build_box(&mut doc, 3.0, 0.0, 0.0, 4.0, 1.0, 1.0);
+    let (def_a, inst_a1, _) = doc
+        .make_component(&[NodeId::Instance(inst_b), NodeId::Object(outer)])
+        .expect("outer component nesting the inner one");
+    let shift = Vec3::new(0.0, 10.0, 0.0);
+    let (inst_a2, _) = doc
+        .place_instance(def_a, Transform::translation(shift))
+        .expect("second placement of A");
+    let _ = def_b;
+
+    doc.open_explode_session(inst_a1).expect("enter A");
+    // B's member instance is a world instance now; drill into it.
+    let surfaced = doc
+        .session_direct_members()
+        .expect("session open")
+        .into_iter()
+        .find_map(|n| match n {
+            NodeId::Instance(i) => Some(i),
+            _ => None,
+        })
+        .expect("the surfaced B placement");
+    doc.open_explode_session(surfaced).expect("enter B");
+    assert_eq!(doc.session_stack().len(), 2);
+
+    // The sibling of A renders both A's own member and B's member.
+    let placements = doc.expanded_placements();
+    let for_a2: Vec<_> = placements
+        .iter()
+        .filter(|(_, _, i)| *i == inst_a2)
+        .collect();
+    assert_eq!(for_a2.len(), 2, "outer member plus the inner one");
+    let inner_t = for_a2
+        .iter()
+        .find(|(o, _, _)| *o == inner)
+        .map(|(_, t, _)| *t)
+        .expect("the inner member renders on A's sibling");
+    assert!((top_z_through(&doc, inner, &inner_t) - 1.0).abs() < 1e-9);
+    // And where the sibling is: the inner box's origin lands at the shift.
+    let (x, y, z) = map(&inner_t, 0.0, 0.0, 0.0);
+    assert!(x.abs() < 1e-9 && (y - 10.0).abs() < 1e-9 && z.abs() < 1e-9);
+
+    // Edit the inner member two frames deep; the sibling of A shows it.
+    let top = face_matching(&doc, inner, Vec3::new(0.0, 0.0, 1.0));
+    doc.apply_object_op(
+        inner,
+        KernelOp::PushPull {
+            face: top,
+            distance: 0.5,
+        },
+    )
+    .expect("edit the inner member");
+    let inner_t = doc
+        .expanded_placements()
+        .into_iter()
+        .find(|(o, _, i)| *o == inner && *i == inst_a2)
+        .map(|(_, t, _)| t)
+        .expect("still rendered");
+    assert!((top_z_through(&doc, inner, &inner_t) - 1.5).abs() < 1e-9);
+    assert!(doc.session_placements().contains(&inst_a2));
+
+    doc.close_innermost_session().expect("close B");
+    let inner_t = doc
+        .expanded_placements()
+        .into_iter()
+        .find(|(o, _, i)| *o == inner && *i == inst_a2)
+        .map(|(_, t, _)| t)
+        .expect("still rendered after the inner close");
+    assert!((top_z_through(&doc, inner, &inner_t) - 1.5).abs() < 1e-9);
+    doc.close_innermost_session().expect("close A");
+    assert_eq!(doc.session_stack().len(), 0);
+    Document::load(&doc.save()).expect("the saved document reopens");
+}
+
+/// **Mid-session creations show on siblings**: a solid extruded from a
+/// ground sketch while the session is open is session content (it folds
+/// into the definition at close), so a sibling renders it as soon as it
+/// exists, and stops when it is deleted.
+#[test]
+fn a_solid_created_mid_session_renders_on_every_sibling() {
+    let mut doc = Document::new();
+    let (component, instance_a, _a, _b) = two_member_component(&mut doc);
+    let (instance_b, _) = doc
+        .place_instance(component, Transform::translation(Vec3::new(20.0, 0.0, 0.0)))
+        .expect("sibling");
+    doc.open_explode_session(instance_a).expect("open");
+
+    let created = build_box(&mut doc, 8.0, 0.0, 0.0, 9.0, 1.0, 1.0);
+    let on_sibling = doc
+        .expanded_placements()
+        .into_iter()
+        .find(|(o, _, i)| *o == created && *i == instance_b)
+        .map(|(_, t, _)| t)
+        .expect("the new solid renders on the sibling");
+    let (x, _, _) = map(&on_sibling, 8.0, 0.0, 0.0);
+    assert!((x - 28.0).abs() < 1e-9, "through the sibling's pose");
+
+    doc.delete_node(NodeId::Object(created)).expect("delete it");
+    assert!(
+        !doc.expanded_placements()
+            .iter()
+            .any(|(o, _, _)| *o == created),
+        "a deleted creation leaves the sibling"
+    );
+    doc.undo().expect("undo the delete");
+    assert!(
+        doc.expanded_placements()
+            .iter()
+            .any(|(o, _, _)| *o == created)
+    );
+    doc.close_explode_session().expect("close");
+    assert!(
+        doc.def_members(component).expect("live").contains(&created),
+        "and it folded into the definition"
     );
 }
 
@@ -745,7 +1468,8 @@ fn structural_and_outside_scope_ops_refuse_mid_session() {
     assert_eq!(
         doc.duplicate_node(
             NodeId::Object(outside),
-            &Transform::translation(Vec3::new(1.0, 0.0, 0.0))
+            &Transform::translation(Vec3::new(1.0, 0.0, 0.0)),
+            kernel::LinkPolicy::Independent,
         )
         .unwrap_err(),
         DocumentError::ExplodeSessionScope
@@ -756,6 +1480,7 @@ fn structural_and_outside_scope_ops_refuse_mid_session() {
         .duplicate_node(
             NodeId::Object(member_a),
             &Transform::translation(Vec3::new(0.0, 8.0, 0.0)),
+            kernel::LinkPolicy::Independent,
         )
         .expect("duplicating a session member is allowed");
     let NodeId::Object(dup) = dup else {
@@ -894,16 +1619,19 @@ fn redo_of_a_close_leaves_exactly_one_undo_step() {
 /// **Grouped instances refuse**: an instance nested inside a Group cannot
 /// open an explode session (the bake would orphan members from the
 /// containing group; the app falls back to in-context editing) — refused
-/// typed, document untouched, and a top-level instance of the SAME
-/// definition still opens.
+/// typed, document untouched. A top-level SIBLING of the same definition
+/// opens normally: siblings stay live (ARCHITECTURE.md 2.11), so the
+/// grouped one keeps its place in its group, renders the session's
+/// geometry there, and the tree stays valid through the round trip.
 #[test]
 fn a_group_nested_instance_refuses_a_session() {
     let mut doc = Document::new();
-    let (component, instance, _a, _b) = two_member_component(&mut doc);
+    let (component, instance, member_a, _b) = two_member_component(&mut doc);
     let (sibling, _) = doc
         .place_instance(component, Transform::translation(Vec3::new(10.0, 0.0, 0.0)))
         .expect("second placement");
-    doc.group_nodes(&[NodeId::Instance(instance)])
+    let (group, _) = doc
+        .group_nodes(&[NodeId::Instance(instance)])
         .expect("group the first instance");
 
     assert_eq!(
@@ -912,20 +1640,37 @@ fn a_group_nested_instance_refuses_a_session() {
     );
     assert_eq!(doc.explode_session_instance(), None);
 
-    // The SIBLING refuses too: a session must hide every placement, and a
-    // grouped one cannot be hidden without breaking the group-membership
-    // invariant — so any grouped placement anywhere gates the whole
-    // definition into the in-context fallback.
-    assert_eq!(
-        doc.open_explode_session(sibling).unwrap_err(),
-        DocumentError::ExplodeSessionGroupedInstance
-    );
-
-    // Ungroup, and the definition opens normally again.
-    doc.undo().expect("undo the grouping");
+    // The ungrouped sibling opens; the grouped placement stays a live
+    // member of its group and shows the session's geometry.
     doc.open_explode_session(sibling)
-        .expect("sibling opens once ungrouped");
+        .expect("the sibling opens");
+    assert!(doc.instance_ids().contains(&instance));
+    assert_eq!(
+        doc.group_members(group),
+        Some(vec![NodeId::Instance(instance)])
+    );
+    let top = face_matching(&doc, member_a, Vec3::new(0.0, 0.0, 1.0));
+    doc.apply_object_op(
+        member_a,
+        KernelOp::PushPull {
+            face: top,
+            distance: 0.4,
+        },
+    )
+    .expect("edit");
+    let t = doc
+        .expanded_placements()
+        .into_iter()
+        .find(|(o, _, i)| *o == member_a && *i == instance)
+        .map(|(_, t, _)| t)
+        .expect("the grouped placement renders the member");
+    assert!((top_z_through(&doc, member_a, &t) - 1.4).abs() < 1e-9);
     doc.close_explode_session().expect("and closes");
+    assert_eq!(
+        doc.group_members(group),
+        Some(vec![NodeId::Instance(instance)])
+    );
+    Document::load(&doc.save()).expect("the saved document reopens");
 }
 
 // -------------------------------------------------------------- spec 15
@@ -1268,4 +2013,155 @@ fn ungrouping_an_outside_group_refuses_under_a_component_frame_on_a_group_frame(
         !members.contains(&NodeId::Object(w1)) && !members.contains(&NodeId::Object(w2)),
         "the outside group's boxes never joined the session group: {members:?}"
     );
+}
+
+// ------------------------------------------------------- KB-44 regression
+
+/// The sketch vertex positions of `s`, sorted, for an exact before/after
+/// comparison.
+fn sketch_points(doc: &Document, s: kernel::SketchId) -> Vec<(f64, f64, f64)> {
+    let mut v: Vec<(f64, f64, f64)> = doc
+        .sketch(s)
+        .expect("sketch is live")
+        .vertices()
+        .values()
+        .map(|v| (v.position.x, v.position.y, v.position.z))
+        .collect();
+    v.sort_by(|a, b| a.partial_cmp(b).expect("finite"));
+    v
+}
+
+/// KB-44, first half (v1.5 decisions D1): naming an object OUTSIDE the
+/// open component as a draft participant is refused
+/// `ExplodeSessionScope`, and the document is untouched. (The draft once
+/// gave a loose line there to the outside object, and the close folded a
+/// world object's sketch into the definition: the autosave did not reopen.)
+#[test]
+fn naming_an_outside_object_as_a_draft_participant_mid_session_is_refused() {
+    let mut doc = Document::new();
+    doc.set_torture_mode(true);
+    let (component, _first, _a, _b) = two_member_component(&mut doc);
+    let outside = build_box(&mut doc, 10.0, 0.0, 0.0, 12.0, 2.0, 1.0);
+    let (instance, _) = doc
+        .place_instance(component, Transform::translation(Vec3::new(0.0, 10.0, 0.0)))
+        .expect("place");
+    doc.open_explode_session(instance).expect("open");
+
+    let top = Plane::from_point_normal(Point3::new(0.0, 0.0, 1.0), Vec3::new(0.0, 0.0, 1.0))
+        .expect("plane");
+    let objects = doc.drawable_objects_on_plane(top, None);
+    assert!(
+        objects.contains(&outside),
+        "the outside box has a face on the plane"
+    );
+    let before = doc.state_hash();
+    let err = doc
+        .draft(top, None, &objects, "Line", |w| {
+            w.add_segment(Point3::new(10.5, 0.5, 1.0), Point3::new(11.0, 1.5, 1.0))
+                .map(|_| ())
+        })
+        .unwrap_err();
+    assert_eq!(err, DocumentError::ExplodeSessionScope);
+    assert_eq!(doc.state_hash(), before, "the document is untouched");
+    assert!(doc.object_owned_sketches(outside).is_empty());
+    Document::load(&doc.save_for_persistence()).expect("the autosave reopens");
+}
+
+/// KB-44, second half: the same line drawn with the session's own
+/// participants ([`Document::draft_participants`]) is a free session
+/// sketch. The close folds it into the definition through the inverse
+/// pose; the autosave reopens; undo and redo across the close agree; the
+/// outside box owns no sketch and its faces are unsplit.
+#[test]
+fn a_loose_line_on_an_outside_face_mid_session_is_session_drawing() {
+    let mut doc = Document::new();
+    doc.set_torture_mode(true);
+    let (component, _first, _a, _b) = two_member_component(&mut doc);
+    let outside = build_box(&mut doc, 10.0, 0.0, 0.0, 12.0, 2.0, 1.0);
+    let faces = doc.object(outside).expect("live").faces().len();
+    // Enter a TRANSLATED placement, so the fold through its inverse pose
+    // visibly moves the line.
+    let (instance, _) = doc
+        .place_instance(component, Transform::translation(Vec3::new(0.0, 10.0, 0.0)))
+        .expect("place");
+    doc.open_explode_session(instance).expect("open");
+
+    let top = Plane::from_point_normal(Point3::new(0.0, 0.0, 1.0), Vec3::new(0.0, 0.0, 1.0))
+        .expect("plane");
+    let objects = doc.draft_participants(top, None);
+    assert!(!objects.contains(&outside), "the outside box takes no part");
+    let (report, _) = doc
+        .draft(top, None, &objects, "Line", |w| {
+            w.add_segment(Point3::new(10.5, 0.5, 1.0), Point3::new(11.0, 1.5, 1.0))
+                .map(|_| ())
+        })
+        .expect("draft a loose line on the outside box's face");
+    assert_eq!(report.sketches.len(), 1, "one sketch: {report:?}");
+    assert!(report.objects.is_empty(), "no face topology changed");
+    let line = report.sketches[0];
+    assert_eq!(doc.sketch_owner_object(line), None, "a free sketch");
+    assert_eq!(
+        sketch_points(&doc, line),
+        vec![(10.5, 0.5, 1.0), (11.0, 1.5, 1.0)]
+    );
+    Document::load(&doc.save_for_persistence()).expect("the autosave reopens");
+
+    doc.close_explode_session().expect("close");
+    let local = vec![(10.5, -9.5, 1.0), (11.0, -8.5, 1.0)];
+    assert_eq!(doc.sketch_owner_component(line), Some(component));
+    assert_eq!(
+        sketch_points(&doc, line),
+        local,
+        "folded through the inverse pose"
+    );
+    assert!(doc.object_owned_sketches(outside).is_empty());
+    assert_eq!(doc.object(outside).expect("live").faces().len(), faces);
+    Document::load(&doc.save()).expect("the closed document reopens");
+    doc.undo().expect("undo the close");
+    assert_eq!(
+        sketch_points(&doc, line),
+        vec![(10.5, 0.5, 1.0), (11.0, 1.5, 1.0)]
+    );
+    assert_eq!(doc.sketch_owner_component(line), None);
+    doc.redo().expect("redo the close");
+    assert_eq!(doc.sketch_owner_component(line), Some(component));
+    assert_eq!(sketch_points(&doc, line), local);
+    Document::load(&doc.save()).expect("the redone close reopens");
+}
+
+/// The member's-face counterpart: a loose line drafted on a session
+/// member's face is owned by the member and folds into the definition
+/// with it, and the autosave reopens.
+#[test]
+fn a_loose_line_on_a_member_mid_session_folds_in_with_its_owner() {
+    let mut doc = Document::new();
+    doc.set_torture_mode(true);
+    let (component, _first, member_a, _b) = two_member_component(&mut doc);
+    let (instance, _) = doc
+        .place_instance(component, Transform::translation(Vec3::new(0.0, 10.0, 0.0)))
+        .expect("place");
+    doc.open_explode_session(instance).expect("open");
+
+    let top = Plane::from_point_normal(Point3::new(0.0, 0.0, 1.0), Vec3::new(0.0, 0.0, 1.0))
+        .expect("plane");
+    let objects = doc.drawable_objects_on_plane(top, None);
+    let (report, _) = doc
+        .draft(top, None, &objects, "Line", |w| {
+            w.add_segment(Point3::new(0.5, 10.5, 1.0), Point3::new(1.0, 11.5, 1.0))
+                .map(|_| ())
+        })
+        .expect("draft a loose line on the member");
+    let line = report.sketches[0];
+    assert_eq!(doc.sketch_owner_object(line), Some(member_a));
+    Document::load(&doc.save_for_persistence()).expect("the autosave reopens");
+
+    doc.close_explode_session().expect("close");
+    assert_eq!(doc.sketch_owner_object(line), Some(member_a));
+    assert_eq!(doc.sketch_owner_component(line), Some(component));
+    assert_eq!(
+        sketch_points(&doc, line),
+        vec![(0.5, 0.5, 1.0), (1.0, 1.5, 1.0)],
+        "folded into the definition's local frame"
+    );
+    Document::load(&doc.save()).expect("the closed document reopens");
 }

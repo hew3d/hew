@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test'
+import { isMac } from './helpers/platform'
 
 /**
  * Dimension + Text tools (docs/design/dimensions-text.md) — end-to-end,
@@ -127,7 +128,8 @@ test('Dimension + Text: create, move-follows, unit relabel, radius dimension, le
     (t) => window.__hew_test!.setCamera({ position: [4, -5, 3], target: t, fovDeg: 45 }),
     leaderAnchorWorld,
   )
-  await page.keyboard.press('Control+k')
+  // Ctrl+K exists only off-Mac; the Mac binding for the palette is Cmd+/.
+  await page.keyboard.press(isMac ? 'Meta+/' : 'Control+k')
   const palette = page.getByRole('dialog', { name: 'Command palette' })
   await expect(palette).toBeVisible()
   await palette.getByRole('textbox', { name: 'Search' }).fill('Text')

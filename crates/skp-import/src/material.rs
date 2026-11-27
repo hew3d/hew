@@ -1,4 +1,4 @@
-//! OpenSKP materials -> the kernel palette, plus the archive-slot -> dense
+//! Skpwright materials -> the kernel palette, plus the archive-slot -> dense
 //! index mapping face/instance material references resolve through.
 
 use std::collections::BTreeMap;
@@ -19,7 +19,7 @@ pub(crate) struct MatTable {
 }
 
 impl MatTable {
-    pub fn build(model: &openskp::Model) -> MatTable {
+    pub fn build(model: &skpwright::Model) -> MatTable {
         let mut materials = Vec::new();
         let mut textures_missing = Vec::new();
         let mut applied_size_in = Vec::new();
@@ -36,8 +36,15 @@ impl MatTable {
                 continue;
             };
             slot_to_dense.insert(slot, materials.len() as u32);
+            let pbr = model
+                .features
+                .material_pbr
+                .iter()
+                .find(|(i, _)| *i == idx)
+                .and_then(|(_, p)| pbr_of(p));
+            let first = materials.len();
             match m {
-                openskp::Material::Solid {
+                skpwright::Material::Solid {
                     name,
                     rgba,
                     opacity,
@@ -58,7 +65,7 @@ impl MatTable {
                     ));
                     applied_size_in.push(None);
                 }
-                openskp::Material::Textured {
+                skpwright::Material::Textured {
                     name,
                     texture,
                     applied_size_in: size_in,
@@ -77,7 +84,7 @@ impl MatTable {
                             // per-face UV frames carry the real mapping).
                             let world_size = match size_in {
                                 Some((w, h)) if *w > 0.0 && *h > 0.0 => {
-                                    [w / openskp::INCH, h / openskp::INCH]
+                                    [w / skpwright::INCH, h / skpwright::INCH]
                                 }
                                 _ => [1.0, 1.0],
                             };
@@ -98,7 +105,7 @@ impl MatTable {
                         _ => {
                             // No embedded image: keep the material usable as
                             // its average color and report the texture. Rare
-                            // since OpenSKP resolves shared-texture back-refs
+                            // since Skpwright resolves shared-texture back-refs
                             // to the owning material's bytes, but stays as
                             // the honest fallback (rule 4: loud, not silent).
                             let label = texture.clone().unwrap_or_else(|| name.clone());
@@ -115,6 +122,8 @@ impl MatTable {
                     applied_size_in.push(*size_in);
                 }
             }
+            // Each arm pushed exactly one palette entry.
+            materials[first].pbr = pbr;
         }
 
         MatTable {
@@ -161,7 +170,46 @@ impl MatTable {
     }
 }
 
-/// PNG vs JPEG from the payload magic (OpenSKP embeds only these two).
+/// The physically based properties Hew interprets, or `None` when they are
+/// the plain material's.
+///
+/// A converted file lists a material whose factors are untouched defaults
+/// (metallic 1, roughness 1, classic workflow); read literally that is a
+/// full metal, so the metallic factor counts only when the workflow is
+/// metallic-roughness, the metalness map is enabled, or the factor is not
+/// the default. A map counts when its slot holds an image and its enable
+/// flag is set. Everything else in the record (workflow, promotion state,
+/// flags, normal-map style, base colour factor, unread attributes) is not
+/// interpreted; a save back keeps it.
+pub fn pbr_of(p: &skpwright::PbrMaterial) -> Option<kernel::Pbr> {
+    let map = |slot: &Option<skpwright::PbrTexture>, on: bool| {
+        slot.as_ref()
+            .filter(|t| on && !t.png.is_empty())
+            .map(|t| kernel::PbrMap {
+                image: t.png.clone(),
+                format: ImageFormat::Png,
+            })
+    };
+    let metal_counts =
+        p.workflow == 1 || p.enable_metalness || (p.metallic_factor - 1.0).abs() > f32::EPSILON;
+    let out = kernel::Pbr {
+        metallic: if metal_counts {
+            p.metallic_factor.clamp(0.0, 1.0)
+        } else {
+            0.0
+        },
+        roughness: p.roughness_factor.clamp(0.0, 1.0),
+        normal_scale: p.normal_scale.max(0.0),
+        occlusion_strength: p.occlusion_strength.clamp(0.0, 1.0),
+        metallic_map: map(&p.metallic, p.enable_metalness),
+        roughness_map: map(&p.roughness, p.enable_roughness),
+        normal_map: map(&p.normal, p.enable_normal),
+        occlusion_map: map(&p.occlusion, p.enable_occlusion),
+    };
+    (!out.is_plain() && out.is_valid()).then_some(out)
+}
+
+/// PNG vs JPEG from the payload magic (Skpwright embeds only these two).
 fn sniff_format(bytes: &[u8]) -> ImageFormat {
     if bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
         ImageFormat::Png

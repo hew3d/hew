@@ -1,0 +1,19 @@
+[package]
+name = "sources"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Shared Library sources (docs/design/shared-library-sources.md 6.1 to 6.4):
+# the `hew.json` index and catalog parsers, source-reference parsing and
+# canonicalization, request-URL building, the index builder, and the
+# public-host check. Pure: no UI, no I/O, no network. Not a kernel crate, but
+# on the `no_wasm_panics` list because the web build runs it through wasm-api.
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true

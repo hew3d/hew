@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test'
+import { activateFromToolsMenu } from './helpers/offset'
 
 /**
  * Texture positioning (paint-tool design §3) — the Position Texture tool
@@ -66,10 +67,12 @@ function dock(page: import('@playwright/test').Page) {
   return page.locator('.hew-dock')
 }
 
-test('Position Texture appears on the dock for a selected object and activates the tool', async ({ page }) => {
+test('Position Texture is in the Tools menu and activates the tool for a selected object', async ({ page }) => {
   const { boxId } = await setupTexturedBox(page)
   await expect(dock(page)).toContainText('OBJECT')
-  await dock(page).getByRole('button', { name: 'Position Texture' }).click()
+  // Not a dock chip any more (Paint is the way to it): the Tools menu has it.
+  await expect(dock(page).getByRole('button', { name: 'Position Texture' })).toHaveCount(0)
+  await activateFromToolsMenu(page, 'Position Texture')
   await expect(page.getByText(/Click a textured face to position its texture/i)).toBeVisible()
   // Sanity: the box is still there, unpainted state untouched by activation alone.
   expect(await page.evaluate((id) => window.__hew_test!.getFaceMaterial(id, id), boxId)).toBeDefined()
@@ -84,7 +87,7 @@ test('a real drag translates the texture and Enter commits it as one undo step',
   )
   expect(before).toEqual([]) // planar default, no explicit frame yet
 
-  await dock(page).getByRole('button', { name: 'Position Texture' }).click()
+  await activateFromToolsMenu(page, 'Position Texture')
 
   const start = await page.evaluate(() => window.__hew_test!.worldToScreen([1, 1, 1]))
   const end = await page.evaluate(() => window.__hew_test!.worldToScreen([1.6, 1, 1]))
@@ -132,7 +135,7 @@ test('a real drag translates the texture and Enter commits it as one undo step',
 test('Esc reverts the drag without committing anything', async ({ page }) => {
   const { boxId, faceId, canvas } = await setupTexturedBox(page)
 
-  await dock(page).getByRole('button', { name: 'Position Texture' }).click()
+  await activateFromToolsMenu(page, 'Position Texture')
 
   const start = await page.evaluate(() => window.__hew_test!.worldToScreen([1, 1, 1]))
   const end = await page.evaluate(() => window.__hew_test!.worldToScreen([0.4, 1.6, 1]))

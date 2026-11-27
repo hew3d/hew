@@ -1,0 +1,14 @@
+{
+  "title": "A hull lofted through three rectangles of different size",
+  "from": "Loft: ruled sections between rectangles at three heights.",
+  "build": [
+    {"method": "hew.sketch.draw_rect", "as": "a", "params": {"plane": {"origin": [0, 0, 0], "normal": [0, 0, 1]}, "corner_a": ["-50mm", "-30mm", 0], "corner_b": ["50mm", "30mm", 0]}},
+    {"method": "hew.sketch.draw_rect", "as": "b", "params": {"plane": {"origin": [0, 0, "40mm"], "normal": [0, 0, 1]}, "corner_a": ["-35mm", "-20mm", "40mm"], "corner_b": ["35mm", "20mm", "40mm"]}},
+    {"method": "hew.sketch.draw_rect", "as": "c", "params": {"plane": {"origin": [0, 0, "90mm"], "normal": [0, 0, 1]}, "corner_a": ["-12mm", "-8mm", "90mm"], "corner_b": ["12mm", "8mm", "90mm"]}},
+    {
+      "method": "hew.solid.loft",
+      "as": "hull",
+      "params": {"profiles": [{"$ref": "a#/region_id"}, {"$ref": "b#/region_id"}, {"$ref": "c#/region_id"}]}
+    }
+  ]
+}

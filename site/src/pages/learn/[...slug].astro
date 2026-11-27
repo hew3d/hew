@@ -1,12 +1,13 @@
 ---
-import { getCollection, render } from 'astro:content';
+import { render } from 'astro:content';
+import { getPublishedLearn } from '../../lib/published';
 import type { InferGetStaticPropsType } from 'astro';
 import ProseLayout from '../../layouts/ProseLayout.astro';
 import DocsVideoRuntime from '../../components/DocsVideoRuntime.astro';
 import docsVideoManifest from '../../data/videos.json';
 
 export async function getStaticPaths() {
-  const entries = await getCollection('learn');
+  const entries = await getPublishedLearn();
   const sorted = [...entries].sort((a, b) => a.data.order - b.data.order);
   return sorted.map((entry, index) => ({
     params: { slug: entry.id },

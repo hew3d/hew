@@ -6,6 +6,7 @@
 
 #![allow(dead_code)]
 
+use kernel::trig;
 use std::f64::consts::TAU;
 
 use kernel::{
@@ -94,7 +95,7 @@ impl Wall {
         (0..n)
             .map(|i| {
                 let a = phase + TAU * i as f64 / n as f64;
-                c + self.u * (r * a.cos()) + self.v * (r * a.sin())
+                c + self.u * (r * trig::cos(a)) + self.v * (r * trig::sin(a))
             })
             .collect()
     }
@@ -642,7 +643,13 @@ pub fn plane_objects(
     scope: Option<ComponentId>,
     obj: ObjectId,
 ) -> Vec<ObjectId> {
-    let mut objs = doc.drawable_objects_on_plane(plane, scope);
+    // A frozen object takes no part (OW-1, as `draft_participants` has
+    // it): it is only something to draw over.
+    let mut objs: Vec<ObjectId> = doc
+        .drawable_objects_on_plane(plane, scope)
+        .into_iter()
+        .filter(|&o| doc.node_frozen(kernel::NodeId::Object(o)).is_none())
+        .collect();
     if !objs.contains(&obj) {
         objs.push(obj);
     }
@@ -992,13 +999,41 @@ pub fn ground_edit(
     sk
 }
 
-/// I6: the wall's face group equals the regions of `sk`. The solid's rings
-/// are compared exactly; only the GROUND side may shed straight-through
+/// The solid's `faces` equal the ground's regions `ground`. The solid's
+/// rings are compared exactly; only the GROUND side may shed straight-through
 /// vertices (a line drawn along an edge leaves one on the ground where it
-/// ends, and the solid inserts none), so a stray vertex on the solid still
-/// fails.
+/// ends, and the solid inserts none), and only those the solid does not
+/// itself have: a vertex where another face's corner meets the edge is real
+/// on the solid too (a T-junction). A stray vertex on the solid still fails.
+pub fn faces_match_ground(faces: &[Rings], ground: &[Rings], n: Vec3) -> bool {
+    let solid: Vec<Point3> = faces
+        .iter()
+        .flat_map(|(o, hs)| o.iter().chain(hs.iter().flatten()))
+        .copied()
+        .collect();
+    let shed = |ring: &[Point3]| -> Vec<Point3> {
+        let k = ring.len();
+        (0..k)
+            .filter(|&i| {
+                let (a, b, c) = (ring[(i + k - 1) % k], ring[i], ring[(i + 1) % k]);
+                let bend = ((b - a).cross(c - b)).dot(n).abs()
+                    > 1e-9 * (b - a).length() * (c - b).length();
+                bend || solid.iter().any(|&q| q.approx_eq(b, tol::POINT_MERGE))
+            })
+            .map(|i| ring[i])
+            .collect()
+    };
+    let shed_ground: Vec<Rings> = ground
+        .iter()
+        .map(|(o, hs)| (shed(o), hs.iter().map(|h| shed(h)).collect()))
+        .collect();
+    multiset_match(faces, ground, true)
+        || multiset_match(faces, &straightened(ground, n), true)
+        || multiset_match(faces, &shed_ground, true)
+}
+
+/// I6: the wall's face group equals the regions of `sk` ([`faces_match_ground`]).
 pub fn assert_group_matches_ground(w: &Wall, sk: &Sketch) {
-    let n = w.plane.normal();
     let ground = ground_regions(sk);
     let obj = w.obj();
     let faces: Vec<Rings> = group_faces(obj, &w.plane)
@@ -1006,8 +1041,7 @@ pub fn assert_group_matches_ground(w: &Wall, sk: &Sketch) {
         .map(|f| face_rings(obj, f))
         .collect();
     assert!(
-        multiset_match(&faces, &ground, true)
-            || multiset_match(&faces, &straightened(&ground, n), true),
+        faces_match_ground(&faces, &ground, w.plane.normal()),
         "face group ({} faces) differs from the ground ({} regions)",
         faces.len(),
         ground.len()
@@ -1049,7 +1083,13 @@ pub fn split_and_check(w: &mut Wall, face: FaceId, path: Vec<Point3>) -> FaceSpl
 pub fn merge_and_check(w: &mut Wall, edge: EdgeId) -> kernel::FaceMergeReport {
     let before = w.obj().clone();
     let run = run_segments(&before, edge);
-    let report = apply_and_check(w, KernelOp::MergeFaces { edge });
+    let report = apply_and_check(
+        w,
+        KernelOp::MergeFaces {
+            edge,
+            keep_vertices: Vec::new(),
+        },
+    );
     assert_group_matches_ground(w, &ground_edit(w.plane, &before, &[], &run));
     match report {
         KernelOpReport::FaceMerge(r) => r,

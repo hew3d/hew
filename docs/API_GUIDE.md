@@ -132,6 +132,95 @@ became four. `hew.view.snapshot` let the program see the result rather
 than infer it from numbers. The rest of this guide is those four, plus
 what to do when a command says no.
 
+## Draw curved profiles
+
+A profile with rounded corners is a chain of straight runs and arcs that
+ends where it began. Draw each run with its own command, and put every
+command after the first on the sketch the first one made:
+
+- Draw the straight runs with `hew.sketch.draw_line` and the arcs with
+  `hew.sketch.draw_arc`. The first call takes a plane such as
+  `{"ground": true}`; every later call takes `{"sketch": <id>}` from that
+  call's result, so all the runs land in one sketch. The region closes when
+  the last edge lands on the first point, and the closing call's result
+  carries `region_id`.
+- An arc you want kept as an arc must come from `draw_arc`. A run of short
+  `draw_line` segments that happens to follow a curve gives hard facets on
+  purpose: Hew never treats a curve as round unless you said it was. It
+  extrudes into flat strips, it does not snap to a center, and it is not
+  smooth-shaded.
+- Extrude along the sketch normal to keep circles circular. Tilt the solid
+  afterward if you want a lean.
+- Send coordinates at full precision. Points closer than a nanometer
+  (1e-9 m) are the same point, and nothing looser is. A client that rounds
+  to micrometers, as a JSON pretty-printer or `round(v, 6)` will, leaves
+  every line and arc junction open by about 1e-7 m. The loop never closes,
+  and the only sign is an empty `region_ids` on the last call. To catch
+  this early, `draw_line` and `draw_arc` refuse a point that misses an open
+  end of the same sketch by more than a nanometer but less than 0.1 mm,
+  with the refusal `endpoint_near_miss`:
+
+  ```json
+  {"refusal": "endpoint_near_miss",
+   "detail": {"gap": 1e-07, "nearest": [0.04, 0.0, 0.0]},
+   "explanation": "This point misses an existing endpoint by 0.100 micrometers. Send coordinates at full precision, or use that endpoint exactly."}
+  ```
+
+  Nothing is drawn when it refuses. Send the point `nearest` names, or the
+  full-precision value you computed it from.
+
+This transaction draws a 0.4 by 0.2 m plate with 0.04 m rounded corners,
+extrudes it 0.05 m, and rounds the top rim with a 0.01 m fillet. The
+fillet's edge is the whole rim of the top face, named by a face locator;
+the corner arcs and the straight runs are rounded as one chain.
+
+```json
+{"jsonrpc": "2.0", "id": 3, "method": "hew.doc.transact",
+ "params": {"label": "Rounded plate", "commands": [
+  {"method": "hew.sketch.draw_line", "as": "bottom",
+   "params": {"plane": {"ground": true},
+              "points": [[0.04, 0, 0], [0.36, 0, 0]]}},
+  {"method": "hew.sketch.draw_arc",
+   "params": {"plane": {"sketch": {"$ref": "bottom#/sketch"}},
+              "center": [0.36, 0.04, 0], "radius": 0.04,
+              "start_angle": -1.5707963267948966, "end_angle": 0}},
+  {"method": "hew.sketch.draw_line",
+   "params": {"plane": {"sketch": {"$ref": "bottom#/sketch"}},
+              "points": [[0.4, 0.04, 0], [0.4, 0.16, 0]]}},
+  {"method": "hew.sketch.draw_arc",
+   "params": {"plane": {"sketch": {"$ref": "bottom#/sketch"}},
+              "center": [0.36, 0.16, 0], "radius": 0.04,
+              "start_angle": 0, "end_angle": 1.5707963267948966}},
+  {"method": "hew.sketch.draw_line",
+   "params": {"plane": {"sketch": {"$ref": "bottom#/sketch"}},
+              "points": [[0.36, 0.2, 0], [0.04, 0.2, 0]]}},
+  {"method": "hew.sketch.draw_arc",
+   "params": {"plane": {"sketch": {"$ref": "bottom#/sketch"}},
+              "center": [0.04, 0.16, 0], "radius": 0.04,
+              "start_angle": 1.5707963267948966, "end_angle": 3.141592653589793}},
+  {"method": "hew.sketch.draw_line",
+   "params": {"plane": {"sketch": {"$ref": "bottom#/sketch"}},
+              "points": [[0, 0.16, 0], [0, 0.04, 0]]}},
+  {"method": "hew.sketch.draw_arc", "as": "closed",
+   "params": {"plane": {"sketch": {"$ref": "bottom#/sketch"}},
+              "center": [0.04, 0.04, 0], "radius": 0.04,
+              "start_angle": 3.141592653589793, "end_angle": 4.71238898038469}},
+  {"method": "hew.solid.extrude", "as": "plate",
+   "params": {"region": {"$ref": "closed#/region_id"}, "distance": 0.05}},
+  {"method": "hew.solid.fillet",
+   "params": {"edges": [{"face": {"object": {"$ref": "plate#/object_id"},
+                                  "at": [0.2, 0.1, 0.05]}}],
+              "radius": 0.01}}]}}
+```
+
+The first seven commands answer with an empty `region_ids`, and the
+closing arc answers with the one `region_id` that `extrude` takes. The
+fillet's result names the new blend and its size:
+
+```json
+{"blend_ids": [1], "faces": 312, "object_id": "obj_1", "size": 0.01}
+```
+
 ## Every request is JSON-RPC 2.0
 
 A request carries `id`, `method`, and `params`. A response carries the
@@ -286,7 +375,13 @@ same result as headless:
   into the document, additively and as one undo entry. `hew-cli` reads the
   file (and a COLLADA file's textures) for you and sends the bytes; a raw
   client sends `bytes_base64` itself.
-- `hew.view.snapshot`, `hew.view.line_drawing`, and `hew.print.pdf` are
+- `hew.component.import_definition {bytes_base64, format}` turns a file's
+  bytes (`hew`, `skp`, `glb`, `gltf`, `stl`, `dae`) into one unplaced
+  component definition you place with `hew.component.place`. Sending the
+  same bytes again returns the same definition (`reused: true`) instead of
+  making another.
+- `hew.view.snapshot` and `hew.view.line_drawing` with a `path` are written
+  by `hew-cli` from the bytes the app returns, once. `hew.print.pdf` is
   rendered by `hew-cli` from a copy of the document's saved bytes, so you
   can see a background document too. With no camera named, the render
   starts from what the user is looking at (the viewport camera at the
@@ -495,6 +590,51 @@ how new capability arrives.
 `hew-cli run` stops at the first refusal, exits nonzero, and prints the
 refusal to stderr as JSON. `hew-cli dispatch` does the same for one
 envelope.
+
+## Lock what must not change
+
+A model often has a part that must not move while everything around it
+does: an imported house, a reference part. `hew.entity.lock` and
+`hew.entity.unlock` take `targets` (objects, groups, and component
+instances) and are one undo entry each. Pass `{"all": true}` alone to
+`hew.entity.unlock` to unlock everything.
+
+```json
+{"jsonrpc": "2.0", "id": 4, "method": "hew.entity.lock",
+ "params": {"targets": ["obj_1"]}}
+```
+
+A lock belongs to a shape, not to one copy of it. Lock one copy of a
+component, or of a set of linked copies, and every copy is locked;
+unlock any copy and every copy is unlocked. To change one copy alone,
+call `hew.component.make_unique` on it, which works on a locked copy and
+gives the copy a shape and a lock of its own. A copy inside a locked
+group, or inside a locked component, is not a locked copy: unlock what
+holds it first.
+
+`hew.query.entity` and every `hew.query.occurrences` row report `locked`
+(the entity's own lock) and `frozen` (whether any lock keeps it from
+changing: its own, a locked group above it, or a locked shape it is part
+of). A command that would change a frozen entity is refused whole, with
+the document untouched:
+
+```json
+{"refusal": "locked_node",
+ "detail": {"node": "grp_5", "via_shared_shape": false},
+ "explanation": "Locked. Unlock it to change it."}
+```
+
+`detail.node` names the locked entity behind the refusal. When
+`via_shared_shape` is `true` the edit reached a locked thing only through
+a shape the entity shares: the component you are editing is also placed
+inside a locked group, and the copy you named is not locked. The way out
+is `hew.component.make_unique` on that copy, or unlocking `node`.
+
+Leaving the locked ones out of a command is your choice, never the
+kernel's: a call that names a locked entity among others is refused as a
+whole. Reading, hiding and showing, and copying a locked entity still
+work, and so does drawing on its face (the drawing is free and does not
+cut the face).
 
 ## Look at what you built
 
@@ -747,12 +887,46 @@ hew-cli dispatch hew.library.insert \
 
 `hew.library.remove` deletes an item; `hew.library.update_meta` edits
 its name, keywords, or collection without touching the file it was
-saved as. All six commands work identically in `--live` — the
+saved as. Those six commands work identically in `--live` — the
 Library lives on whichever machine runs `hew-cli`, so `list`/
 `describe`/`remove`/`update_meta` never even need a running desktop
 instance, and `insert`/`save` read or write the item on this side
 while the geometry itself lands in the live document (§12.1 of the
 spec has the full mechanics).
+
+When an item changes in the Library, the documents that use it can
+catch up. `hew.library.status` lists every definition that came from
+the Library and where it stands: `in_step`, `library_newer`,
+`edited_here`, `both_changed`, `different` (a part placed before 1.5
+whose two sides differ), or `item_missing`. Renaming an item never
+shows up here; only a change to what the part holds does. A part that is
+open for editing is reported as it would be saved.
+
+```sh
+hew-cli dispatch hew.library.status '{}' --file room.hew
+# {"result": {"links": [{"definition": "cmp_4", "name": "Side Table", "item": "3f2a9900-…", "state": "library_newer", "copies": 2, "locked": false, …}]}}
+```
+
+`hew.library.update` brings parts up to date, as one undo step: name
+them with `definitions`, or pass `"all": true` for every part the
+Library has newer (a part also changed here is updated only when you
+name it, since its changes would be replaced). Each copy stays where
+it stands. A part that is locked, open for editing, or whose item is
+gone is skipped and listed with the reason; the rest go through. A part
+nested inside an updated one that you changed here, or that a lock
+holds, is never overwritten: it is listed under `kept`, and the updated
+part gets a fresh copy of the Library's version instead.
+
+```sh
+hew-cli dispatch hew.library.update '{"all": true}' --file room.hew
+# {"result": {"results": [{"updated": ["cmp_4"], "also_updated": [], "unchanged": [], "kept": [], "skipped": [], …}]}}
+```
+
+To push a part changed here back to the Library, save it over its item
+with `hew.library.save` and `replace` (the item's id): the item keeps
+its id, and other documents see it as `library_newer`. These two
+commands read the Library on the machine they run on, so in `--live`
+they are not served yet.
 
 Two differences from saving through the app's own Library browser,
 worth knowing: `save` stamps the item's "saved from" bookkeeping
@@ -821,7 +995,10 @@ Linux, installed from a `.deb`/`.rpm` (`hew-cli` is already on `PATH`):
 ```
 
 Add `"--live"` to `args` to drive the app the user has open instead of
-an embedded document.
+an embedded document. Each argument is its own array entry:
+`"args": ["mcp", "--live", "--launch"]`, never `"args": ["mcp --live --launch"]`
+(one string reaches `hew-cli` as a single unknown command, and the client
+only reports a closed connection).
 
 The server does not expose one tool per command. Eighty near-flat tools
 would bury a model in choices while stripping the transaction semantics

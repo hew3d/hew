@@ -201,7 +201,7 @@ describe('LineTool — honest refusal when a re-homed chain closes onto an EARLI
     // detection in the real kernel either — the two vertices are merely
     // coincident, not welded) — so this must NOT be silent.
     expect(onToast).toHaveBeenCalledTimes(1)
-    expect(onToast).toHaveBeenCalledWith(expect.stringContaining('spans two planes'))
+    expect(onToast).toHaveBeenCalledWith(expect.stringContaining('do not lie on one plane'))
     // The point still commits (as its own, merely-coincident vertex) rather
     // than being dropped outright — the refusal is about the CLOSURE, not
     // the placement.
@@ -221,7 +221,7 @@ describe('LineTool — honest refusal when a re-homed chain closes onto an EARLI
 })
 
 describe('LineTool — a mid-gesture undo invalidates the stale cross-sketch bookkeeping (tool-parity DELTA review finding 2)', () => {
-  it('a coincidence with a PRE-UNDO vertex does not surface the "spans two planes" toast once onHistoryChanged has fired', () => {
+  it('a coincidence with a PRE-UNDO vertex does not surface the "do not lie on one plane" toast once onHistoryChanged has fired', () => {
     const { scene } = makeWasmScene()
     const { tool, onToast } = makeTool(scene)
 
@@ -242,7 +242,7 @@ describe('LineTool — a mid-gesture undo invalidates the stale cross-sketch boo
     // plane — onHistoryChanged does not touch planeStage) and close back to
     // the chain's very first point, [2,3,4]. Pre-fix, `_chainVertices` still
     // remembered that point as belonging to sketch A (a DIFFERENT sketch
-    // from the current B) and wrongly fired the "spans two planes" toast —
+    // from the current B) and wrongly fired the "do not lie on one plane" toast —
     // exactly the assertion the sibling test two blocks up makes WITHOUT an
     // intervening onHistoryChanged call, where that same toast is in fact
     // correct. Here, the invalidation must have cleared that bookkeeping,
@@ -290,5 +290,42 @@ describe('LineTool — chain re-homing against a MOVED drawing-axes frame', () =
     expect(segmentCalls).toHaveLength(2)
     expect(planeCalls[1]).not.toEqual(planeCalls[0])
     expect(segmentCalls[1]).toEqual({ a: [2, 3, 9], b: [2, 7, 9] })
+  })
+})
+
+describe('LineTool — four Lines closing a loop that is not flat (playtest step 9)', () => {
+  /** Three Lines from (1,0,0): along the ground to (0,0,0) and (0,1,0),
+   *  then ↑ to (0,1,1), which re-homes the chain off the ground. */
+  function drawThreeSides(tool: LineTool) {
+    tool.onPointerDown(makeSnap([1, 0, 0]), RAY)
+    tool.onPointerDown(makeSnap([0, 0, 0]), RAY)
+    tool.onPointerDown(makeSnap([0, 1, 0]), RAY)
+    tool.onKey(makeKeyEvent('ArrowUp'))
+    tool.onPointerDown(makeSnap([0, 1, 1]), RAY)
+  }
+
+  it('the fourth Line back to the start is drawn, and the toast says no face formed', () => {
+    const { scene, segmentCalls } = makeWasmScene()
+    const { tool, onToast } = makeTool(scene)
+    drawThreeSides(tool)
+    tool.onKey(makeKeyEvent('ArrowUp')) // release the lock
+    tool.onPointerDown(makeSnap([1, 0, 0]), RAY)
+    expect(segmentCalls).toHaveLength(4)
+    expect(segmentCalls[3]).toEqual({ a: [0, 1, 1], b: [1, 0, 0] })
+    expect(onToast).toHaveBeenCalledTimes(1)
+    expect(onToast).toHaveBeenCalledWith(expect.stringContaining('do not lie on one plane'))
+  })
+
+  it('a click the still-held ↑ lock lands back on the foot of the Line just drawn closes no loop, so no "not on one plane" toast', () => {
+    // The dry run's fourth Line: the cursor aimed at the start, but the ↑
+    // lock was still on, so the engine answered on the vertical — the
+    // Line's own foot (0, 1, 0), "Endpoint on blue axis". That retraces the
+    // third Line; it is not a loop in space, and the toast must not say one
+    // failed to lie flat.
+    const { scene } = makeWasmScene()
+    const { tool, onToast } = makeTool(scene)
+    drawThreeSides(tool)
+    tool.onPointerDown({ ...makeSnap([0, 1, 0]), kind: 'endpoint' }, RAY)
+    expect(onToast).not.toHaveBeenCalledWith(expect.stringContaining('do not lie on one plane'))
   })
 })

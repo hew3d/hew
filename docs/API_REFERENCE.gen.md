@@ -16,6 +16,148 @@ New to the API? Read docs/API_GUIDE.md first — how to connect, what
 a session looks like, and worked examples of the idioms these
 entries assume (transactions, `$ref`, face locators, refusals).
 
+## hew.array
+
+### `hew.array.path`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** model-mutating
+- **Served:** kernel
+- **Permission:** model.write
+
+Copy nodes along a sketch curve or face loop, with an optional scale ramp.
+
+> **Preview.** Part of the preview feature Array along Path (`path-array`). Only a preview build serves it; a production build leaves it out of every listing and refuses it with `preview_only`.
+
+**Params schema:**
+
+```json
+{
+  "properties": {
+    "align": {
+      "description": "turn copies to follow the path tangent (default true)",
+      "type": "boolean"
+    },
+    "count": {
+      "description": "total instances including the original",
+      "minimum": 2,
+      "type": "integer"
+    },
+    "nodes": {
+      "description": "ids of the objects, groups or instances to copy",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "path": {
+      "oneOf": [
+        {
+          "properties": {
+            "curve": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "curve"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "face": {
+              "description": "a face locator; its outer loop is a closed path",
+              "type": "object"
+            }
+          },
+          "required": [
+            "face"
+          ],
+          "type": "object"
+        },
+        {
+          "description": "Reserved: no kernel mapping yet, refuses unimplemented",
+          "properties": {
+            "edges": {
+              "type": "array"
+            }
+          },
+          "required": [
+            "edges"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "scale": {
+      "description": "uniform scale at the first and last copy, linear between; default 1 to 1",
+      "properties": {
+        "from": {
+          "type": "number"
+        },
+        "to": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "from",
+        "to"
+      ],
+      "type": "object"
+    }
+  },
+  "required": [
+    "nodes",
+    "path",
+    "count"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "properties": {
+    "node_ids": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "node_ids"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `amount_out_of_range` — That amount is out of range.
+- `path_too_short_for_count` — The path is too short for that many copies.
+- `array_count_too_large`
+- `empty_path` — Follow Me needs a path. Select or click the line, curve, or face edge to follow.
+- `unknown_path_edge` — That path line is no longer there — the model changed since it was picked. Click it again.
+- `path_branches` — The path forks — Follow Me needs one continuous run of lines. Select a single chain with no branches.
+- `path_disconnected` — The path is in separate pieces. Select one connected run of lines.
+- `path_segment_too_short` — Part of the path is too short to follow. Redraw the path without tiny segments.
+- `empty_selection` — The selection has nothing visible to transform — everything in it is hidden or empty. Unhide its contents, or select something visible.
+- `duplicate_member` — The same object is in the selection twice. Reselect and try again.
+- `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
+- `unknown_group` — That group is no longer there — the model changed since it was picked. Click it again.
+- `unknown_instance` — That component instance is no longer there — the model changed since it was picked. Click it again.
+- `unknown_face` — That face is no longer there — the model changed since it was picked. Click it again.
+- `unknown_entity`
+- `locator_missed`
+- `ambiguous_locator`
+- `reflection`
+- `unimplemented`
+- `locked_node` — Locked. Unlock it to change it.
+
 ## hew.attr
 
 ### `hew.attr.delete`
@@ -24,6 +166,7 @@ entries assume (transactions, `$ref`, face locators, refusals).
 - **Tier:** Required
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** attributes.write
 
 Delete one attribute key or a whole namespace.
 
@@ -40,7 +183,36 @@ Delete one attribute key or a whole namespace.
       "type": "string"
     },
     "target": {
-      "type": "string"
+      "oneOf": [
+        {
+          "description": "an entity's public id, or \"document\"",
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "face": {
+              "description": "a face locator: {object | path, at}, {object | path, ray}, or {\"$face\": \"label#key\"}; path is an occurrence path ending at the object, at and ray in the object's own frame: world coordinates for an object with no placement above it, the definition's coordinates for one reached through a placement"
+            }
+          },
+          "required": [
+            "face"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "edge": {
+              "description": "a solid edge locator: {object | path, at}, at in the object's own frame: world coordinates for an object with no placement above it, the definition's coordinates for one reached through a placement"
+            }
+          },
+          "required": [
+            "edge"
+          ],
+          "type": "object"
+        }
+      ]
     }
   },
   "required": [
@@ -64,8 +236,19 @@ Delete one attribute key or a whole namespace.
 **Refusals:**
 
 - `unknown_entity`
+- `unknown_face` — That face is no longer there — the model changed since it was picked. Click it again.
+- `unknown_edge` — That edge is no longer there — the model changed since it was picked. Click it again.
+- `not_a_solid_edge`
+- `locator_missed`
+- `ambiguous_locator`
+- `face_token_unknown`
+- `face_token_stale`
+- `unknown_occurrence`
+- `not_an_object`
+- `explode_session_scope` — That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again.
 - `invalid_attr_name` — Attribute names need both a namespace and a key. Give the attribute a non-empty name and try again.
 - `reserved_attr_namespace`
+- `attr_namespace_not_granted`
 - `unknown_attr` — That attribute doesn't exist on this item, so there was nothing to remove.
 - `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
 - `unknown_group` — That group is no longer there — the model changed since it was picked. Click it again.
@@ -75,6 +258,7 @@ Delete one attribute key or a whole namespace.
 - `unknown_material` — That material is no longer in the palette. Pick another swatch.
 - `unknown_component` — That component is no longer there — the model changed since it was picked. Click it again.
 - `unknown_tag` — That tag doesn't exist in this model. Check the tag name and try again.
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.attr.get`
 
@@ -82,6 +266,7 @@ Delete one attribute key or a whole namespace.
 - **Tier:** Required
 - **Class:** read-only
 - **Served:** kernel
+- **Permission:** model.read
 
 Read a target's attribute dictionaries.
 
@@ -95,7 +280,36 @@ Read a target's attribute dictionaries.
       "type": "string"
     },
     "target": {
-      "type": "string"
+      "oneOf": [
+        {
+          "description": "an entity's public id, or \"document\"",
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "face": {
+              "description": "a face locator: {object | path, at}, {object | path, ray}, or {\"$face\": \"label#key\"}; path is an occurrence path ending at the object, at and ray in the object's own frame: world coordinates for an object with no placement above it, the definition's coordinates for one reached through a placement"
+            }
+          },
+          "required": [
+            "face"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "edge": {
+              "description": "a solid edge locator: {object | path, at}, at in the object's own frame: world coordinates for an object with no placement above it, the definition's coordinates for one reached through a placement"
+            }
+          },
+          "required": [
+            "edge"
+          ],
+          "type": "object"
+        }
+      ]
     }
   },
   "required": [
@@ -116,6 +330,16 @@ Read a target's attribute dictionaries.
 **Refusals:**
 
 - `unknown_entity`
+- `unknown_face` — That face is no longer there — the model changed since it was picked. Click it again.
+- `unknown_edge` — That edge is no longer there — the model changed since it was picked. Click it again.
+- `not_a_solid_edge`
+- `locator_missed`
+- `ambiguous_locator`
+- `face_token_unknown`
+- `face_token_stale`
+- `unknown_occurrence`
+- `not_an_object`
+- `explode_session_scope` — That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again.
 - `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
 - `unknown_group` — That group is no longer there — the model changed since it was picked. Click it again.
 - `unknown_instance` — That component instance is no longer there — the model changed since it was picked. Click it again.
@@ -131,6 +355,7 @@ Read a target's attribute dictionaries.
 - **Tier:** Required
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** attributes.write
 
 Write one attribute key.
 
@@ -147,7 +372,36 @@ Write one attribute key.
       "type": "string"
     },
     "target": {
-      "type": "string"
+      "oneOf": [
+        {
+          "description": "an entity's public id, or \"document\"",
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "face": {
+              "description": "a face locator: {object | path, at}, {object | path, ray}, or {\"$face\": \"label#key\"}; path is an occurrence path ending at the object, at and ray in the object's own frame: world coordinates for an object with no placement above it, the definition's coordinates for one reached through a placement"
+            }
+          },
+          "required": [
+            "face"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "edge": {
+              "description": "a solid edge locator: {object | path, at}, at in the object's own frame: world coordinates for an object with no placement above it, the definition's coordinates for one reached through a placement"
+            }
+          },
+          "required": [
+            "edge"
+          ],
+          "type": "object"
+        }
+      ]
     },
     "value": {}
   },
@@ -174,8 +428,19 @@ Write one attribute key.
 **Refusals:**
 
 - `unknown_entity`
+- `unknown_face` — That face is no longer there — the model changed since it was picked. Click it again.
+- `unknown_edge` — That edge is no longer there — the model changed since it was picked. Click it again.
+- `not_a_solid_edge`
+- `locator_missed`
+- `ambiguous_locator`
+- `face_token_unknown`
+- `face_token_stale`
+- `unknown_occurrence`
+- `not_an_object`
+- `explode_session_scope` — That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again.
 - `invalid_attr_name` — Attribute names need both a namespace and a key. Give the attribute a non-empty name and try again.
 - `reserved_attr_namespace`
+- `attr_namespace_not_granted`
 - `non_finite_attr_value` — Attribute numbers can't be NaN or infinity. Use a finite number and try again.
 - `attr_value_too_deep` — This attribute value is nested too deeply to store. Flatten it and try again.
 - `unrepresentable_attr_value`
@@ -187,6 +452,7 @@ Write one attribute key.
 - `unknown_material` — That material is no longer in the palette. Pick another swatch.
 - `unknown_component` — That component is no longer there — the model changed since it was picked. Click it again.
 - `unknown_tag` — That tag doesn't exist in this model. Check the tag name and try again.
+- `locked_node` — Locked. Unlock it to change it.
 
 ## hew.component
 
@@ -196,6 +462,7 @@ Write one attribute key.
 - **Tier:** Standard
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Fold a selection into a definition plus one instance.
 
@@ -248,6 +515,7 @@ Fold a selection into a definition plus one instance.
 - `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
 - `unknown_group` — That group is no longer there — the model changed since it was picked. Click it again.
 - `unknown_instance` — That component instance is no longer there — the model changed since it was picked. Click it again.
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.component.explode`
 
@@ -255,6 +523,7 @@ Fold a selection into a definition plus one instance.
 - **Tier:** Standard
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Bake an instance into world geometry.
 
@@ -298,16 +567,19 @@ Bake an instance into world geometry.
 
 - `unknown_entity`
 - `unknown_instance` — That component instance is no longer there — the model changed since it was picked. Click it again.
-- `cannot_explode_reflected` — A mirrored instance can't be exploded — baking the mirror would turn the solid inside out. Use Make Unique instead.
+- `cannot_explode_reflected`
+- `face_not_flat` — That shape is too far from the origin, or would be stretched too far, for its faces to stay flat, so it was refused. Try moving it closer to the origin, or use a smaller change.
+- `locked_node` — Locked. Unlock it to change it.
 
-### `hew.component.make_unique`
+### `hew.component.flip_instance`
 
 - **Version:** 1
 - **Tier:** Standard
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
-Deep-copy an instance's definition into a private one.
+Mirror one world instance across one of its definition's local axes.
 
 **Params schema:**
 
@@ -315,12 +587,123 @@ Deep-copy an instance's definition into a private one.
 {
   "additionalProperties": false,
   "properties": {
+    "axis": {
+      "description": "the definition-local axis to mirror across (the plane normal to it, through the local origin)",
+      "enum": [
+        "x",
+        "y",
+        "z"
+      ],
+      "type": "string"
+    },
     "instance": {
+      "description": "a world instance (\"ins_…\")",
       "type": "string"
     }
   },
   "required": [
-    "instance"
+    "instance",
+    "axis"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "instance": {
+      "type": "string"
+    },
+    "mirrored": {
+      "description": "whether the new pose's determinant is negative",
+      "type": "boolean"
+    },
+    "pose": {
+      "description": "the new pose, row-major 3×4",
+      "items": {
+        "type": "number"
+      },
+      "maxItems": 12,
+      "minItems": 12,
+      "type": "array"
+    }
+  },
+  "required": [
+    "instance",
+    "pose",
+    "mirrored"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `unknown_entity`
+- `face_not_flat` — That shape is too far from the origin, or would be stretched too far, for its faces to stay flat, so it was refused. Try moving it closer to the origin, or use a smaller change.
+- `locked_node` — Locked. Unlock it to change it.
+
+### `hew.component.import_definition`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** solitary
+- **Served:** host
+- **Permission:** model.write
+
+Turn a file's bytes (hew, skp, glb, gltf, stl, dae) into one unplaced component definition, reusing the definition an earlier import of the same bytes made. Place it with hew.component.place.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "bytes_base64": {
+      "description": "the file's bytes; at most 64 MiB together with all images",
+      "type": "string"
+    },
+    "format": {
+      "description": "the file's format; a picture format is refused",
+      "enum": [
+        "hew",
+        "skp",
+        "glb",
+        "gltf",
+        "stl",
+        "dae"
+      ],
+      "type": "string"
+    },
+    "images": {
+      "additionalProperties": {
+        "type": "object"
+      },
+      "description": "COLLADA texture images by the uri the file uses: {bytes_base64, format: png|jpeg}",
+      "type": "object"
+    },
+    "name": {
+      "description": "the definition's name when this import creates it (a later import of the same bytes keeps the first name); at most 128 bytes, no control characters; default \"Imported\"",
+      "type": "string"
+    },
+    "units": {
+      "description": "meters-per-source-unit hint; STL requires it, other formats ignore it",
+      "enum": [
+        "m",
+        "mm",
+        "cm",
+        "in"
+      ],
+      "type": "string"
+    }
+  },
+  "required": [
+    "bytes_base64",
+    "format"
   ],
   "type": "object"
 }
@@ -331,12 +714,121 @@ Deep-copy an instance's definition into a private one.
 ```json
 {
   "properties": {
-    "component": {
+    "definition": {
+      "description": "the definition's cmp_ id, ready for hew.component.place",
       "type": "string"
+    },
+    "report": {
+      "properties": {
+        "members": {
+          "description": "all direct members: objects, groups, and nested instances",
+          "type": "integer"
+        },
+        "objects": {
+          "description": "the definition's direct member objects",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "objects",
+        "members"
+      ],
+      "type": "object"
+    },
+    "reused": {
+      "description": "true when an earlier import of the same bytes already made it; nothing changed",
+      "type": "boolean"
     }
   },
   "required": [
-    "component"
+    "definition",
+    "reused",
+    "report"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `host_capability_missing`
+- `units_required`
+- `load_failed` — The Library item couldn't be read, so the part wasn't updated. The Library file may be damaged.
+- `unsupported_format`
+- `unsupported_for_definition`
+- `import_too_large`
+- `empty_group` — Select at least one object to group.
+- `explode_session_scope` — That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again.
+- `component_expansion_exceeded` — That would multiply past a million rendered component parts. Reduce how many copies the nested components repeat — explode or thin out a level — and try again.
+
+### `hew.component.make_unique`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** model-mutating
+- **Served:** kernel
+- **Permission:** model.write
+
+Give one placement its own private definition (through an occurrence path at any depth), with the old-to-new id map.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "cascade": {
+      "default": true,
+      "description": "true: every instance on the path is made unique in turn, so only the placement at the end diverges; false: only the last definition is forked, in place inside its owner, so every placement of the owners changes",
+      "type": "boolean"
+    },
+    "deep": {
+      "default": false,
+      "description": "also give every nested definition of the fork a private copy",
+      "type": "boolean"
+    },
+    "instance": {
+      "description": "a world placement: the same as path [instance]",
+      "type": "string"
+    },
+    "path": {
+      "description": "instance ids, outermost first; the last is the placement to fork",
+      "items": {
+        "type": "string"
+      },
+      "minItems": 1,
+      "type": "array"
+    }
+  },
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "properties": {
+    "component": {
+      "description": "the forked definition",
+      "type": "string"
+    },
+    "instance": {
+      "description": "the placement at the end of the path after the call: the leaf itself for a one-element path, its divergent twin (a value in remap) for a deeper one",
+      "type": "string"
+    },
+    "remap": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "description": "every id the call minted, keyed by the id it copies, over every kind (objects, groups, instances, definitions); only new ids are values",
+      "type": "object"
+    }
+  },
+  "required": [
+    "component",
+    "instance",
+    "remap"
   ],
   "type": "object"
 }
@@ -345,8 +837,11 @@ Deep-copy an instance's definition into a private one.
 **Refusals:**
 
 - `unknown_entity`
+- `unknown_occurrence`
 - `unknown_instance` — That component instance is no longer there — the model changed since it was picked. Click it again.
 - `unknown_component` — That component is no longer there — the model changed since it was picked. Click it again.
+- `explode_session_scope` — That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again.
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.component.place`
 
@@ -354,6 +849,7 @@ Deep-copy an instance's definition into a private one.
 - **Tier:** Standard
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Place an instance of a definition at a pose.
 
@@ -396,6 +892,3047 @@ Place an instance of a definition at a pose.
 - `unknown_entity`
 - `unknown_component` — That component is no longer there — the model changed since it was picked. Click it again.
 - `singular` — That transform would scale the object down to nothing, so it was refused.
+- `face_not_flat` — That shape is too far from the origin, or would be stretched too far, for its faces to stay flat, so it was refused. Try moving it closer to the origin, or use a smaller change.
+
+### `hew.component.promote`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** model-mutating
+- **Served:** kernel
+- **Permission:** model.write
+
+Make a set of linked copies a named component: removes its linked mark and names its definition.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "component": {
+      "description": "the linked set's definition (cmp_)",
+      "type": "string"
+    },
+    "name": {
+      "description": "the component's name: not blank, at most 128 bytes, no control characters",
+      "type": "string"
+    }
+  },
+  "required": [
+    "component",
+    "name"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "component": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "component"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `unknown_entity`
+- `not_linked` — This is already a component, not a set of linked copies, so there's nothing to change.
+- `locked_node` — Locked. Unlock it to change it.
+
+### `hew.component.rebase`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** model-mutating
+- **Served:** kernel
+- **Permission:** model.write
+
+Re-express a definition in a new frame; every placement is compensated, so nothing moves on screen.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "id": {
+      "description": "a definition (\"cmp_…\"), or an instance (\"ins_…\") meaning its definition",
+      "type": "string"
+    },
+    "origin": {
+      "description": "the new origin, in the definition's current local coordinates",
+      "items": {
+        "type": "number"
+      },
+      "maxItems": 3,
+      "minItems": 3,
+      "type": "array"
+    },
+    "x": {
+      "description": "the new x axis, unit length, in the definition's current local coordinates",
+      "items": {
+        "type": "number"
+      },
+      "maxItems": 3,
+      "minItems": 3,
+      "type": "array"
+    },
+    "y": {
+      "description": "the new y axis, unit length and perpendicular to x; z is x × y",
+      "items": {
+        "type": "number"
+      },
+      "maxItems": 3,
+      "minItems": 3,
+      "type": "array"
+    }
+  },
+  "required": [
+    "id",
+    "origin",
+    "x",
+    "y"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "component": {
+      "type": "string"
+    },
+    "instances_updated": {
+      "description": "how many instances place the definition, world or nested in another definition; each pose was compensated",
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "component",
+    "instances_updated"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `unknown_entity`
+- `invalid_frame` — That frame is not a valid right-handed set of axes. Give three unit-length, mutually perpendicular directions.
+- `rebase_during_session` — Finish editing the component before changing its axes.
+- `face_not_flat` — That shape is too far from the origin, or would be stretched too far, for its faces to stay flat, so it was refused. Try moving it closer to the origin, or use a smaller change.
+- `locked_node` — Locked. Unlock it to change it.
+
+## hew.compute
+
+### `hew.compute.boolean`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** read-only
+- **Served:** kernel
+- **Permission:** model.read
+
+Union, subtract, or intersect two solids without touching the document; answers the result's measure, mesh, topology, or shell count.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "a": {
+      "description": "SolidSpec: {id|path, pose?} (exactly one object), {prism: {plane, loops, distance}} (first loop outer, the rest holes), or {box: {min, max, pose?}}",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "pose": {
+              "description": "row-major 3×4; replaces the world pose; a mirroring pose refuses mirrored_pose",
+              "items": {
+                "type": "number"
+              },
+              "maxItems": 12,
+              "minItems": 12,
+              "type": "array"
+            }
+          },
+          "required": [
+            "id"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "path": {
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1,
+              "type": "array"
+            },
+            "pose": {
+              "description": "row-major 3×4; replaces the world pose; a mirroring pose refuses mirrored_pose",
+              "items": {
+                "type": "number"
+              },
+              "maxItems": 12,
+              "minItems": 12,
+              "type": "array"
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "prism": {
+              "additionalProperties": false,
+              "properties": {
+                "distance": {
+                  "type": "number"
+                },
+                "loops": {
+                  "items": {
+                    "items": {
+                      "items": {
+                        "type": "number"
+                      },
+                      "maxItems": 3,
+                      "minItems": 3,
+                      "type": "array"
+                    },
+                    "minItems": 3,
+                    "type": "array"
+                  },
+                  "minItems": 1,
+                  "type": "array"
+                },
+                "plane": {
+                  "additionalProperties": false,
+                  "description": "world coordinates",
+                  "properties": {
+                    "normal": {
+                      "items": {
+                        "type": "number"
+                      },
+                      "maxItems": 3,
+                      "minItems": 3,
+                      "type": "array"
+                    },
+                    "origin": {
+                      "items": {
+                        "type": "number"
+                      },
+                      "maxItems": 3,
+                      "minItems": 3,
+                      "type": "array"
+                    }
+                  },
+                  "required": [
+                    "origin",
+                    "normal"
+                  ],
+                  "type": "object"
+                }
+              },
+              "required": [
+                "plane",
+                "loops",
+                "distance"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "prism"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "box": {
+              "additionalProperties": false,
+              "properties": {
+                "max": {
+                  "items": {
+                    "type": "number"
+                  },
+                  "maxItems": 3,
+                  "minItems": 3,
+                  "type": "array"
+                },
+                "min": {
+                  "items": {
+                    "type": "number"
+                  },
+                  "maxItems": 3,
+                  "minItems": 3,
+                  "type": "array"
+                },
+                "pose": {
+                  "description": "row-major 3×4; replaces the world pose; a mirroring pose refuses mirrored_pose",
+                  "items": {
+                    "type": "number"
+                  },
+                  "maxItems": 12,
+                  "minItems": 12,
+                  "type": "array"
+                }
+              },
+              "required": [
+                "min",
+                "max"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "box"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "b": {
+      "description": "SolidSpec: {id|path, pose?} (exactly one object), {prism: {plane, loops, distance}} (first loop outer, the rest holes), or {box: {min, max, pose?}}",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "pose": {
+              "description": "row-major 3×4; replaces the world pose; a mirroring pose refuses mirrored_pose",
+              "items": {
+                "type": "number"
+              },
+              "maxItems": 12,
+              "minItems": 12,
+              "type": "array"
+            }
+          },
+          "required": [
+            "id"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "path": {
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1,
+              "type": "array"
+            },
+            "pose": {
+              "description": "row-major 3×4; replaces the world pose; a mirroring pose refuses mirrored_pose",
+              "items": {
+                "type": "number"
+              },
+              "maxItems": 12,
+              "minItems": 12,
+              "type": "array"
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "prism": {
+              "additionalProperties": false,
+              "properties": {
+                "distance": {
+                  "type": "number"
+                },
+                "loops": {
+                  "items": {
+                    "items": {
+                      "items": {
+                        "type": "number"
+                      },
+                      "maxItems": 3,
+                      "minItems": 3,
+                      "type": "array"
+                    },
+                    "minItems": 3,
+                    "type": "array"
+                  },
+                  "minItems": 1,
+                  "type": "array"
+                },
+                "plane": {
+                  "additionalProperties": false,
+                  "description": "world coordinates",
+                  "properties": {
+                    "normal": {
+                      "items": {
+                        "type": "number"
+                      },
+                      "maxItems": 3,
+                      "minItems": 3,
+                      "type": "array"
+                    },
+                    "origin": {
+                      "items": {
+                        "type": "number"
+                      },
+                      "maxItems": 3,
+                      "minItems": 3,
+                      "type": "array"
+                    }
+                  },
+                  "required": [
+                    "origin",
+                    "normal"
+                  ],
+                  "type": "object"
+                }
+              },
+              "required": [
+                "plane",
+                "loops",
+                "distance"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "prism"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "box": {
+              "additionalProperties": false,
+              "properties": {
+                "max": {
+                  "items": {
+                    "type": "number"
+                  },
+                  "maxItems": 3,
+                  "minItems": 3,
+                  "type": "array"
+                },
+                "min": {
+                  "items": {
+                    "type": "number"
+                  },
+                  "maxItems": 3,
+                  "minItems": 3,
+                  "type": "array"
+                },
+                "pose": {
+                  "description": "row-major 3×4; replaces the world pose; a mirroring pose refuses mirrored_pose",
+                  "items": {
+                    "type": "number"
+                  },
+                  "maxItems": 12,
+                  "minItems": 12,
+                  "type": "array"
+                }
+              },
+              "required": [
+                "min",
+                "max"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "box"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "op": {
+      "enum": [
+        "union",
+        "subtract",
+        "intersect"
+      ],
+      "type": "string"
+    },
+    "want": {
+      "description": "the result blocks to answer; defaults to [\"measure\"]",
+      "items": {
+        "enum": [
+          "mesh",
+          "topology",
+          "measure",
+          "shells"
+        ],
+        "type": "string"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "op",
+    "a",
+    "b"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "properties": {
+    "measure": {
+      "properties": {
+        "area": {
+          "description": "square meters, holes subtracted",
+          "type": "number"
+        },
+        "bbox": {
+          "properties": {
+            "max": {
+              "items": {
+                "type": "number"
+              },
+              "maxItems": 3,
+              "minItems": 3,
+              "type": "array"
+            },
+            "min": {
+              "items": {
+                "type": "number"
+              },
+              "maxItems": 3,
+              "minItems": 3,
+              "type": "array"
+            }
+          },
+          "required": [
+            "min",
+            "max"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "volume": {
+          "description": "cubic meters; null for an object that is not watertight",
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "volume",
+        "area",
+        "bbox"
+      ],
+      "type": "object"
+    },
+    "mesh": {
+      "additionalProperties": false,
+      "properties": {
+        "face_indices_base64": {
+          "description": "u32 little-endian per triangle: the face's index in hew.query.topology's faces, plus its part's face_index_base",
+          "type": "string"
+        },
+        "indices_base64": {
+          "description": "u32 little-endian, three per triangle, counter-clockwise from outside",
+          "type": "string"
+        },
+        "normals_base64": {
+          "description": "f32 little-endian xyz per vertex, unit length",
+          "type": "string"
+        },
+        "parts": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "face_index_base": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "id": {
+                "description": "null on a computed mesh",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "index_base": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "index_count": {
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "id",
+              "face_index_base",
+              "index_base",
+              "index_count"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "positions_base64": {
+          "description": "f32 little-endian xyz per vertex",
+          "type": "string"
+        },
+        "triangle_count": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "vertex_count": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "vertex_count",
+        "triangle_count",
+        "positions_base64",
+        "normals_base64",
+        "indices_base64",
+        "face_indices_base64",
+        "parts"
+      ],
+      "type": "object"
+    },
+    "shells": {
+      "description": "connected pieces in the result",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "solid": {
+      "description": "false when nothing is left (no other block then)",
+      "type": "boolean"
+    },
+    "tidied": {
+      "description": "present only when the boolean's cut left faces narrower than feature_min (0.1 µm): it merged them into their neighbors, moving no point farther than twice feature_min, or kept them when merging could not give a valid solid. Several booleans in one command sum",
+      "properties": {
+        "faces_split": {
+          "description": "faces split into flat triangles because a moved point bent them",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "feature_min": {
+          "description": "meters: 1e-7",
+          "type": "number"
+        },
+        "max_move": {
+          "description": "meters, at most twice feature_min",
+          "minimum": 0,
+          "type": "number"
+        },
+        "points_moved": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "sites": {
+          "description": "one point per place something was merged, the first 16: world coordinates, except where the boolean ran in a definition's own geometry (a push_pull on a definition member, a rejoin of a definition's pieces), which reports the definition's coordinates",
+          "items": {
+            "items": {
+              "type": "number"
+            },
+            "maxItems": 3,
+            "minItems": 3,
+            "type": "array"
+          },
+          "maxItems": 16,
+          "type": "array"
+        },
+        "sites_total": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "slivers_kept": {
+          "description": "faces under feature_min the result still holds",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "slivers_merged": {
+          "description": "faces under feature_min the merge removed",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "slivers_merged",
+        "slivers_kept",
+        "points_moved",
+        "max_move",
+        "faces_split",
+        "sites",
+        "sites_total",
+        "feature_min"
+      ],
+      "type": "object"
+    },
+    "topology": {
+      "additionalProperties": false,
+      "properties": {
+        "edges": {
+          "items": {
+            "description": "{index, a, b (vertex indices), faces: [face indices, 1 or 2], curve: {kind: \"circle\", center, axis, radius} | null, attrs: the edge's attribute dictionary, {} for none}",
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "faces": {
+          "items": {
+            "description": "{index, plane: {point, normal}, outer: [vertex indices], holes: [[...]], material, back_material, surface: {kind: \"cylinder\", axis_point, axis, radius} | null, area, attrs: the face's attribute dictionary, {} for none}",
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "object": {
+          "description": "null on a computed solid",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "vertices": {
+          "items": {
+            "items": {
+              "type": "number"
+            },
+            "maxItems": 3,
+            "minItems": 3,
+            "type": "array"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "object",
+        "vertices",
+        "faces",
+        "edges"
+      ],
+      "type": "object"
+    }
+  },
+  "required": [
+    "solid"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `unknown_entity`
+- `unknown_occurrence`
+- `not_an_object`
+- `mirrored_pose`
+- `compute_busy`
+- `compute_too_large`
+- `mesh_too_large`
+- `face_not_flat` — That shape is too far from the origin, or would be stretched too far, for its faces to stay flat, so it was refused. Try moving it closer to the origin, or use a smaller change.
+- `operand_not_solid` — Combining needs a solid on both sides. To make it solid, select it and choose Object ▸ Make Solid…
+- `degenerate_contact` — The objects only touch, or graze each other along an edge or at a corner, so there is no clean solid to make. Nudge one object a little and try again.
+- `operand_face_not_flat` — One of these objects has a face that isn't flat enough to cut. Some imported models have them. Try the cut on a different part of the object, or export the model again from the program it came from with its faces as triangles.
+- `arrangement_failed` — Hew couldn't work out a clean result where these two objects meet. Move one of them a little and try again. If it keeps happening, please send a bug report with Help ▸ Report Bug.
+- `result_too_thin` — The cut passes so close to a corner or edge that it would leave a piece too thin to keep. Move one of the objects a tiny bit (a hundredth of a millimeter is enough) and try again.
+- `nothing_removed` — Nothing was cut away: the solids only touch or sit apart. Check that each cutter is the shape you expect, then move it so it passes through the solid you're cutting.
+- `singular_transform` — One object's placement is scaled down to nothing, so the operation can't run.
+
+### `hew.compute.measure`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** read-only
+- **Served:** kernel
+- **Permission:** model.read
+
+Volume, surface area, bounding box, and centroid of a solid.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "solid": {
+      "description": "SolidSpec: {id|path, pose?} (exactly one object), {prism: {plane, loops, distance}} (first loop outer, the rest holes), or {box: {min, max, pose?}}",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "pose": {
+              "description": "row-major 3×4; replaces the world pose; a mirroring pose refuses mirrored_pose",
+              "items": {
+                "type": "number"
+              },
+              "maxItems": 12,
+              "minItems": 12,
+              "type": "array"
+            }
+          },
+          "required": [
+            "id"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "path": {
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1,
+              "type": "array"
+            },
+            "pose": {
+              "description": "row-major 3×4; replaces the world pose; a mirroring pose refuses mirrored_pose",
+              "items": {
+                "type": "number"
+              },
+              "maxItems": 12,
+              "minItems": 12,
+              "type": "array"
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "prism": {
+              "additionalProperties": false,
+              "properties": {
+                "distance": {
+                  "type": "number"
+                },
+                "loops": {
+                  "items": {
+                    "items": {
+                      "items": {
+                        "type": "number"
+                      },
+                      "maxItems": 3,
+                      "minItems": 3,
+                      "type": "array"
+                    },
+                    "minItems": 3,
+                    "type": "array"
+                  },
+                  "minItems": 1,
+                  "type": "array"
+                },
+                "plane": {
+                  "additionalProperties": false,
+                  "description": "world coordinates",
+                  "properties": {
+                    "normal": {
+                      "items": {
+                        "type": "number"
+                      },
+                      "maxItems": 3,
+                      "minItems": 3,
+                      "type": "array"
+                    },
+                    "origin": {
+                      "items": {
+                        "type": "number"
+                      },
+                      "maxItems": 3,
+                      "minItems": 3,
+                      "type": "array"
+                    }
+                  },
+                  "required": [
+                    "origin",
+                    "normal"
+                  ],
+                  "type": "object"
+                }
+              },
+              "required": [
+                "plane",
+                "loops",
+                "distance"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "prism"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "box": {
+              "additionalProperties": false,
+              "properties": {
+                "max": {
+                  "items": {
+                    "type": "number"
+                  },
+                  "maxItems": 3,
+                  "minItems": 3,
+                  "type": "array"
+                },
+                "min": {
+                  "items": {
+                    "type": "number"
+                  },
+                  "maxItems": 3,
+                  "minItems": 3,
+                  "type": "array"
+                },
+                "pose": {
+                  "description": "row-major 3×4; replaces the world pose; a mirroring pose refuses mirrored_pose",
+                  "items": {
+                    "type": "number"
+                  },
+                  "maxItems": 12,
+                  "minItems": 12,
+                  "type": "array"
+                }
+              },
+              "required": [
+                "min",
+                "max"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "box"
+          ],
+          "type": "object"
+        }
+      ]
+    }
+  },
+  "required": [
+    "solid"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "properties": {
+    "area": {
+      "description": "square meters, holes subtracted",
+      "type": "number"
+    },
+    "bbox": {
+      "properties": {
+        "max": {
+          "items": {
+            "type": "number"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "type": "array"
+        },
+        "min": {
+          "items": {
+            "type": "number"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "type": "array"
+        }
+      },
+      "required": [
+        "min",
+        "max"
+      ],
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "centroid": {
+      "description": "the volume centroid; null for an object that is not watertight",
+      "items": {
+        "type": "number"
+      },
+      "maxItems": 3,
+      "minItems": 3,
+      "type": [
+        "array",
+        "null"
+      ]
+    },
+    "volume": {
+      "description": "cubic meters; null for an object that is not watertight",
+      "type": [
+        "number",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "volume",
+    "area",
+    "bbox",
+    "centroid"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `unknown_entity`
+- `unknown_occurrence`
+- `not_an_object`
+- `mirrored_pose`
+- `compute_busy`
+- `compute_too_large`
+- `face_not_flat` — That shape is too far from the origin, or would be stretched too far, for its faces to stay flat, so it was refused. Try moving it closer to the origin, or use a smaller change.
+
+### `hew.compute.offset`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** read-only
+- **Served:** kernel
+- **Permission:** model.read
+
+Offset closed 2D loops outward or inward by a distance.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "distance": {
+      "description": "positive grows the material, negative shrinks it",
+      "type": "number"
+    },
+    "join": {
+      "description": "miter (the default); round is reserved and not available yet",
+      "enum": [
+        "miter",
+        "round"
+      ],
+      "type": "string"
+    },
+    "loops": {
+      "description": "closed 2D loops, the first the outer boundary, the rest holes, in either winding",
+      "items": {
+        "items": {
+          "items": {
+            "type": "number"
+          },
+          "maxItems": 2,
+          "minItems": 2,
+          "type": "array"
+        },
+        "minItems": 3,
+        "type": "array"
+      },
+      "minItems": 1,
+      "type": "array"
+    }
+  },
+  "required": [
+    "loops",
+    "distance"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "properties": {
+    "loops": {
+      "items": {
+        "properties": {
+          "edges": {
+            "items": {
+              "oneOf": [
+                {
+                  "properties": {
+                    "a": {
+                      "items": {
+                        "type": "number"
+                      },
+                      "maxItems": 2,
+                      "minItems": 2,
+                      "type": "array"
+                    },
+                    "b": {
+                      "items": {
+                        "type": "number"
+                      },
+                      "maxItems": 2,
+                      "minItems": 2,
+                      "type": "array"
+                    },
+                    "kind": {
+                      "const": "line"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "a",
+                    "b"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "properties": {
+                    "ccw": {
+                      "type": "boolean"
+                    },
+                    "center": {
+                      "items": {
+                        "type": "number"
+                      },
+                      "maxItems": 2,
+                      "minItems": 2,
+                      "type": "array"
+                    },
+                    "end": {
+                      "items": {
+                        "type": "number"
+                      },
+                      "maxItems": 2,
+                      "minItems": 2,
+                      "type": "array"
+                    },
+                    "kind": {
+                      "const": "arc"
+                    },
+                    "radius": {
+                      "type": "number"
+                    },
+                    "start": {
+                      "items": {
+                        "type": "number"
+                      },
+                      "maxItems": 2,
+                      "minItems": 2,
+                      "type": "array"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "center",
+                    "radius",
+                    "start",
+                    "end",
+                    "ccw"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "properties": {
+                    "center": {
+                      "items": {
+                        "type": "number"
+                      },
+                      "maxItems": 2,
+                      "minItems": 2,
+                      "type": "array"
+                    },
+                    "kind": {
+                      "const": "circle"
+                    },
+                    "radius": {
+                      "type": "number"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "center",
+                    "radius"
+                  ],
+                  "type": "object"
+                }
+              ]
+            },
+            "type": "array"
+          },
+          "outer": {
+            "description": "an outer boundary (counter-clockwise), else a hole (clockwise)",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "outer",
+          "edges"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "loops"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `offset_too_small` — That offset distance is too small to make a new boundary. Drag further, or type an exact distance.
+- `offset_collapsed` — The shape can't absorb that offset — its boundary would collapse, cross itself, or spike out of a sharp corner. Try a smaller distance, or soften the sharpest corner.
+- `compute_busy`
+
+### `hew.compute.outline`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** read-only
+- **Served:** kernel
+- **Permission:** model.read
+
+A part's outline in a frame's xy plane: its largest face, or its silhouette, with arcs and circles kept analytic.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "frame": {
+      "description": "\"part\" (the default: hew.query.part_frame's frame) or {origin, x, y, z}, orthonormal and right-handed",
+      "oneOf": [
+        {
+          "enum": [
+            "part"
+          ],
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "origin": {
+              "items": {
+                "type": "number"
+              },
+              "maxItems": 3,
+              "minItems": 3,
+              "type": "array"
+            },
+            "x": {
+              "items": {
+                "type": "number"
+              },
+              "maxItems": 3,
+              "minItems": 3,
+              "type": "array"
+            },
+            "y": {
+              "items": {
+                "type": "number"
+              },
+              "maxItems": 3,
+              "minItems": 3,
+              "type": "array"
+            },
+            "z": {
+              "items": {
+                "type": "number"
+              },
+              "maxItems": 3,
+              "minItems": 3,
+              "type": "array"
+            }
+          },
+          "required": [
+            "origin",
+            "x",
+            "y",
+            "z"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "id": {
+      "description": "a world node's public id",
+      "type": "string"
+    },
+    "path": {
+      "items": {
+        "type": "string"
+      },
+      "minItems": 1,
+      "type": "array"
+    },
+    "which": {
+      "description": "largest_face: the loops of the part's largest face; projection: the silhouette seen along the frame's z",
+      "enum": [
+        "largest_face",
+        "projection"
+      ],
+      "type": "string"
+    }
+  },
+  "required": [
+    "which"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "properties": {
+    "loops": {
+      "items": {
+        "properties": {
+          "edges": {
+            "items": {
+              "oneOf": [
+                {
+                  "properties": {
+                    "a": {
+                      "items": {
+                        "type": "number"
+                      },
+                      "maxItems": 2,
+                      "minItems": 2,
+                      "type": "array"
+                    },
+                    "b": {
+                      "items": {
+                        "type": "number"
+                      },
+                      "maxItems": 2,
+                      "minItems": 2,
+                      "type": "array"
+                    },
+                    "kind": {
+                      "const": "line"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "a",
+                    "b"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "properties": {
+                    "ccw": {
+                      "type": "boolean"
+                    },
+                    "center": {
+                      "items": {
+                        "type": "number"
+                      },
+                      "maxItems": 2,
+                      "minItems": 2,
+                      "type": "array"
+                    },
+                    "end": {
+                      "items": {
+                        "type": "number"
+                      },
+                      "maxItems": 2,
+                      "minItems": 2,
+                      "type": "array"
+                    },
+                    "kind": {
+                      "const": "arc"
+                    },
+                    "radius": {
+                      "type": "number"
+                    },
+                    "start": {
+                      "items": {
+                        "type": "number"
+                      },
+                      "maxItems": 2,
+                      "minItems": 2,
+                      "type": "array"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "center",
+                    "radius",
+                    "start",
+                    "end",
+                    "ccw"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "properties": {
+                    "center": {
+                      "items": {
+                        "type": "number"
+                      },
+                      "maxItems": 2,
+                      "minItems": 2,
+                      "type": "array"
+                    },
+                    "kind": {
+                      "const": "circle"
+                    },
+                    "radius": {
+                      "type": "number"
+                    }
+                  },
+                  "required": [
+                    "kind",
+                    "center",
+                    "radius"
+                  ],
+                  "type": "object"
+                }
+              ]
+            },
+            "type": "array"
+          },
+          "outer": {
+            "description": "an outer boundary (counter-clockwise), else a hole (clockwise)",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "outer",
+          "edges"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "loops"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `unknown_entity`
+- `unknown_occurrence`
+- `invalid_frame` — That frame is not a valid right-handed set of axes. Give three unit-length, mutually perpendicular directions.
+- `no_part_frame` — That part has no faces to measure.
+- `compute_busy`
+- `compute_too_large`
+- `too_many_occurrences` — This model has more placed parts than Hew can list at once.
+
+### `hew.compute.project`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** read-only
+- **Served:** kernel
+- **Permission:** model.read
+
+A single part's flat drawing on a plane, its faces grouped by depth into layers (not available yet).
+
+> **Not yet implemented.** Every call answers the `unimplemented` refusal (docs/agents/HEW_API.md §14's burn-down posture).
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "plane": {
+      "additionalProperties": false,
+      "description": "world coordinates",
+      "properties": {
+        "normal": {
+          "items": {
+            "type": "number"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "type": "array"
+        },
+        "origin": {
+          "items": {
+            "type": "number"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "type": "array"
+        }
+      },
+      "required": [
+        "origin",
+        "normal"
+      ],
+      "type": "object"
+    },
+    "solid": {
+      "description": "SolidSpec: {id|path, pose?} (exactly one object), {prism: {plane, loops, distance}} (first loop outer, the rest holes), or {box: {min, max, pose?}}",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "pose": {
+              "description": "row-major 3×4; replaces the world pose; a mirroring pose refuses mirrored_pose",
+              "items": {
+                "type": "number"
+              },
+              "maxItems": 12,
+              "minItems": 12,
+              "type": "array"
+            }
+          },
+          "required": [
+            "id"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "path": {
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1,
+              "type": "array"
+            },
+            "pose": {
+              "description": "row-major 3×4; replaces the world pose; a mirroring pose refuses mirrored_pose",
+              "items": {
+                "type": "number"
+              },
+              "maxItems": 12,
+              "minItems": 12,
+              "type": "array"
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "prism": {
+              "additionalProperties": false,
+              "properties": {
+                "distance": {
+                  "type": "number"
+                },
+                "loops": {
+                  "items": {
+                    "items": {
+                      "items": {
+                        "type": "number"
+                      },
+                      "maxItems": 3,
+                      "minItems": 3,
+                      "type": "array"
+                    },
+                    "minItems": 3,
+                    "type": "array"
+                  },
+                  "minItems": 1,
+                  "type": "array"
+                },
+                "plane": {
+                  "additionalProperties": false,
+                  "description": "world coordinates",
+                  "properties": {
+                    "normal": {
+                      "items": {
+                        "type": "number"
+                      },
+                      "maxItems": 3,
+                      "minItems": 3,
+                      "type": "array"
+                    },
+                    "origin": {
+                      "items": {
+                        "type": "number"
+                      },
+                      "maxItems": 3,
+                      "minItems": 3,
+                      "type": "array"
+                    }
+                  },
+                  "required": [
+                    "origin",
+                    "normal"
+                  ],
+                  "type": "object"
+                }
+              },
+              "required": [
+                "plane",
+                "loops",
+                "distance"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "prism"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "box": {
+              "additionalProperties": false,
+              "properties": {
+                "max": {
+                  "items": {
+                    "type": "number"
+                  },
+                  "maxItems": 3,
+                  "minItems": 3,
+                  "type": "array"
+                },
+                "min": {
+                  "items": {
+                    "type": "number"
+                  },
+                  "maxItems": 3,
+                  "minItems": 3,
+                  "type": "array"
+                },
+                "pose": {
+                  "description": "row-major 3×4; replaces the world pose; a mirroring pose refuses mirrored_pose",
+                  "items": {
+                    "type": "number"
+                  },
+                  "maxItems": 12,
+                  "minItems": 12,
+                  "type": "array"
+                }
+              },
+              "required": [
+                "min",
+                "max"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "box"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "want": {
+      "items": {
+        "enum": [
+          "outline",
+          "layers"
+        ],
+        "type": "string"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "solid",
+    "plane"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "properties": {
+    "layers": {
+      "items": {
+        "properties": {
+          "depth": {
+            "type": "number"
+          },
+          "loops": {
+            "items": {
+              "properties": {
+                "edges": {
+                  "items": {
+                    "properties": {
+                      "a": {
+                        "items": {
+                          "type": "number"
+                        },
+                        "maxItems": 2,
+                        "minItems": 2,
+                        "type": "array"
+                      },
+                      "b": {
+                        "items": {
+                          "type": "number"
+                        },
+                        "maxItems": 2,
+                        "minItems": 2,
+                        "type": "array"
+                      },
+                      "kind": {
+                        "type": "string"
+                      }
+                    },
+                    "type": "object"
+                  },
+                  "type": "array"
+                },
+                "outer": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "outer",
+                "edges"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "depth",
+          "loops"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "outline": {
+      "items": {
+        "properties": {
+          "edges": {
+            "items": {
+              "properties": {
+                "a": {
+                  "items": {
+                    "type": "number"
+                  },
+                  "maxItems": 2,
+                  "minItems": 2,
+                  "type": "array"
+                },
+                "b": {
+                  "items": {
+                    "type": "number"
+                  },
+                  "maxItems": 2,
+                  "minItems": 2,
+                  "type": "array"
+                },
+                "kind": {
+                  "type": "string"
+                }
+              },
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "outer": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "outer",
+          "edges"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    }
+  },
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `unimplemented`
+
+### `hew.compute.shells`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** read-only
+- **Served:** kernel
+- **Permission:** model.read
+
+Split a solid into its connected pieces without touching the document.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "solid": {
+      "description": "SolidSpec: {id|path, pose?} (exactly one object), {prism: {plane, loops, distance}} (first loop outer, the rest holes), or {box: {min, max, pose?}}",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "pose": {
+              "description": "row-major 3×4; replaces the world pose; a mirroring pose refuses mirrored_pose",
+              "items": {
+                "type": "number"
+              },
+              "maxItems": 12,
+              "minItems": 12,
+              "type": "array"
+            }
+          },
+          "required": [
+            "id"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "path": {
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1,
+              "type": "array"
+            },
+            "pose": {
+              "description": "row-major 3×4; replaces the world pose; a mirroring pose refuses mirrored_pose",
+              "items": {
+                "type": "number"
+              },
+              "maxItems": 12,
+              "minItems": 12,
+              "type": "array"
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "prism": {
+              "additionalProperties": false,
+              "properties": {
+                "distance": {
+                  "type": "number"
+                },
+                "loops": {
+                  "items": {
+                    "items": {
+                      "items": {
+                        "type": "number"
+                      },
+                      "maxItems": 3,
+                      "minItems": 3,
+                      "type": "array"
+                    },
+                    "minItems": 3,
+                    "type": "array"
+                  },
+                  "minItems": 1,
+                  "type": "array"
+                },
+                "plane": {
+                  "additionalProperties": false,
+                  "description": "world coordinates",
+                  "properties": {
+                    "normal": {
+                      "items": {
+                        "type": "number"
+                      },
+                      "maxItems": 3,
+                      "minItems": 3,
+                      "type": "array"
+                    },
+                    "origin": {
+                      "items": {
+                        "type": "number"
+                      },
+                      "maxItems": 3,
+                      "minItems": 3,
+                      "type": "array"
+                    }
+                  },
+                  "required": [
+                    "origin",
+                    "normal"
+                  ],
+                  "type": "object"
+                }
+              },
+              "required": [
+                "plane",
+                "loops",
+                "distance"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "prism"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "box": {
+              "additionalProperties": false,
+              "properties": {
+                "max": {
+                  "items": {
+                    "type": "number"
+                  },
+                  "maxItems": 3,
+                  "minItems": 3,
+                  "type": "array"
+                },
+                "min": {
+                  "items": {
+                    "type": "number"
+                  },
+                  "maxItems": 3,
+                  "minItems": 3,
+                  "type": "array"
+                },
+                "pose": {
+                  "description": "row-major 3×4; replaces the world pose; a mirroring pose refuses mirrored_pose",
+                  "items": {
+                    "type": "number"
+                  },
+                  "maxItems": 12,
+                  "minItems": 12,
+                  "type": "array"
+                }
+              },
+              "required": [
+                "min",
+                "max"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "box"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "want_mesh": {
+      "description": "answer each piece's mesh too; defaults to false",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "solid"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "properties": {
+    "count": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "shells": {
+      "items": {
+        "properties": {
+          "measure": {
+            "properties": {
+              "area": {
+                "description": "square meters, holes subtracted",
+                "type": "number"
+              },
+              "bbox": {
+                "properties": {
+                  "max": {
+                    "items": {
+                      "type": "number"
+                    },
+                    "maxItems": 3,
+                    "minItems": 3,
+                    "type": "array"
+                  },
+                  "min": {
+                    "items": {
+                      "type": "number"
+                    },
+                    "maxItems": 3,
+                    "minItems": 3,
+                    "type": "array"
+                  }
+                },
+                "required": [
+                  "min",
+                  "max"
+                ],
+                "type": [
+                  "object",
+                  "null"
+                ]
+              },
+              "volume": {
+                "description": "cubic meters; null for an object that is not watertight",
+                "type": [
+                  "number",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "volume",
+              "area",
+              "bbox"
+            ],
+            "type": "object"
+          },
+          "mesh": {
+            "additionalProperties": false,
+            "properties": {
+              "face_indices_base64": {
+                "description": "u32 little-endian per triangle: the face's index in hew.query.topology's faces, plus its part's face_index_base",
+                "type": "string"
+              },
+              "indices_base64": {
+                "description": "u32 little-endian, three per triangle, counter-clockwise from outside",
+                "type": "string"
+              },
+              "normals_base64": {
+                "description": "f32 little-endian xyz per vertex, unit length",
+                "type": "string"
+              },
+              "parts": {
+                "items": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "face_index_base": {
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "id": {
+                      "description": "null on a computed mesh",
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "index_base": {
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "index_count": {
+                      "minimum": 0,
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "face_index_base",
+                    "index_base",
+                    "index_count"
+                  ],
+                  "type": "object"
+                },
+                "type": "array"
+              },
+              "positions_base64": {
+                "description": "f32 little-endian xyz per vertex",
+                "type": "string"
+              },
+              "triangle_count": {
+                "minimum": 0,
+                "type": "integer"
+              },
+              "vertex_count": {
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "vertex_count",
+              "triangle_count",
+              "positions_base64",
+              "normals_base64",
+              "indices_base64",
+              "face_indices_base64",
+              "parts"
+            ],
+            "type": "object"
+          }
+        },
+        "required": [
+          "measure"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "count",
+    "shells"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `unknown_entity`
+- `unknown_occurrence`
+- `not_an_object`
+- `mirrored_pose`
+- `compute_busy`
+- `compute_too_large`
+- `mesh_too_large`
+- `face_not_flat` — That shape is too far from the origin, or would be stretched too far, for its faces to stay flat, so it was refused. Try moving it closer to the origin, or use a smaller change.
+
+### `hew.compute.slice`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** read-only
+- **Served:** kernel
+- **Permission:** model.read
+
+Cut a solid by a plane without touching the document; answers both pieces.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "plane": {
+      "additionalProperties": false,
+      "description": "world coordinates",
+      "properties": {
+        "normal": {
+          "items": {
+            "type": "number"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "type": "array"
+        },
+        "origin": {
+          "items": {
+            "type": "number"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "type": "array"
+        }
+      },
+      "required": [
+        "origin",
+        "normal"
+      ],
+      "type": "object"
+    },
+    "solid": {
+      "description": "SolidSpec: {id|path, pose?} (exactly one object), {prism: {plane, loops, distance}} (first loop outer, the rest holes), or {box: {min, max, pose?}}",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "type": "string"
+            },
+            "pose": {
+              "description": "row-major 3×4; replaces the world pose; a mirroring pose refuses mirrored_pose",
+              "items": {
+                "type": "number"
+              },
+              "maxItems": 12,
+              "minItems": 12,
+              "type": "array"
+            }
+          },
+          "required": [
+            "id"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "path": {
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1,
+              "type": "array"
+            },
+            "pose": {
+              "description": "row-major 3×4; replaces the world pose; a mirroring pose refuses mirrored_pose",
+              "items": {
+                "type": "number"
+              },
+              "maxItems": 12,
+              "minItems": 12,
+              "type": "array"
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "prism": {
+              "additionalProperties": false,
+              "properties": {
+                "distance": {
+                  "type": "number"
+                },
+                "loops": {
+                  "items": {
+                    "items": {
+                      "items": {
+                        "type": "number"
+                      },
+                      "maxItems": 3,
+                      "minItems": 3,
+                      "type": "array"
+                    },
+                    "minItems": 3,
+                    "type": "array"
+                  },
+                  "minItems": 1,
+                  "type": "array"
+                },
+                "plane": {
+                  "additionalProperties": false,
+                  "description": "world coordinates",
+                  "properties": {
+                    "normal": {
+                      "items": {
+                        "type": "number"
+                      },
+                      "maxItems": 3,
+                      "minItems": 3,
+                      "type": "array"
+                    },
+                    "origin": {
+                      "items": {
+                        "type": "number"
+                      },
+                      "maxItems": 3,
+                      "minItems": 3,
+                      "type": "array"
+                    }
+                  },
+                  "required": [
+                    "origin",
+                    "normal"
+                  ],
+                  "type": "object"
+                }
+              },
+              "required": [
+                "plane",
+                "loops",
+                "distance"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "prism"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "box": {
+              "additionalProperties": false,
+              "properties": {
+                "max": {
+                  "items": {
+                    "type": "number"
+                  },
+                  "maxItems": 3,
+                  "minItems": 3,
+                  "type": "array"
+                },
+                "min": {
+                  "items": {
+                    "type": "number"
+                  },
+                  "maxItems": 3,
+                  "minItems": 3,
+                  "type": "array"
+                },
+                "pose": {
+                  "description": "row-major 3×4; replaces the world pose; a mirroring pose refuses mirrored_pose",
+                  "items": {
+                    "type": "number"
+                  },
+                  "maxItems": 12,
+                  "minItems": 12,
+                  "type": "array"
+                }
+              },
+              "required": [
+                "min",
+                "max"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "box"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "want": {
+      "description": "the result blocks to answer; defaults to [\"measure\"]",
+      "items": {
+        "enum": [
+          "mesh",
+          "topology",
+          "measure",
+          "shells"
+        ],
+        "type": "string"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "solid",
+    "plane"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "description": "positive is the piece on the side the plane normal points to",
+  "properties": {
+    "negative": {
+      "properties": {
+        "measure": {
+          "properties": {
+            "area": {
+              "description": "square meters, holes subtracted",
+              "type": "number"
+            },
+            "bbox": {
+              "properties": {
+                "max": {
+                  "items": {
+                    "type": "number"
+                  },
+                  "maxItems": 3,
+                  "minItems": 3,
+                  "type": "array"
+                },
+                "min": {
+                  "items": {
+                    "type": "number"
+                  },
+                  "maxItems": 3,
+                  "minItems": 3,
+                  "type": "array"
+                }
+              },
+              "required": [
+                "min",
+                "max"
+              ],
+              "type": [
+                "object",
+                "null"
+              ]
+            },
+            "volume": {
+              "description": "cubic meters; null for an object that is not watertight",
+              "type": [
+                "number",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "volume",
+            "area",
+            "bbox"
+          ],
+          "type": "object"
+        },
+        "mesh": {
+          "additionalProperties": false,
+          "properties": {
+            "face_indices_base64": {
+              "description": "u32 little-endian per triangle: the face's index in hew.query.topology's faces, plus its part's face_index_base",
+              "type": "string"
+            },
+            "indices_base64": {
+              "description": "u32 little-endian, three per triangle, counter-clockwise from outside",
+              "type": "string"
+            },
+            "normals_base64": {
+              "description": "f32 little-endian xyz per vertex, unit length",
+              "type": "string"
+            },
+            "parts": {
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "face_index_base": {
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "id": {
+                    "description": "null on a computed mesh",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "index_base": {
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "index_count": {
+                    "minimum": 0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "id",
+                  "face_index_base",
+                  "index_base",
+                  "index_count"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "positions_base64": {
+              "description": "f32 little-endian xyz per vertex",
+              "type": "string"
+            },
+            "triangle_count": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "vertex_count": {
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "vertex_count",
+            "triangle_count",
+            "positions_base64",
+            "normals_base64",
+            "indices_base64",
+            "face_indices_base64",
+            "parts"
+          ],
+          "type": "object"
+        },
+        "shells": {
+          "description": "connected pieces in the result",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "topology": {
+          "additionalProperties": false,
+          "properties": {
+            "edges": {
+              "items": {
+                "description": "{index, a, b (vertex indices), faces: [face indices, 1 or 2], curve: {kind: \"circle\", center, axis, radius} | null, attrs: the edge's attribute dictionary, {} for none}",
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "faces": {
+              "items": {
+                "description": "{index, plane: {point, normal}, outer: [vertex indices], holes: [[...]], material, back_material, surface: {kind: \"cylinder\", axis_point, axis, radius} | null, area, attrs: the face's attribute dictionary, {} for none}",
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "object": {
+              "description": "null on a computed solid",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "vertices": {
+              "items": {
+                "items": {
+                  "type": "number"
+                },
+                "maxItems": 3,
+                "minItems": 3,
+                "type": "array"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "object",
+            "vertices",
+            "faces",
+            "edges"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "positive": {
+      "properties": {
+        "measure": {
+          "properties": {
+            "area": {
+              "description": "square meters, holes subtracted",
+              "type": "number"
+            },
+            "bbox": {
+              "properties": {
+                "max": {
+                  "items": {
+                    "type": "number"
+                  },
+                  "maxItems": 3,
+                  "minItems": 3,
+                  "type": "array"
+                },
+                "min": {
+                  "items": {
+                    "type": "number"
+                  },
+                  "maxItems": 3,
+                  "minItems": 3,
+                  "type": "array"
+                }
+              },
+              "required": [
+                "min",
+                "max"
+              ],
+              "type": [
+                "object",
+                "null"
+              ]
+            },
+            "volume": {
+              "description": "cubic meters; null for an object that is not watertight",
+              "type": [
+                "number",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "volume",
+            "area",
+            "bbox"
+          ],
+          "type": "object"
+        },
+        "mesh": {
+          "additionalProperties": false,
+          "properties": {
+            "face_indices_base64": {
+              "description": "u32 little-endian per triangle: the face's index in hew.query.topology's faces, plus its part's face_index_base",
+              "type": "string"
+            },
+            "indices_base64": {
+              "description": "u32 little-endian, three per triangle, counter-clockwise from outside",
+              "type": "string"
+            },
+            "normals_base64": {
+              "description": "f32 little-endian xyz per vertex, unit length",
+              "type": "string"
+            },
+            "parts": {
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "face_index_base": {
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "id": {
+                    "description": "null on a computed mesh",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "index_base": {
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "index_count": {
+                    "minimum": 0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "id",
+                  "face_index_base",
+                  "index_base",
+                  "index_count"
+                ],
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "positions_base64": {
+              "description": "f32 little-endian xyz per vertex",
+              "type": "string"
+            },
+            "triangle_count": {
+              "minimum": 0,
+              "type": "integer"
+            },
+            "vertex_count": {
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "vertex_count",
+            "triangle_count",
+            "positions_base64",
+            "normals_base64",
+            "indices_base64",
+            "face_indices_base64",
+            "parts"
+          ],
+          "type": "object"
+        },
+        "shells": {
+          "description": "connected pieces in the result",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "topology": {
+          "additionalProperties": false,
+          "properties": {
+            "edges": {
+              "items": {
+                "description": "{index, a, b (vertex indices), faces: [face indices, 1 or 2], curve: {kind: \"circle\", center, axis, radius} | null, attrs: the edge's attribute dictionary, {} for none}",
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "faces": {
+              "items": {
+                "description": "{index, plane: {point, normal}, outer: [vertex indices], holes: [[...]], material, back_material, surface: {kind: \"cylinder\", axis_point, axis, radius} | null, area, attrs: the face's attribute dictionary, {} for none}",
+                "type": "object"
+              },
+              "type": "array"
+            },
+            "object": {
+              "description": "null on a computed solid",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "vertices": {
+              "items": {
+                "items": {
+                  "type": "number"
+                },
+                "maxItems": 3,
+                "minItems": 3,
+                "type": "array"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "object",
+            "vertices",
+            "faces",
+            "edges"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "tidied": {
+      "description": "present only when the boolean's cut left faces narrower than feature_min (0.1 µm): it merged them into their neighbors, moving no point farther than twice feature_min, or kept them when merging could not give a valid solid. Several booleans in one command sum",
+      "properties": {
+        "faces_split": {
+          "description": "faces split into flat triangles because a moved point bent them",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "feature_min": {
+          "description": "meters: 1e-7",
+          "type": "number"
+        },
+        "max_move": {
+          "description": "meters, at most twice feature_min",
+          "minimum": 0,
+          "type": "number"
+        },
+        "points_moved": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "sites": {
+          "description": "one point per place something was merged, the first 16: world coordinates, except where the boolean ran in a definition's own geometry (a push_pull on a definition member, a rejoin of a definition's pieces), which reports the definition's coordinates",
+          "items": {
+            "items": {
+              "type": "number"
+            },
+            "maxItems": 3,
+            "minItems": 3,
+            "type": "array"
+          },
+          "maxItems": 16,
+          "type": "array"
+        },
+        "sites_total": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "slivers_kept": {
+          "description": "faces under feature_min the result still holds",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "slivers_merged": {
+          "description": "faces under feature_min the merge removed",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "slivers_merged",
+        "slivers_kept",
+        "points_moved",
+        "max_move",
+        "faces_split",
+        "sites",
+        "sites_total",
+        "feature_min"
+      ],
+      "type": "object"
+    }
+  },
+  "required": [
+    "positive",
+    "negative"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `unknown_entity`
+- `unknown_occurrence`
+- `not_an_object`
+- `mirrored_pose`
+- `compute_busy`
+- `compute_too_large`
+- `mesh_too_large`
+- `face_not_flat` — That shape is too far from the origin, or would be stretched too far, for its faces to stay flat, so it was refused. Try moving it closer to the origin, or use a smaller change.
+- `not_solid` — Only a solid can be sliced. To make it solid, select it and choose Object ▸ Make Solid…
+- `plane_misses_solid` — The slicing plane doesn't pass through the object. Position the cut so it goes through the solid.
+- `degenerate` — The cut lines up exactly with an existing face or edge, so it wouldn't create two pieces. Move the cut slightly.
+
+### `hew.compute.stretch`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** read-only
+- **Served:** kernel
+- **Permission:** model.read
+
+Preview a section stretch of parts along one axis of a frame (not available yet).
+
+> **Not yet implemented.** Every call answers the `unimplemented` refusal (docs/agents/HEW_API.md §14's burn-down posture).
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "axis": {
+      "enum": [
+        0,
+        1,
+        2
+      ],
+      "type": "integer"
+    },
+    "cutters": {
+      "oneOf": [
+        {
+          "items": {
+            "type": "number"
+          },
+          "type": "array"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "positions": {
+              "items": {
+                "type": "number"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "positions"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "dimension": {
+      "type": "number"
+    },
+    "distance": {
+      "type": "number"
+    },
+    "frame": {
+      "oneOf": [
+        {
+          "enum": [
+            "active",
+            "context",
+            "entity"
+          ],
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "origin": {
+              "items": {
+                "type": "number"
+              },
+              "maxItems": 3,
+              "minItems": 3,
+              "type": "array"
+            },
+            "x": {
+              "items": {
+                "type": "number"
+              },
+              "maxItems": 3,
+              "minItems": 3,
+              "type": "array"
+            },
+            "y": {
+              "items": {
+                "type": "number"
+              },
+              "maxItems": 3,
+              "minItems": 3,
+              "type": "array"
+            },
+            "z": {
+              "items": {
+                "type": "number"
+              },
+              "maxItems": 3,
+              "minItems": 3,
+              "type": "array"
+            }
+          },
+          "required": [
+            "origin",
+            "x",
+            "y",
+            "z"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "mode": {
+      "oneOf": [
+        {
+          "enum": [
+            "end",
+            "centered"
+          ],
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "interior": {
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "interior"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "paths": {
+      "items": {
+        "oneOf": [
+          {
+            "type": "string"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "path": {
+                "items": {
+                  "type": "string"
+                },
+                "minItems": 1,
+                "type": "array"
+              }
+            },
+            "required": [
+              "path"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "paths",
+    "axis"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "properties": {
+    "applied": {
+      "type": "number"
+    },
+    "cutters": {
+      "items": {
+        "type": "number"
+      },
+      "type": "array"
+    },
+    "max_compression": {
+      "type": "number"
+    }
+  },
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `unimplemented`
 
 ## hew.context
 
@@ -405,6 +3942,7 @@ Place an instance of a definition at a pose.
 - **Tier:** Required
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Open a group/component editing frame (transaction-balanced only).
 
@@ -440,10 +3978,12 @@ Open a group/component editing frame (transaction-balanced only).
 - `unknown_entity`
 - `explode_session_open` — This component is already open for editing further out. Step back out to it (Escape) instead of opening it again — and close the editor before saving.
 - `explode_session_nested_group` — This group is nested inside another one, so it can't be opened for editing directly. Enter its enclosing group first, then drill down to this one.
-- `explode_session_pose_unsupported` — This instance's pose is scaled unevenly or mirrored, so it can't be opened for direct editing. Even out its scale and unmirror it first.
-- `explode_session_grouped_instance` — A placement of this component sits inside a group, so it opens in the in-context editing mode instead.
+- `explode_session_pose_unsupported` — This instance is scaled unevenly, so it can't be opened for direct editing. Even out its scale first.
+- `explode_session_grouped_instance` — This instance sits inside a group, so it opens in the in-context editing mode instead.
 - `unknown_group` — That group is no longer there — the model changed since it was picked. Click it again.
 - `unknown_instance` — That component instance is no longer there — the model changed since it was picked. Click it again.
+- `face_not_flat` — That shape is too far from the origin, or would be stretched too far, for its faces to stay flat, so it was refused. Try moving it closer to the origin, or use a smaller change.
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.context.exit`
 
@@ -451,6 +3991,7 @@ Open a group/component editing frame (transaction-balanced only).
 - **Tier:** Required
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Close the innermost frame this envelope opened.
 
@@ -477,6 +4018,7 @@ Close the innermost frame this envelope opened.
 **Refusals:**
 
 - `explode_session_not_open` — No component is currently open for editing.
+- `face_not_flat` — That shape is too far from the origin, or would be stretched too far, for its faces to stay flat, so it was refused. Try moving it closer to the origin, or use a smaller change.
 
 ## hew.doc
 
@@ -486,6 +4028,7 @@ Close the innermost frame this envelope opened.
 - **Tier:** Required
 - **Class:** solitary
 - **Served:** kernel
+- **Permission:** always
 
 Bind this connection to one open document, named by `document` (id, path, label, or title; see hew.meta.documents). With no `document`, the connection's current document.
 
@@ -518,6 +4061,13 @@ Bind this connection to one open document, named by `document` (id, path, label,
         "dirty": {
           "type": "boolean"
         },
+        "document_id": {
+          "description": "the persistent UUID the document's file carries (lowercase, hyphenated); null until the document is first saved",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "front": {
           "description": "this is the user's front-most document window",
           "type": "boolean"
@@ -545,7 +4095,8 @@ Bind this connection to one open document, named by `document` (id, path, label,
         "id",
         "title",
         "path",
-        "dirty"
+        "dirty",
+        "document_id"
       ],
       "type": "object"
     }
@@ -558,6 +4109,7 @@ Bind this connection to one open document, named by `document` (id, path, label,
 
 - `unknown_document`
 - `ambiguous_document`
+- `document_not_granted`
 
 ### `hew.doc.close`
 
@@ -565,6 +4117,7 @@ Bind this connection to one open document, named by `document` (id, path, label,
 - **Tier:** Standard
 - **Class:** solitary
 - **Served:** host
+- **Permission:** documents.discard
 
 Close an open document window (the attached one, or the named `document`). Refuses unsaved changes unless `discard` is set.
 
@@ -600,6 +4153,13 @@ Close an open document window (the attached one, or the named `document`). Refus
         "dirty": {
           "type": "boolean"
         },
+        "document_id": {
+          "description": "the persistent UUID the document's file carries (lowercase, hyphenated); null until the document is first saved",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "front": {
           "description": "this is the user's front-most document window",
           "type": "boolean"
@@ -627,7 +4187,8 @@ Close an open document window (the attached one, or the named `document`). Refus
         "id",
         "title",
         "path",
-        "dirty"
+        "dirty",
+        "document_id"
       ],
       "type": "object"
     }
@@ -643,6 +4204,8 @@ Close an open document window (the attached one, or the named `document`). Refus
 - `ambiguous_document`
 - `unsaved_changes`
 - `last_document`
+- `dry_run_host_command`
+- `document_busy` — A plugin is still working on this model. Wait for it to finish, or cancel it from the notice at the top of the window.
 
 ### `hew.doc.export`
 
@@ -650,8 +4213,11 @@ Close an open document window (the attached one, or the named `document`). Refus
 - **Tier:** Required
 - **Class:** solitary
 - **Served:** host
+- **Permission:** documents.save
 
-Export the attached document — STL, 3MF, glTF/GLB, USDZ (solids only), or a SketchUp .skp ("skp", 2026 container; "skp2017") — bytes base64, or a path on hosts with filesystem access.
+Export the attached document — STL, 3MF, glTF/GLB, USDZ (solids only), or a SketchUp .skp ("skp", the 2021-and-later container; "skp3" to "skp8", "skp2013" to "skp2020") — bytes base64, or a path on hosts with filesystem access.
+
+> **Preview parameters:** `cages`, part of the preview feature Smooth (`smooth`). A production build leaves them out of the params schema and refuses them with `preview_only`.
 
 **Params schema:**
 
@@ -659,8 +4225,17 @@ Export the attached document — STL, 3MF, glTF/GLB, USDZ (solids only), or a Sk
 {
   "additionalProperties": false,
   "properties": {
+    "cages": {
+      "default": false,
+      "description": "Mesh formats: export smoothed objects' cages instead of their Smooth surfaces.",
+      "type": "boolean"
+    },
+    "compat": {
+      "description": "Format \"skp\" only: write revision 17 of the container, leaving out what only newer SketchUp versions hold (see hew.doc.save). Absent or false: the lowest revision that holds the content.",
+      "type": "boolean"
+    },
     "format": {
-      "description": "\"gltf\" is an alias for \"glb\" — every host that implements one implements both. \"skp\" is the SketchUp 2026 container, \"skp2017\" the 2017 format; exporting never changes the document's own file",
+      "description": "\"gltf\" is an alias for \"glb\" — every host that implements one implements both. \"skp\" is the SketchUp 2021-and-later container, \"skp3\" to \"skp8\" and \"skp2013\" to \"skp2020\" those releases' formats; exporting never changes the document's own file",
       "enum": [
         "stl",
         "3mf",
@@ -668,7 +4243,20 @@ Export the attached document — STL, 3MF, glTF/GLB, USDZ (solids only), or a Sk
         "gltf",
         "usdz",
         "skp",
-        "skp2017"
+        "skp2020",
+        "skp2019",
+        "skp2018",
+        "skp2017",
+        "skp2016",
+        "skp2015",
+        "skp2014",
+        "skp2013",
+        "skp8",
+        "skp7",
+        "skp6",
+        "skp5",
+        "skp4",
+        "skp3"
       ],
       "type": "string"
     },
@@ -679,6 +4267,34 @@ Export the attached document — STL, 3MF, glTF/GLB, USDZ (solids only), or a Sk
       "maximum": 512,
       "minimum": 8,
       "type": "integer"
+    },
+    "selection": {
+      "description": "draw only these: node ids, occurrence locators {path}, or a definition's cmp_ id (its leaves at the identity pose)",
+      "items": {
+        "oneOf": [
+          {
+            "type": "string"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "path": {
+                "items": {
+                  "type": "string"
+                },
+                "minItems": 1,
+                "type": "array"
+              }
+            },
+            "required": [
+              "path"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "minItems": 1,
+      "type": "array"
     },
     "units": {
       "description": "SketchUp formats only: the display units the file opens in (hew.view.units's formats). Absent: the host's display units (the app's preference live; meters headless).",
@@ -725,6 +4341,9 @@ Export the attached document — STL, 3MF, glTF/GLB, USDZ (solids only), or a Sk
 - `host_capability_missing`
 - `nothing_to_export`
 - `save_failed`
+- `unknown_entity`
+- `unknown_occurrence`
+- `too_many_occurrences` — This model has more placed parts than Hew can list at once.
 
 ### `hew.doc.focus`
 
@@ -732,6 +4351,7 @@ Export the attached document — STL, 3MF, glTF/GLB, USDZ (solids only), or a Sk
 - **Tier:** Standard
 - **Class:** solitary
 - **Served:** host
+- **Permission:** documents.other
 
 Raise a document's window to the front. Every other command leaves the user's focus alone; this is the explicit opt-in.
 
@@ -763,6 +4383,13 @@ Raise a document's window to the front. Every other command leaves the user's fo
         "dirty": {
           "type": "boolean"
         },
+        "document_id": {
+          "description": "the persistent UUID the document's file carries (lowercase, hyphenated); null until the document is first saved",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "front": {
           "description": "this is the user's front-most document window",
           "type": "boolean"
@@ -790,7 +4417,8 @@ Raise a document's window to the front. Every other command leaves the user's fo
         "id",
         "title",
         "path",
-        "dirty"
+        "dirty",
+        "document_id"
       ],
       "type": "object"
     }
@@ -804,6 +4432,7 @@ Raise a document's window to the front. Every other command leaves the user's fo
 - `host_capability_missing`
 - `unknown_document`
 - `ambiguous_document`
+- `dry_run_host_command`
 
 ### `hew.doc.health`
 
@@ -811,6 +4440,7 @@ Raise a document's window to the front. Every other command leaves the user's fo
 - **Tier:** Standard
 - **Class:** read-only
 - **Served:** kernel
+- **Permission:** model.read
 
 Model health: every open object (world or component member) with its verdict, open rims and seam family, and counts by kind.
 
@@ -882,6 +4512,10 @@ Model health: every open object (world or component member) with its verdict, op
               "string",
               "null"
             ]
+          },
+          "degenerate_faces": {
+            "description": "zero-width or sub-tolerance faces on the solid; a solid is listed only when it has some",
+            "type": "integer"
           },
           "faces": {
             "description": "how many faces the object has",
@@ -1022,6 +4656,7 @@ Model health: every open object (world or component member) with its verdict, op
 - **Tier:** Standard
 - **Class:** solitary
 - **Served:** host
+- **Permission:** documents.save
 
 Merge a foreign-format file (STL, glTF/GLB, COLLADA, SketchUp) into the attached document through the shared healing pipeline, or place a PNG/JPEG picture (a component holding one face painted with it, at origin/u/v, width meters wide). Additive: existing geometry is untouched.
 
@@ -1114,7 +4749,7 @@ Merge a foreign-format file (STL, glTF/GLB, COLLADA, SketchUp) into the attached
 
 - `host_capability_missing`
 - `units_required`
-- `load_failed`
+- `load_failed` — The Library item couldn't be read, so the part wasn't updated. The Library file may be damaged.
 - `unsupported_format`
 
 ### `hew.doc.new`
@@ -1123,6 +4758,7 @@ Merge a foreign-format file (STL, glTF/GLB, COLLADA, SketchUp) into the attached
 - **Tier:** Required
 - **Class:** solitary
 - **Served:** host
+- **Permission:** documents.other
 
 Create a fresh document. The desktop app opens it in a new window — behind the user's current one unless `focus` says otherwise — and attaches the connection to it; headless hosts replace the working document.
 
@@ -1163,6 +4799,13 @@ Create a fresh document. The desktop app opens it in a new window — behind the
         "dirty": {
           "type": "boolean"
         },
+        "document_id": {
+          "description": "the persistent UUID the document's file carries (lowercase, hyphenated); null until the document is first saved",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "front": {
           "description": "this is the user's front-most document window",
           "type": "boolean"
@@ -1190,7 +4833,8 @@ Create a fresh document. The desktop app opens it in a new window — behind the
         "id",
         "title",
         "path",
-        "dirty"
+        "dirty",
+        "document_id"
       ],
       "type": "object"
     }
@@ -1203,6 +4847,8 @@ Create a fresh document. The desktop app opens it in a new window — behind the
 
 - `host_capability_missing`
 - `window_not_ready`
+- `dry_run_host_command`
+- `document_busy` — A plugin is still working on this model. Wait for it to finish, or cancel it from the notice at the top of the window.
 
 ### `hew.doc.open`
 
@@ -1210,6 +4856,7 @@ Create a fresh document. The desktop app opens it in a new window — behind the
 - **Tier:** Required
 - **Class:** solitary
 - **Served:** host
+- **Permission:** documents.other
 
 Open a .hew or SketchUp .skp document. The desktop app opens it in a new window (or attaches to the window that already has that file open), behind the user's current window unless `focus` says otherwise; headless hosts replace the working document.
 
@@ -1261,6 +4908,13 @@ Open a .hew or SketchUp .skp document. The desktop app opens it in a new window 
         "dirty": {
           "type": "boolean"
         },
+        "document_id": {
+          "description": "the persistent UUID the document's file carries (lowercase, hyphenated); null until the document is first saved",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "front": {
           "description": "this is the user's front-most document window",
           "type": "boolean"
@@ -1288,7 +4942,8 @@ Open a .hew or SketchUp .skp document. The desktop app opens it in a new window 
         "id",
         "title",
         "path",
-        "dirty"
+        "dirty",
+        "document_id"
       ],
       "type": "object"
     }
@@ -1300,8 +4955,10 @@ Open a .hew or SketchUp .skp document. The desktop app opens it in a new window 
 **Refusals:**
 
 - `host_capability_missing`
-- `load_failed`
+- `load_failed` — The Library item couldn't be read, so the part wasn't updated. The Library file may be damaged.
 - `window_not_ready`
+- `dry_run_host_command`
+- `document_busy` — A plugin is still working on this model. Wait for it to finish, or cancel it from the notice at the top of the window.
 
 ### `hew.doc.purge_unused`
 
@@ -1309,6 +4966,7 @@ Open a .hew or SketchUp .skp document. The desktop app opens it in a new window 
 - **Tier:** Standard
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Delete every unused material and component definition, as one undo entry.
 
@@ -1351,6 +5009,7 @@ Delete every unused material and component definition, as one undo entry.
 - **Tier:** Standard
 - **Class:** solitary
 - **Served:** host
+- **Permission:** documents.discard
 
 Revert to Saved: re-read the document's saved file in place, discarding every change since the last save. The undo and redo history is cleared and the document reads clean. Refuses `nothing_to_revert` when the document has no saved file or has no changes since the last save. There is no confirmation step: the caller is deliberate.
 
@@ -1381,10 +5040,12 @@ Revert to Saved: re-read the document's saved file in place, discarding every ch
 **Refusals:**
 
 - `host_capability_missing`
-- `load_failed`
+- `load_failed` — The Library item couldn't be read, so the part wasn't updated. The Library file may be damaged.
 - `nothing_to_revert`
 - `unknown_document`
 - `ambiguous_document`
+- `dry_run_host_command`
+- `document_busy` — A plugin is still working on this model. Wait for it to finish, or cancel it from the notice at the top of the window.
 
 ### `hew.doc.save`
 
@@ -1392,6 +5053,7 @@ Revert to Saved: re-read the document's saved file in place, discarding every ch
 - **Tier:** Required
 - **Class:** solitary
 - **Served:** host
+- **Permission:** documents.save
 
 Save the attached document (Save / Save As) as .hew or SketchUp .skp: the file is written, the unsaved mark cleared, and the document bound to it. `copy` writes a copy without any of that. With no `path` it re-saves in place; a document with no file yet, in a host that cannot ask where, hands the bytes back instead.
 
@@ -1401,16 +5063,33 @@ Save the attached document (Save / Save As) as .hew or SketchUp .skp: the file i
 {
   "additionalProperties": false,
   "properties": {
+    "compat": {
+      "description": "For the 2021-and-later container (\"skp\") only: write its revision 17, which every SketchUp since 2021 opens, leaving out what only newer versions hold (layer folders, hatch patterns, PBR materials, environments, snaps, procedures, page extras, CRS), each kind itemised in `writer_notes`. Absent or false: the lowest revision that holds the content. A save back over a revision-17 file keeps revision 17 either way. Refused for any other format.",
+      "type": "boolean"
+    },
     "copy": {
       "description": "write a copy to `path` — the document is not rebound to it and keeps its unsaved mark; requires `path`",
       "type": "boolean"
     },
     "format": {
-      "description": "\"skp\" is the 2026 container (what current SketchUp saves), \"skp2017\" the 2017 format (opens in SketchUp Make 2017 and later). Absent: a .skp path keeps the working file's own .skp container (the 2026 one for a document that did not come from a .skp), any other path writes .hew, and no path uses the working file's own format. A format that contradicts the path's extension is refused (format_mismatch).",
+      "description": "\"skp\" is the SketchUp 2021-and-later container (what current SketchUp saves); \"skp3\" to \"skp8\" and \"skp2013\" to \"skp2020\" are those releases' own formats (SketchUp opens a file of its own release or later). Absent: a .skp path keeps the working file's own .skp container (the 2026 one for a document that did not come from a .skp), any other path writes .hew, and no path uses the working file's own format. A format that contradicts the path's extension is refused (format_mismatch).",
       "enum": [
         "hew",
         "skp",
-        "skp2017"
+        "skp2020",
+        "skp2019",
+        "skp2018",
+        "skp2017",
+        "skp2016",
+        "skp2015",
+        "skp2014",
+        "skp2013",
+        "skp8",
+        "skp7",
+        "skp6",
+        "skp5",
+        "skp4",
+        "skp3"
       ],
       "type": "string"
     },
@@ -1452,7 +5131,20 @@ Save the attached document (Save / Save As) as .hew or SketchUp .skp: the file i
       "enum": [
         "hew",
         "skp",
-        "skp2017"
+        "skp2020",
+        "skp2019",
+        "skp2018",
+        "skp2017",
+        "skp2016",
+        "skp2015",
+        "skp2014",
+        "skp2013",
+        "skp8",
+        "skp7",
+        "skp6",
+        "skp5",
+        "skp4",
+        "skp3"
       ],
       "type": "string"
     },
@@ -1464,7 +5156,7 @@ Save the attached document (Save / Save As) as .hew or SketchUp .skp: the file i
       "type": "array"
     },
     "writer_notes": {
-      "description": "present for a .skp: what the 2017 writer dropped",
+      "description": "present for a .skp: what a stream release or revision-17 (`compat`) save dropped, one entry per kind",
       "items": {
         "type": "string"
       },
@@ -1482,6 +5174,7 @@ Save the attached document (Save / Save As) as .hew or SketchUp .skp: the file i
 - `host_capability_missing`
 - `path_required`
 - `save_failed`
+- `dry_run_host_command`
 
 ### `hew.doc.transact`
 
@@ -1489,6 +5182,7 @@ Save the attached document (Save / Save As) as .hew or SketchUp .skp: the file i
 - **Tier:** Required
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** always
 
 Execute commands in order, atomically, as one labeled undo entry.
 
@@ -1497,6 +5191,12 @@ Execute commands in order, atomically, as one labeled undo entry.
 ```json
 {
   "properties": {
+    "coalesce": {
+      "description": "merge into the top undo entry when it was committed under the same key by a connection with this connection's identity (docs/agents/HEW_API.md §6.5)",
+      "maxLength": 64,
+      "minLength": 1,
+      "type": "string"
+    },
     "commands": {
       "items": {
         "properties": {
@@ -1518,6 +5218,15 @@ Execute commands in order, atomically, as one labeled undo entry.
       "minItems": 1,
       "type": "array"
     },
+    "dry_run": {
+      "description": "rehearse: run the envelope on a copy of the document and answer what a commit would, changing nothing (docs/agents/HEW_API.md §6.6); needs only read permissions; no coalesce",
+      "type": "boolean"
+    },
+    "expect_generation": {
+      "description": "refuse with generation_moved, before any command runs, unless the document's history generation is this value (docs/agents/HEW_API.md §6.5)",
+      "minimum": 0,
+      "type": "integer"
+    },
     "label": {
       "type": "string"
     }
@@ -1534,6 +5243,10 @@ Execute commands in order, atomically, as one labeled undo entry.
 ```json
 {
   "properties": {
+    "dry_run": {
+      "description": "true on a rehearsal's answer",
+      "type": "boolean"
+    },
     "label": {
       "type": "string"
     },
@@ -1552,6 +5265,9 @@ Execute commands in order, atomically, as one labeled undo entry.
 **Refusals:**
 
 - `ref_resolution_failed`
+- `generation_moved`
+- `dry_run_host_command`
+- `compute_busy`
 
 ## hew.entity
 
@@ -1561,6 +5277,7 @@ Execute commands in order, atomically, as one labeled undo entry.
 - **Tier:** Required
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Delete an entity.
 
@@ -1605,6 +5322,248 @@ Delete an entity.
 - `unknown_component` — That component is no longer there — the model changed since it was picked. Click it again.
 - `definition_nested_in_definition` — This component is used inside another component's definition. Make that component's instances unique or explode them first, or delete the outer component.
 - `explode_session_scope` — That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again.
+- `locked_node` — Locked. Unlock it to change it.
+
+### `hew.entity.flip`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** model-mutating
+- **Served:** kernel
+- **Permission:** model.write
+
+Mirror a selection across a plane (Flip Along an axis through its center, the origin, or a point; or a given plane), in place or as one mirrored copy that links by default.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "about": {
+      "description": "where an axis plane passes: center (the default, the selection's world bounding-box center), origin, or a point",
+      "oneOf": [
+        {
+          "enum": [
+            "center",
+            "origin"
+          ],
+          "type": "string"
+        },
+        {
+          "items": {
+            "type": "number"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "type": "array"
+        }
+      ]
+    },
+    "axis": {
+      "description": "the mirror plane's world normal (SketchUp's Flip Along); exactly one of axis and plane",
+      "enum": [
+        "x",
+        "y",
+        "z"
+      ],
+      "type": "string"
+    },
+    "copy": {
+      "additionalProperties": false,
+      "description": "one mirrored copy instead of flipping in place; a linked copy is another placement at a mirrored pose",
+      "properties": {
+        "linked": {
+          "default": true,
+          "description": "true (the default on the bus, whatever the app's preference): each object or group copied becomes a set of linked copies, its copies placements of one shared solid; false: independent geometry",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "ids": {
+      "description": "world node and sketch ids, or occurrence locators {path: [instance, …, member]} that all reach members of one definition by the same path (the gesture is world space; every placement of the definition follows). One call is one scope: a mix refuses -32602",
+      "items": {
+        "oneOf": [
+          {
+            "type": "string"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "path": {
+                "items": {
+                  "type": "string"
+                },
+                "minItems": 1,
+                "type": "array"
+              }
+            },
+            "required": [
+              "path"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "minItems": 1,
+      "type": "array"
+    },
+    "plane": {
+      "additionalProperties": false,
+      "description": "the mirror plane in world coordinates; takes no about",
+      "properties": {
+        "normal": {
+          "items": {
+            "type": "number"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "type": "array"
+        },
+        "point": {
+          "description": "a point on the plane: [x, y, z] or a derived-point locator (§5.3)"
+        }
+      },
+      "required": [
+        "point",
+        "normal"
+      ],
+      "type": "object"
+    }
+  },
+  "required": [
+    "ids"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "description": "{} for a flip in place",
+  "properties": {
+    "ids": {
+      "description": "with copy: the mirrored copies (placements for a linked copy)",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "linked": {
+      "description": "present whenever copy was given: each object or group the copy wrapped as a linked set (it keeps its id, now inside definition, placed by instance in its old spot); empty for linked: false or when every root already was a placement",
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "definition": {
+            "type": "string"
+          },
+          "instance": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "source",
+          "instance",
+          "definition"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    }
+  },
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `unknown_entity`
+- `sketch_copy_unsupported`
+- `empty_selection` — The selection has nothing visible to transform — everything in it is hidden or empty. Unhide its contents, or select something visible.
+- `duplicate_member` — The same object is in the selection twice. Reselect and try again.
+- `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
+- `unknown_group` — That group is no longer there — the model changed since it was picked. Click it again.
+- `unknown_instance` — That component instance is no longer there — the model changed since it was picked. Click it again.
+- `unknown_sketch` — That sketch is no longer there — the model changed since it was picked. Click it again.
+- `unknown_occurrence`
+- `unknown_component` — That component is no longer there — the model changed since it was picked. Click it again.
+- `explode_session_scope` — That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again.
+- `component_expansion_exceeded` — That would multiply past a million rendered component parts. Reduce how many copies the nested components repeat — explode or thin out a level — and try again.
+- `too_many_occurrences` — This model has more placed parts than Hew can list at once.
+- `singular` — That transform would scale the object down to nothing, so it was refused.
+- `degenerate_axis` — The rotation axis needs two distinct points. Pick a second point further from the first.
+- `degenerate_texture_frame` — That would stretch a picture or texture on the object so far it couldn't stay on its face, so it was refused. Try a smaller stretch.
+- `face_not_flat` — That shape is too far from the origin, or would be stretched too far, for its faces to stay flat, so it was refused. Try moving it closer to the origin, or use a smaller change.
+- `locked_node` — Locked. Unlock it to change it.
+
+### `hew.entity.lock`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** model-mutating
+- **Served:** kernel
+- **Permission:** model.write
+
+Lock objects, groups, and component copies so nothing about them changes until they are unlocked; locking one copy of a component or linked set locks every copy.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "description": "One undo step labeled Lock. Hiding, selecting, measuring, and copying a locked thing still work; edits to it refuse locked_node. Refused explode_session_scope while a component is open for editing, or when the lock would freeze an open group.",
+  "properties": {
+    "targets": {
+      "description": "objects (\"obj_…\"), groups (\"grp_…\"), and component instances (\"ins_…\"); an instance stands for its definition, so every copy of it changes together",
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 10000,
+      "minItems": 1,
+      "type": "array"
+    }
+  },
+  "required": [
+    "targets"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "changed": {
+      "description": "how many objects, groups, and shapes changed state; 0 when all were already as asked (and no undo entry was made)",
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "changed"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `unknown_entity`
+- `not_a_node`
+- `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
+- `unknown_group` — That group is no longer there — the model changed since it was picked. Click it again.
+- `unknown_instance` — That component instance is no longer there — the model changed since it was picked. Click it again.
+- `unknown_component` — That component is no longer there — the model changed since it was picked. Click it again.
+- `explode_session_scope` — That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again.
 
 ### `hew.entity.move`
 
@@ -1612,8 +5571,9 @@ Delete an entity.
 - **Tier:** Required
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
-Translate (with copy/array forms) by vector or from→to points.
+Translate (with copy/array forms) by vector or from→to points; ids may be paths to members of one definition, moved in world terms with every placement following.
 
 **Params schema:**
 
@@ -1625,17 +5585,72 @@ Translate (with copy/array forms) by vector or from→to points.
       "additionalProperties": false,
       "properties": {
         "count": {
+          "description": "copies at step, 2·step, …, count·step along the translation",
           "maximum": 1000,
           "minimum": 1,
           "type": "integer"
+        },
+        "grid": {
+          "description": "a grid copy: one entry per axis; count is the number of slots along it, the original's included, so [{count: 4, step}] makes three copies. Takes the place of translation/from/to and of copy.count; the product of counts is at most 1000",
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "count": {
+                "minimum": 1,
+                "type": "integer"
+              },
+              "step": {
+                "items": {
+                  "type": "number"
+                },
+                "maxItems": 3,
+                "minItems": 3,
+                "type": "array"
+              }
+            },
+            "required": [
+              "count",
+              "step"
+            ],
+            "type": "object"
+          },
+          "maxItems": 3,
+          "minItems": 1,
+          "type": "array"
+        },
+        "linked": {
+          "default": true,
+          "description": "true (the default on the bus, whatever the app's preference): each object or group copied becomes a set of linked copies, its copies placements of one shared solid; false: independent geometry",
+          "type": "boolean"
         }
       },
       "type": "object"
     },
     "from": {},
     "ids": {
+      "description": "world node and sketch ids, or occurrence locators {path: [instance, …, member]} that all reach members of one definition by the same path (the gesture is world space; every placement of the definition follows). One call is one scope: a mix refuses -32602",
       "items": {
-        "type": "string"
+        "oneOf": [
+          {
+            "type": "string"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "path": {
+                "items": {
+                  "type": "string"
+                },
+                "minItems": 1,
+                "type": "array"
+              }
+            },
+            "required": [
+              "path"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "minItems": 1,
       "type": "array"
@@ -1663,8 +5678,33 @@ Translate (with copy/array forms) by vector or from→to points.
 {
   "properties": {
     "ids": {
+      "description": "the copies, placement-major, each placement's block in ids order; a linked copy's are placements (ins_)",
       "items": {
         "type": "string"
+      },
+      "type": "array"
+    },
+    "linked": {
+      "description": "present whenever copy was given: each object or group the copy wrapped as a linked set (it keeps its id, now inside definition, placed by instance in its old spot); empty for linked: false or when every root already was a placement",
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "definition": {
+            "type": "string"
+          },
+          "instance": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "source",
+          "instance",
+          "definition"
+        ],
+        "type": "object"
       },
       "type": "array"
     }
@@ -1685,6 +5725,12 @@ Translate (with copy/array forms) by vector or from→to points.
 - `unknown_group` — That group is no longer there — the model changed since it was picked. Click it again.
 - `unknown_instance` — That component instance is no longer there — the model changed since it was picked. Click it again.
 - `unknown_sketch` — That sketch is no longer there — the model changed since it was picked. Click it again.
+- `unknown_occurrence`
+- `unknown_component` — That component is no longer there — the model changed since it was picked. Click it again.
+- `explode_session_scope` — That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again.
+- `component_expansion_exceeded` — That would multiply past a million rendered component parts. Reduce how many copies the nested components repeat — explode or thin out a level — and try again.
+- `face_not_flat` — That shape is too far from the origin, or would be stretched too far, for its faces to stay flat, so it was refused. Try moving it closer to the origin, or use a smaller change.
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.entity.rename`
 
@@ -1692,6 +5738,7 @@ Translate (with copy/array forms) by vector or from→to points.
 - **Tier:** Required
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Rename an entity.
 
@@ -1737,6 +5784,7 @@ Rename an entity.
 - `unknown_instance` — That component instance is no longer there — the model changed since it was picked. Click it again.
 - `unknown_component` — That component is no longer there — the model changed since it was picked. Click it again.
 - `unknown_material` — That material is no longer in the palette. Pick another swatch.
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.entity.rotate`
 
@@ -1744,8 +5792,9 @@ Rename an entity.
 - **Tier:** Required
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
-Rotate about a pivot and axis by an angle.
+Rotate about a pivot and axis by an angle; ids may be paths to members of one definition, turned in world terms with every placement following.
 
 **Params schema:**
 
@@ -1754,6 +5803,7 @@ Rotate about a pivot and axis by an angle.
   "additionalProperties": false,
   "properties": {
     "angle": {
+      "description": "radians, right-handed about axis",
       "type": "number"
     },
     "axis": {
@@ -1771,13 +5821,39 @@ Rotate about a pivot and axis by an angle.
           "maximum": 1000,
           "minimum": 1,
           "type": "integer"
+        },
+        "linked": {
+          "default": true,
+          "description": "true (the default on the bus, whatever the app's preference): each object or group copied becomes a set of linked copies, its copies placements of one shared solid; false: independent geometry",
+          "type": "boolean"
         }
       },
       "type": "object"
     },
     "ids": {
+      "description": "world node and sketch ids, or occurrence locators {path: [instance, …, member]} that all reach members of one definition by the same path (the gesture is world space; every placement of the definition follows). One call is one scope: a mix refuses -32602",
       "items": {
-        "type": "string"
+        "oneOf": [
+          {
+            "type": "string"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "path": {
+                "items": {
+                  "type": "string"
+                },
+                "minItems": 1,
+                "type": "array"
+              }
+            },
+            "required": [
+              "path"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "minItems": 1,
       "type": "array"
@@ -1804,6 +5880,30 @@ Rotate about a pivot and axis by an angle.
         "type": "string"
       },
       "type": "array"
+    },
+    "linked": {
+      "description": "present whenever copy was given: each object or group the copy wrapped as a linked set (it keeps its id, now inside definition, placed by instance in its old spot); empty for linked: false or when every root already was a placement",
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "definition": {
+            "type": "string"
+          },
+          "instance": {
+            "type": "string"
+          },
+          "source": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "source",
+          "instance",
+          "definition"
+        ],
+        "type": "object"
+      },
+      "type": "array"
     }
   },
   "type": "object"
@@ -1822,6 +5922,12 @@ Rotate about a pivot and axis by an angle.
 - `unknown_group` — That group is no longer there — the model changed since it was picked. Click it again.
 - `unknown_instance` — That component instance is no longer there — the model changed since it was picked. Click it again.
 - `unknown_sketch` — That sketch is no longer there — the model changed since it was picked. Click it again.
+- `unknown_occurrence`
+- `unknown_component` — That component is no longer there — the model changed since it was picked. Click it again.
+- `explode_session_scope` — That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again.
+- `component_expansion_exceeded` — That would multiply past a million rendered component parts. Reduce how many copies the nested components repeat — explode or thin out a level — and try again.
+- `face_not_flat` — That shape is too far from the origin, or would be stretched too far, for its faces to stay flat, so it was refused. Try moving it closer to the origin, or use a smaller change.
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.entity.scale`
 
@@ -1829,8 +5935,9 @@ Rotate about a pivot and axis by an angle.
 - **Tier:** Required
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
-Scale about an anchor with per-axis factors.
+Scale about an anchor with per-axis factors; a negative factor mirrors. ids may be paths to members of one definition, scaled in world terms with every placement following.
 
 **Params schema:**
 
@@ -1848,8 +5955,29 @@ Scale about an anchor with per-axis factors.
       "type": "array"
     },
     "ids": {
+      "description": "world node and sketch ids, or occurrence locators {path: [instance, …, member]} that all reach members of one definition by the same path (the gesture is world space; every placement of the definition follows). One call is one scope: a mix refuses -32602",
       "items": {
-        "type": "string"
+        "oneOf": [
+          {
+            "type": "string"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "path": {
+                "items": {
+                  "type": "string"
+                },
+                "minItems": 1,
+                "type": "array"
+              }
+            },
+            "required": [
+              "path"
+            ],
+            "type": "object"
+          }
+        ]
       },
       "minItems": 1,
       "type": "array"
@@ -1883,6 +6011,536 @@ Scale about an anchor with per-axis factors.
 - `unknown_group` — That group is no longer there — the model changed since it was picked. Click it again.
 - `unknown_instance` — That component instance is no longer there — the model changed since it was picked. Click it again.
 - `unknown_sketch` — That sketch is no longer there — the model changed since it was picked. Click it again.
+- `unknown_occurrence`
+- `unknown_component` — That component is no longer there — the model changed since it was picked. Click it again.
+- `explode_session_scope` — That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again.
+- `face_not_flat` — That shape is too far from the origin, or would be stretched too far, for its faces to stay flat, so it was refused. Try moving it closer to the origin, or use a smaller change.
+- `locked_node` — Locked. Unlock it to change it.
+
+### `hew.entity.set_frame`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** model-mutating
+- **Served:** kernel
+- **Permission:** model.write
+
+Set or clear the part frame override (hew.part / frame) of an object or group.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "description": "origin, x, and y are coordinates in the face frame hew.query.part_frame reports for the part without an override (after its [length, width, thickness] swap): origin an offset along that frame's axes, x and y unit, perpendicular directions in it. Give all three, or clear: true.",
+  "properties": {
+    "clear": {
+      "description": "true removes the override; give it alone",
+      "type": "boolean"
+    },
+    "id": {
+      "description": "an object (\"obj_…\") or group (\"grp_…\")",
+      "type": "string"
+    },
+    "origin": {
+      "items": {
+        "type": "number"
+      },
+      "maxItems": 3,
+      "minItems": 3,
+      "type": "array"
+    },
+    "x": {
+      "items": {
+        "type": "number"
+      },
+      "maxItems": 3,
+      "minItems": 3,
+      "type": "array"
+    },
+    "y": {
+      "items": {
+        "type": "number"
+      },
+      "maxItems": 3,
+      "minItems": 3,
+      "type": "array"
+    }
+  },
+  "required": [
+    "id"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "id": {
+      "type": "string"
+    },
+    "source": {
+      "description": "where hew.query.part_frame now takes the frame from",
+      "enum": [
+        "attribute",
+        "face"
+      ],
+      "type": "string"
+    }
+  },
+  "required": [
+    "id",
+    "source"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `unknown_entity`
+- `not_a_part`
+- `invalid_frame` — That frame is not a valid right-handed set of axes. Give three unit-length, mutually perpendicular directions.
+- `locked_node` — Locked. Unlock it to change it.
+
+### `hew.entity.unlock`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** model-mutating
+- **Served:** kernel
+- **Permission:** model.write
+
+Unlock objects, groups, and component copies (every copy of a shared shape with them), or everything with all: true.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "description": "Give targets, or all: true. One undo step labeled Unlock.",
+  "properties": {
+    "all": {
+      "description": "true unlocks every locked object, group, and shape in the document; give it alone",
+      "type": "boolean"
+    },
+    "targets": {
+      "description": "objects (\"obj_…\"), groups (\"grp_…\"), and component instances (\"ins_…\"); an instance stands for its definition, so every copy of it changes together",
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 10000,
+      "minItems": 1,
+      "type": "array"
+    }
+  },
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "changed": {
+      "description": "how many objects, groups, and shapes changed state; 0 when all were already as asked (and no undo entry was made)",
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "changed"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `unknown_entity`
+- `not_a_node`
+- `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
+- `unknown_group` — That group is no longer there — the model changed since it was picked. Click it again.
+- `unknown_instance` — That component instance is no longer there — the model changed since it was picked. Click it again.
+- `unknown_component` — That component is no longer there — the model changed since it was picked. Click it again.
+
+## hew.event
+
+### `hew.event.subscribe`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** read-only
+- **Served:** kernel
+- **Permission:** always
+
+Receive the named events on this connection as notification frames. Names the grant may not receive come back in `denied`.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "events": {
+      "items": {
+        "enum": [
+          "document_changed",
+          "selection_changed",
+          "context_changed",
+          "document_will_save",
+          "document_saved",
+          "document_opened",
+          "document_closed",
+          "units_changed",
+          "scenes_changed",
+          "tool_changed",
+          "plugin_state",
+          "slot_changed",
+          "settings_changed",
+          "ui_cancel",
+          "window_closed",
+          "surface_closed"
+        ],
+        "type": "string"
+      },
+      "maxItems": 32,
+      "minItems": 1,
+      "type": "array"
+    }
+  },
+  "required": [
+    "events"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "denied": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "subscribed": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "subscribed",
+    "denied"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:** none.
+
+### `hew.event.unsubscribe`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** read-only
+- **Served:** kernel
+- **Permission:** always
+
+Stop receiving the named events on this connection.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "events": {
+      "items": {
+        "enum": [
+          "document_changed",
+          "selection_changed",
+          "context_changed",
+          "document_will_save",
+          "document_saved",
+          "document_opened",
+          "document_closed",
+          "units_changed",
+          "scenes_changed",
+          "tool_changed",
+          "plugin_state",
+          "slot_changed",
+          "settings_changed",
+          "ui_cancel",
+          "window_closed",
+          "surface_closed"
+        ],
+        "type": "string"
+      },
+      "maxItems": 32,
+      "minItems": 1,
+      "type": "array"
+    }
+  },
+  "required": [
+    "events"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "denied": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "subscribed": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "subscribed",
+    "denied"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:** none.
+
+## hew.geo
+
+### `hew.geo.get`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** read-only
+- **Served:** kernel
+- **Permission:** model.read
+
+The document's geo-reference (coordinate reference system), or null when it has none.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {},
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "geo": {
+      "additionalProperties": false,
+      "description": "the coordinate reference system, or null when the document has none; positions are in the system's own map unit",
+      "properties": {
+        "calibration_file_name": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "easting": {
+          "description": "model origin easting, in the map unit",
+          "type": "number"
+        },
+        "geodetic_datum": {
+          "type": "string"
+        },
+        "height": {
+          "description": "model origin height, in the map unit",
+          "type": "number"
+        },
+        "map_projection": {
+          "type": "string"
+        },
+        "map_unit": {
+          "description": "the unit's name as the file holds it, e.g. METRE",
+          "type": "string"
+        },
+        "map_unit_metres": {
+          "description": "meters per map unit, when known",
+          "exclusiveMinimum": 0,
+          "type": "number"
+        },
+        "map_zone": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "northing": {
+          "description": "model origin northing, in the map unit",
+          "type": "number"
+        },
+        "scale": {
+          "description": "map scale factor",
+          "type": "number"
+        },
+        "tgl_id": {
+          "type": "string"
+        },
+        "vertical_datum": {
+          "type": "string"
+        },
+        "x_axis": {
+          "description": "the model's x axis in the map plane, a 2D vector (not an angle)",
+          "items": {
+            "type": "number"
+          },
+          "maxItems": 2,
+          "minItems": 2,
+          "type": "array"
+        }
+      },
+      "type": [
+        "object",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "geo"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:** none.
+
+### `hew.geo.set`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** model-mutating
+- **Served:** kernel
+- **Permission:** model.write
+
+Set the document's geo-reference to the given record, or clear it with null. One undo step.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "geo": {
+      "additionalProperties": false,
+      "description": "the coordinate reference system, or null when the document has none; positions are in the system's own map unit",
+      "properties": {
+        "calibration_file_name": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "easting": {
+          "description": "model origin easting, in the map unit",
+          "type": "number"
+        },
+        "geodetic_datum": {
+          "type": "string"
+        },
+        "height": {
+          "description": "model origin height, in the map unit",
+          "type": "number"
+        },
+        "map_projection": {
+          "type": "string"
+        },
+        "map_unit": {
+          "description": "the unit's name as the file holds it, e.g. METRE",
+          "type": "string"
+        },
+        "map_unit_metres": {
+          "description": "meters per map unit, when known",
+          "exclusiveMinimum": 0,
+          "type": "number"
+        },
+        "map_zone": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "northing": {
+          "description": "model origin northing, in the map unit",
+          "type": "number"
+        },
+        "scale": {
+          "description": "map scale factor",
+          "type": "number"
+        },
+        "tgl_id": {
+          "type": "string"
+        },
+        "vertical_datum": {
+          "type": "string"
+        },
+        "x_axis": {
+          "description": "the model's x axis in the map plane, a 2D vector (not an angle)",
+          "items": {
+            "type": "number"
+          },
+          "maxItems": 2,
+          "minItems": 2,
+          "type": "array"
+        }
+      },
+      "type": [
+        "object",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "geo"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {},
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `invalid_geo_reference` — That geo-location has a number that isn't finite or a unit size that isn't above zero, so it wasn't set. Fix the value and try again.
 
 ## hew.group
 
@@ -1892,6 +6550,7 @@ Scale about an anchor with per-axis factors.
 - **Tier:** Required
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Group sibling nodes non-destructively.
 
@@ -1940,6 +6599,7 @@ Group sibling nodes non-destructively.
 - `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
 - `unknown_group` — That group is no longer there — the model changed since it was picked. Click it again.
 - `unknown_instance` — That component instance is no longer there — the model changed since it was picked. Click it again.
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.group.explode`
 
@@ -1947,6 +6607,7 @@ Group sibling nodes non-destructively.
 - **Tier:** Required
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Dissolve a group, re-homing its members.
 
@@ -1981,6 +6642,7 @@ Dissolve a group, re-homing its members.
 
 - `unknown_entity`
 - `unknown_group` — That group is no longer there — the model changed since it was picked. Click it again.
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.group.reparent`
 
@@ -1988,6 +6650,7 @@ Dissolve a group, re-homing its members.
 - **Tier:** Standard
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Move live nodes into a group, or out to the top level, without touching their geometry.
 
@@ -2036,6 +6699,7 @@ Move live nodes into a group, or out to the top level, without touching their ge
 - `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
 - `unknown_group` — That group is no longer there — the model changed since it was picked. Click it again.
 - `unknown_instance` — That component instance is no longer there — the model changed since it was picked. Click it again.
+- `locked_node` — Locked. Unlock it to change it.
 
 ## hew.guide
 
@@ -2045,6 +6709,7 @@ Move live nodes into a group, or out to the top level, without touching their ge
 - **Tier:** Standard
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Add an angular construction guide.
 
@@ -2116,6 +6781,7 @@ Add an angular construction guide.
 - **Tier:** Standard
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Delete all guides.
 
@@ -2147,6 +6813,7 @@ Delete all guides.
 - **Tier:** Standard
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Add an infinite construction guide line.
 
@@ -2197,6 +6864,7 @@ Add an infinite construction guide line.
 - **Tier:** Standard
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Add a construction guide point.
 
@@ -2247,6 +6915,7 @@ Add a construction guide point.
 - **Tier:** Required
 - **Class:** solitary
 - **Served:** kernel
+- **Permission:** model.write
 
 Redo the most recently undone entry.
 
@@ -2282,6 +6951,7 @@ Redo the most recently undone entry.
 - **Tier:** Required
 - **Class:** solitary
 - **Served:** kernel
+- **Permission:** model.read
 
 History depth, the top entry's label and origin, the saved depth, and every undo/redo entry's label and origin.
 
@@ -2349,6 +7019,14 @@ History depth, the top entry's label and origin, the saved depth, and every undo
       ],
       "type": "object"
     },
+    "epoch": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "generation": {
+      "minimum": 0,
+      "type": "integer"
+    },
     "redo_depth": {
       "type": "integer"
     },
@@ -2363,7 +7041,9 @@ History depth, the top entry's label and origin, the saved depth, and every undo
     "redo_depth",
     "top",
     "saved_depth",
-    "entries"
+    "entries",
+    "generation",
+    "epoch"
   ],
   "type": "object"
 }
@@ -2377,6 +7057,7 @@ History depth, the top entry's label and origin, the saved depth, and every undo
 - **Tier:** Required
 - **Class:** solitary
 - **Served:** kernel
+- **Permission:** model.write
 
 Undo the top history entry (optionally guarded by expected_label).
 
@@ -2419,8 +7100,11 @@ Undo the top history entry (optionally guarded by expected_label).
 - **Tier:** Standard
 - **Class:** read-only
 - **Served:** host
+- **Permission:** model.read
 
 One library item's full metadata, manifest summary, and document attributes.
+
+> **Preview values:** `"profile"` of `category`, part of the preview feature Fillet and Chamfer (`fillet`). A production build leaves them out of the schemas, refuses them with `preview_only`, and reports no item that carries one.
 
 **Params schema:**
 
@@ -2453,7 +7137,8 @@ One library item's full metadata, manifest summary, and document attributes.
       "enum": [
         "component",
         "material",
-        "model"
+        "model",
+        "profile"
       ],
       "type": "string"
     },
@@ -2482,6 +7167,10 @@ One library item's full metadata, manifest summary, and document attributes.
     "path": {
       "type": "string"
     },
+    "remote": {
+      "description": "the remote note of an item fetched from a source (source, name, path, sha256, commit?, license?, fetchedAt, edited); absent when the item has none",
+      "type": "object"
+    },
     "saved_at": {
       "type": "string"
     },
@@ -2509,7 +7198,7 @@ One library item's full metadata, manifest summary, and document attributes.
 **Refusals:**
 
 - `host_capability_missing`
-- `unknown_library_item`
+- `unknown_library_item` — That part's Library item is no longer in the Library, so it can't be updated.
 
 ### `hew.library.insert`
 
@@ -2517,6 +7206,7 @@ One library item's full metadata, manifest summary, and document attributes.
 - **Tier:** Standard
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** library
 
 Insert a library item into the attached document, wired for idempotent re-insert exactly like the UI's own placement; a material item goes into the palette instead, recording no undo entry (§6.4).
 
@@ -2623,13 +7313,14 @@ Insert a library item into the attached document, wired for idempotent re-insert
 **Refusals:**
 
 - `host_capability_missing`
-- `unknown_library_item`
-- `load_failed`
+- `unknown_library_item` — That part's Library item is no longer in the Library, so it can't be updated.
+- `load_failed` — The Library item couldn't be read, so the part wasn't updated. The Library file may be damaged.
 - `component_expansion_exceeded` — That would multiply past a million rendered component parts. Reduce how many copies the nested components repeat — explode or thin out a level — and try again.
 - `singular` — That transform would scale the object down to nothing, so it was refused.
 - `degenerate_axis` — The rotation axis needs two distinct points. Pick a second point further from the first.
-- `reflection` — This would turn the object inside out (a mirror), which can't be baked into a solid. Mirror a component instance instead.
 - `explode_session_scope` — That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again.
+- `profile_not_insertable`
+- `face_not_flat` — That shape is too far from the origin, or would be stretched too far, for its faces to stay flat, so it was refused. Try moving it closer to the origin, or use a smaller change.
 
 ### `hew.library.list`
 
@@ -2637,8 +7328,11 @@ Insert a library item into the attached document, wired for idempotent re-insert
 - **Tier:** Standard
 - **Class:** read-only
 - **Served:** host
+- **Permission:** model.read
 
 List items in the Hew Library, optionally filtered by category, collection, or a text query.
+
+> **Preview values:** `"profile"` of `category`, part of the preview feature Fillet and Chamfer (`fillet`). A production build leaves them out of the schemas, refuses them with `preview_only`, and reports no item that carries one.
 
 **Params schema:**
 
@@ -2650,7 +7344,8 @@ List items in the Hew Library, optionally filtered by category, collection, or a
       "enum": [
         "component",
         "material",
-        "model"
+        "model",
+        "profile"
       ],
       "type": "string"
     },
@@ -2682,7 +7377,8 @@ List items in the Hew Library, optionally filtered by category, collection, or a
             "enum": [
               "component",
               "material",
-              "model"
+              "model",
+              "profile"
             ],
             "type": "string"
           },
@@ -2710,6 +7406,10 @@ List items in the Hew Library, optionally filtered by category, collection, or a
           },
           "path": {
             "type": "string"
+          },
+          "remote": {
+            "description": "the remote note of an item fetched from a source (source, name, path, sha256, commit?, license?, fetchedAt, edited); absent when the item has none",
+            "type": "object"
           },
           "saved_at": {
             "type": "string"
@@ -2753,6 +7453,7 @@ List items in the Hew Library, optionally filtered by category, collection, or a
 - **Tier:** Standard
 - **Class:** read-only
 - **Served:** host
+- **Permission:** library
 
 Delete a library item.
 
@@ -2793,7 +7494,7 @@ Delete a library item.
 **Refusals:**
 
 - `host_capability_missing`
-- `unknown_library_item`
+- `unknown_library_item` — That part's Library item is no longer in the Library, so it can't be updated.
 
 ### `hew.library.save`
 
@@ -2801,8 +7502,13 @@ Delete a library item.
 - **Tier:** Standard
 - **Class:** read-only
 - **Served:** kernel
+- **Permission:** library
 
 Save a selection, one material, or the whole document to the library. Records no undo entry (§6.4).
+
+> **Preview parameters:** `profile_chain`, part of the preview feature Fillet and Chamfer (`fillet`). A production build leaves them out of the params schema and refuses them with `preview_only`.
+
+> **Preview values:** `"profile"` of `category`, part of the preview feature Fillet and Chamfer (`fillet`). A production build leaves them out of the schemas, refuses them with `preview_only`, and reports no item that carries one.
 
 **Params schema:**
 
@@ -2815,7 +7521,8 @@ Save a selection, one material, or the whole document to the library. Records no
       "enum": [
         "component",
         "material",
-        "model"
+        "model",
+        "profile"
       ],
       "type": "string"
     },
@@ -2833,6 +7540,27 @@ Save a selection, one material, or the whole document to the library. Records no
       "type": "string"
     },
     "name": {
+      "type": "string"
+    },
+    "profile_chain": {
+      "description": "an open drawn chain saved as a profile item (category profile, implied): {sketch, edges: [<sketch edge id or locator>, …]}, edges in order from the profile's start on the bearing face to its end — not with selection or material",
+      "properties": {
+        "edges": {
+          "items": {},
+          "type": "array"
+        },
+        "sketch": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "sketch",
+        "edges"
+      ],
+      "type": "object"
+    },
+    "replace": {
+      "description": "the id or path of an existing item to overwrite in place, keeping its id",
       "type": "string"
     },
     "return_bytes": {
@@ -2892,7 +7620,238 @@ Save a selection, one material, or the whole document to the library. Records no
 - `unknown_group` — That group is no longer there — the model changed since it was picked. Click it again.
 - `unknown_instance` — That component instance is no longer there — the model changed since it was picked. Click it again.
 - `explode_session_scope` — That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again.
+- `face_not_flat` — That shape is too far from the origin, or would be stretched too far, for its faces to stay flat, so it was refused. Try moving it closer to the origin, or use a smaller change.
 - `save_failed`
+- `unknown_library_item` — That part's Library item is no longer in the Library, so it can't be updated.
+- `invalid_profile` — This profile shape isn't valid. Redraw it as one open chain.
+- `locator_missed`
+- `ambiguous_locator`
+
+### `hew.library.status`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** read-only
+- **Served:** kernel
+- **Permission:** model.read
+
+Every definition linked to a Library item, and where it stands against the item: in step, newer in the Library, changed here, changed on both sides, different, or the item missing.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {},
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "properties": {
+    "links": {
+      "items": {
+        "properties": {
+          "base": {
+            "description": "the content print it had when last in step with the item; absent for a link made before 1.5",
+            "type": "string"
+          },
+          "copies": {
+            "description": "how many live placements the definition has",
+            "type": "integer"
+          },
+          "definition": {
+            "description": "the linked definition's id",
+            "type": "string"
+          },
+          "item": {
+            "description": "the Library item's id",
+            "type": "string"
+          },
+          "locked": {
+            "description": "a lock would make an update skip it: the definition or something its contents hold is locked (the same check hew.library.update makes)",
+            "type": "boolean"
+          },
+          "mine": {
+            "description": "the definition's content print now (p1:<hex>)",
+            "type": "string"
+          },
+          "name": {
+            "description": "the definition's name, when it has one",
+            "type": "string"
+          },
+          "state": {
+            "description": "in_step: the definition holds what the item holds; library_newer: unchanged here, changed in the Library; edited_here: changed here, unchanged in the Library; both_changed: changed on both sides; different: the two differ and nothing says which side moved (a link made before 1.5, or another print scheme); item_missing: the Library no longer holds the item or the item no longer holds this definition (the part keeps working)",
+            "enum": [
+              "in_step",
+              "library_newer",
+              "edited_here",
+              "both_changed",
+              "different",
+              "item_missing"
+            ],
+            "type": "string"
+          },
+          "theirs": {
+            "description": "the item's content print of the definition now; absent when the item is missing",
+            "type": "string"
+          }
+        },
+        "required": [
+          "definition",
+          "item",
+          "state",
+          "copies",
+          "locked",
+          "mine"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "links"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `host_capability_missing`
+
+### `hew.library.update`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** model-mutating
+- **Served:** kernel
+- **Permission:** library
+
+Replace linked definitions' contents with their Library items' (Update from Library): named ones, or every one the Library has newer, as one undo entry; placements keep their poses, refused parts are skipped and named.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "all": {
+      "description": "true updates every linked definition whose state is library_newer (a part also changed here is updated only when named) — exactly one of definitions/all",
+      "type": "boolean"
+    },
+    "definitions": {
+      "description": "linked definition ids to update, whatever their state — exactly one of definitions/all",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    }
+  },
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "properties": {
+    "also_updated": {
+      "description": "nested definitions from the same item replaced in the same step",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "definitions_added": {
+      "description": "definitions the items carried that the model did not hold, copied in",
+      "type": "integer"
+    },
+    "kept": {
+      "description": "definitions from the same item as a nested part of an updated one, left exactly as they were because they were changed here or a lock holds them; the updated part got a fresh copy of the item's definition instead",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "materials_added": {
+      "type": "integer"
+    },
+    "skipped": {
+      "items": {
+        "properties": {
+          "definition": {
+            "type": "string"
+          },
+          "detail": {
+            "description": "the refusal's detail; for locked_node, node is the locked node (inside the part, or the copy that locks it)",
+            "type": "object"
+          },
+          "explanation": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "refusal": {
+            "description": "why it was left as it was, a refusal name: locked_node, explode_session_scope, component_cycle, component_depth_exceeded, component_expansion_exceeded, unknown_library_item, load_failed, unknown_component",
+            "type": "string"
+          }
+        },
+        "required": [
+          "definition",
+          "refusal",
+          "explanation",
+          "detail"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "unchanged": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "updated": {
+      "description": "requested definitions whose contents were replaced",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "updated",
+    "also_updated",
+    "unchanged",
+    "kept",
+    "skipped",
+    "definitions_added",
+    "materials_added"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `host_capability_missing`
+- `unknown_entity`
+- `unknown_library_item` — That part's Library item is no longer in the Library, so it can't be updated.
+- `load_failed` — The Library item couldn't be read, so the part wasn't updated. The Library file may be damaged.
+- `locked_node` — Locked. Unlock it to change it.
+- `explode_session_scope` — That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again.
+- `component_cycle` — Placing that instance here would make a component contain itself, directly or through another component. Pick a different definition, or explode/make unique the instance that closes the loop.
+- `component_depth_exceeded` — That would nest components deeper than Hew supports. Flatten one of the levels — explode an instance, or make it unique — before placing this one.
+- `component_expansion_exceeded` — That would multiply past a million rendered component parts. Reduce how many copies the nested components repeat — explode or thin out a level — and try again.
+- `unknown_component` — That component is no longer there — the model changed since it was picked. Click it again.
 
 ### `hew.library.update_meta`
 
@@ -2900,8 +7859,11 @@ Save a selection, one material, or the whole document to the library. Records no
 - **Tier:** Standard
 - **Class:** read-only
 - **Served:** host
+- **Permission:** library
 
 Edit a library item's name, keywords, or collection in place.
+
+> **Preview values:** `"profile"` of `category`, part of the preview feature Fillet and Chamfer (`fillet`). A production build leaves them out of the schemas, refuses them with `preview_only`, and reports no item that carries one.
 
 **Params schema:**
 
@@ -2942,7 +7904,8 @@ Edit a library item's name, keywords, or collection in place.
       "enum": [
         "component",
         "material",
-        "model"
+        "model",
+        "profile"
       ],
       "type": "string"
     },
@@ -2961,6 +7924,10 @@ Edit a library item's name, keywords, or collection in place.
     "name": {
       "type": "string"
     },
+    "remote": {
+      "description": "the remote note of an item fetched from a source (source, name, path, sha256, commit?, license?, fetchedAt, edited); absent when the item has none",
+      "type": "object"
+    },
     "saved_at": {
       "type": "string"
     }
@@ -2977,7 +7944,7 @@ Edit a library item's name, keywords, or collection in place.
 **Refusals:**
 
 - `host_capability_missing`
-- `unknown_library_item`
+- `unknown_library_item` — That part's Library item is no longer in the Library, so it can't be updated.
 - `save_failed`
 
 ## hew.material
@@ -2988,6 +7955,7 @@ Edit a library item's name, keywords, or collection in place.
 - **Tier:** Standard
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Add a color or texture material to the palette. Registry-state: records no undo entry (§6.4).
 
@@ -3065,7 +8033,7 @@ Add a color or texture material to the palette. Registry-state: records no undo 
 
 **Refusals:**
 
-- `load_failed`
+- `load_failed` — The Library item couldn't be read, so the part wasn't updated. The Library file may be damaged.
 - `host_capability_missing`
 
 ### `hew.material.paint`
@@ -3074,8 +8042,9 @@ Add a color or texture material to the palette. Registry-state: records no undo 
 - **Tier:** Standard
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
-Paint a face or entity.
+Paint a face (by default its whole logical face: a fillet, a cylinder wall; `logical: false` paints one facet) or an entity.
 
 **Params schema:**
 
@@ -3083,15 +8052,29 @@ Paint a face or entity.
 {
   "additionalProperties": false,
   "properties": {
-    "face": {},
+    "face": {
+      "description": "a face locator {object | path, at} | {object | path, ray} | {\"$face\"}; through a path the definition's face is painted, so every copy shows it"
+    },
     "id": {
+      "description": "an object (its base material), an instance (the placement's own material), or a definition (every object it owns)",
       "type": "string"
+    },
+    "logical": {
+      "type": "boolean"
     },
     "material": {
       "type": [
         "string",
         "null"
       ]
+    },
+    "scope": {
+      "description": "for an instance id: the placement (default) or its definition; a definition id takes only \"definition\"",
+      "enum": [
+        "instance",
+        "definition"
+      ],
+      "type": "string"
     }
   },
   "required": [
@@ -3115,10 +8098,16 @@ Paint a face or entity.
 
 - `unknown_entity`
 - `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
+- `unknown_instance` — That component instance is no longer there — the model changed since it was picked. Click it again.
+- `unknown_component` — That component is no longer there — the model changed since it was picked. Click it again.
 - `unknown_face` — That face is no longer there — the model changed since it was picked. Click it again.
 - `unknown_material` — That material is no longer in the palette. Pick another swatch.
 - `locator_missed`
 - `ambiguous_locator`
+- `unknown_occurrence`
+- `not_an_object`
+- `explode_session_scope` — That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again.
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.material.position_texture`
 
@@ -3126,6 +8115,7 @@ Paint a face or entity.
 - **Tier:** Standard
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Position a face's texture by three tile-corner pins, or reset it to the default projection.
 
@@ -3206,6 +8196,7 @@ Position a face's texture by three tile-corner pins, or reset it to the default 
 - `face_token_unknown`
 - `face_token_stale`
 - `degenerate_pins`
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.material.replace`
 
@@ -3213,6 +8204,7 @@ Position a face's texture by three tile-corner pins, or reset it to the default 
 - **Tier:** Standard
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Replace one material with another everywhere it is painted, or within one object.
 
@@ -3230,7 +8222,7 @@ Replace one material with another everywhere it is painted, or within one object
       ]
     },
     "object": {
-      "description": "only within this object; omitted: the whole document",
+      "description": "only within this object; omitted: the whole document, instance materials included",
       "type": "string"
     },
     "to": {
@@ -3263,6 +8255,7 @@ Replace one material with another everywhere it is painted, or within one object
 
 - `unknown_entity`
 - `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.material.set_default`
 
@@ -3270,6 +8263,7 @@ Replace one material with another everywhere it is painted, or within one object
 - **Tier:** Standard
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Set an object's default material.
 
@@ -3312,6 +8306,7 @@ Set an object's default material.
 - `unknown_entity`
 - `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
 - `unknown_material` — That material is no longer in the palette. Pick another swatch.
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.material.set_opacity`
 
@@ -3319,6 +8314,7 @@ Set an object's default material.
 - **Tier:** Standard
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Set a material's opacity.
 
@@ -3360,6 +8356,62 @@ Set a material's opacity.
 - `unknown_entity`
 - `unknown_material` — That material is no longer in the palette. Pick another swatch.
 
+### `hew.material.set_pbr`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** model-mutating
+- **Served:** kernel
+- **Permission:** model.write
+
+Set a material's metallic and roughness factors (0 to 1); its maps and strengths are kept.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "material": {
+      "type": "string"
+    },
+    "metallic": {
+      "description": "0 dielectric to 1 metal",
+      "maximum": 1,
+      "minimum": 0,
+      "type": "number"
+    },
+    "roughness": {
+      "description": "0 mirror to 1 fully diffuse",
+      "maximum": 1,
+      "minimum": 0,
+      "type": "number"
+    }
+  },
+  "required": [
+    "material",
+    "metallic",
+    "roughness"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {},
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `unknown_entity`
+- `unknown_material` — That material is no longer in the palette. Pick another swatch.
+
 ## hew.meta
 
 ### `hew.meta.capabilities`
@@ -3368,6 +8420,7 @@ Set a material's opacity.
 - **Tier:** Required
 - **Class:** read-only
 - **Served:** kernel
+- **Permission:** always
 
 The registry as data: every granted command's schemas, summary, and refusal inventory.
 
@@ -3452,6 +8505,7 @@ The registry as data: every granted command's schemas, summary, and refusal inve
 - **Tier:** Required
 - **Class:** read-only
 - **Served:** host
+- **Permission:** model.read
 
 The host's open documents: id, title, path, dirty, and — in the desktop app — label, front, and attached.
 
@@ -3480,6 +8534,13 @@ The host's open documents: id, title, path, dirty, and — in the desktop app �
           "dirty": {
             "type": "boolean"
           },
+          "document_id": {
+            "description": "the persistent UUID the document's file carries (lowercase, hyphenated); null until the document is first saved",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "front": {
             "description": "this is the user's front-most document window",
             "type": "boolean"
@@ -3507,7 +8568,8 @@ The host's open documents: id, title, path, dirty, and — in the desktop app �
           "id",
           "title",
           "path",
-          "dirty"
+          "dirty",
+          "document_id"
         ],
         "type": "object"
       },
@@ -3521,7 +8583,9 @@ The host's open documents: id, title, path, dirty, and — in the desktop app �
 }
 ```
 
-**Refusals:** none.
+**Refusals:**
+
+- `dry_run_host_command`
 
 ### `hew.meta.hello`
 
@@ -3529,6 +8593,7 @@ The host's open documents: id, title, path, dirty, and — in the desktop app �
 - **Tier:** Required
 - **Class:** read-only
 - **Served:** kernel
+- **Permission:** always
 
 Open the connection: negotiate protocol and encoding, learn the granted profile and open documents.
 
@@ -3598,6 +8663,13 @@ Open the connection: negotiate protocol and encoding, learn the granted profile 
           "dirty": {
             "type": "boolean"
           },
+          "document_id": {
+            "description": "the persistent UUID the document's file carries (lowercase, hyphenated); null until the document is first saved",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "front": {
             "description": "this is the user's front-most document window",
             "type": "boolean"
@@ -3625,7 +8697,8 @@ Open the connection: negotiate protocol and encoding, learn the granted profile 
           "id",
           "title",
           "path",
-          "dirty"
+          "dirty",
+          "document_id"
         ],
         "type": "object"
       },
@@ -3634,10 +8707,14 @@ Open the connection: negotiate protocol and encoding, learn the granted profile 
     "encoding": {
       "type": "string"
     },
+    "grant": {
+      "type": "object"
+    },
     "profile": {
       "enum": [
         "core",
-        "app"
+        "app",
+        "plugin"
       ],
       "type": "string"
     },
@@ -3658,6 +8735,551 @@ Open the connection: negotiate protocol and encoding, learn the granted profile 
 
 **Refusals:** none.
 
+## hew.object
+
+### `hew.object.crease`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** model-mutating
+- **Served:** kernel
+- **Permission:** model.write
+
+Set or clear the crease on edges, which keeps them sharp under Smooth.
+
+> **Preview.** Part of the preview feature Smooth (`smooth`). Only a preview build serves it; a production build leaves it out of every listing and refuses it with `preview_only`.
+
+**Params schema:**
+
+```json
+{
+  "properties": {
+    "crease": {
+      "default": true,
+      "type": "boolean"
+    },
+    "edges": {
+      "items": {
+        "description": "an edge locator {object, at}; all on one object",
+        "type": "object"
+      },
+      "minItems": 1,
+      "type": "array"
+    },
+    "propagate": {
+      "default": "none",
+      "description": "tangent: also follow each edge's tangent continuations",
+      "enum": [
+        "none",
+        "tangent"
+      ]
+    }
+  },
+  "required": [
+    "edges"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "properties": {
+    "edges": {
+      "description": "how many kernel edges changed",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "edges"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `crease_on_soft_edge` — Soft seams can't be creased.
+- `crease_on_boundary` — An edge on an opening can't be creased.
+- `edges_span_objects`
+- `shape_degenerate` — That change didn't produce a valid solid. The model is unchanged.
+- `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
+- `unknown_component` — That component is no longer there — the model changed since it was picked. Click it again.
+- `unknown_entity`
+- `locator_missed`
+- `ambiguous_locator`
+- `locked_node` — Locked. Unlock it to change it.
+
+### `hew.object.smooth`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** model-mutating
+- **Served:** kernel
+- **Permission:** model.write
+
+Set an object's Smooth level (0 = Off, 1–3): its faces become the cage of a subdivision surface.
+
+> **Preview.** Part of the preview feature Smooth (`smooth`). Only a preview build serves it; a production build leaves it out of every listing and refuses it with `preview_only`.
+
+**Params schema:**
+
+```json
+{
+  "properties": {
+    "level": {
+      "description": "0 = Off",
+      "maximum": 3,
+      "minimum": 0,
+      "type": "integer"
+    },
+    "object": {
+      "description": "an object id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "object",
+    "level"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `amount_out_of_range` — That amount is out of range.
+- `smooth_too_dense` — This shape is too dense for that Smooth level. Try a lower level, or simplify the shape first.
+- `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
+- `unknown_component` — That component is no longer there — the model changed since it was picked. Click it again.
+- `unknown_entity`
+- `locked_node` — Locked. Unlock it to change it.
+
+## hew.permissions
+
+### `hew.permissions.request`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** solitary
+- **Served:** host
+- **Permission:** always
+
+Ask the person using Hew to grant this plugin some of the optional permissions its manifest declares (optionalPermissions). Only a plugin can ask, from its own connection, and only right after the person acted in that plugin's own window or panel; Hew shows what the plugin would be able to do and the person decides. Names the plugin already holds are granted without asking. The grant applies at once to the running plugin, which receives a grant message and keeps running. After a no, the same plugin is refused for a minute. Not available in Shop Mode. Any other caller is refused host_capability_missing.
+
+> **Preview.** Part of the preview feature Plugins (`plugins`). Only a preview build serves it; a production build leaves it out of every listing and refuses it with `preview_only`.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "permissions": {
+      "description": "names from the manifest's optionalPermissions",
+      "items": {
+        "maxLength": 256,
+        "minLength": 1,
+        "type": "string"
+      },
+      "maxItems": 64,
+      "minItems": 1,
+      "type": "array"
+    },
+    "reason": {
+      "description": "shown to the person; plain text",
+      "maxLength": 200,
+      "type": "string"
+    }
+  },
+  "required": [
+    "permissions"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "properties": {
+    "granted": {
+      "description": "the names asked for that the plugin now holds",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "granted"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `host_capability_missing`
+- `permission_not_requestable`
+- `no_user_activation`
+- `request_pending`
+- `request_declined`
+- `not_available_in_shop`
+
+## hew.plugin
+
+### `hew.plugin.activity`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** solitary
+- **Served:** host
+- **Permission:** first_party
+
+What a plugin did in the app, newest first, at most 500 entries: each state a window reported for it (enabled, activating, activated, crashed, blocked, idle, unloaded), when, in which window, and why. Reads only; the log is kept by the app and goes with the plugin when it is uninstalled.
+
+> **Preview.** Part of the preview feature Plugins (`plugins`). Only a preview build serves it; a production build leaves it out of every listing and refuses it with `preview_only`.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "id": {
+      "description": "an installed plugin's id",
+      "maxLength": 128,
+      "minLength": 1,
+      "type": "string"
+    }
+  },
+  "required": [
+    "id"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "properties": {
+    "entries": {
+      "items": {
+        "properties": {
+          "at": {
+            "description": "milliseconds since the Unix epoch",
+            "type": "integer"
+          },
+          "reason": {
+            "description": "cleaned, at most 160 characters",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "state": {
+            "enum": [
+              "enabled",
+              "activating",
+              "activated",
+              "crashed",
+              "blocked",
+              "idle",
+              "unloaded"
+            ],
+            "type": "string"
+          },
+          "window": {
+            "description": "the label of the window that reported it",
+            "type": "string"
+          }
+        },
+        "required": [
+          "at",
+          "window",
+          "state",
+          "reason"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "entries"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `host_capability_missing`
+- `plugins_disabled`
+- `no_plugin_dir`
+- `invalid_params`
+- `not_installed`
+- `installed_unreadable`
+- `storage_unreadable`
+- `dry_run_host_command`
+- `io`
+
+### `hew.plugin.dev`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** solitary
+- **Served:** host
+- **Permission:** first_party
+
+Ask the app to show the person a request to load a plugin from a folder. Nothing is loaded, staged or read: the person picks the folder in the app's own folder picker, which opens at `path`, and reads what the plugin asks for before anything runs. The answer only says the request is waiting. Refused while developer mode is off, while another request waits, and for a while after the person dismisses one.
+
+> **Preview.** Part of the preview feature Plugins (`plugins`). Only a preview build serves it; a production build leaves it out of every listing and refuses it with `preview_only`.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "path": {
+      "description": "the plugin's folder; shown to the person and used as a starting point for the picker, never read",
+      "minLength": 1,
+      "type": "string"
+    }
+  },
+  "required": [
+    "path"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "properties": {
+    "status": {
+      "enum": [
+        "awaiting_user"
+      ],
+      "type": "string"
+    }
+  },
+  "required": [
+    "status"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `host_capability_missing`
+- `plugins_disabled`
+- `no_plugin_dir`
+- `plugins_off`
+- `developer_mode_off`
+- `confirmation_open`
+- `request_waiting`
+- `request_dismissed`
+- `dry_run_host_command`
+- `io`
+
+### `hew.plugin.list`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** solitary
+- **Served:** host
+- **Permission:** first_party
+
+List the plugins installed in the app: id, display name, version, where each came from (file, dir, index, git or url), whether it is turned on, and its state. A folder plugin is needs_developer_mode while developer mode is off, needs_review while the person has not yet read a change to what it asks for, checking until its folder has been compared since it started being watched (nothing of it is read before), plugins_off for the same while no window runs a plugin host (nothing will compare it), and unreadable when its record cannot be read. The list says whether a request to load a folder (hew.plugin.dev) is still waiting for the person, including while they are reading what the plugin asks for, and carries no folder path and does not say whether a plugin is running. Reads only.
+
+> **Preview.** Part of the preview feature Plugins (`plugins`). Only a preview build serves it; a production build leaves it out of every listing and refuses it with `preview_only`.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {},
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "properties": {
+    "developer_mode": {
+      "type": "boolean"
+    },
+    "plugins": {
+      "items": {
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "source": {
+            "description": "null when the record is unreadable",
+            "enum": [
+              "file",
+              "dir",
+              "index",
+              "git",
+              "url",
+              null
+            ],
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "state": {
+            "enum": [
+              "installed",
+              "needs_developer_mode",
+              "needs_review",
+              "checking",
+              "plugins_off",
+              "unreadable"
+            ],
+            "type": "string"
+          },
+          "version": {
+            "description": "null when the record is unreadable",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "version",
+          "source",
+          "enabled",
+          "state"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "request_waiting": {
+      "description": "true while a request to load a plugin is waiting for the person, including while they are reading what the plugin asks for; no path, no id",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "plugins",
+    "developer_mode",
+    "request_waiting"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `host_capability_missing`
+- `plugins_disabled`
+- `no_plugin_dir`
+- `dry_run_host_command`
+
+### `hew.plugin.reload`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** solitary
+- **Served:** host
+- **Permission:** first_party
+
+Ask every window running plugins to reload a plugin loaded from a developer folder, as when its files change: its running copy stops and starts again from the folder. Only while developer mode is on, never for a plugin installed from a package, one waiting for the person to review a change, or one that stopped (that one starts again only when the person turns it off and on). At most once every two seconds per plugin. The answer only says the reload was asked for.
+
+> **Preview.** Part of the preview feature Plugins (`plugins`). Only a preview build serves it; a production build leaves it out of every listing and refuses it with `preview_only`.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "id": {
+      "description": "an installed plugin's id",
+      "maxLength": 128,
+      "minLength": 1,
+      "type": "string"
+    }
+  },
+  "required": [
+    "id"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "properties": {
+    "status": {
+      "enum": [
+        "reloading"
+      ],
+      "type": "string"
+    }
+  },
+  "required": [
+    "status"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `host_capability_missing`
+- `plugins_disabled`
+- `no_plugin_dir`
+- `invalid_params`
+- `plugins_off`
+- `developer_mode_off`
+- `not_installed`
+- `installed_unreadable`
+- `not_a_developer_folder`
+- `plugin_blocked`
+- `plugin_stopped`
+- `plugin_turned_off`
+- `reload_too_soon`
+- `dry_run_host_command`
+- `storage_unreadable`
+- `io`
+
 ## hew.print
 
 ### `hew.print.pdf`
@@ -3666,6 +9288,7 @@ Open the connection: negotiate protocol and encoding, learn the granted profile 
 - **Tier:** Standard
 - **Class:** solitary
 - **Served:** host
+- **Permission:** model.read
 
 Print the document to a PDF the way File ▸ Print… does: standard (one page, the view as-is) or scaled (parallel projection at an exact drawing scale, tiled across pages with overlap bands, crop/trim marks, a scale bar, and a title block). Line art is vector (hidden lines removed); shaded is a software-rasterized bitmap per page. Bytes base64 inline, or written to path.
 
@@ -3836,14 +9459,174 @@ Print the document to a PDF the way File ▸ Print… does: standard (one page, 
 
 ## hew.query
 
+### `hew.query.changes_since`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** read-only
+- **Served:** kernel
+- **Permission:** model.read
+
+What changed since a history generation: the union of the change sets since then, or `full` when the history no longer reaches back that far.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "generation": {
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "generation"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "changes": {
+      "additionalProperties": false,
+      "properties": {
+        "added": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "attrs": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "id": {
+                "type": "string"
+              },
+              "ns": {
+                "type": "string"
+              },
+              "scope": {
+                "enum": [
+                  "entity",
+                  "face",
+                  "edge"
+                ]
+              }
+            },
+            "required": [
+              "id",
+              "ns",
+              "scope"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "copied_from": {
+          "description": "[new, source] pairs of public ids for entities copied in the range",
+          "items": {
+            "items": {
+              "type": "string"
+            },
+            "maxItems": 2,
+            "minItems": 2,
+            "type": "array"
+          },
+          "type": "array"
+        },
+        "document": {
+          "type": "boolean"
+        },
+        "full": {
+          "type": "boolean"
+        },
+        "linked": {
+          "description": "linked-copy wraps made in the range: the source, the placement that now stands for it, and the shared definition",
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "definition": {
+                "type": "string"
+              },
+              "instance": {
+                "type": "string"
+              },
+              "source": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "source",
+              "instance",
+              "definition"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "modified": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "removed": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "added",
+        "removed",
+        "modified",
+        "attrs",
+        "document",
+        "full",
+        "linked",
+        "copied_from"
+      ],
+      "type": "object"
+    },
+    "epoch": {
+      "type": "integer"
+    },
+    "from": {
+      "type": "integer"
+    },
+    "generation": {
+      "type": "integer"
+    }
+  },
+  "required": [
+    "generation",
+    "epoch",
+    "from",
+    "changes"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:** none.
+
 ### `hew.query.context`
 
 - **Version:** 1
 - **Tier:** Required
 - **Class:** read-only
 - **Served:** kernel
+- **Permission:** model.read
 
-The open editing-context frame stack.
+The open editing-context frame stack, with the app's fallback entries and whether a gesture is armed.
 
 **Params schema:**
 
@@ -3860,13 +9643,53 @@ The open editing-context frame stack.
 ```json
 {
   "properties": {
+    "armed": {
+      "description": "a tool gesture is armed in the user's window; false headless",
+      "type": "boolean"
+    },
     "direct_members": {},
+    "epoch": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "fallback": {
+      "description": "the app's in-context entries inside the innermost open frame, outermost first; empty headless",
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "object",
+              "instance"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "id"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "generation": {
+      "minimum": 0,
+      "type": "integer"
+    },
     "stack": {
       "type": "array"
     }
   },
   "required": [
-    "stack"
+    "stack",
+    "fallback",
+    "armed",
+    "generation",
+    "epoch"
   ],
   "type": "object"
 }
@@ -3880,6 +9703,7 @@ The open editing-context frame stack.
 - **Tier:** Required
 - **Class:** read-only
 - **Served:** kernel
+- **Permission:** model.read
 
 One entity's details.
 
@@ -3906,16 +9730,34 @@ One entity's details.
 ```json
 {
   "properties": {
+    "epoch": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "frozen": {
+      "description": "objects, groups, and instances: whether a lock keeps it from changing — its own, a locked group above it, or a locked shape it is part of. Edits to a frozen entity refuse locked_node",
+      "type": "boolean"
+    },
+    "generation": {
+      "minimum": 0,
+      "type": "integer"
+    },
     "id": {
       "type": "string"
     },
     "kind": {
       "type": "string"
+    },
+    "locked": {
+      "description": "objects, groups, instances, and components: locked itself (an instance by its component's lock, shared by every copy)",
+      "type": "boolean"
     }
   },
   "required": [
     "kind",
-    "id"
+    "id",
+    "generation",
+    "epoch"
   ],
   "type": "object"
 }
@@ -3931,6 +9773,7 @@ One entity's details.
 - **Tier:** Required
 - **Class:** read-only
 - **Served:** kernel
+- **Permission:** model.read
 
 A solid's faces: planes, areas, centroids, boundary loops.
 
@@ -3941,12 +9784,18 @@ A solid's faces: planes, areas, centroids, boundary loops.
   "additionalProperties": false,
   "properties": {
     "object": {
+      "description": "an object id; give this or path",
       "type": "string"
+    },
+    "path": {
+      "description": "an occurrence path ending at an object ([...instances, object]); each face then also reports material_effective through it",
+      "items": {
+        "type": "string"
+      },
+      "minItems": 1,
+      "type": "array"
     }
   },
-  "required": [
-    "object"
-  ],
   "type": "object"
 }
 ```
@@ -3956,8 +9805,73 @@ A solid's faces: planes, areas, centroids, boundary loops.
 ```json
 {
   "properties": {
+    "epoch": {
+      "minimum": 0,
+      "type": "integer"
+    },
     "faces": {
+      "description": "per face: object, plane, area, centroid, outer, holes, material, surface, texture_pins, attrs (the face's attribute dictionary, namespace -> key -> value, {} for none), and material_effective when asked through a path",
+      "items": {
+        "properties": {
+          "blend": {
+            "description": "present on a face of a fillet, chamfer or profile blend: `id` (per object), `kind` (\"fillet\", \"chamfer\" or \"profile\") and `role` (\"strip\", \"corner\" or \"runout\")",
+            "properties": {
+              "id": {
+                "type": "integer"
+              },
+              "kind": {
+                "enum": [
+                  "fillet",
+                  "chamfer",
+                  "profile"
+                ],
+                "type": "string"
+              },
+              "role": {
+                "enum": [
+                  "strip",
+                  "corner",
+                  "runout"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "id",
+              "kind",
+              "role"
+            ],
+            "type": "object"
+          },
+          "surface": {
+            "description": "the analytic surface the face is a chord facet of, or null. `kind` is \"cylinder\" (axis_point, axis, radius), \"sphere\" (center, radius), \"torus\" (center, axis, major_radius, minor_radius) or \"cone\" (apex, axis, half_angle in radians); lengths in meters",
+            "properties": {
+              "kind": {
+                "enum": [
+                  "cylinder",
+                  "sphere",
+                  "torus",
+                  "cone"
+                ],
+                "type": "string"
+              }
+            },
+            "required": [
+              "kind"
+            ],
+            "type": [
+              "object",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
       "type": "array"
+    },
+    "generation": {
+      "minimum": 0,
+      "type": "integer"
     },
     "object": {
       "type": "string"
@@ -3965,7 +9879,9 @@ A solid's faces: planes, areas, centroids, boundary loops.
   },
   "required": [
     "object",
-    "faces"
+    "faces",
+    "generation",
+    "epoch"
   ],
   "type": "object"
 }
@@ -3974,6 +9890,7 @@ A solid's faces: planes, areas, centroids, boundary loops.
 **Refusals:**
 
 - `unknown_entity`
+- `unknown_occurrence`
 
 ### `hew.query.measure`
 
@@ -3981,21 +9898,99 @@ A solid's faces: planes, areas, centroids, boundary loops.
 - **Tier:** Required
 - **Class:** read-only
 - **Served:** kernel
+- **Permission:** model.read
 
-Distances and angles between points, edges, and faces.
+Distances between points, edges, and faces; or the volume, area, and bounding box of a part, group, or instance.
 
 **Params schema:**
 
 ```json
 {
-  "additionalProperties": false,
-  "properties": {
-    "from": {},
-    "to": {}
-  },
-  "required": [
-    "from",
-    "to"
+  "oneOf": [
+    {
+      "additionalProperties": false,
+      "properties": {
+        "from": {},
+        "to": {}
+      },
+      "required": [
+        "from",
+        "to"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "exclude": {
+          "description": "Object ids, each one of the target's own members, left out of the frame and the measures (needs scope \"own\"); an id that is not an own member is -32602",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "id": {
+          "description": "a world object, group, or instance; a definition member needs path",
+          "type": "string"
+        },
+        "scope": {
+          "default": "all",
+          "description": "all (the default) takes every leaf under the target; own takes a container's direct objects and its groups' objects, never a nested instance's members. On an object both are the same",
+          "enum": [
+            "own",
+            "all"
+          ],
+          "type": "string"
+        },
+        "solids_only": {
+          "default": false,
+          "description": "true leaves out Objects that are not closed solids (stray faces, imported surfaces; the ones hew.query.occurrences reports as solid: false) from the frame and the measures. Works with any scope and composes with exclude; when nothing is left it answers as exclude does when it leaves nothing",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "exclude": {
+          "description": "Object ids, each one of the target's own members, left out of the frame and the measures (needs scope \"own\"); an id that is not an own member is -32602",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "path": {
+          "description": "an occurrence path [...instances, node]",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array"
+        },
+        "scope": {
+          "default": "all",
+          "description": "all (the default) takes every leaf under the target; own takes a container's direct objects and its groups' objects, never a nested instance's members. On an object both are the same",
+          "enum": [
+            "own",
+            "all"
+          ],
+          "type": "string"
+        },
+        "solids_only": {
+          "default": false,
+          "description": "true leaves out Objects that are not closed solids (stray faces, imported surfaces; the ones hew.query.occurrences reports as solid: false) from the frame and the measures. Works with any scope and composes with exclude; when nothing is left it answers as exclude does when it leaves nothing",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "type": "object"
+    }
   ],
   "type": "object"
 }
@@ -4005,17 +10000,89 @@ Distances and angles between points, edges, and faces.
 
 ```json
 {
-  "properties": {
-    "delta": {
-      "type": "array"
+  "oneOf": [
+    {
+      "properties": {
+        "delta": {
+          "type": "array"
+        },
+        "distance": {
+          "type": "number"
+        },
+        "epoch": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "generation": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "distance",
+        "delta",
+        "generation",
+        "epoch"
+      ],
+      "type": "object"
     },
-    "distance": {
-      "type": "number"
+    {
+      "description": "meters, square meters, cubic meters; groups and instances sum their parts. extents are the sizes of the world-axis-aligned bbox (part-frame extents are hew.query.part_frame's). volume is null when no part is watertight; open parts add nothing to it and are counted in open_leaves",
+      "properties": {
+        "area": {
+          "type": "number"
+        },
+        "bbox": {
+          "properties": {
+            "max": {
+              "type": "array"
+            },
+            "min": {
+              "type": "array"
+            }
+          },
+          "required": [
+            "min",
+            "max"
+          ],
+          "type": "object"
+        },
+        "epoch": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "extents": {
+          "type": "array"
+        },
+        "generation": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "leaf_count": {
+          "type": "integer"
+        },
+        "open_leaves": {
+          "type": "integer"
+        },
+        "volume": {
+          "type": [
+            "number",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "volume",
+        "area",
+        "bbox",
+        "extents",
+        "leaf_count",
+        "open_leaves",
+        "generation",
+        "epoch"
+      ],
+      "type": "object"
     }
-  },
-  "required": [
-    "distance",
-    "delta"
   ],
   "type": "object"
 }
@@ -4024,18 +10091,21 @@ Distances and angles between points, edges, and faces.
 **Refusals:**
 
 - `unknown_entity`
+- `unknown_occurrence`
 - `locator_missed`
 - `ambiguous_locator`
 - `no_such_point`
+- `too_many_occurrences` — This model has more placed parts than Hew can list at once.
 
-### `hew.query.raycast`
+### `hew.query.mesh`
 
 - **Version:** 1
-- **Tier:** Required
+- **Tier:** Standard
 - **Class:** read-only
 - **Served:** kernel
+- **Permission:** model.read
 
-First hit along a ray — the programmatic form of clicking.
+One placement's triangle mesh: positions, normals, indices, and per-triangle face indices, base64.
 
 **Params schema:**
 
@@ -4043,6 +10113,557 @@ First hit along a ray — the programmatic form of clicking.
 {
   "additionalProperties": false,
   "properties": {
+    "id": {
+      "description": "a world node's public id",
+      "type": "string"
+    },
+    "path": {
+      "description": "an occurrence path, instances first and the node last",
+      "items": {
+        "type": "string"
+      },
+      "minItems": 1,
+      "type": "array"
+    },
+    "space": {
+      "description": "defaults to world; local is the node's own frame (an instance's definition coordinates)",
+      "enum": [
+        "world",
+        "local"
+      ],
+      "type": "string"
+    }
+  },
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "epoch": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "face_indices_base64": {
+      "description": "u32 little-endian per triangle: the face's index in hew.query.topology's faces, plus its part's face_index_base",
+      "type": "string"
+    },
+    "generation": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "indices_base64": {
+      "description": "u32 little-endian, three per triangle, counter-clockwise from outside",
+      "type": "string"
+    },
+    "normals_base64": {
+      "description": "f32 little-endian xyz per vertex, unit length",
+      "type": "string"
+    },
+    "parts": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "face_index_base": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "id": {
+            "type": "string"
+          },
+          "index_base": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "index_count": {
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "face_index_base",
+          "index_base",
+          "index_count"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "positions_base64": {
+      "description": "f32 little-endian xyz per vertex",
+      "type": "string"
+    },
+    "triangle_count": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "vertex_count": {
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "vertex_count",
+    "triangle_count",
+    "positions_base64",
+    "normals_base64",
+    "indices_base64",
+    "face_indices_base64",
+    "parts",
+    "generation",
+    "epoch"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `unknown_entity`
+- `unknown_occurrence`
+- `mesh_too_large`
+- `too_many_occurrences` — This model has more placed parts than Hew can list at once.
+
+### `hew.query.occurrences`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** read-only
+- **Served:** kernel
+- **Permission:** model.read
+
+Every placement in the model with its path and world pose: objects, groups, and instances, nested definitions expanded through each instance.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "include_hidden": {
+      "description": "defaults to false: hidden placements are skipped and hidden instances are not descended",
+      "type": "boolean"
+    },
+    "kinds": {
+      "description": "which rows to return (never what is traversed); defaults to all three",
+      "items": {
+        "enum": [
+          "object",
+          "group",
+          "instance"
+        ],
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "roots": {
+      "description": "where to start: node ids (world nodes) or occurrence locators {path}; absent is the whole world. Rows come in root order, each root's subtree depth-first, a placement listed once even when two roots reach it",
+      "items": {
+        "oneOf": [
+          {
+            "type": "string"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "path": {
+                "items": {
+                  "type": "string"
+                },
+                "minItems": 1,
+                "type": "array"
+              }
+            },
+            "required": [
+              "path"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "minItems": 1,
+      "type": "array"
+    }
+  },
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "epoch": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "generation": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "occurrences": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "definition": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "definition_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "depth": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "family": {
+            "description": "object rows only: the seam family index in hew.doc.health's families, valid for the same document state; null when the object is in no family",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "family_closed": {
+            "description": "object rows only: every shared rim of the family can take a cap; null exactly when family is null",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "frozen": {
+            "description": "a lock keeps the node from changing: its own, a locked group above it, or a locked shape it is part of (through any placement). Edits to it refuse locked_node",
+            "type": "boolean"
+          },
+          "hidden": {
+            "description": "effective: the node's own flag and tags, its groups', and every instance on the path",
+            "type": "boolean"
+          },
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "enum": [
+              "object",
+              "group",
+              "instance"
+            ],
+            "type": "string"
+          },
+          "linked": {
+            "description": "instance rows only: the definition is a set of linked copies (hew / linked)",
+            "type": "boolean"
+          },
+          "locked": {
+            "description": "locked itself: an object's or group's own lock, an instance's component's (shared by every copy)",
+            "type": "boolean"
+          },
+          "material": {
+            "description": "an object's base material, an instance's own; null for a group",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "material_effective": {
+            "description": "what the node's unpainted faces show: an object's base, else the nearest painted instance on the path; an instance's own, else the nearest painted instance above it; null for a group",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "members": {
+            "additionalProperties": false,
+            "description": "the node's direct members by kind, in member order: a group's members, an instance's definition's members, three empty lists for an object. Hidden members are left out unless include_hidden",
+            "properties": {
+              "groups": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "instances": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "objects": {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              }
+            },
+            "required": [
+              "objects",
+              "groups",
+              "instances"
+            ],
+            "type": "object"
+          },
+          "mirrored": {
+            "type": "boolean"
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "parent": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "path": {
+            "description": "the instances above this node, outermost first; {path: [...path, id]} locates it",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "solid": {
+            "description": "object rows only: the health verdict is solid (closed and manifold)",
+            "type": "boolean"
+          },
+          "tags": {
+            "items": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "type": "array"
+          },
+          "user_hidden": {
+            "type": "boolean"
+          },
+          "world_pose": {
+            "description": "row-major 3×4",
+            "items": {
+              "type": "number"
+            },
+            "maxItems": 12,
+            "minItems": 12,
+            "type": "array"
+          }
+        },
+        "required": [
+          "path",
+          "id",
+          "kind",
+          "definition",
+          "parent",
+          "world_pose",
+          "mirrored",
+          "hidden",
+          "user_hidden",
+          "material",
+          "material_effective",
+          "tags",
+          "name",
+          "definition_name",
+          "depth",
+          "locked",
+          "frozen",
+          "members"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "occurrences",
+    "generation",
+    "epoch"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `unknown_entity`
+- `unknown_occurrence`
+- `too_many_occurrences` — This model has more placed parts than Hew can list at once.
+
+### `hew.query.part_frame`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** read-only
+- **Served:** kernel
+- **Permission:** model.read
+
+A part measured along its own axes: origin, axes, and extents of one placement.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "exclude": {
+      "description": "Object ids, each one of the target's own members, left out of the frame and the measures (needs scope \"own\"); an id that is not an own member is -32602",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "id": {
+      "description": "a world node's public id",
+      "type": "string"
+    },
+    "path": {
+      "description": "an occurrence path, instances first and the node last",
+      "items": {
+        "type": "string"
+      },
+      "minItems": 1,
+      "type": "array"
+    },
+    "scope": {
+      "default": "all",
+      "description": "all (the default) takes every leaf under the target; own takes a container's direct objects and its groups' objects, never a nested instance's members. On an object both are the same",
+      "enum": [
+        "own",
+        "all"
+      ],
+      "type": "string"
+    },
+    "solids_only": {
+      "default": false,
+      "description": "true leaves out Objects that are not closed solids (stray faces, imported surfaces; the ones hew.query.occurrences reports as solid: false) from the frame and the measures. Works with any scope and composes with exclude; when nothing is left it answers as exclude does when it leaves nothing",
+      "type": "boolean"
+    }
+  },
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "epoch": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "extents": {
+      "description": "along x, y, z: [length, width, thickness] for a face frame; the definition's own axis order for an instance",
+      "items": {
+        "type": "number"
+      },
+      "maxItems": 3,
+      "minItems": 3,
+      "type": "array"
+    },
+    "generation": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "mirrored": {
+      "type": "boolean"
+    },
+    "origin": {
+      "items": {
+        "type": "number"
+      },
+      "maxItems": 3,
+      "minItems": 3,
+      "type": "array"
+    },
+    "source": {
+      "enum": [
+        "attribute",
+        "definition",
+        "face"
+      ],
+      "type": "string"
+    },
+    "x": {
+      "items": {
+        "type": "number"
+      },
+      "maxItems": 3,
+      "minItems": 3,
+      "type": "array"
+    },
+    "y": {
+      "items": {
+        "type": "number"
+      },
+      "maxItems": 3,
+      "minItems": 3,
+      "type": "array"
+    },
+    "z": {
+      "items": {
+        "type": "number"
+      },
+      "maxItems": 3,
+      "minItems": 3,
+      "type": "array"
+    }
+  },
+  "required": [
+    "origin",
+    "x",
+    "y",
+    "z",
+    "extents",
+    "source",
+    "mirrored",
+    "generation",
+    "epoch"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `unknown_entity`
+- `unknown_occurrence`
+- `no_part_frame` — That part has no faces to measure.
+- `too_many_occurrences` — This model has more placed parts than Hew can list at once.
+
+### `hew.query.raycast`
+
+- **Version:** 1
+- **Tier:** Required
+- **Class:** read-only
+- **Served:** kernel
+- **Permission:** model.read
+
+First hit along a ray, or every crossing, through any depth of nesting — the programmatic form of clicking.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "all": {
+      "description": "list every face crossing along the ray, nearest first (front and back faces both), instead of only the nearest; an empty list is a success",
+      "type": "boolean"
+    },
     "dir": {
       "items": {
         "type": "number"
@@ -4050,6 +10671,43 @@ First hit along a ray — the programmatic form of clicking.
       "maxItems": 3,
       "minItems": 3,
       "type": "array"
+    },
+    "exclude": {
+      "description": "world node ids or occurrence locators {path}; each entry and everything under it is ignored by the ray",
+      "items": {
+        "oneOf": [
+          {
+            "type": "string"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "path": {
+                "items": {
+                  "type": "string"
+                },
+                "minItems": 1,
+                "type": "array"
+              }
+            },
+            "required": [
+              "path"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "maxItems": 64,
+      "type": "array"
+    },
+    "include_hidden": {
+      "description": "let the ray hit parts that are effectively hidden (user-hidden or on a hidden tag); each hit reports hidden. Default false: hidden parts fall through, as rendering does",
+      "type": "boolean"
+    },
+    "max_distance": {
+      "description": "meters along the ray; farther crossings are dropped",
+      "exclusiveMinimum": 0,
+      "type": "number"
     },
     "origin": {
       "items": {
@@ -4072,34 +10730,153 @@ First hit along a ray — the programmatic form of clicking.
 
 ```json
 {
-  "properties": {
-    "distance": {
-      "type": "number"
-    },
-    "kind": {
-      "enum": [
+  "oneOf": [
+    {
+      "properties": {
+        "distance": {
+          "type": "number"
+        },
+        "epoch": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "face": {
+          "description": "a face locator {object, at} with at in the object's own frame: world coordinates for an object with no placement above it, the definition's coordinates for one reached through a placement; feed it to hew.query.resolve, hew.material.paint, or hew.solid.push_pull",
+          "type": "object"
+        },
+        "generation": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "hidden": {
+          "description": "effective visibility including tags; false unless include_hidden",
+          "type": "boolean"
+        },
+        "kind": {
+          "enum": [
+            "object",
+            "instance"
+          ],
+          "type": "string"
+        },
+        "leaf": {
+          "description": "the hit Object's public id",
+          "type": "string"
+        },
+        "normal": {
+          "type": "array"
+        },
+        "object": {
+          "description": "the world object's or, for a hit inside an instance, the outermost instance's public id",
+          "type": "string"
+        },
+        "path": {
+          "description": "the hit part's occurrence path without the part itself (the form hew.query.occurrences uses); [] for a world object",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "point": {
+          "type": "array"
+        }
+      },
+      "required": [
         "object",
-        "instance"
+        "kind",
+        "point",
+        "distance",
+        "normal",
+        "path",
+        "leaf",
+        "face",
+        "hidden",
+        "generation",
+        "epoch"
       ],
-      "type": "string"
+      "type": "object"
     },
-    "normal": {
-      "type": "array"
-    },
-    "object": {
-      "description": "the world object's or, for an instance hit, the instance's public id",
-      "type": "string"
-    },
-    "point": {
-      "type": "array"
+    {
+      "properties": {
+        "epoch": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "generation": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "hits": {
+          "items": {
+            "properties": {
+              "distance": {
+                "type": "number"
+              },
+              "face": {
+                "description": "a face locator {object, at} with at in the object's own frame: world coordinates for an object with no placement above it, the definition's coordinates for one reached through a placement; feed it to hew.query.resolve, hew.material.paint, or hew.solid.push_pull",
+                "type": "object"
+              },
+              "hidden": {
+                "description": "effective visibility including tags; false unless include_hidden",
+                "type": "boolean"
+              },
+              "kind": {
+                "enum": [
+                  "object",
+                  "instance"
+                ],
+                "type": "string"
+              },
+              "leaf": {
+                "description": "the hit Object's public id",
+                "type": "string"
+              },
+              "normal": {
+                "type": "array"
+              },
+              "object": {
+                "description": "the world object's or, for a hit inside an instance, the outermost instance's public id",
+                "type": "string"
+              },
+              "path": {
+                "description": "the hit part's occurrence path without the part itself (the form hew.query.occurrences uses); [] for a world object",
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "point": {
+                "type": "array"
+              }
+            },
+            "required": [
+              "object",
+              "kind",
+              "point",
+              "distance",
+              "normal",
+              "path",
+              "leaf",
+              "face",
+              "hidden"
+            ],
+            "type": "object"
+          },
+          "maxItems": 1000,
+          "type": "array"
+        },
+        "raycast_hits_capped": {
+          "description": "present and true when more than 1,000 crossings were found and the farthest were dropped",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "hits",
+        "generation",
+        "epoch"
+      ],
+      "type": "object"
     }
-  },
-  "required": [
-    "object",
-    "kind",
-    "point",
-    "distance",
-    "normal"
   ],
   "type": "object"
 }
@@ -4109,6 +10886,9 @@ First hit along a ray — the programmatic form of clicking.
 
 - `locator_missed`
 - `ambiguous_locator`
+- `unknown_entity`
+- `unknown_occurrence`
+- `too_many_occurrences` — This model has more placed parts than Hew can list at once.
 
 ### `hew.query.resolve`
 
@@ -4116,6 +10896,7 @@ First hit along a ray — the programmatic form of clicking.
 - **Tier:** Required
 - **Class:** read-only
 - **Served:** kernel
+- **Permission:** model.read
 
 Resolve any locator (point, face, edge) to its concrete value without mutating.
 
@@ -4129,6 +10910,10 @@ Resolve any locator (point, face, edge) to its concrete value without mutating.
       "description": "HEW_API.md §5.2's edge locator: a solid edge by {object,at}, a sketch edge's own public id (\"edg_…\") as a bare string, or a sketch edge by {sketch,at} / {sketch,from,to}"
     },
     "face": {},
+    "occurrence": {
+      "description": "an occurrence locator {path: [instance, …, leaf]}; answers {occurrence: OccurrenceJson without members, solid, family, or linked}",
+      "type": "object"
+    },
     "point": {}
   },
   "type": "object"
@@ -4140,6 +10925,20 @@ Resolve any locator (point, face, edge) to its concrete value without mutating.
 ```json
 {
   "description": "a resolved \"edge\" carries \"kind\": \"solid\" ({object,from,to}) or \"sketch\" ({id,sketch,from,to,curve})",
+  "properties": {
+    "epoch": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "generation": {
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "generation",
+    "epoch"
+  ],
   "type": "object"
 }
 ```
@@ -4152,6 +10951,7 @@ Resolve any locator (point, face, edge) to its concrete value without mutating.
 - `no_such_point`
 - `face_token_unknown`
 - `face_token_stale`
+- `unknown_occurrence`
 
 ### `hew.query.scene`
 
@@ -4159,6 +10959,7 @@ Resolve any locator (point, face, edge) to its concrete value without mutating.
 - **Tier:** Required
 - **Class:** read-only
 - **Served:** kernel
+- **Permission:** model.read
 
 The document tree with per-entity summaries.
 
@@ -4183,6 +10984,14 @@ The document tree with per-entity summaries.
     "document": {
       "type": "object"
     },
+    "epoch": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "generation": {
+      "minimum": 0,
+      "type": "integer"
+    },
     "guides": {
       "type": "array"
     },
@@ -4190,6 +10999,7 @@ The document tree with per-entity summaries.
       "type": "array"
     },
     "sketches": {
+      "description": "each sketch's id, plane, regions, curves and edges; a detached sketch (a shape drawn with `detached`, in no plane's arrangement) also carries \"detached\": true",
       "type": "array"
     },
     "tags": {
@@ -4206,13 +11016,253 @@ The document tree with per-entity summaries.
     "guides",
     "materials",
     "tags",
-    "components"
+    "components",
+    "generation",
+    "epoch"
   ],
   "type": "object"
 }
 ```
 
 **Refusals:** none.
+
+### `hew.query.signature`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** read-only
+- **Served:** kernel
+- **Permission:** model.read
+
+Whether two objects are the same part or mirrored twins: one object's shape and mirror hashes, and its part frame.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "id": {
+      "description": "a world node's public id",
+      "type": "string"
+    },
+    "path": {
+      "description": "an occurrence path, instances first and the node last",
+      "items": {
+        "type": "string"
+      },
+      "minItems": 1,
+      "type": "array"
+    }
+  },
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "epoch": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "frame": {
+      "additionalProperties": false,
+      "description": "the part's face frame (l ≥ w ≥ t, right-handed), as hew.query.part_frame reports it without a hew.part / frame override; origin is the part's minimum corner in that frame and extents its size along x, y, z, so the frame's center is origin + extents / 2 along the axes",
+      "properties": {
+        "extents": {
+          "items": {
+            "type": "number"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "type": "array"
+        },
+        "origin": {
+          "items": {
+            "type": "number"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "type": "array"
+        },
+        "x": {
+          "items": {
+            "type": "number"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "type": "array"
+        },
+        "y": {
+          "items": {
+            "type": "number"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "type": "array"
+        },
+        "z": {
+          "items": {
+            "type": "number"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "type": "array"
+        }
+      },
+      "required": [
+        "origin",
+        "x",
+        "y",
+        "z",
+        "extents"
+      ],
+      "type": "object"
+    },
+    "generation": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "mirror": {
+      "description": "the shape hash of the object's mirror image: a.shape == b.mirror means a and b are mirrored twins",
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "shape": {
+      "description": "SHA-256, lowercase hex",
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "symmetric": {
+      "description": "shape == mirror: the part is its own mirror image",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "shape",
+    "mirror",
+    "symmetric",
+    "frame",
+    "generation",
+    "epoch"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `unknown_entity`
+- `unknown_occurrence`
+- `not_an_object`
+- `no_part_frame` — That part has no faces to measure.
+- `too_many_occurrences` — This model has more placed parts than Hew can list at once.
+
+### `hew.query.topology`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** read-only
+- **Served:** kernel
+- **Permission:** model.read
+
+One object's vertices, faces, and edges with their adjacency, planes, and analytic curves.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "id": {
+      "description": "a world node's public id",
+      "type": "string"
+    },
+    "path": {
+      "description": "an occurrence path, instances first and the node last",
+      "items": {
+        "type": "string"
+      },
+      "minItems": 1,
+      "type": "array"
+    },
+    "space": {
+      "description": "defaults to world; local is the node's own frame (an instance's definition coordinates)",
+      "enum": [
+        "world",
+        "local"
+      ],
+      "type": "string"
+    }
+  },
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "edges": {
+      "items": {
+        "description": "{index, a, b (vertex indices), faces: [face indices, 1 or 2], curve: {kind: \"circle\", center, axis, radius} | null, attrs: the edge's attribute dictionary, {} for none}",
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "epoch": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "faces": {
+      "items": {
+        "description": "{index, plane: {point, normal}, outer: [vertex indices], holes: [[...]], material, back_material, surface: {kind: \"cylinder\", axis_point, axis, radius} | null, area, attrs: the face's attribute dictionary, {} for none}",
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "generation": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "object": {
+      "type": "string"
+    },
+    "vertices": {
+      "items": {
+        "items": {
+          "type": "number"
+        },
+        "maxItems": 3,
+        "minItems": 3,
+        "type": "array"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "object",
+    "vertices",
+    "faces",
+    "edges",
+    "generation",
+    "epoch"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `unknown_entity`
+- `unknown_occurrence`
+- `not_an_object`
 
 ## hew.scenes
 
@@ -4222,6 +11272,7 @@ The document tree with per-entity summaries.
 - **Tier:** Standard
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Add a Scene capturing the document's current view state. Records no undo entry (§6.4).
 
@@ -4376,6 +11427,7 @@ Add a Scene capturing the document's current view state. Records no undo entry (
 - **Tier:** Standard
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Apply a Scene: write its captured camera/hidden-set/section state into the document. Records no undo entry (§6.4).
 
@@ -4517,6 +11569,7 @@ Apply a Scene: write its captured camera/hidden-set/section state into the docum
 - **Tier:** Standard
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.read
 
 Set a Scene's free-text description. Records no undo entry (§6.4).
 
@@ -4561,6 +11614,7 @@ Set a Scene's free-text description. Records no undo entry (§6.4).
 - **Tier:** Standard
 - **Class:** read-only
 - **Served:** kernel
+- **Permission:** model.read
 
 Every Scene, in tab order.
 
@@ -4633,6 +11687,13 @@ Every Scene, in tab order.
               "parallel_height"
             ],
             "type": "object"
+          },
+          "delay_s": {
+            "description": "the Scene's own delay in seconds; null is the document's own",
+            "type": [
+              "number",
+              "null"
+            ]
           },
           "description": {
             "type": "string"
@@ -4731,6 +11792,13 @@ Every Scene, in tab order.
           "sid": {
             "type": "integer"
           },
+          "transition_s": {
+            "description": "the Scene's own transition time in seconds; null is the document's own",
+            "type": [
+              "number",
+              "null"
+            ]
+          },
           "view_style": {
             "description": "the look the Scene restores with its display property: backdrop (sRGB background, sky and ground or null) and whether the model axes are drawn; captured from the document's own view style, so absent for a document shown Hew's way",
             "properties": {
@@ -4812,6 +11880,7 @@ Every Scene, in tab order.
 - **Tier:** Standard
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Delete a Scene. Records no undo entry (§6.4).
 
@@ -4852,6 +11921,7 @@ Delete a Scene. Records no undo entry (§6.4).
 - **Tier:** Standard
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Rename a Scene. Records no undo entry (§6.4).
 
@@ -4898,6 +11968,7 @@ Rename a Scene. Records no undo entry (§6.4).
 - **Tier:** Standard
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Move a Scene to a new position in tab order. Records no undo entry (§6.4).
 
@@ -4944,15 +12015,16 @@ Move a Scene to a new position in tab order. Records no undo entry (§6.4).
 - **Tier:** Standard
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
-Re-capture a Scene's properties from the document's current state. Records no undo entry (§6.4).
+Re-capture a Scene's properties from the document's current state, and/or set its own transition and delay times. Records no undo entry (§6.4).
 
 **Params schema:**
 
 ```json
 {
   "additionalProperties": false,
-  "description": "properties defaults to the Scene's currently captured set (re-capture, never widen) when omitted",
+  "description": "properties defaults to the Scene's currently captured set (re-capture, never widen) when omitted; with only transition_s/delay_s given, nothing is re-captured",
   "properties": {
     "camera": {
       "additionalProperties": false,
@@ -5004,6 +12076,14 @@ Re-capture a Scene's properties from the document's current state. Records no un
       ],
       "type": "object"
     },
+    "delay_s": {
+      "description": "the Scene's own delay in seconds; null returns it to the document's own",
+      "minimum": 0,
+      "type": [
+        "number",
+        "null"
+      ]
+    },
     "display": {
       "additionalProperties": false,
       "description": "opaque editor display toggles: stored and returned, never interpreted by the kernel",
@@ -5049,6 +12129,14 @@ Re-capture a Scene's properties from the document's current state. Records no un
         }
       },
       "type": "object"
+    },
+    "transition_s": {
+      "description": "the Scene's own transition time in seconds; null returns it to the document's own",
+      "minimum": 0,
+      "type": [
+        "number",
+        "null"
+      ]
     }
   },
   "required": [
@@ -5072,6 +12160,218 @@ Re-capture a Scene's properties from the document's current state. Records no un
 
 - `unknown_scene` — That Scene no longer exists — it may have been deleted.
 
+## hew.selection
+
+### `hew.selection.clear`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** read-only
+- **Served:** host
+- **Permission:** view
+
+Clear the app's selection.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {},
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "epoch": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "generation": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "ids": {
+      "description": "public ids in pick order; index 0 is the primary",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "primary": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "ids",
+    "primary",
+    "generation",
+    "epoch"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `host_capability_missing`
+
+### `hew.selection.get`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** read-only
+- **Served:** host
+- **Permission:** view
+
+The app's selection: public ids in pick order, the primary first. A drafting selection reads as empty.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {},
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "epoch": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "generation": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "ids": {
+      "description": "public ids in pick order; index 0 is the primary",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "primary": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "ids",
+    "primary",
+    "generation",
+    "epoch"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `host_capability_missing`
+
+### `hew.selection.set`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** read-only
+- **Served:** host
+- **Permission:** view
+
+Change the app's selection: replace it (the default), or add, subtract, or toggle the named entities. Objects, groups, instances, sketches, guides, and annotations mix in any count. Hidden entities refuse.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "ids": {
+      "description": "objects, groups, instances, sketches, guides, and annotations, in pick order",
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 10000,
+      "type": "array"
+    },
+    "mode": {
+      "description": "defaults to replace",
+      "enum": [
+        "replace",
+        "add",
+        "subtract",
+        "toggle"
+      ],
+      "type": "string"
+    }
+  },
+  "required": [
+    "ids"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "epoch": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "generation": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "ids": {
+      "description": "public ids in pick order; index 0 is the primary",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "primary": {
+      "type": [
+        "string",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "ids",
+    "primary",
+    "generation",
+    "epoch"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `unknown_entity`
+- `selection_target_not_visible`
+- `host_capability_missing`
+
 ## hew.sketch
 
 ### `hew.sketch.copy`
@@ -5080,6 +12380,7 @@ Re-capture a Scene's properties from the document's current state. Records no un
 - **Tier:** Standard
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Copy drawing units on a plane by an offset.
 
@@ -5124,10 +12425,37 @@ Copy drawing units on a plane by an offset.
 {
   "description": "the plane units the edit made (new keys after the edit); empty for delete",
   "properties": {
+    "faces_closed": {
+      "description": "present when the edit closed a face on another plane (a loop on one plane is a face, whichever sketches hold its lines): the sketches that now hold such a face; a face a solid consumed in the same step is not listed",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "solid": {
+      "description": "present when the edit's faces enclosed a space and became a solid in the same undo step: the first such solid; `grew` when the shape closed against an existing solid and that solid grew (its new id is `object_id`, carrying the old one's name and tags)",
+      "properties": {
+        "grew": {
+          "type": "boolean"
+        },
+        "object_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "object_id",
+        "grew"
+      ],
+      "type": "object"
+    },
     "units": {
       "description": "the plane units the call touched: every drawing edge lying along what was drawn, then every region whose boundary carries it",
       "items": {
         "properties": {
+          "detached": {
+            "description": "true on a free store that is a detached sketch; absent otherwise",
+            "type": "boolean"
+          },
           "key": {
             "description": "edg_<hex16> or rgn_<hex16>, as hew.sketch.units lists them",
             "type": "string"
@@ -5184,6 +12512,7 @@ Copy drawing units on a plane by an offset.
 - `ambiguous_locator`
 - `point_off_plane` — That point isn't on the drawing surface. Draw on the highlighted face or the ground plane.
 - `degenerate_segment` — The line's two ends are the same point. Click a second, different point.
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.sketch.delete`
 
@@ -5191,6 +12520,7 @@ Copy drawing units on a plane by an offset.
 - **Tier:** Standard
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Delete drawing units from a plane.
 
@@ -5230,6 +12560,10 @@ Delete drawing units from a plane.
       "description": "the plane units the call touched: every drawing edge lying along what was drawn, then every region whose boundary carries it",
       "items": {
         "properties": {
+          "detached": {
+            "description": "true on a free store that is a detached sketch; absent otherwise",
+            "type": "boolean"
+          },
           "key": {
             "description": "edg_<hex16> or rgn_<hex16>, as hew.sketch.units lists them",
             "type": "string"
@@ -5286,6 +12620,7 @@ Delete drawing units from a plane.
 - `ambiguous_locator`
 - `point_off_plane` — That point isn't on the drawing surface. Draw on the highlighted face or the ground plane.
 - `degenerate_segment` — The line's two ends are the same point. Click a second, different point.
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.sketch.draw_arc`
 
@@ -5293,8 +12628,9 @@ Delete drawing units from a plane.
 - **Tier:** Required
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
-Draw an arc on a plane spec.
+Draw an arc on a plane spec. On a face of a locked Object the shape is drawn detached, as if `detached: true`.
 
 **Params schema:**
 
@@ -5325,6 +12661,10 @@ Draw an arc on a plane spec.
         "segment"
       ],
       "type": "string"
+    },
+    "detached": {
+      "description": "keep the shape detached: it joins no face or drawing on its plane, and extruding it always makes a new Object; default false. Refused (invalid params) with a {sketch} plane spec, whose own flag decides",
+      "type": "boolean"
     },
     "end_angle": {
       "description": "radians",
@@ -5364,10 +12704,18 @@ Draw an arc on a plane spec.
 {
   "oneOf": [
     {
+      "description": "drawing on the ground, a new plane, or into a sketch; also every `detached: true` draw, which makes one new detached sketch whatever the plane spec, and every draw on a face of a locked Object",
       "properties": {
         "curve_id": {
           "description": "present when this command began a curve chain",
           "type": "string"
+        },
+        "faces_closed": {
+          "description": "present when the edit closed a face on another plane (a loop on one plane is a face, whichever sketches hold its lines): the sketches that now hold such a face; a face a solid consumed in the same step is not listed",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         },
         "region_id": {
           "description": "present when exactly one region resulted (HEW_API.md §6.1's example)",
@@ -5381,6 +12729,22 @@ Draw an arc on a plane spec.
         },
         "sketch": {
           "type": "string"
+        },
+        "solid": {
+          "description": "present when the edit's faces enclosed a space and became a solid in the same undo step: the first such solid; `grew` when the shape closed against an existing solid and that solid grew (its new id is `object_id`, carrying the old one's name and tags)",
+          "properties": {
+            "grew": {
+              "type": "boolean"
+            },
+            "object_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "object_id",
+            "grew"
+          ],
+          "type": "object"
         }
       },
       "required": [
@@ -5392,13 +12756,40 @@ Draw an arc on a plane spec.
     {
       "description": "on-face drawing (plane spec {\"face\": <locator>}) draws through the drafting engine instead of creating a sketch region; `units` lists the plane units the draw touched; mints transaction-scoped face tokens \"a\"/\"b\" (an open sweep — a plain boundary-to-boundary cut) or \"face\"/\"parent\" (a full-turn sweep, or a pie/segment close — closed, imprinted like a circle) (HEW_API.md §5.2/§5.4) when the draw produced a face",
       "properties": {
+        "faces_closed": {
+          "description": "present when the edit closed a face on another plane (a loop on one plane is a face, whichever sketches hold its lines): the sketches that now hold such a face; a face a solid consumed in the same step is not listed",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "object_id": {
           "type": "string"
+        },
+        "solid": {
+          "description": "present when the edit's faces enclosed a space and became a solid in the same undo step: the first such solid; `grew` when the shape closed against an existing solid and that solid grew (its new id is `object_id`, carrying the old one's name and tags)",
+          "properties": {
+            "grew": {
+              "type": "boolean"
+            },
+            "object_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "object_id",
+            "grew"
+          ],
+          "type": "object"
         },
         "units": {
           "description": "the plane units the call touched: every drawing edge lying along what was drawn, then every region whose boundary carries it",
           "items": {
             "properties": {
+              "detached": {
+                "description": "true on a free store that is a detached sketch; absent otherwise",
+                "type": "boolean"
+              },
               "key": {
                 "description": "edg_<hex16> or rgn_<hex16>, as hew.sketch.units lists them",
                 "type": "string"
@@ -5454,6 +12845,7 @@ Draw an arc on a plane spec.
 - `degenerate_curve` — That circle or arc is too small to keep. Drag a larger radius, or type an exact one.
 - `degenerate_segment` — The line's two ends are the same point. Click a second, different point.
 - `unknown_sketch` — That sketch is no longer there — the model changed since it was picked. Click it again.
+- `endpoint_near_miss`
 - `segments_above_cap` — That is more segments than a circle can hold. Enter a smaller count.
 - `unknown_entity`
 - `locator_missed`
@@ -5464,6 +12856,7 @@ Draw an arc on a plane spec.
 - `unknown_face` — That face is no longer there — the model changed since it was picked. Click it again.
 - `point_not_on_face` — Part of the line leaves the face. Keep every point on the face being split.
 - `would_corrupt` — That edit would damage the surrounding geometry, so it was refused. Adjust the shape slightly and try again.
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.sketch.draw_circle`
 
@@ -5471,8 +12864,9 @@ Draw an arc on a plane spec.
 - **Tier:** Required
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
-Draw a circle on a plane spec.
+Draw a circle on a plane spec. On a face of a locked Object the shape is drawn detached, as if `detached: true`.
 
 **Params schema:**
 
@@ -5494,6 +12888,10 @@ Draw a circle on a plane spec.
           "type": "object"
         }
       ]
+    },
+    "detached": {
+      "description": "keep the shape detached: it joins no face or drawing on its plane, and extruding it always makes a new Object; default false. Refused (invalid params) with a {sketch} plane spec, whose own flag decides",
+      "type": "boolean"
     },
     "plane": {
       "description": "HEW_API.md §7 plane spec: {ground:true} | {origin,normal[,x_axis]} | {face:<locator>} | {sketch:<id>}",
@@ -5523,10 +12921,18 @@ Draw a circle on a plane spec.
 {
   "oneOf": [
     {
+      "description": "drawing on the ground, a new plane, or into a sketch; also every `detached: true` draw, which makes one new detached sketch whatever the plane spec, and every draw on a face of a locked Object",
       "properties": {
         "curve_id": {
           "description": "present when this command began a curve chain",
           "type": "string"
+        },
+        "faces_closed": {
+          "description": "present when the edit closed a face on another plane (a loop on one plane is a face, whichever sketches hold its lines): the sketches that now hold such a face; a face a solid consumed in the same step is not listed",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         },
         "region_id": {
           "description": "present when exactly one region resulted (HEW_API.md §6.1's example)",
@@ -5540,6 +12946,22 @@ Draw a circle on a plane spec.
         },
         "sketch": {
           "type": "string"
+        },
+        "solid": {
+          "description": "present when the edit's faces enclosed a space and became a solid in the same undo step: the first such solid; `grew` when the shape closed against an existing solid and that solid grew (its new id is `object_id`, carrying the old one's name and tags)",
+          "properties": {
+            "grew": {
+              "type": "boolean"
+            },
+            "object_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "object_id",
+            "grew"
+          ],
+          "type": "object"
         }
       },
       "required": [
@@ -5551,13 +12973,40 @@ Draw a circle on a plane spec.
     {
       "description": "on-face drawing (plane spec {\"face\": <locator>}) draws through the drafting engine instead of creating a sketch region; `units` lists the plane units the draw touched; mints transaction-scoped face tokens \"face\" (the new sub-face) and \"parent\" (the reshaped parent, now carrying the loop as a hole) (HEW_API.md §5.2/§5.4) when the draw produced a face",
       "properties": {
+        "faces_closed": {
+          "description": "present when the edit closed a face on another plane (a loop on one plane is a face, whichever sketches hold its lines): the sketches that now hold such a face; a face a solid consumed in the same step is not listed",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "object_id": {
           "type": "string"
+        },
+        "solid": {
+          "description": "present when the edit's faces enclosed a space and became a solid in the same undo step: the first such solid; `grew` when the shape closed against an existing solid and that solid grew (its new id is `object_id`, carrying the old one's name and tags)",
+          "properties": {
+            "grew": {
+              "type": "boolean"
+            },
+            "object_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "object_id",
+            "grew"
+          ],
+          "type": "object"
         },
         "units": {
           "description": "the plane units the call touched: every drawing edge lying along what was drawn, then every region whose boundary carries it",
           "items": {
             "properties": {
+              "detached": {
+                "description": "true on a free store that is a detached sketch; absent otherwise",
+                "type": "boolean"
+              },
               "key": {
                 "description": "edg_<hex16> or rgn_<hex16>, as hew.sketch.units lists them",
                 "type": "string"
@@ -5624,6 +13073,7 @@ Draw a circle on a plane spec.
 - `unknown_face` — That face is no longer there — the model changed since it was picked. Click it again.
 - `point_not_on_face` — Part of the line leaves the face. Keep every point on the face being split.
 - `would_corrupt` — That edit would damage the surrounding geometry, so it was refused. Adjust the shape slightly and try again.
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.sketch.draw_line`
 
@@ -5631,14 +13081,19 @@ Draw a circle on a plane spec.
 - **Tier:** Required
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
-Draw a line (chain) on a plane spec.
+Draw a line (chain) on a plane spec. On a face of a locked Object the shape is drawn detached, as if `detached: true`.
 
 **Params schema:**
 
 ```json
 {
   "properties": {
+    "detached": {
+      "description": "keep the shape detached: it joins no face or drawing on its plane, and extruding it always makes a new Object; default false. Refused (invalid params) with a {sketch} plane spec, whose own flag decides",
+      "type": "boolean"
+    },
     "plane": {
       "description": "HEW_API.md §7 plane spec: {ground:true} | {origin,normal[,x_axis]} | {face:<locator>} | {sketch:<id>}",
       "type": "object"
@@ -5678,10 +13133,18 @@ Draw a line (chain) on a plane spec.
 {
   "oneOf": [
     {
+      "description": "drawing on the ground, a new plane, or into a sketch; also every `detached: true` draw, which makes one new detached sketch whatever the plane spec, and every draw on a face of a locked Object",
       "properties": {
         "curve_id": {
           "description": "present when this command began a curve chain",
           "type": "string"
+        },
+        "faces_closed": {
+          "description": "present when the edit closed a face on another plane (a loop on one plane is a face, whichever sketches hold its lines): the sketches that now hold such a face; a face a solid consumed in the same step is not listed",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         },
         "region_id": {
           "description": "present when exactly one region resulted (HEW_API.md §6.1's example)",
@@ -5695,6 +13158,22 @@ Draw a line (chain) on a plane spec.
         },
         "sketch": {
           "type": "string"
+        },
+        "solid": {
+          "description": "present when the edit's faces enclosed a space and became a solid in the same undo step: the first such solid; `grew` when the shape closed against an existing solid and that solid grew (its new id is `object_id`, carrying the old one's name and tags)",
+          "properties": {
+            "grew": {
+              "type": "boolean"
+            },
+            "object_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "object_id",
+            "grew"
+          ],
+          "type": "object"
         }
       },
       "required": [
@@ -5706,13 +13185,40 @@ Draw a line (chain) on a plane spec.
     {
       "description": "on-face drawing (plane spec {\"face\": <locator>}) draws through the drafting engine instead of creating a sketch region; `units` lists the plane units the draw touched; mints transaction-scoped face tokens \"a\"/\"b\" naming the faces either side of the path's last cut — for a single cut, the two faces it produced (HEW_API.md §5.2/§5.4) when the draw produced a face",
       "properties": {
+        "faces_closed": {
+          "description": "present when the edit closed a face on another plane (a loop on one plane is a face, whichever sketches hold its lines): the sketches that now hold such a face; a face a solid consumed in the same step is not listed",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "object_id": {
           "type": "string"
+        },
+        "solid": {
+          "description": "present when the edit's faces enclosed a space and became a solid in the same undo step: the first such solid; `grew` when the shape closed against an existing solid and that solid grew (its new id is `object_id`, carrying the old one's name and tags)",
+          "properties": {
+            "grew": {
+              "type": "boolean"
+            },
+            "object_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "object_id",
+            "grew"
+          ],
+          "type": "object"
         },
         "units": {
           "description": "the plane units the call touched: every drawing edge lying along what was drawn, then every region whose boundary carries it",
           "items": {
             "properties": {
+              "detached": {
+                "description": "true on a free store that is a detached sketch; absent otherwise",
+                "type": "boolean"
+              },
               "key": {
                 "description": "edg_<hex16> or rgn_<hex16>, as hew.sketch.units lists them",
                 "type": "string"
@@ -5767,6 +13273,7 @@ Draw a line (chain) on a plane spec.
 - `point_off_plane` — That point isn't on the drawing surface. Draw on the highlighted face or the ground plane.
 - `degenerate_segment` — The line's two ends are the same point. Click a second, different point.
 - `unknown_sketch` — That sketch is no longer there — the model changed since it was picked. Click it again.
+- `endpoint_near_miss`
 - `unknown_entity`
 - `locator_missed`
 - `ambiguous_locator`
@@ -5775,6 +13282,7 @@ Draw a line (chain) on a plane spec.
 - `unknown_face` — That face is no longer there — the model changed since it was picked. Click it again.
 - `point_not_on_face` — Part of the line leaves the face. Keep every point on the face being split.
 - `would_corrupt` — That edit would damage the surrounding geometry, so it was refused. Adjust the shape slightly and try again.
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.sketch.draw_polygon`
 
@@ -5782,8 +13290,9 @@ Draw a line (chain) on a plane spec.
 - **Tier:** Required
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
-Draw a regular N-gon on a plane spec.
+Draw a regular N-gon on a plane spec. On a face of a locked Object the shape is drawn detached, as if `detached: true`.
 
 **Params schema:**
 
@@ -5805,6 +13314,10 @@ Draw a regular N-gon on a plane spec.
           "type": "object"
         }
       ]
+    },
+    "detached": {
+      "description": "keep the shape detached: it joins no face or drawing on its plane, and extruding it always makes a new Object; default false. Refused (invalid params) with a {sketch} plane spec, whose own flag decides",
+      "type": "boolean"
     },
     "plane": {
       "description": "HEW_API.md §7 plane spec: {ground:true} | {origin,normal[,x_axis]} | {face:<locator>} | {sketch:<id>}",
@@ -5836,10 +13349,18 @@ Draw a regular N-gon on a plane spec.
 {
   "oneOf": [
     {
+      "description": "drawing on the ground, a new plane, or into a sketch; also every `detached: true` draw, which makes one new detached sketch whatever the plane spec, and every draw on a face of a locked Object",
       "properties": {
         "curve_id": {
           "description": "present when this command began a curve chain",
           "type": "string"
+        },
+        "faces_closed": {
+          "description": "present when the edit closed a face on another plane (a loop on one plane is a face, whichever sketches hold its lines): the sketches that now hold such a face; a face a solid consumed in the same step is not listed",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         },
         "region_id": {
           "description": "present when exactly one region resulted (HEW_API.md §6.1's example)",
@@ -5853,6 +13374,22 @@ Draw a regular N-gon on a plane spec.
         },
         "sketch": {
           "type": "string"
+        },
+        "solid": {
+          "description": "present when the edit's faces enclosed a space and became a solid in the same undo step: the first such solid; `grew` when the shape closed against an existing solid and that solid grew (its new id is `object_id`, carrying the old one's name and tags)",
+          "properties": {
+            "grew": {
+              "type": "boolean"
+            },
+            "object_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "object_id",
+            "grew"
+          ],
+          "type": "object"
         }
       },
       "required": [
@@ -5864,13 +13401,40 @@ Draw a regular N-gon on a plane spec.
     {
       "description": "on-face drawing (plane spec {\"face\": <locator>}) draws through the drafting engine instead of creating a sketch region; `units` lists the plane units the draw touched; mints transaction-scoped face tokens \"face\" (the new sub-face) and \"parent\" (the reshaped parent, now carrying the loop as a hole) (HEW_API.md §5.2/§5.4) when the draw produced a face",
       "properties": {
+        "faces_closed": {
+          "description": "present when the edit closed a face on another plane (a loop on one plane is a face, whichever sketches hold its lines): the sketches that now hold such a face; a face a solid consumed in the same step is not listed",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "object_id": {
           "type": "string"
+        },
+        "solid": {
+          "description": "present when the edit's faces enclosed a space and became a solid in the same undo step: the first such solid; `grew` when the shape closed against an existing solid and that solid grew (its new id is `object_id`, carrying the old one's name and tags)",
+          "properties": {
+            "grew": {
+              "type": "boolean"
+            },
+            "object_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "object_id",
+            "grew"
+          ],
+          "type": "object"
         },
         "units": {
           "description": "the plane units the call touched: every drawing edge lying along what was drawn, then every region whose boundary carries it",
           "items": {
             "properties": {
+              "detached": {
+                "description": "true on a free store that is a detached sketch; absent otherwise",
+                "type": "boolean"
+              },
               "key": {
                 "description": "edg_<hex16> or rgn_<hex16>, as hew.sketch.units lists them",
                 "type": "string"
@@ -5935,6 +13499,7 @@ Draw a regular N-gon on a plane spec.
 - `unknown_face` — That face is no longer there — the model changed since it was picked. Click it again.
 - `point_not_on_face` — Part of the line leaves the face. Keep every point on the face being split.
 - `would_corrupt` — That edit would damage the surrounding geometry, so it was refused. Adjust the shape slightly and try again.
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.sketch.draw_rect`
 
@@ -5942,8 +13507,9 @@ Draw a regular N-gon on a plane spec.
 - **Tier:** Required
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
-Draw an axis-aligned rectangle on a plane spec.
+Draw an axis-aligned rectangle on a plane spec. On a face of a locked Object the shape is drawn detached, as if `detached: true`.
 
 **Params schema:**
 
@@ -5982,6 +13548,10 @@ Draw an axis-aligned rectangle on a plane spec.
         }
       ]
     },
+    "detached": {
+      "description": "keep the shape detached: it joins no face or drawing on its plane, and extruding it always makes a new Object; default false. Refused (invalid params) with a {sketch} plane spec, whose own flag decides",
+      "type": "boolean"
+    },
     "plane": {
       "description": "HEW_API.md §7 plane spec: {ground:true} | {origin,normal[,x_axis]} | {face:<locator>} | {sketch:<id>}",
       "type": "object"
@@ -6002,10 +13572,18 @@ Draw an axis-aligned rectangle on a plane spec.
 {
   "oneOf": [
     {
+      "description": "drawing on the ground, a new plane, or into a sketch; also every `detached: true` draw, which makes one new detached sketch whatever the plane spec, and every draw on a face of a locked Object",
       "properties": {
         "curve_id": {
           "description": "present when this command began a curve chain",
           "type": "string"
+        },
+        "faces_closed": {
+          "description": "present when the edit closed a face on another plane (a loop on one plane is a face, whichever sketches hold its lines): the sketches that now hold such a face; a face a solid consumed in the same step is not listed",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
         },
         "region_id": {
           "description": "present when exactly one region resulted (HEW_API.md §6.1's example)",
@@ -6019,6 +13597,22 @@ Draw an axis-aligned rectangle on a plane spec.
         },
         "sketch": {
           "type": "string"
+        },
+        "solid": {
+          "description": "present when the edit's faces enclosed a space and became a solid in the same undo step: the first such solid; `grew` when the shape closed against an existing solid and that solid grew (its new id is `object_id`, carrying the old one's name and tags)",
+          "properties": {
+            "grew": {
+              "type": "boolean"
+            },
+            "object_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "object_id",
+            "grew"
+          ],
+          "type": "object"
         }
       },
       "required": [
@@ -6030,13 +13624,40 @@ Draw an axis-aligned rectangle on a plane spec.
     {
       "description": "on-face drawing (plane spec {\"face\": <locator>}) draws through the drafting engine instead of creating a sketch region; `units` lists the plane units the draw touched; mints transaction-scoped face tokens \"face\" (the new sub-face) and \"parent\" (the reshaped parent, now carrying the loop as a hole) (HEW_API.md §5.2/§5.4) when the draw produced a face",
       "properties": {
+        "faces_closed": {
+          "description": "present when the edit closed a face on another plane (a loop on one plane is a face, whichever sketches hold its lines): the sketches that now hold such a face; a face a solid consumed in the same step is not listed",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
         "object_id": {
           "type": "string"
+        },
+        "solid": {
+          "description": "present when the edit's faces enclosed a space and became a solid in the same undo step: the first such solid; `grew` when the shape closed against an existing solid and that solid grew (its new id is `object_id`, carrying the old one's name and tags)",
+          "properties": {
+            "grew": {
+              "type": "boolean"
+            },
+            "object_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "object_id",
+            "grew"
+          ],
+          "type": "object"
         },
         "units": {
           "description": "the plane units the call touched: every drawing edge lying along what was drawn, then every region whose boundary carries it",
           "items": {
             "properties": {
+              "detached": {
+                "description": "true on a free store that is a detached sketch; absent otherwise",
+                "type": "boolean"
+              },
               "key": {
                 "description": "edg_<hex16> or rgn_<hex16>, as hew.sketch.units lists them",
                 "type": "string"
@@ -6099,6 +13720,7 @@ Draw an axis-aligned rectangle on a plane spec.
 - `unknown_face` — That face is no longer there — the model changed since it was picked. Click it again.
 - `point_not_on_face` — Part of the line leaves the face. Keep every point on the face being split.
 - `would_corrupt` — That edit would damage the surrounding geometry, so it was refused. Adjust the shape slightly and try again.
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.sketch.move`
 
@@ -6106,6 +13728,7 @@ Draw an axis-aligned rectangle on a plane spec.
 - **Tier:** Standard
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Move drawing units (islands, edges, circles, regions) on a plane by an offset.
 
@@ -6151,10 +13774,37 @@ Move drawing units (islands, edges, circles, regions) on a plane by an offset.
 {
   "description": "the plane units the edit made (new keys after the edit); empty for delete",
   "properties": {
+    "faces_closed": {
+      "description": "present when the edit closed a face on another plane (a loop on one plane is a face, whichever sketches hold its lines): the sketches that now hold such a face; a face a solid consumed in the same step is not listed",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "solid": {
+      "description": "present when the edit's faces enclosed a space and became a solid in the same undo step: the first such solid; `grew` when the shape closed against an existing solid and that solid grew (its new id is `object_id`, carrying the old one's name and tags)",
+      "properties": {
+        "grew": {
+          "type": "boolean"
+        },
+        "object_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "object_id",
+        "grew"
+      ],
+      "type": "object"
+    },
     "units": {
       "description": "the plane units the call touched: every drawing edge lying along what was drawn, then every region whose boundary carries it",
       "items": {
         "properties": {
+          "detached": {
+            "description": "true on a free store that is a detached sketch; absent otherwise",
+            "type": "boolean"
+          },
           "key": {
             "description": "edg_<hex16> or rgn_<hex16>, as hew.sketch.units lists them",
             "type": "string"
@@ -6211,6 +13861,7 @@ Move drawing units (islands, edges, circles, regions) on a plane by an offset.
 - `ambiguous_locator`
 - `point_off_plane` — That point isn't on the drawing surface. Draw on the highlighted face or the ground plane.
 - `degenerate_segment` — The line's two ends are the same point. Click a second, different point.
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.sketch.offset`
 
@@ -6218,6 +13869,7 @@ Move drawing units (islands, edges, circles, regions) on a plane by an offset.
 - **Tier:** Required
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Offset a region boundary within its sketch, or a face or plane region by its unit key.
 
@@ -6288,6 +13940,10 @@ Offset a region boundary within its sketch, or a face or plane region by its uni
           "description": "the plane units the call touched: every drawing edge lying along what was drawn, then every region whose boundary carries it",
           "items": {
             "properties": {
+              "detached": {
+                "description": "true on a free store that is a detached sketch; absent otherwise",
+                "type": "boolean"
+              },
               "key": {
                 "description": "edg_<hex16> or rgn_<hex16>, as hew.sketch.units lists them",
                 "type": "string"
@@ -6346,6 +14002,7 @@ Offset a region boundary within its sketch, or a face or plane region by its uni
 - `unknown_entity`
 - `unknown_unit`
 - `draft_boundary_edge_touched` — A solid's own edges can't be moved or erased by drawing. Push/Pull or a boolean changes the solid itself.
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.sketch.rotate`
 
@@ -6353,6 +14010,7 @@ Offset a region boundary within its sketch, or a face or plane region by its uni
 - **Tier:** Standard
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Rotate drawing units on a plane about the plane normal through a point.
 
@@ -6410,10 +14068,37 @@ Rotate drawing units on a plane about the plane normal through a point.
 {
   "description": "the plane units the edit made (new keys after the edit); empty for delete",
   "properties": {
+    "faces_closed": {
+      "description": "present when the edit closed a face on another plane (a loop on one plane is a face, whichever sketches hold its lines): the sketches that now hold such a face; a face a solid consumed in the same step is not listed",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "solid": {
+      "description": "present when the edit's faces enclosed a space and became a solid in the same undo step: the first such solid; `grew` when the shape closed against an existing solid and that solid grew (its new id is `object_id`, carrying the old one's name and tags)",
+      "properties": {
+        "grew": {
+          "type": "boolean"
+        },
+        "object_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "object_id",
+        "grew"
+      ],
+      "type": "object"
+    },
     "units": {
       "description": "the plane units the call touched: every drawing edge lying along what was drawn, then every region whose boundary carries it",
       "items": {
         "properties": {
+          "detached": {
+            "description": "true on a free store that is a detached sketch; absent otherwise",
+            "type": "boolean"
+          },
           "key": {
             "description": "edg_<hex16> or rgn_<hex16>, as hew.sketch.units lists them",
             "type": "string"
@@ -6470,6 +14155,7 @@ Rotate drawing units on a plane about the plane normal through a point.
 - `ambiguous_locator`
 - `point_off_plane` — That point isn't on the drawing surface. Draw on the highlighted face or the ground plane.
 - `degenerate_segment` — The line's two ends are the same point. Click a second, different point.
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.sketch.scale`
 
@@ -6477,6 +14163,7 @@ Rotate drawing units on a plane about the plane normal through a point.
 - **Tier:** Standard
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Scale drawing units on a plane about a center, uniformly or per axis.
 
@@ -6542,10 +14229,37 @@ Scale drawing units on a plane about a center, uniformly or per axis.
 {
   "description": "the plane units the edit made (new keys after the edit); empty for delete",
   "properties": {
+    "faces_closed": {
+      "description": "present when the edit closed a face on another plane (a loop on one plane is a face, whichever sketches hold its lines): the sketches that now hold such a face; a face a solid consumed in the same step is not listed",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "solid": {
+      "description": "present when the edit's faces enclosed a space and became a solid in the same undo step: the first such solid; `grew` when the shape closed against an existing solid and that solid grew (its new id is `object_id`, carrying the old one's name and tags)",
+      "properties": {
+        "grew": {
+          "type": "boolean"
+        },
+        "object_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "object_id",
+        "grew"
+      ],
+      "type": "object"
+    },
     "units": {
       "description": "the plane units the call touched: every drawing edge lying along what was drawn, then every region whose boundary carries it",
       "items": {
         "properties": {
+          "detached": {
+            "description": "true on a free store that is a detached sketch; absent otherwise",
+            "type": "boolean"
+          },
           "key": {
             "description": "edg_<hex16> or rgn_<hex16>, as hew.sketch.units lists them",
             "type": "string"
@@ -6602,6 +14316,7 @@ Scale drawing units on a plane about a center, uniformly or per axis.
 - `ambiguous_locator`
 - `point_off_plane` — That point isn't on the drawing surface. Draw on the highlighted face or the ground plane.
 - `degenerate_segment` — The line's two ends are the same point. Click a second, different point.
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.sketch.units`
 
@@ -6609,6 +14324,7 @@ Scale drawing units on a plane about a center, uniformly or per axis.
 - **Tier:** Standard
 - **Class:** read-only
 - **Served:** kernel
+- **Permission:** model.read
 
 List a plane's drawing as units: islands of edges (with where each is stored) and regions.
 
@@ -6618,7 +14334,7 @@ List a plane's drawing as units: islands of edges (with where each is stored) an
 {
   "properties": {
     "plane": {
-      "description": "HEW_API.md §7 plane spec: {ground:true} | {origin,normal[,x_axis]} | {face:<locator>} | {sketch:<id>}",
+      "description": "HEW_API.md §7 plane spec: {ground:true} | {origin,normal[,x_axis]} | {face:<locator>} | {sketch:<id>}. A plane or face spec lists the plane's arrangement, which no detached sketch joins; {sketch:<id>} on a detached sketch lists exactly that sketch",
       "type": "object"
     }
   },
@@ -6732,6 +14448,10 @@ List a plane's drawing as units: islands of edges (with where each is stored) an
                   },
                   "type": "object"
                 },
+                "detached": {
+                  "description": "true on a free store that is a detached sketch (listed only by a {sketch} plane spec naming it); absent otherwise",
+                  "type": "boolean"
+                },
                 "key": {
                   "description": "edg_<hex16>",
                   "type": "string"
@@ -6792,12 +14512,68 @@ List a plane's drawing as units: islands of edges (with where each is stored) an
 
 ## hew.solid
 
+### `hew.solid.bake`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** model-mutating
+- **Served:** kernel
+- **Permission:** model.write
+
+Replace a smoothed object's cage with its Smooth surface and clear the level.
+
+> **Preview.** Part of the preview feature Smooth (`smooth`). Only a preview build serves it; a production build leaves it out of every listing and refuses it with `preview_only`.
+
+**Params schema:**
+
+```json
+{
+  "properties": {
+    "object": {
+      "description": "an object id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "object"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "properties": {
+    "object_id": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "object_id"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `amount_out_of_range` — That amount is out of range.
+- `smooth_too_dense` — This shape is too dense for that Smooth level. Try a lower level, or simplify the shape first.
+- `shape_degenerate` — That change didn't produce a valid solid. The model is unchanged.
+- `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
+- `unknown_component` — That component is no longer there — the model changed since it was picked. Click it again.
+- `unknown_entity`
+- `locked_node` — Locked. Unlock it to change it.
+
 ### `hew.solid.cap`
 
 - **Version:** 1
 - **Tier:** Standard
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Close an open object's flat openings with faces; an object closed all round becomes a solid.
 
@@ -6866,11 +14642,302 @@ Close an open object's flat openings with faces; an object closed all round beco
 - `explode_session_scope` — That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again.
 - `invalid` — Hew couldn't make this change without damaging the object, so nothing changed. Please send the file with Help ▸ Report Bug.
 - `unknown_rim` — That opening is already closed. Check the list again for what is left.
-- `rim_not_planar` — This opening isn't flat, so one face can't close it. Draw faces across it by hand.
+- `rim_not_planar` — This opening isn't flat, so one face can't close it. Mend in Model Health can fill small ones; otherwise draw faces across it by hand.
 - `rim_self_intersecting` — The edge of this opening crosses itself, so one face can't close it. Draw faces across it by hand.
 - `cap_would_be_coplanar` — This is a flat panel, not an open shape. Keep it as a panel, or add thickness to make it solid.
 - `non_manifold_rim` — The edges around this opening branch off in more than one direction, so Hew can't tell where a face goes. Fix those edges by hand first.
 - `caps_overlap` — A face here would overlap another part of this object. Close all of the object's openings together, or draw faces across this one by hand.
+- `locked_node` — Locked. Unlock it to change it.
+
+### `hew.solid.chamfer`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** model-mutating
+- **Served:** kernel
+- **Permission:** model.write
+
+Chamfer the edges of a solid, or chamfer a 2D corner, as the Fillet tool's Chamfer mode does.
+
+> **Preview.** Part of the preview feature Fillet and Chamfer (`fillet`). Only a preview build serves it; a production build leaves it out of every listing and refuses it with `preview_only`.
+
+**Params schema:**
+
+```json
+{
+  "description": "give edges or corner, and distance, distances, or distance with angle",
+  "properties": {
+    "angle": {
+      "description": "radians measured from the primary face; with `distance`",
+      "type": "number"
+    },
+    "corner": {
+      "description": "a 2D corner instead of solid edges: {sketch: <sketch id>, at: [x,y,z]} for a drawn corner, or {face: <face locator>, at: [x,y,z]} for a corner of a shape drawn on a face",
+      "properties": {
+        "at": {
+          "items": {
+            "type": "number"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "type": "array"
+        },
+        "face": {
+          "type": "object"
+        },
+        "sketch": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "at"
+      ],
+      "type": "object"
+    },
+    "corners": {
+      "description": "three-way corners; default \"mitered\"",
+      "enum": [
+        "mitered",
+        "flat"
+      ],
+      "type": "string"
+    },
+    "distance": {
+      "description": "meters on both faces, or on the primary face when `angle` is given",
+      "exclusiveMinimum": 0,
+      "type": "number"
+    },
+    "distances": {
+      "description": "[a, b] meters: a on the primary face, b on the other",
+      "items": {
+        "type": "number"
+      },
+      "maxItems": 2,
+      "minItems": 2,
+      "type": "array"
+    },
+    "edges": {
+      "description": "solid edges to blend, all on one object",
+      "items": {
+        "description": "HEW_API.md §5.2 edge-set locator: {object, at}, {object, from, to}, {face: <face locator>}, {face, loop_near}, or {object, all: true}",
+        "type": "object"
+      },
+      "minItems": 1,
+      "type": "array"
+    },
+    "primary": {
+      "description": "face locator of the face that takes `distances[0]` (or `distance` with `angle`)",
+      "type": "object"
+    },
+    "propagate": {
+      "description": "default \"tangent\": each located edge extends along the smooth chain a click on it would take",
+      "enum": [
+        "tangent",
+        "none"
+      ],
+      "type": "string"
+    },
+    "stops": {
+      "description": "meters left sharp at the start and end of the chain",
+      "properties": {
+        "end": {
+          "type": "number"
+        },
+        "start": {
+          "type": "number"
+        }
+      },
+      "type": "object"
+    }
+  },
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "description": "an edge blend answers object_id, blend_ids, faces and size (meters; null for a bullnose); a 2D corner answers sketch_id or object_id",
+  "properties": {
+    "blend_ids": {
+      "items": {
+        "type": "integer"
+      },
+      "type": "array"
+    },
+    "faces": {
+      "description": "new blend faces",
+      "type": "integer"
+    },
+    "object_id": {
+      "type": "string"
+    },
+    "sketch_id": {
+      "description": "a corner of a world sketch: the sketch",
+      "type": "string"
+    }
+  },
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `radius_too_large` — That radius doesn't fit here. Try a smaller one.
+- `profile_too_wide` — This profile is wider than the face it has to fit on. Try a smaller profile or a smaller size.
+- `edge_is_smooth` — That edge is already smooth.
+- `blend_needs_solid` — Fillet needs a solid. This object has gaps.
+- `unsupported_vertex` — Can't blend this corner. Try these edges one at a time.
+- `blend_faces_flush` — The two surfaces meet smoothly here, with no edge between them, as two pipes of the same size do. There's nothing to round, chamfer, or cove there. Make one part a little larger or smaller.
+- `unsupported_edge` — This edge can't be filleted yet.
+- `obstructed` — The fillet would cut into other geometry.
+- `segments_out_of_range` — Use between 2 and 96 segments.
+- `non_uniform_instance` — Make this component unique, or reset its scale, to fillet it.
+- `stop_out_of_range` — A stop or radius point has to sit on the edge, farther from its end than the radius.
+- `corner_not_blendable` — Only a corner where two straight lines meet can be rounded.
+- `corner_is_straight` — Those lines are in a straight line; there is no corner to round.
+- `corner_radius_too_large` — The radius is too large for this corner. Try a smaller radius.
+- `corner_leaves_face` — The rounded corner would run off the face. Draw the shape farther inside the face, or use a smaller radius.
+- `edges_span_objects`
+- `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
+- `unknown_face` — That face is no longer there — the model changed since it was picked. Click it again.
+- `unknown_entity`
+- `locator_missed`
+- `ambiguous_locator`
+- `angle_does_not_fit`
+- `locked_node` — Locked. Unlock it to change it.
+
+### `hew.solid.deform`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** model-mutating
+- **Served:** kernel
+- **Permission:** model.write
+
+Twist, bend or taper a solid along its bounding box, or bend it along a path, as the Deform tool does.
+
+> **Preview.** Part of the preview feature Deform (`deform`). Only a preview build serves it; a production build leaves it out of every listing and refuses it with `preview_only`.
+
+**Params schema:**
+
+```json
+{
+  "properties": {
+    "angle": {
+      "description": "twist or bend, radians: |twist| ≤ 4π, |bend| ≤ 2π",
+      "type": "number"
+    },
+    "base": {
+      "description": "bend_to_path: the straight line mapped onto the path",
+      "properties": {
+        "from": {},
+        "to": {}
+      },
+      "required": [
+        "from",
+        "to"
+      ],
+      "type": "object"
+    },
+    "end": {
+      "allOf": [
+        {
+          "enum": [
+            "+x",
+            "-x",
+            "+y",
+            "-y",
+            "+z",
+            "-z"
+          ],
+          "type": "string"
+        }
+      ],
+      "description": "the moving end of the object's world bounding box (twist, bend, taper); the opposite face stays fixed"
+    },
+    "mode": {
+      "enum": [
+        "twist",
+        "bend",
+        "taper",
+        "bend_to_path"
+      ],
+      "type": "string"
+    },
+    "object": {
+      "description": "a world object id",
+      "type": "string"
+    },
+    "path": {
+      "description": "bend_to_path: {\"curve\": <sketch curve id>} or {\"face\": <face locator>} (its boundary loop)"
+    },
+    "ratio": {
+      "description": "taper: the moving end's scale",
+      "exclusiveMinimum": 0,
+      "type": "number"
+    },
+    "stations": {
+      "description": "bands along the axis (twist/bend default one per 15°, at least 4; taper 1); the object is also cut through every vertex so no face spans one; for bend_to_path, bands per path segment (default 4)",
+      "minimum": 1,
+      "type": "integer"
+    },
+    "toward": {
+      "allOf": [
+        {
+          "enum": [
+            "+x",
+            "-x",
+            "+y",
+            "-y",
+            "+z",
+            "-z"
+          ],
+          "type": "string"
+        }
+      ],
+      "description": "bend only: the cross axis it bends toward; default the one closest to -z, or +x for a vertical axis"
+    }
+  },
+  "required": [
+    "object",
+    "mode"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "properties": {
+    "object_id": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "object_id"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `self_intersecting` — The result would pass through itself.
+- `shape_needs_solid` — This needs a solid. This object has gaps.
+- `amount_out_of_range` — That amount is out of range.
+- `shape_degenerate` — That change didn't produce a valid solid. The model is unchanged.
+- `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
+- `unknown_entity`
+- `unknown_face` — That face is no longer there — the model changed since it was picked. Click it again.
+- `locator_missed`
+- `ambiguous_locator`
+- `follow_me_in_component_unsupported`
+- `unimplemented`
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.solid.delete_faces`
 
@@ -6878,6 +14945,7 @@ Close an open object's flat openings with faces; an object closed all round beco
 - **Tier:** Standard
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Remove faces from an open object; islands cut loose become objects of their own. Solids refuse.
 
@@ -6890,7 +14958,7 @@ Remove faces from an open object; islands cut loose become objects of their own.
     "faces": {
       "description": "faces of that object; omitted = every face, which deletes the object (a component member too, unless it is its component's last object: last_definition_member)",
       "items": {
-        "description": "HEW_API.md §5.2 face locator: {object,at} | {object,ray} | {\"$face\":\"label#key\"}",
+        "description": "HEW_API.md §5.2 face locator: {object,at} | {object,ray} | {\"$face\":\"label#key\"}; with a path through a placement, at and ray are read in the leaf's frame (the definition's coordinates), not world coordinates",
         "type": "object"
       },
       "minItems": 1,
@@ -6949,6 +15017,7 @@ Remove faces from an open object; islands cut loose become objects of their own.
 - `ambiguous_locator`
 - `face_token_unknown`
 - `face_token_stale`
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.solid.delete_imprint`
 
@@ -6956,6 +15025,7 @@ Remove faces from an open object; islands cut loose become objects of their own.
 - **Tier:** Standard
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Kept for compatibility: delete a drawn shape (sub-face or chord island) back into its face; hew.sketch.delete is the general form.
 
@@ -7003,6 +15073,7 @@ Kept for compatibility: delete a drawn shape (sub-face or chord island) back int
 - `ambiguous_locator`
 - `face_token_unknown`
 - `face_token_stale`
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.solid.extrude`
 
@@ -7010,6 +15081,7 @@ Kept for compatibility: delete a drawn shape (sub-face or chord island) back int
 - **Tier:** Required
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Extrude a region into a new Object, consuming the profile.
 
@@ -7069,6 +15141,188 @@ Extrude a region into a new Object, consuming the profile.
 - `unknown_unit`
 - `region_not_pushable` — That shape can't be pushed or pulled: part of it is drawn on the solid's face and part is loose, so the face can't hold it. Move the drawing clear of the edge, or push/pull the neighboring pieces instead.
 - `region_touches_hole` — This shape touches another shape at a point, so it can't be pulled as one piece. Pull the shape inside it instead, or move them a hair apart.
+- `locked_node` — Locked. Unlock it to change it.
+
+### `hew.solid.fillet`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** model-mutating
+- **Served:** kernel
+- **Permission:** model.write
+
+Round, cove, bullnose or profile the edges of a solid, or round a 2D corner, as the Fillet tool does.
+
+> **Preview.** Part of the preview feature Fillet and Chamfer (`fillet`). Only a preview build serves it; a production build leaves it out of every listing and refuses it with `preview_only`.
+
+**Params schema:**
+
+```json
+{
+  "description": "give edges or corner",
+  "properties": {
+    "corner": {
+      "description": "a 2D corner instead of solid edges: {sketch: <sketch id>, at: [x,y,z]} for a drawn corner, or {face: <face locator>, at: [x,y,z]} for a corner of a shape drawn on a face",
+      "properties": {
+        "at": {
+          "items": {
+            "type": "number"
+          },
+          "maxItems": 3,
+          "minItems": 3,
+          "type": "array"
+        },
+        "face": {
+          "type": "object"
+        },
+        "sketch": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "at"
+      ],
+      "type": "object"
+    },
+    "corners": {
+      "description": "three-way corners; default \"rolled\"",
+      "enum": [
+        "rolled",
+        "mitered"
+      ],
+      "type": "string"
+    },
+    "edges": {
+      "description": "solid edges to blend, all on one object",
+      "items": {
+        "description": "HEW_API.md §5.2 edge-set locator: {object, at}, {object, from, to}, {face: <face locator>}, {face, loop_near}, or {object, all: true}",
+        "type": "object"
+      },
+      "minItems": 1,
+      "type": "array"
+    },
+    "handles": {
+      "description": "round only: a radius at an arc length along the chain (variable radius)",
+      "items": {
+        "properties": {
+          "at": {
+            "type": "number"
+          },
+          "radius": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "at",
+          "radius"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "profile": {
+      "description": "\"round\" (default), \"cove\", \"bullnose\", a built-in id such as \"builtin:ogee\", or a Library profile's id",
+      "type": "string"
+    },
+    "propagate": {
+      "description": "default \"tangent\": each located edge extends along the smooth chain a click on it would take",
+      "enum": [
+        "tangent",
+        "none"
+      ],
+      "type": "string"
+    },
+    "radius": {
+      "description": "meters; required except for a bullnose or a profile",
+      "exclusiveMinimum": 0,
+      "type": "number"
+    },
+    "segments": {
+      "description": "facets across the arc: 2 to 96 for an edge round, cove or bullnose, 1 to 96 for a profile, up to 1024 for a 2D corner; default the drawing tools' count for the edge's turn at this radius",
+      "maximum": 1024,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "stops": {
+      "description": "meters left sharp at the start and end of the chain",
+      "properties": {
+        "end": {
+          "type": "number"
+        },
+        "start": {
+          "type": "number"
+        }
+      },
+      "type": "object"
+    },
+    "width": {
+      "description": "profiles only, meters on the bearing face (replaces radius)",
+      "exclusiveMinimum": 0,
+      "type": "number"
+    }
+  },
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "description": "an edge blend answers object_id, blend_ids, faces and size (meters; null for a bullnose); a 2D corner answers sketch_id or object_id",
+  "properties": {
+    "blend_ids": {
+      "items": {
+        "type": "integer"
+      },
+      "type": "array"
+    },
+    "faces": {
+      "description": "new blend faces",
+      "type": "integer"
+    },
+    "object_id": {
+      "type": "string"
+    },
+    "sketch_id": {
+      "description": "a corner of a world sketch: the sketch",
+      "type": "string"
+    }
+  },
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `radius_too_large` — That radius doesn't fit here. Try a smaller one.
+- `profile_too_wide` — This profile is wider than the face it has to fit on. Try a smaller profile or a smaller size.
+- `edge_is_smooth` — That edge is already smooth.
+- `blend_needs_solid` — Fillet needs a solid. This object has gaps.
+- `unsupported_vertex` — Can't blend this corner. Try these edges one at a time.
+- `blend_faces_flush` — The two surfaces meet smoothly here, with no edge between them, as two pipes of the same size do. There's nothing to round, chamfer, or cove there. Make one part a little larger or smaller.
+- `unsupported_edge` — This edge can't be filleted yet.
+- `obstructed` — The fillet would cut into other geometry.
+- `segments_out_of_range` — Use between 2 and 96 segments.
+- `non_uniform_instance` — Make this component unique, or reset its scale, to fillet it.
+- `stop_out_of_range` — A stop or radius point has to sit on the edge, farther from its end than the radius.
+- `corner_not_blendable` — Only a corner where two straight lines meet can be rounded.
+- `corner_is_straight` — Those lines are in a straight line; there is no corner to round.
+- `corner_radius_too_large` — The radius is too large for this corner. Try a smaller radius.
+- `corner_leaves_face` — The rounded corner would run off the face. Draw the shape farther inside the face, or use a smaller radius.
+- `edges_span_objects`
+- `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
+- `unknown_face` — That face is no longer there — the model changed since it was picked. Click it again.
+- `unknown_entity`
+- `locator_missed`
+- `ambiguous_locator`
+- `profile_needs_convex_edge` — A cove needs an outside edge.
+- `bullnose_needs_parallel_sides` — A bullnose needs two parallel edges of one face.
+- `invalid_profile` — This profile shape isn't valid. Redraw it as one open chain.
+- `unknown_profile` — That profile isn't built in. Pick one from the profile list.
+- `load_failed` — The Library item couldn't be read, so the part wasn't updated. The Library file may be damaged.
+- `host_capability_missing`
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.solid.follow_me`
 
@@ -7076,14 +15330,22 @@ Extrude a region into a new Object, consuming the profile.
 - **Tier:** Standard
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Sweep a profile along an edge-chain path, as the tool does.
+
+> **Preview parameters:** `twist`, `end_scale`, `stations`, part of the preview feature Follow Me twist and scale (`follow-me-twist`). A production build leaves them out of the params schema and refuses them with `preview_only`.
 
 **Params schema:**
 
 ```json
 {
   "properties": {
+    "end_scale": {
+      "description": "scale of the end profile relative to the start (1 = none); open paths only",
+      "exclusiveMinimum": 0,
+      "type": "number"
+    },
     "path": {
       "oneOf": [
         {
@@ -7142,6 +15404,15 @@ Sweep a profile along an edge-chain path, as the tool does.
           "type": "object"
         }
       ]
+    },
+    "stations": {
+      "description": "stations per path segment; default one per 15° of twist",
+      "minimum": 1,
+      "type": "integer"
+    },
+    "twist": {
+      "description": "total twist over the swept length, radians (right-hand rule about the path); open paths only",
+      "type": "number"
     }
   },
   "required": [
@@ -7180,10 +15451,12 @@ Sweep a profile along an edge-chain path, as the tool does.
 - `path_detached_from_profile` — The path doesn't start on the profile's surface. Start the path at the profile — or, on a loop, cross the profile partway along a straight run, not at a corner.
 - `path_reverses` — The path doubles back on itself — or turns nearly all the way around — so there is no clean corner to turn. Remove the reversal, or soften the corner.
 - `path_too_tight` — The path turns tighter than the profile is wide, so the sweep would fold into itself. Use a smaller profile or gentler turns.
+- `profile_too_wide_for_corner` — The profile is too wide to fit inside this corner, so the sweep would run into itself. Draw the profile at a corner of the path, square to the edge it starts along, and narrower than half the shortest side.
 - `profile_crosses_axis` — This profile crosses the circle's center axis, so revolving it would lose the geometry on one side. Draw the profile entirely on one side of the axis instead.
 - `partial_sweep_on_pole` — A partial sweep can't cut open this shape — its profile touches the turning axis, so the pole only exists in the full revolution. Sweep the whole path, or move the profile off the axis.
 - `sweep_self_intersects` — Following this path would make the shape run into itself. Shorten the path or use a smaller profile.
 - `sweep_degenerate` — This profile can't be swept along that path into a valid solid. Simplify the profile or the path and try again.
+- `twist_needs_open_path` — Twist and end scale need an open path.
 - `unknown_region` — That profile is no longer there — the model changed since it was picked. Click it again.
 - `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
 - `unknown_face` — That face is no longer there — the model changed since it was picked. Click it again.
@@ -7191,6 +15464,70 @@ Sweep a profile along an edge-chain path, as the tool does.
 - `locator_missed`
 - `ambiguous_locator`
 - `unimplemented`
+- `locked_node` — Locked. Unlock it to change it.
+
+### `hew.solid.from_faces`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** model-mutating
+- **Served:** kernel
+- **Permission:** model.write
+
+Make a solid from drawn faces that enclose a space (Make Solid on sketches), first filling the faces the named sketches' lines can close; a shape closed against a solid grows it.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "sketches": {
+      "description": "skt_ ids of free sketches; their lines first fill every face they can close (as a draw would), then every face (faced region) they hold, and every face so filled, seeds the search, which gathers every face connected to one through shared edges (two faces with the same loop on one plane are one face: the ordinary one, else the earlier drawn)",
+      "items": {
+        "type": "string"
+      },
+      "minItems": 1,
+      "type": "array"
+    }
+  },
+  "required": [
+    "sketches"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "description": "the faces enclosed a space and became a solid, one undo step; the faces' sketches lose the consumed edges (an emptied sketch is deleted)",
+  "properties": {
+    "grew": {
+      "description": "the shape closed against an existing solid, which grew into object_id (carrying its name and tags)",
+      "type": "boolean"
+    },
+    "object_id": {
+      "description": "the first solid made",
+      "type": "string"
+    }
+  },
+  "required": [
+    "object_id",
+    "grew"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `faces_not_closed`
+- `loop_not_planar`
+- `faces_not_solid`
+- `unknown_entity`
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.solid.imprints`
 
@@ -7198,6 +15535,7 @@ Sweep a profile along an edge-chain path, as the tool does.
 - **Tier:** Standard
 - **Class:** read-only
 - **Served:** kernel
+- **Permission:** model.read
 
 Kept for compatibility: list an object's drawn shapes (sub-faces and chords) per drawing plane; hew.sketch.units is the general form.
 
@@ -7343,8 +15681,9 @@ Kept for compatibility: list an object's drawn shapes (sub-faces and chords) per
 - **Tier:** Required
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
-Boolean intersection of two solids.
+Boolean intersection of two or more solids: the material in all of them.
 
 **Params schema:**
 
@@ -7352,18 +15691,66 @@ Boolean intersection of two solids.
 {
   "properties": {
     "a": {
-      "description": "a node id: obj_/grp_/ins_",
-      "type": "string"
+      "description": "a world node id (obj_/grp_/ins_), or {path: [instance, …, object]}: a definition member through one placement, edited in the definition so every placement follows",
+      "oneOf": [
+        {
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "path": {
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1,
+              "type": "array"
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "type": "object"
+        }
+      ]
     },
     "b": {
-      "description": "a node id: obj_/grp_/ins_",
-      "type": "string"
+      "description": "a world node id; with a by path, a world object (subtract only, consumed) or {path} to a member of the same definition by the same path",
+      "oneOf": [
+        {
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "path": {
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1,
+              "type": "array"
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "operands": {
+      "description": "every node in order, two or more world node ids, instead of a and b: a union of all of them, the first minus the union of the rest, or the intersection of all, as one undo step. Two operands are the a and b call; a path operand, a transient cutter and unlink take a and b",
+      "items": {
+        "type": "string"
+      },
+      "minItems": 2,
+      "type": "array"
+    },
+    "unlink": {
+      "description": "true: a placement operand (an instance, a member by path, or a group holding one) is unlinked and exploded into plain solids, then joined; its other copies keep the shared solid. Without it such an operand refuses would_unlink. Ignored when no operand is a placement, and in a call with three or more operands, where a placement refuses boolean_operand_has_instance",
+      "type": "boolean"
     }
   },
-  "required": [
-    "a",
-    "b"
-  ],
   "type": "object"
 }
 ```
@@ -7373,8 +15760,85 @@ Boolean intersection of two solids.
 ```json
 {
   "properties": {
-    "result": {
+    "note": {
+      "description": "present with pieces: why the result is several, in words for this operation",
       "type": "string"
+    },
+    "pieces": {
+      "description": "present when the result is a group of pieces: how many",
+      "type": "integer"
+    },
+    "result": {
+      "description": "the result node: one object, or a group when the result is several pieces (a Union of operands that only touch, an Intersect of several overlaps)",
+      "type": "string"
+    },
+    "tidied": {
+      "description": "present only when the boolean's cut left faces narrower than feature_min (0.1 µm): it merged them into their neighbors, moving no point farther than twice feature_min, or kept them when merging could not give a valid solid. Several booleans in one command sum",
+      "properties": {
+        "faces_split": {
+          "description": "faces split into flat triangles because a moved point bent them",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "feature_min": {
+          "description": "meters: 1e-7",
+          "type": "number"
+        },
+        "max_move": {
+          "description": "meters, at most twice feature_min",
+          "minimum": 0,
+          "type": "number"
+        },
+        "points_moved": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "sites": {
+          "description": "one point per place something was merged, the first 16: world coordinates, except where the boolean ran in a definition's own geometry (a push_pull on a definition member, a rejoin of a definition's pieces), which reports the definition's coordinates",
+          "items": {
+            "items": {
+              "type": "number"
+            },
+            "maxItems": 3,
+            "minItems": 3,
+            "type": "array"
+          },
+          "maxItems": 16,
+          "type": "array"
+        },
+        "sites_total": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "slivers_kept": {
+          "description": "faces under feature_min the result still holds",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "slivers_merged": {
+          "description": "faces under feature_min the merge removed",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "slivers_merged",
+        "slivers_kept",
+        "points_moved",
+        "max_move",
+        "faces_split",
+        "sites",
+        "sites_total",
+        "feature_min"
+      ],
+      "type": "object"
+    },
+    "unlinked": {
+      "description": "present when unlink: true split placements off: the placements exploded",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
     }
   },
   "required": [
@@ -7386,15 +15850,135 @@ Boolean intersection of two solids.
 
 **Refusals:**
 
+- `boolean_needs_two` — Select at least two objects to combine.
 - `boolean_operand_has_instance` — Combining can't consume a component instance — its geometry is shared with every copy. Explode the instance (or Make Unique, then Explode) first.
 - `boolean_operand_not_solid` — Something in that selection isn't solid, so it can't be combined. To make it solid, select it and choose Object ▸ Make Solid…
 - `boolean_operand_empty` — That selection has no solids to combine. Pick a solid object or a group of solids.
 - `grouped_operand` — This operation can't target an object inside a group. Ungroup it, or leave the group context, first.
-- `degenerate_contact` — The objects only touch along a face, edge, or corner — combining needs real overlap. Nudge one object so their volumes intersect.
+- `degenerate_contact` — The objects only touch, or graze each other along an edge or at a corner, so there is no clean solid to make. Nudge one object a little and try again.
+- `non_planar_input` — One of these objects has a face that isn't flat enough to combine.
+- `degenerate_input` — One of these objects has a face with no area. Use Model Health ▸ Remove degenerate faces first.
+- `operand_face_not_flat` — One of these objects has a face that isn't flat enough to cut. Some imported models have them. Try the cut on a different part of the object, or export the model again from the program it came from with its faces as triangles.
+- `arrangement_failed` — Hew couldn't work out a clean result where these two objects meet. Move one of them a little and try again. If it keeps happening, please send a bug report with Help ▸ Report Bug.
+- `result_too_thin` — The cut passes so close to a corner or edge that it would leave a piece too thin to keep. Move one of the objects a tiny bit (a hundredth of a millimeter is enough) and try again.
 - `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
 - `unknown_group` — That group is no longer there — the model changed since it was picked. Click it again.
 - `unknown_instance` — That component instance is no longer there — the model changed since it was picked. Click it again.
 - `unknown_entity`
+- `unknown_occurrence`
+- `unknown_component` — That component is no longer there — the model changed since it was picked. Click it again.
+- `explode_session_scope` — That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again.
+- `face_not_flat` — That shape is too far from the origin, or would be stretched too far, for its faces to stay flat, so it was refused. Try moving it closer to the origin, or use a smaller change.
+- `would_unlink`
+- `locked_node` — Locked. Unlock it to change it.
+
+### `hew.solid.loft`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** model-mutating
+- **Served:** kernel
+- **Permission:** model.write
+
+Skin a new solid through closed shapes in order, optionally to an apex and along rails, as the Loft tool does.
+
+> **Preview.** Part of the preview feature Loft (`loft`). Only a preview build serves it; a production build leaves it out of every listing and refuses it with `preview_only`.
+
+**Params schema:**
+
+```json
+{
+  "properties": {
+    "apex": {
+      "description": "[x, y, z] or a derived-point locator: the point the loft ends in"
+    },
+    "profiles": {
+      "description": "closed shapes without holes, in loft order",
+      "items": {
+        "oneOf": [
+          {
+            "description": "a sketch region id",
+            "type": "string"
+          },
+          {
+            "properties": {
+              "face": {
+                "description": "HEW_API.md §5.2 face locator of a world object's face",
+                "type": "object"
+              }
+            },
+            "required": [
+              "face"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "type": "array"
+    },
+    "rails": {
+      "description": "up to two paths touching every profile at a vertex or a start marker",
+      "items": {
+        "description": "{\"curve\": <sketch curve id>} or {\"face\": <face locator>} (its boundary loop)"
+      },
+      "maxItems": 2,
+      "type": "array"
+    },
+    "start_offsets": {
+      "description": "per profile: move its correspondence start by this many start candidates: corners where every profile has the same number of corners, else vertices",
+      "items": {
+        "type": "integer"
+      },
+      "type": "array"
+    },
+    "stations": {
+      "description": "stations between consecutive profiles (1 = ruled); default 1 for two shapes without rails, else 8",
+      "minimum": 1,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "profiles"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "properties": {
+    "object_id": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "object_id"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `open_profile` — Loft needs closed shapes. Close this one first.
+- `loft_profile_has_hole` — Loft needs shapes without holes. Shell the lofted solid to hollow it.
+- `loft_needs_two_profiles` — Loft needs at least two shapes, or one shape and a point.
+- `loft_too_many_rails` — Loft takes at most two rails.
+- `rail_misses_profile` — Each rail must run through a matching corner or point on every shape you loft between, and two rails must line the shapes up the same way.
+- `self_intersecting` — The result would pass through itself.
+- `amount_out_of_range` — That amount is out of range.
+- `shape_degenerate` — That change didn't produce a valid solid. The model is unchanged.
+- `unknown_region` — That profile is no longer there — the model changed since it was picked. Click it again.
+- `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
+- `unknown_face` — That face is no longer there — the model changed since it was picked. Click it again.
+- `unknown_entity`
+- `locator_missed`
+- `ambiguous_locator`
+- `follow_me_in_component_unsupported`
+- `unimplemented`
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.solid.mark_surface`
 
@@ -7402,6 +15986,7 @@ Boolean intersection of two solids.
 - **Tier:** Standard
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Mark an open object as a surface on purpose (or clear the mark); hew.doc.health keeps listing it, flagged accepted.
 
@@ -7451,6 +16036,206 @@ Mark an open object as a surface on purpose (or clear the mark); hew.doc.health 
 
 - `object_is_solid` — This is already solid, so there's nothing to close. Use Push/Pull to change its shape.
 - `unknown_entity`
+- `locked_node` — Locked. Unlock it to change it.
+
+### `hew.solid.mend`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** model-mutating
+- **Served:** kernel
+- **Permission:** model.write
+
+Mend an open object: merge nearby points, remove zero-width folds, separate pinched parts and fill small gaps, as one undo step.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "fill": {
+      "description": "\"holes\" (default) fills every gap that is a hole; an array of hew.doc.health rim indices fills those; false or null fills none",
+      "oneOf": [
+        {
+          "enum": [
+            "holes"
+          ],
+          "type": "string"
+        },
+        {
+          "items": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "type": "array"
+        },
+        {
+          "enum": [
+            false
+          ],
+          "type": "boolean"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "folds": {
+      "description": "remove zero-width folds at open edges (default true)",
+      "type": "boolean"
+    },
+    "object": {
+      "description": "obj_ id (a world object or a component member)",
+      "type": "string"
+    },
+    "require_solid": {
+      "description": "refuse still_open instead of committing a result that is not watertight (default false)",
+      "type": "boolean"
+    },
+    "split": {
+      "description": "separate pinched parts; islands become objects of their own (default true)",
+      "type": "boolean"
+    },
+    "weld": {
+      "description": "merge points closer than this many meters; omitted or true = the object's default distance, false or null = no merge",
+      "type": [
+        "number",
+        "boolean",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "object"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "properties": {
+    "closed": {
+      "description": "the object is now a solid",
+      "type": "boolean"
+    },
+    "collapsed_faces": {
+      "description": "faces the merge collapsed, dropped",
+      "type": "integer"
+    },
+    "fill_triangles": {
+      "type": "integer"
+    },
+    "filled_rims": {
+      "type": "integer"
+    },
+    "folds_removed": {
+      "description": "zero-width folds removed",
+      "type": "integer"
+    },
+    "object_id": {
+      "type": "string"
+    },
+    "pieces": {
+      "description": "obj_ ids of the parts cut loose",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "pieces_closed": {
+      "type": "integer"
+    },
+    "reversed": {
+      "type": "boolean"
+    },
+    "seam_folds": {
+      "description": "zero-width doublings-back cut out of faces while stitching seams",
+      "type": "integer"
+    },
+    "skipped_rims": {
+      "items": {
+        "properties": {
+          "object": {
+            "description": "0 the mended object, i+1 piece i",
+            "type": "integer"
+          },
+          "reason": {
+            "description": "why the rim was left open: a refusal code such as fill_crosses_faces",
+            "type": "string"
+          },
+          "rim": {
+            "description": "that object's hew.doc.health rim index after the Mend; null when no open rim passes there",
+            "type": [
+              "integer",
+              "null"
+            ]
+          }
+        },
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "soft_seams": {
+      "description": "edges the Mend left between faces on one plane, made soft so it adds no drawing",
+      "type": "integer"
+    },
+    "split_edges": {
+      "type": "integer"
+    },
+    "split_vertices": {
+      "type": "integer"
+    },
+    "stitched_rims": {
+      "description": "of filled_rims, seams closed by stitching",
+      "type": "integer"
+    },
+    "weld_max_move": {
+      "description": "farthest a merged point moved (m)",
+      "type": "number"
+    },
+    "welded_vertices": {
+      "description": "points merged away",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "object_id",
+    "welded_vertices",
+    "pieces",
+    "filled_rims",
+    "skipped_rims",
+    "closed"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `unknown_component` — That component is no longer there — the model changed since it was picked. Click it again.
+- `unknown_entity`
+- `explode_session_scope` — That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again.
+- `invalid` — Hew couldn't make this change without damaging the object, so nothing changed. Please send the file with Help ▸ Report Bug.
+- `unknown_rim` — That opening is already closed. Check the list again for what is left.
+- `nothing_to_mend` — Nothing to mend here: no nearby points, touching parts or small gaps.
+- `weld_distance_out_of_range` — That distance for merging points is out of range. Try a distance nearer the one first shown.
+- `weld_folds_faces` — Merging those points would fold faces onto each other. Turn on Separate parts that touch at a point too.
+- `weld_collapses_object` — Merging points that far apart would leave nothing. Try a smaller distance.
+- `fill_crosses_faces` — Filling this gap would cut through other faces, so it was left open.
+- `fill_rim_too_small` — This gap is too small or thin to fill.
+- `cap_would_be_coplanar` — This is a flat panel, not an open shape. Keep it as a panel, or add thickness to make it solid.
+- `still_open` — Mend would leave this object open, so nothing was changed.
+- `fold_removal_pinches` — Removing those overlaps would leave parts touching at one point. Turn on Separate parts that touch at a point too.
+- `weld_flips_faces` — Merging points that far apart would turn a thin face over onto its neighbor. Try a smaller distance.
+- `mend_opens_object` — Mend would leave this object more open than it is now, so nothing was changed. Try a smaller distance.
+- `weld_flattens_object` — Merging points that far apart would press the sides of a thin part together. Try a smaller distance.
+- `non_manifold_rim` — The edges around this opening branch off in more than one direction, so Hew can't tell where a face goes. Fix those edges by hand first.
+- `rim_not_planar` — This opening isn't flat, so one face can't close it. Mend in Model Health can fill small ones; otherwise draw faces across it by hand.
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.solid.move_imprint`
 
@@ -7458,6 +16243,7 @@ Mark an open object as a surface on purpose (or clear the mark); hew.doc.health 
 - **Tier:** Standard
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Kept for compatibility: slide a drawn shape (sub-face or chord island) in its plane; hew.sketch.move is the general form.
 
@@ -7514,6 +16300,100 @@ Kept for compatibility: slide a drawn shape (sub-face or chord island) in its pl
 - `ambiguous_locator`
 - `face_token_unknown`
 - `face_token_stale`
+- `locked_node` — Locked. Unlock it to change it.
+
+### `hew.solid.project`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** model-mutating
+- **Served:** kernel
+- **Permission:** model.write
+
+Drape a sketch's shape onto an object's faces, then engrave or emboss it.
+
+> **Preview.** Part of the preview feature Project (`project`). Only a preview build serves it; a production build leaves it out of every listing and refuses it with `preview_only`.
+
+**Params schema:**
+
+```json
+{
+  "properties": {
+    "depth": {
+      "description": "meters; > 0 engraves, < 0 embosses; absent imprints only",
+      "type": "number"
+    },
+    "mode": {
+      "description": "straight (default) cuts along the projection and can go through a wall; follow offsets along the surface",
+      "enum": [
+        "straight",
+        "follow"
+      ]
+    },
+    "object": {
+      "description": "the target object id",
+      "type": "string"
+    },
+    "regions": {
+      "description": "region ids of that sketch; default every region",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "sketch": {
+      "description": "the sketch whose shape is projected along its normal, toward the object",
+      "type": "string"
+    }
+  },
+  "required": [
+    "object",
+    "sketch"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "properties": {
+    "faces": {
+      "description": "how many faces the imprinted region has",
+      "type": "integer"
+    },
+    "object_id": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "object_id",
+    "faces"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `project_misses` — The shape doesn't land on this object. Aim it at a face.
+- `project_needs_closed_shape` — Project needs a closed shape. Close the drawing first.
+- `would_sever` — That depth would cut the object apart. Use Push/Pull or Subtract to split it.
+- `self_intersecting` — The result would pass through itself.
+- `unsupported_shell_corner` — Can't thicken this corner: its faces don't meet in one point.
+- `wall_too_thick` — The wall is too thick for this shape. Try a thinner wall.
+- `shape_needs_solid` — This needs a solid. This object has gaps.
+- `amount_out_of_range` — That amount is out of range.
+- `shape_degenerate` — That change didn't produce a valid solid. The model is unchanged.
+- `degenerate_contact` — The objects only touch, or graze each other along an edge or at a corner, so there is no clean solid to make. Nudge one object a little and try again.
+- `non_planar_input` — One of these objects has a face that isn't flat enough to combine.
+- `degenerate_input` — One of these objects has a face with no area. Use Model Health ▸ Remove degenerate faces first.
+- `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
+- `unknown_sketch` — That sketch is no longer there — the model changed since it was picked. Click it again.
+- `unknown_component` — That component is no longer there — the model changed since it was picked. Click it again.
+- `unknown_entity`
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.solid.push_pull`
 
@@ -7521,6 +16401,7 @@ Kept for compatibility: slide a drawn shape (sub-face or chord island) in its pl
 - **Tier:** Required
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Push/pull a face of a solid with the tool's full semantics.
 
@@ -7533,7 +16414,7 @@ Push/pull a face of a solid with the tool's full semantics.
       "type": "number"
     },
     "face": {
-      "description": "HEW_API.md §5.2 face locator: {object,at} | {object,ray} | {\"$face\":\"label#key\"}",
+      "description": "HEW_API.md §5.2 face locator: {object | path, at} | {object | path, ray} | {\"$face\":\"label#key\"}; path (or object as {path: [...]}) is an occurrence path [instance, …, object] that reaches a definition member through a placement, every placement following (at and ray stay in the leaf's frame, the definition's coordinates, not world coordinates)",
       "type": "object"
     }
   },
@@ -7549,7 +16430,7 @@ Push/pull a face of a solid with the tool's full semantics.
 
 ```json
 {
-  "description": "exactly one of object_id / object_ids is present, depending on the tool's three-way branch (HEW_API.md §7 semantics notes)",
+  "description": "exactly one of object_id / object_ids is present, depending on the tool's three-way branch (HEW_API.md §7 semantics notes); a through push or pull is a boolean, so it can carry tidied",
   "properties": {
     "object_id": {
       "description": "the pushed/pulled object, still standing (in-place or sub-face case)",
@@ -7561,6 +16442,67 @@ Push/pull a face of a solid with the tool's full semantics.
         "type": "string"
       },
       "type": "array"
+    },
+    "tidied": {
+      "description": "present only when the boolean's cut left faces narrower than feature_min (0.1 µm): it merged them into their neighbors, moving no point farther than twice feature_min, or kept them when merging could not give a valid solid. Several booleans in one command sum",
+      "properties": {
+        "faces_split": {
+          "description": "faces split into flat triangles because a moved point bent them",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "feature_min": {
+          "description": "meters: 1e-7",
+          "type": "number"
+        },
+        "max_move": {
+          "description": "meters, at most twice feature_min",
+          "minimum": 0,
+          "type": "number"
+        },
+        "points_moved": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "sites": {
+          "description": "one point per place something was merged, the first 16: world coordinates, except where the boolean ran in a definition's own geometry (a push_pull on a definition member, a rejoin of a definition's pieces), which reports the definition's coordinates",
+          "items": {
+            "items": {
+              "type": "number"
+            },
+            "maxItems": 3,
+            "minItems": 3,
+            "type": "array"
+          },
+          "maxItems": 16,
+          "type": "array"
+        },
+        "sites_total": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "slivers_kept": {
+          "description": "faces under feature_min the result still holds",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "slivers_merged": {
+          "description": "faces under feature_min the merge removed",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "slivers_merged",
+        "slivers_kept",
+        "points_moved",
+        "max_move",
+        "faces_split",
+        "sites",
+        "sites_total",
+        "feature_min"
+      ],
+      "type": "object"
     }
   },
   "type": "object"
@@ -7575,7 +16517,16 @@ Push/pull a face of a solid with the tool's full semantics.
 - `non_manifold_result` — The walls this would create run into the object's other geometry. Try a different distance, or reshape the surrounding faces first.
 - `not_a_sub_face` — Push/Pull here needs a shape drawn on the face. Draw a closed outline on the face first.
 - `radius_vanishes` — Pushing that far would shrink the curved wall to nothing. Push a shorter distance.
-- `wall_neighbor_non_planar` — Offsetting this curved wall would bend a neighboring face out of flat, so it was refused. Adjust or simplify the touching faces first.
+- `wall_neighbor_non_planar` — Moving this face would bend a face that touches it out of flat, so it was refused. Adjust or simplify the touching faces first.
+- `blend_modified` — This fillet has been changed and can't be edited. It's ordinary geometry now.
+- `dependent_blend` — A fillet that runs into this one can't be rebuilt after that change. Change or remove that fillet first.
+- `radius_too_large` — That radius doesn't fit here. Try a smaller one.
+- `profile_too_wide` — This profile is wider than the face it has to fit on. Try a smaller profile or a smaller size.
+- `unsupported_edge` — This edge can't be filleted yet.
+- `unsupported_vertex` — Can't blend this corner. Try these edges one at a time.
+- `blend_faces_flush` — The two surfaces meet smoothly here, with no edge between them, as two pipes of the same size do. There's nothing to round, chamfer, or cove there. Make one part a little larger or smaller.
+- `obstructed` — The fillet would cut into other geometry.
+- `blend_degenerate` — That fillet didn't produce a valid solid. The model is unchanged.
 - `unknown_face` — That face is no longer there — the model changed since it was picked. Click it again.
 - `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
 - `unknown_component` — That component is no longer there — the model changed since it was picked. Click it again.
@@ -7585,6 +16536,484 @@ Push/pull a face of a solid with the tool's full semantics.
 - `ambiguous_locator`
 - `face_token_unknown`
 - `face_token_stale`
+- `unknown_occurrence`
+- `explode_session_scope` — That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again.
+- `not_an_object`
+- `locked_node` — Locked. Unlock it to change it.
+
+### `hew.solid.rejoin`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** model-mutating
+- **Served:** kernel
+- **Permission:** model.write
+
+Rejoin one seam family of split pieces as a single solid (Model Health's Rejoin as one solid); one undo entry.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "as": {
+      "enum": [
+        "one_solid"
+      ],
+      "type": "string"
+    },
+    "family": {
+      "description": "index into the families of hew.doc.health over the whole model (the family a hew.query.occurrences row reports), resolved when the call runs; an index read from a hew.doc.health call with an objects scope may name a different family",
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "family",
+    "as"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "properties": {
+    "object": {
+      "description": "obj_ id of the joined solid; it keeps the largest piece's name, tags, and attributes",
+      "type": "string"
+    },
+    "tidied": {
+      "description": "present only when the boolean's cut left faces narrower than feature_min (0.1 µm): it merged them into their neighbors, moving no point farther than twice feature_min, or kept them when merging could not give a valid solid. Several booleans in one command sum",
+      "properties": {
+        "faces_split": {
+          "description": "faces split into flat triangles because a moved point bent them",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "feature_min": {
+          "description": "meters: 1e-7",
+          "type": "number"
+        },
+        "max_move": {
+          "description": "meters, at most twice feature_min",
+          "minimum": 0,
+          "type": "number"
+        },
+        "points_moved": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "sites": {
+          "description": "one point per place something was merged, the first 16: world coordinates, except where the boolean ran in a definition's own geometry (a push_pull on a definition member, a rejoin of a definition's pieces), which reports the definition's coordinates",
+          "items": {
+            "items": {
+              "type": "number"
+            },
+            "maxItems": 3,
+            "minItems": 3,
+            "type": "array"
+          },
+          "maxItems": 16,
+          "type": "array"
+        },
+        "sites_total": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "slivers_kept": {
+          "description": "faces under feature_min the result still holds",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "slivers_merged": {
+          "description": "faces under feature_min the merge removed",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "slivers_merged",
+        "slivers_kept",
+        "points_moved",
+        "max_move",
+        "faces_split",
+        "sites",
+        "sites_total",
+        "feature_min"
+      ],
+      "type": "object"
+    }
+  },
+  "required": [
+    "object"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `unknown_family`
+- `not_cappable`
+- `rejoin_not_possible` — These pieces can't be joined into one solid. An opening may keep the result open, there may be only one piece, the pieces may sit in different groups, they may not fit together into one solid, or they may be in a group inside a component, which Hew can't rejoin yet. Use Rejoin to close each piece instead.
+- `rim_not_planar` — This opening isn't flat, so one face can't close it. Mend in Model Health can fill small ones; otherwise draw faces across it by hand.
+- `rim_self_intersecting` — The edge of this opening crosses itself, so one face can't close it. Draw faces across it by hand.
+- `cap_would_be_coplanar` — This is a flat panel, not an open shape. Keep it as a panel, or add thickness to make it solid.
+- `non_manifold_rim` — The edges around this opening branch off in more than one direction, so Hew can't tell where a face goes. Fix those edges by hand first.
+- `caps_overlap` — A face here would overlap another part of this object. Close all of the object's openings together, or draw faces across this one by hand.
+- `invalid` — Hew couldn't make this change without damaging the object, so nothing changed. Please send the file with Help ▸ Report Bug.
+- `degenerate_contact` — The objects only touch, or graze each other along an edge or at a corner, so there is no clean solid to make. Nudge one object a little and try again.
+- `operand_face_not_flat` — One of these objects has a face that isn't flat enough to cut. Some imported models have them. Try the cut on a different part of the object, or export the model again from the program it came from with its faces as triangles.
+- `arrangement_failed` — Hew couldn't work out a clean result where these two objects meet. Move one of them a little and try again. If it keeps happening, please send a bug report with Help ▸ Report Bug.
+- `result_too_thin` — The cut passes so close to a corner or edge that it would leave a piece too thin to keep. Move one of the objects a tiny bit (a hundredth of a millimeter is enough) and try again.
+- `boolean_operand_not_solid` — Something in that selection isn't solid, so it can't be combined. To make it solid, select it and choose Object ▸ Make Solid…
+- `boolean_operand_empty` — That selection has no solids to combine. Pick a solid object or a group of solids.
+- `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
+- `unknown_component` — That component is no longer there — the model changed since it was picked. Click it again.
+- `explode_session_scope` — That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again.
+- `locked_node` — Locked. Unlock it to change it.
+
+### `hew.solid.remove_blend`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** model-mutating
+- **Served:** kernel
+- **Permission:** model.write
+
+Remove a fillet or chamfer, restoring the sharp edges, by naming any face of it.
+
+**Params schema:**
+
+```json
+{
+  "properties": {
+    "face": {
+      "description": "HEW_API.md §5.2 face locator of any face of the blend",
+      "type": "object"
+    }
+  },
+  "required": [
+    "face"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "properties": {
+    "object_id": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "object_id"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `blend_modified` — This fillet has been changed and can't be edited. It's ordinary geometry now.
+- `dependent_blend` — A fillet that runs into this one can't be rebuilt after that change. Change or remove that fillet first.
+- `unknown_blend` — That face isn't part of a fillet.
+- `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
+- `unknown_face` — That face is no longer there — the model changed since it was picked. Click it again.
+- `unknown_entity`
+- `locator_missed`
+- `ambiguous_locator`
+- `locked_node` — Locked. Unlock it to change it.
+
+### `hew.solid.remove_degenerate_faces`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** model-mutating
+- **Served:** kernel
+- **Permission:** model.write
+
+Remove an object's zero-width and sub-tolerance faces, keeping it closed.
+
+> **Preview.** Part of the preview feature Remove degenerate faces (`remove-degenerate-faces`). Only a preview build serves it; a production build leaves it out of every listing and refuses it with `preview_only`.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "object": {
+      "description": "obj_ id (a world object or a component member)",
+      "type": "string"
+    }
+  },
+  "required": [
+    "object"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "properties": {
+    "removed": {
+      "description": "faces removed",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "removed"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `object_is_solid` — This is already solid, so there's nothing to close. Use Push/Pull to change its shape.
+- `unknown_component` — That component is no longer there — the model changed since it was picked. Click it again.
+- `unknown_entity`
+- `explode_session_scope` — That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again.
+- `invalid` — Hew couldn't make this change without damaging the object, so nothing changed. Please send the file with Help ▸ Report Bug.
+- `nothing_to_remove` — No degenerate faces found.
+- `locked_node` — Locked. Unlock it to change it.
+
+### `hew.solid.resize_blend`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** model-mutating
+- **Served:** kernel
+- **Permission:** model.write
+
+Resize a fillet or chamfer (or switch it between round and chamfer) by naming any face of it.
+
+**Params schema:**
+
+```json
+{
+  "properties": {
+    "distance": {
+      "exclusiveMinimum": 0,
+      "type": "number"
+    },
+    "distances": {
+      "items": {
+        "type": "number"
+      },
+      "maxItems": 2,
+      "minItems": 2,
+      "type": "array"
+    },
+    "face": {
+      "description": "HEW_API.md §5.2 face locator of any face of the blend",
+      "type": "object"
+    },
+    "profile": {
+      "type": "string"
+    },
+    "radius": {
+      "exclusiveMinimum": 0,
+      "type": "number"
+    },
+    "segments": {
+      "description": "facets across the arc: 2 to 96 for a round, cove or bullnose, 1 to 96 for a profile",
+      "maximum": 96,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "width": {
+      "exclusiveMinimum": 0,
+      "type": "number"
+    }
+  },
+  "required": [
+    "face"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "description": "an edge blend answers object_id, blend_ids, faces and size (meters; null for a bullnose); a 2D corner answers sketch_id or object_id",
+  "properties": {
+    "blend_ids": {
+      "items": {
+        "type": "integer"
+      },
+      "type": "array"
+    },
+    "faces": {
+      "description": "new blend faces",
+      "type": "integer"
+    },
+    "object_id": {
+      "type": "string"
+    },
+    "sketch_id": {
+      "description": "a corner of a world sketch: the sketch",
+      "type": "string"
+    }
+  },
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `blend_modified` — This fillet has been changed and can't be edited. It's ordinary geometry now.
+- `dependent_blend` — A fillet that runs into this one can't be rebuilt after that change. Change or remove that fillet first.
+- `unknown_blend` — That face isn't part of a fillet.
+- `radius_too_large` — That radius doesn't fit here. Try a smaller one.
+- `blend_degenerate` — That fillet didn't produce a valid solid. The model is unchanged.
+- `profile_too_wide` — This profile is wider than the face it has to fit on. Try a smaller profile or a smaller size.
+- `segments_out_of_range` — Use between 2 and 96 segments.
+- `unsupported_edge` — This edge can't be filleted yet.
+- `unsupported_vertex` — Can't blend this corner. Try these edges one at a time.
+- `blend_faces_flush` — The two surfaces meet smoothly here, with no edge between them, as two pipes of the same size do. There's nothing to round, chamfer, or cove there. Make one part a little larger or smaller.
+- `obstructed` — The fillet would cut into other geometry.
+- `invalid_profile` — This profile shape isn't valid. Redraw it as one open chain.
+- `unknown_profile` — That profile isn't built in. Pick one from the profile list.
+- `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
+- `unknown_face` — That face is no longer there — the model changed since it was picked. Click it again.
+- `unknown_entity`
+- `locator_missed`
+- `ambiguous_locator`
+- `locked_node` — Locked. Unlock it to change it.
+
+### `hew.solid.revolve`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** model-mutating
+- **Served:** kernel
+- **Permission:** model.write
+
+Turn a profile about an axis in its plane into a solid, as the Revolve tool does.
+
+> **Preview.** Part of the preview feature Revolve (`revolve`). Only a preview build serves it; a production build leaves it out of every listing and refuses it with `preview_only`.
+
+**Params schema:**
+
+```json
+{
+  "properties": {
+    "angle": {
+      "description": "radians, 0 < |angle| ≤ 2π, right-hand rule about from→to; default 2π (a closed solid)",
+      "type": "number"
+    },
+    "axis": {
+      "description": "a line lying in the profile's plane",
+      "oneOf": [
+        {
+          "properties": {
+            "from": {
+              "description": "[x, y, z] or a derived-point locator (HEW_API.md §5.3)"
+            },
+            "to": {
+              "description": "[x, y, z] or a derived-point locator (HEW_API.md §5.3)"
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "edge": {
+              "description": "a solid or sketch edge locator; the axis is its line"
+            }
+          },
+          "required": [
+            "edge"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "profile": {
+      "oneOf": [
+        {
+          "description": "a sketch region id",
+          "type": "string"
+        },
+        {
+          "properties": {
+            "face": {
+              "description": "HEW_API.md §5.2 face locator of a world object's face",
+              "type": "object"
+            }
+          },
+          "required": [
+            "face"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "segments": {
+      "description": "facets per full turn; default the drawing tools' count at the profile's largest distance from the axis",
+      "maximum": 1024,
+      "minimum": 3,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "profile",
+    "axis"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "properties": {
+    "object_id": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "object_id"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `axis_not_in_profile_plane` — The axis has to lie in the plane of the shape. Move the axis onto that plane.
+- `amount_out_of_range` — That amount is out of range.
+- `profile_crosses_axis` — This profile crosses the circle's center axis, so revolving it would lose the geometry on one side. Draw the profile entirely on one side of the axis instead.
+- `partial_sweep_on_pole` — A partial sweep can't cut open this shape — its profile touches the turning axis, so the pole only exists in the full revolution. Sweep the whole path, or move the profile off the axis.
+- `sweep_self_intersects` — Following this path would make the shape run into itself. Shorten the path or use a smaller profile.
+- `sweep_degenerate` — This profile can't be swept along that path into a valid solid. Simplify the profile or the path and try again.
+- `follow_me_in_component_unsupported`
+- `unknown_region` — That profile is no longer there — the model changed since it was picked. Click it again.
+- `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
+- `unknown_face` — That face is no longer there — the model changed since it was picked. Click it again.
+- `unknown_entity`
+- `locator_missed`
+- `ambiguous_locator`
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.solid.rotate_imprint`
 
@@ -7592,6 +17021,7 @@ Push/pull a face of a solid with the tool's full semantics.
 - **Tier:** Standard
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Kept for compatibility: turn a drawn shape about its plane's normal through a pivot; hew.sketch.rotate is the general form.
 
@@ -7662,6 +17092,7 @@ Kept for compatibility: turn a drawn shape about its plane's normal through a pi
 - `face_token_unknown`
 - `face_token_stale`
 - `no_such_point`
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.solid.scale_imprint`
 
@@ -7669,8 +17100,9 @@ Kept for compatibility: turn a drawn shape about its plane's normal through a pi
 - **Tier:** Standard
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
-Kept for compatibility: uniformly scale a drawn shape about an anchor in its plane; hew.sketch.scale is the general form.
+Kept for compatibility: uniformly scale a drawn shape about an anchor in its plane (a negative factor turns it 180 degrees about the anchor and scales it by |factor|); hew.sketch.scale is the general form, and a mirror about a world axis of an axis-aligned drawing plane is hew.sketch.scale with a negative per-axis factor.
 
 **Params schema:**
 
@@ -7694,8 +17126,7 @@ Kept for compatibility: uniformly scale a drawn shape about an anchor in its pla
       ]
     },
     "factor": {
-      "description": "uniform scale factor",
-      "exclusiveMinimum": 0,
+      "description": "uniform scale factor, finite and nonzero; a negative factor turns the shape 180 degrees about `about` and scales it by |factor| (a mirror about a world axis of an axis-aligned drawing plane is hew.sketch.scale with a negative per-axis factor)",
       "type": "number"
     },
     "imprint": {
@@ -7740,15 +17171,19 @@ Kept for compatibility: uniformly scale a drawn shape about an anchor in its pla
 - `face_token_unknown`
 - `face_token_stale`
 - `no_such_point`
+- `locked_node` — Locked. Unlock it to change it.
 
-### `hew.solid.slice`
+### `hew.solid.shell`
 
 - **Version:** 1
-- **Tier:** Required
+- **Tier:** Standard
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
-Slice a solid by a plane into two solids.
+Hollow a solid to a wall of one thickness, leaving chosen faces open.
+
+> **Preview.** Part of the preview feature Shell (`shell`). Only a preview build serves it; a production build leaves it out of every listing and refuses it with `preview_only`.
 
 **Params schema:**
 
@@ -7756,9 +17191,101 @@ Slice a solid by a plane into two solids.
 {
   "properties": {
     "object": {
+      "description": "an object id",
       "type": "string"
     },
+    "open": {
+      "items": {
+        "description": "HEW_API.md §5.2 face locator of a face of `object` to leave open",
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "thickness": {
+      "description": "wall thickness in meters; negative grows the wall outward",
+      "type": "number"
+    }
+  },
+  "required": [
+    "object",
+    "thickness"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "properties": {
+    "object_id": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "object_id"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `wall_too_thick` — The wall is too thick for this shape. Try a thinner wall.
+- `self_intersecting` — The result would pass through itself.
+- `unsupported_shell_corner` — Can't thicken this corner: its faces don't meet in one point.
+- `shape_needs_solid` — This needs a solid. This object has gaps.
+- `amount_out_of_range` — That amount is out of range.
+- `shape_degenerate` — That change didn't produce a valid solid. The model is unchanged.
+- `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
+- `unknown_component` — That component is no longer there — the model changed since it was picked. Click it again.
+- `unknown_entity`
+- `locator_missed`
+- `ambiguous_locator`
+- `locked_node` — Locked. Unlock it to change it.
+
+### `hew.solid.slice`
+
+- **Version:** 1
+- **Tier:** Required
+- **Class:** model-mutating
+- **Served:** kernel
+- **Permission:** model.write
+
+Slice a solid by a plane into two solids; the object may be a path to a definition member, sliced in the definition.
+
+**Params schema:**
+
+```json
+{
+  "properties": {
+    "object": {
+      "description": "a world object id, or {path: [instance, …, object]}: a definition member through one placement; the pieces stay in the definition and every placement follows",
+      "oneOf": [
+        {
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "path": {
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1,
+              "type": "array"
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "type": "object"
+        }
+      ]
+    },
     "plane": {
+      "description": "world coordinates, also through a path",
       "properties": {
         "normal": {
           "oneOf": [
@@ -7818,6 +17345,67 @@ Slice a solid by a plane into two solids.
     },
     "positive": {
       "type": "string"
+    },
+    "tidied": {
+      "description": "present only when the boolean's cut left faces narrower than feature_min (0.1 µm): it merged them into their neighbors, moving no point farther than twice feature_min, or kept them when merging could not give a valid solid. Several booleans in one command sum",
+      "properties": {
+        "faces_split": {
+          "description": "faces split into flat triangles because a moved point bent them",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "feature_min": {
+          "description": "meters: 1e-7",
+          "type": "number"
+        },
+        "max_move": {
+          "description": "meters, at most twice feature_min",
+          "minimum": 0,
+          "type": "number"
+        },
+        "points_moved": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "sites": {
+          "description": "one point per place something was merged, the first 16: world coordinates, except where the boolean ran in a definition's own geometry (a push_pull on a definition member, a rejoin of a definition's pieces), which reports the definition's coordinates",
+          "items": {
+            "items": {
+              "type": "number"
+            },
+            "maxItems": 3,
+            "minItems": 3,
+            "type": "array"
+          },
+          "maxItems": 16,
+          "type": "array"
+        },
+        "sites_total": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "slivers_kept": {
+          "description": "faces under feature_min the result still holds",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "slivers_merged": {
+          "description": "faces under feature_min the merge removed",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "slivers_merged",
+        "slivers_kept",
+        "points_moved",
+        "max_move",
+        "faces_split",
+        "sites",
+        "sites_total",
+        "feature_min"
+      ],
+      "type": "object"
     }
   },
   "required": [
@@ -7835,33 +17423,44 @@ Slice a solid by a plane into two solids.
 - `degenerate` — The cut lines up exactly with an existing face or edge, so it wouldn't create two pieces. Move the cut slightly.
 - `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
 - `unknown_entity`
+- `unknown_occurrence`
+- `unknown_instance` — That component instance is no longer there — the model changed since it was picked. Click it again.
+- `unknown_component` — That component is no longer there — the model changed since it was picked. Click it again.
+- `grouped_operand` — This operation can't target an object inside a group. Ungroup it, or leave the group context, first.
+- `explode_session_scope` — That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again.
+- `locked_node` — Locked. Unlock it to change it.
 
-### `hew.solid.subtract`
+### `hew.solid.soften`
 
 - **Version:** 1
-- **Tier:** Required
+- **Tier:** Standard
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
-Boolean subtraction of two solids.
+Soften the edges of an object that bend less than an angle, so faceted walls read as smooth.
+
+> **Preview.** Part of the preview feature Soften Edges (`soften`). Only a preview build serves it; a production build leaves it out of every listing and refuses it with `preview_only`.
 
 **Params schema:**
 
 ```json
 {
   "properties": {
-    "a": {
-      "description": "a node id: obj_/grp_/ins_",
-      "type": "string"
+    "max_angle": {
+      "description": "radians: edges bending less than this are softened (coplanar and creased edges are left alone)",
+      "exclusiveMaximum": 3.141592653589793,
+      "exclusiveMinimum": 0,
+      "type": "number"
     },
-    "b": {
-      "description": "a node id: obj_/grp_/ins_",
+    "object": {
+      "description": "an object id",
       "type": "string"
     }
   },
   "required": [
-    "a",
-    "b"
+    "object",
+    "max_angle"
   ],
   "type": "object"
 }
@@ -7872,8 +17471,205 @@ Boolean subtraction of two solids.
 ```json
 {
   "properties": {
-    "result": {
+    "softened": {
+      "type": "integer"
+    }
+  },
+  "required": [
+    "softened"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `amount_out_of_range` — That amount is out of range.
+- `shape_degenerate` — That change didn't produce a valid solid. The model is unchanged.
+- `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
+- `unknown_component` — That component is no longer there — the model changed since it was picked. Click it again.
+- `unknown_entity`
+- `locked_node` — Locked. Unlock it to change it.
+
+### `hew.solid.subtract`
+
+- **Version:** 1
+- **Tier:** Required
+- **Class:** model-mutating
+- **Served:** kernel
+- **Permission:** model.write
+
+Boolean subtraction: the first solid minus every other one; a may be a path to a definition member, cut through that placement so every placement shows the cut, by a world object or a transient prism or box.
+
+**Params schema:**
+
+```json
+{
+  "properties": {
+    "a": {
+      "description": "a world node id (obj_/grp_/ins_), or {path: [instance, …, object]}: a definition member through one placement, edited in the definition so every placement follows",
+      "oneOf": [
+        {
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "path": {
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1,
+              "type": "array"
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "b": {
+      "description": "a world node id; with a by path, a world object (consumed), {path} to a member of the same definition by the same path, or a transient cutter {prism} | {box} in world coordinates (no object is created)",
+      "oneOf": [
+        {
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "path": {
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1,
+              "type": "array"
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "prism": {
+              "description": "{plane: {origin, normal}, loops: [[[x,y,z], ...], ...], distance}: the first loop outer, the rest holes",
+              "type": "object"
+            }
+          },
+          "required": [
+            "prism"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "box": {
+              "description": "{min, max, pose?}",
+              "type": "object"
+            }
+          },
+          "required": [
+            "box"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "operands": {
+      "description": "every node in order, two or more world node ids, instead of a and b: a union of all of them, the first minus the union of the rest, or the intersection of all, as one undo step. Two operands are the a and b call; a path operand, a transient cutter and unlink take a and b",
+      "items": {
+        "type": "string"
+      },
+      "minItems": 2,
+      "type": "array"
+    }
+  },
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "properties": {
+    "note": {
+      "description": "present with pieces: why the result is several, in words for this operation",
       "type": "string"
+    },
+    "pieces": {
+      "description": "present when the result is a group of pieces: how many",
+      "type": "integer"
+    },
+    "result": {
+      "description": "the result node: one object, or a group when the result is several pieces (a Union of operands that only touch, a Subtract that severs, an Intersect of several overlaps)",
+      "type": "string"
+    },
+    "tidied": {
+      "description": "present only when the boolean's cut left faces narrower than feature_min (0.1 µm): it merged them into their neighbors, moving no point farther than twice feature_min, or kept them when merging could not give a valid solid. Several booleans in one command sum",
+      "properties": {
+        "faces_split": {
+          "description": "faces split into flat triangles because a moved point bent them",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "feature_min": {
+          "description": "meters: 1e-7",
+          "type": "number"
+        },
+        "max_move": {
+          "description": "meters, at most twice feature_min",
+          "minimum": 0,
+          "type": "number"
+        },
+        "points_moved": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "sites": {
+          "description": "one point per place something was merged, the first 16: world coordinates, except where the boolean ran in a definition's own geometry (a push_pull on a definition member, a rejoin of a definition's pieces), which reports the definition's coordinates",
+          "items": {
+            "items": {
+              "type": "number"
+            },
+            "maxItems": 3,
+            "minItems": 3,
+            "type": "array"
+          },
+          "maxItems": 16,
+          "type": "array"
+        },
+        "sites_total": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "slivers_kept": {
+          "description": "faces under feature_min the result still holds",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "slivers_merged": {
+          "description": "faces under feature_min the merge removed",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "slivers_merged",
+        "slivers_kept",
+        "points_moved",
+        "max_move",
+        "faces_split",
+        "sites",
+        "sites_total",
+        "feature_min"
+      ],
+      "type": "object"
     }
   },
   "required": [
@@ -7885,15 +17681,29 @@ Boolean subtraction of two solids.
 
 **Refusals:**
 
+- `boolean_needs_two` — Select at least two objects to combine.
 - `boolean_operand_has_instance` — Combining can't consume a component instance — its geometry is shared with every copy. Explode the instance (or Make Unique, then Explode) first.
 - `boolean_operand_not_solid` — Something in that selection isn't solid, so it can't be combined. To make it solid, select it and choose Object ▸ Make Solid…
 - `boolean_operand_empty` — That selection has no solids to combine. Pick a solid object or a group of solids.
 - `grouped_operand` — This operation can't target an object inside a group. Ungroup it, or leave the group context, first.
-- `degenerate_contact` — The objects only touch along a face, edge, or corner — combining needs real overlap. Nudge one object so their volumes intersect.
+- `degenerate_contact` — The objects only touch, or graze each other along an edge or at a corner, so there is no clean solid to make. Nudge one object a little and try again.
+- `non_planar_input` — One of these objects has a face that isn't flat enough to combine.
+- `degenerate_input` — One of these objects has a face with no area. Use Model Health ▸ Remove degenerate faces first.
+- `operand_face_not_flat` — One of these objects has a face that isn't flat enough to cut. Some imported models have them. Try the cut on a different part of the object, or export the model again from the program it came from with its faces as triangles.
+- `arrangement_failed` — Hew couldn't work out a clean result where these two objects meet. Move one of them a little and try again. If it keeps happening, please send a bug report with Help ▸ Report Bug.
+- `result_too_thin` — The cut passes so close to a corner or edge that it would leave a piece too thin to keep. Move one of the objects a tiny bit (a hundredth of a millimeter is enough) and try again.
 - `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
 - `unknown_group` — That group is no longer there — the model changed since it was picked. Click it again.
 - `unknown_instance` — That component instance is no longer there — the model changed since it was picked. Click it again.
 - `unknown_entity`
+- `unknown_occurrence`
+- `unknown_component` — That component is no longer there — the model changed since it was picked. Click it again.
+- `explode_session_scope` — That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again.
+- `face_not_flat` — That shape is too far from the origin, or would be stretched too far, for its faces to stay flat, so it was refused. Try moving it closer to the origin, or use a smaller change.
+- `nothing_removed` — Nothing was cut away: the solids only touch or sit apart. Check that each cutter is the shape you expect, then move it so it passes through the solid you're cutting.
+- `mirrored_pose`
+- `compute_too_large`
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.solid.thicken`
 
@@ -7901,6 +17711,7 @@ Boolean subtraction of two solids.
 - **Tier:** Standard
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Pull a flat surface into a solid of the given thickness.
 
@@ -7965,6 +17776,7 @@ Pull a flat surface into a solid of the given thickness.
 - `invalid` — Hew couldn't make this change without damaging the object, so nothing changed. Please send the file with Help ▸ Report Bug.
 - `not_a_flat_sheet` — Only flat panels can get a thickness this way. Close the openings of this shape instead.
 - `thickness_too_small` — That thickness is too small. Enter at least 0.001 mm.
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.solid.union`
 
@@ -7972,8 +17784,9 @@ Pull a flat surface into a solid of the given thickness.
 - **Tier:** Required
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
-Boolean union of two solids.
+Boolean union of two or more solids: the material in any of them.
 
 **Params schema:**
 
@@ -7981,18 +17794,66 @@ Boolean union of two solids.
 {
   "properties": {
     "a": {
-      "description": "a node id: obj_/grp_/ins_",
-      "type": "string"
+      "description": "a world node id (obj_/grp_/ins_), or {path: [instance, …, object]}: a definition member through one placement, edited in the definition so every placement follows",
+      "oneOf": [
+        {
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "path": {
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1,
+              "type": "array"
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "type": "object"
+        }
+      ]
     },
     "b": {
-      "description": "a node id: obj_/grp_/ins_",
-      "type": "string"
+      "description": "a world node id; with a by path, a world object (subtract only, consumed) or {path} to a member of the same definition by the same path",
+      "oneOf": [
+        {
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "path": {
+              "items": {
+                "type": "string"
+              },
+              "minItems": 1,
+              "type": "array"
+            }
+          },
+          "required": [
+            "path"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "operands": {
+      "description": "every node in order, two or more world node ids, instead of a and b: a union of all of them, the first minus the union of the rest, or the intersection of all, as one undo step. Two operands are the a and b call; a path operand, a transient cutter and unlink take a and b",
+      "items": {
+        "type": "string"
+      },
+      "minItems": 2,
+      "type": "array"
+    },
+    "unlink": {
+      "description": "true: a placement operand (an instance, a member by path, or a group holding one) is unlinked and exploded into plain solids, then joined; its other copies keep the shared solid. Without it such an operand refuses would_unlink. Ignored when no operand is a placement, and in a call with three or more operands, where a placement refuses boolean_operand_has_instance",
+      "type": "boolean"
     }
   },
-  "required": [
-    "a",
-    "b"
-  ],
   "type": "object"
 }
 ```
@@ -8002,8 +17863,85 @@ Boolean union of two solids.
 ```json
 {
   "properties": {
-    "result": {
+    "note": {
+      "description": "present with pieces: why the result is several, in words for this operation",
       "type": "string"
+    },
+    "pieces": {
+      "description": "present when the result is a group of pieces: how many",
+      "type": "integer"
+    },
+    "result": {
+      "description": "the result node: one object, or a group when the result is several pieces (a Union of operands that only touch, an Intersect of several overlaps)",
+      "type": "string"
+    },
+    "tidied": {
+      "description": "present only when the boolean's cut left faces narrower than feature_min (0.1 µm): it merged them into their neighbors, moving no point farther than twice feature_min, or kept them when merging could not give a valid solid. Several booleans in one command sum",
+      "properties": {
+        "faces_split": {
+          "description": "faces split into flat triangles because a moved point bent them",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "feature_min": {
+          "description": "meters: 1e-7",
+          "type": "number"
+        },
+        "max_move": {
+          "description": "meters, at most twice feature_min",
+          "minimum": 0,
+          "type": "number"
+        },
+        "points_moved": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "sites": {
+          "description": "one point per place something was merged, the first 16: world coordinates, except where the boolean ran in a definition's own geometry (a push_pull on a definition member, a rejoin of a definition's pieces), which reports the definition's coordinates",
+          "items": {
+            "items": {
+              "type": "number"
+            },
+            "maxItems": 3,
+            "minItems": 3,
+            "type": "array"
+          },
+          "maxItems": 16,
+          "type": "array"
+        },
+        "sites_total": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "slivers_kept": {
+          "description": "faces under feature_min the result still holds",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "slivers_merged": {
+          "description": "faces under feature_min the merge removed",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "slivers_merged",
+        "slivers_kept",
+        "points_moved",
+        "max_move",
+        "faces_split",
+        "sites",
+        "sites_total",
+        "feature_min"
+      ],
+      "type": "object"
+    },
+    "unlinked": {
+      "description": "present when unlink: true split placements off: the placements exploded",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
     }
   },
   "required": [
@@ -8015,15 +17953,27 @@ Boolean union of two solids.
 
 **Refusals:**
 
+- `boolean_needs_two` — Select at least two objects to combine.
 - `boolean_operand_has_instance` — Combining can't consume a component instance — its geometry is shared with every copy. Explode the instance (or Make Unique, then Explode) first.
 - `boolean_operand_not_solid` — Something in that selection isn't solid, so it can't be combined. To make it solid, select it and choose Object ▸ Make Solid…
 - `boolean_operand_empty` — That selection has no solids to combine. Pick a solid object or a group of solids.
 - `grouped_operand` — This operation can't target an object inside a group. Ungroup it, or leave the group context, first.
-- `degenerate_contact` — The objects only touch along a face, edge, or corner — combining needs real overlap. Nudge one object so their volumes intersect.
+- `degenerate_contact` — The objects only touch, or graze each other along an edge or at a corner, so there is no clean solid to make. Nudge one object a little and try again.
+- `non_planar_input` — One of these objects has a face that isn't flat enough to combine.
+- `degenerate_input` — One of these objects has a face with no area. Use Model Health ▸ Remove degenerate faces first.
+- `operand_face_not_flat` — One of these objects has a face that isn't flat enough to cut. Some imported models have them. Try the cut on a different part of the object, or export the model again from the program it came from with its faces as triangles.
+- `arrangement_failed` — Hew couldn't work out a clean result where these two objects meet. Move one of them a little and try again. If it keeps happening, please send a bug report with Help ▸ Report Bug.
+- `result_too_thin` — The cut passes so close to a corner or edge that it would leave a piece too thin to keep. Move one of the objects a tiny bit (a hundredth of a millimeter is enough) and try again.
 - `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
 - `unknown_group` — That group is no longer there — the model changed since it was picked. Click it again.
 - `unknown_instance` — That component instance is no longer there — the model changed since it was picked. Click it again.
 - `unknown_entity`
+- `unknown_occurrence`
+- `unknown_component` — That component is no longer there — the model changed since it was picked. Click it again.
+- `explode_session_scope` — That isn't available while a group or component is open for editing. Close it first (Escape, or double-click outside), then try again.
+- `face_not_flat` — That shape is too far from the origin, or would be stretched too far, for its faces to stay flat, so it was refused. Try moving it closer to the origin, or use a smaller change.
+- `would_unlink`
+- `locked_node` — Locked. Unlock it to change it.
 
 ## hew.tag
 
@@ -8033,6 +17983,7 @@ Boolean union of two solids.
 - **Tier:** Standard
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Assign a tag to nodes.
 
@@ -8080,6 +18031,7 @@ Assign a tag to nodes.
 - `unknown_object` — That object is no longer there — the model changed since it was picked. Click it again.
 - `unknown_group` — That group is no longer there — the model changed since it was picked. Click it again.
 - `unknown_instance` — That component instance is no longer there — the model changed since it was picked. Click it again.
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.tag.create`
 
@@ -8087,6 +18039,7 @@ Assign a tag to nodes.
 - **Tier:** Standard
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Register a tag path. Registry-state: records no undo entry (§6.4).
 
@@ -8138,6 +18091,7 @@ Register a tag path. Registry-state: records no undo entry (§6.4).
 - **Tier:** Standard
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Delete a tag path, unassigning it everywhere.
 
@@ -8175,6 +18129,7 @@ Delete a tag path, unassigning it everywhere.
 **Refusals:**
 
 - `unknown_tag` — That tag doesn't exist in this model. Check the tag name and try again.
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.tag.rename`
 
@@ -8182,6 +18137,7 @@ Delete a tag path, unassigning it everywhere.
 - **Tier:** Standard
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Rename a tag path (and every tag nested under it), keeping its identity.
 
@@ -8229,6 +18185,7 @@ Rename a tag path (and every tag nested under it), keeping its identity.
 - `unknown_tag` — That tag doesn't exist in this model. Check the tag name and try again.
 - `duplicate_tag` — A tag with that name already exists. Choose a different name.
 - `invalid_tag_path` — That isn't a valid tag name — it can't be empty, and a tag can't be moved inside itself.
+- `locked_node` — Locked. Unlock it to change it.
 
 ### `hew.tag.set_visible`
 
@@ -8236,6 +18193,7 @@ Rename a tag path (and every tag nested under it), keeping its identity.
 - **Tier:** Standard
 - **Class:** model-mutating
 - **Served:** kernel
+- **Permission:** model.write
 
 Toggle a tag's visibility. Registry-state: records no undo entry (§6.4).
 
@@ -8284,6 +18242,7 @@ Toggle a tag's visibility. Registry-state: records no undo entry (§6.4).
 - **Tier:** Standard
 - **Class:** solitary
 - **Served:** host
+- **Permission:** view
 
 Set the live desktop viewport's camera. A host effect on the view, not a document edit (mutates_document = false: never recorded, never resyncs the document). Headless clients pass a camera per hew.view.snapshot call instead.
 
@@ -8376,14 +18335,418 @@ Set the live desktop viewport's camera. A host effect on the view, not a documen
 
 - `host_capability_missing`
 
+### `hew.view.clear_isolation`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** read-only
+- **Served:** host
+- **Permission:** view
+
+End the live viewport's isolation; a no-op when nothing is isolated.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {},
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {},
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `host_capability_missing`
+
+### `hew.view.enter`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** solitary
+- **Served:** host
+- **Permission:** view
+
+Converge the user's window onto a node, opening group and component sessions level by level and falling back to the in-context entry for an instance a session cannot take (unevenly scaled, or placed in a group elsewhere; a mirrored instance opens a session like any other), then select it. Give exactly one of id (an object, group, or instance in the world) or path (instances outermost first, ending at the leaf). The call answers after the window has acted on it: an empty result when it entered (the outcome arrives as context_changed, and hew.query.context reports the stack and fallback afterward), or a refusal naming why when the window declined, with the window put back where it was. Acts on the user's window, so it is solitary: it runs alone or as the only command of a transaction. Distinct from hew.context.enter, which scopes a plugin's own edits.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "id": {
+      "description": "a world object, group, or instance",
+      "type": "string"
+    },
+    "path": {
+      "description": "an occurrence path: instances outermost first, the last element the node to enter",
+      "items": {
+        "type": "string"
+      },
+      "minItems": 1,
+      "type": "array"
+    }
+  },
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {},
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `unknown_entity`
+- `unknown_occurrence`
+- `gesture_in_progress`
+- `nested_component_in_context` — This nested component can't open for editing here — its placement is unevenly scaled or inside a group. Explode the instance, or make it unique, to edit its parts.
+- `locked_node` — Locked. Unlock it to change it.
+- `enter_refused` — Hew couldn't open that for editing.
+- `host_capability_missing`
+
+### `hew.view.exit`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** solitary
+- **Served:** host
+- **Permission:** view
+
+Pop the user's innermost editing context, a fallback entry or a session frame. The outcome arrives as context_changed.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {},
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {},
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `gesture_in_progress`
+- `nothing_to_exit`
+- `host_capability_missing`
+
+### `hew.view.exit_all`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** solitary
+- **Served:** host
+- **Permission:** view
+
+Close every editing context in the user's window, back to the top level. The outcome arrives as context_changed.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {},
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {},
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `gesture_in_progress`
+- `host_capability_missing`
+
+### `hew.view.hidden`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** read-only
+- **Served:** kernel
+- **Permission:** view
+
+What is hidden: the hidden objects, groups, and instances, the hidden tags, and the live viewport's isolation (null when nothing is isolated or the host has no viewport).
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {},
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "hidden": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "isolated": {
+      "oneOf": [
+        {
+          "items": {
+            "oneOf": [
+              {
+                "description": "an object, group, or instance id",
+                "type": "string"
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "instance": {
+                    "description": "an instance that places it",
+                    "type": "string"
+                  },
+                  "object": {
+                    "description": "a definition member object",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "object",
+                  "instance"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          "type": "array"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "tags_hidden": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "hidden",
+    "tags_hidden",
+    "isolated"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:** none.
+
+### `hew.view.hide`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** read-only
+- **Served:** kernel
+- **Permission:** view
+
+Hide objects, groups, and component instances. View state: saved with the document, never undoable. Tags hide through hew.tag.set_visible.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "ids": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "ids"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "hidden": {
+      "description": "every hidden object, group, and instance",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "hidden"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `unknown_entity`
+- `not_a_node`
+
+### `hew.view.isolate`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** read-only
+- **Served:** host
+- **Permission:** view
+
+Show only the named objects, groups, instances, or definition members (each with an instance that places it) in the live viewport, and frame them. View-only: nothing in the document changes.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "ids": {
+      "items": {
+        "oneOf": [
+          {
+            "description": "an object, group, or instance id",
+            "type": "string"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "instance": {
+                "description": "an instance that places it",
+                "type": "string"
+              },
+              "object": {
+                "description": "a definition member object",
+                "type": "string"
+              }
+            },
+            "required": [
+              "object",
+              "instance"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "maxItems": 10000,
+      "minItems": 1,
+      "type": "array"
+    }
+  },
+  "required": [
+    "ids"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "isolated": {
+      "items": {
+        "oneOf": [
+          {
+            "description": "an object, group, or instance id",
+            "type": "string"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "instance": {
+                "description": "an instance that places it",
+                "type": "string"
+              },
+              "object": {
+                "description": "a definition member object",
+                "type": "string"
+              }
+            },
+            "required": [
+              "object",
+              "instance"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "isolated"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `unknown_entity`
+- `host_capability_missing`
+
 ### `hew.view.line_drawing`
 
 - **Version:** 1
 - **Tier:** Standard
 - **Class:** solitary
 - **Served:** host
+- **Permission:** model.read
 
-Hidden-line drawing of the visible document from a camera (crates/hlr): hard edges, curved-wall silhouettes, section-cut outlines, optionally dashed hidden lines — as a true-size SVG at a drawing scale (inline or written to path), or as raw segments in view-plane meters.
+Hidden-line drawing of the visible document, or of a selection, from a camera (crates/hlr), served identically in the app and in hew-cli: hard edges, curved-wall silhouettes, section-cut outlines, optionally dashed hidden lines — as a true-size SVG at a drawing scale (inline or written to path), or as raw segments in view-plane meters.
 
 **Params schema:**
 
@@ -8422,6 +18785,43 @@ Hidden-line drawing of the visible document from a camera (crates/hlr): hard edg
     "scene": {
       "description": "a Scene's id: its camera and hidden sets, as hew.view.snapshot",
       "type": "string"
+    },
+    "scope": {
+      "default": "all",
+      "description": "all (the default) takes every leaf under the target; own takes a container's direct objects and its groups' objects, never a nested instance's members. On an object both are the same",
+      "enum": [
+        "own",
+        "all"
+      ],
+      "type": "string"
+    },
+    "selection": {
+      "description": "draw only these: node ids, occurrence locators {path}, or a definition's cmp_ id (its leaves at the identity pose)",
+      "items": {
+        "oneOf": [
+          {
+            "type": "string"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "path": {
+                "items": {
+                  "type": "string"
+                },
+                "minItems": 1,
+                "type": "array"
+              }
+            },
+            "required": [
+              "path"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "minItems": 1,
+      "type": "array"
     },
     "view": {
       "description": "a named standard view (parallel projection); mutually exclusive with camera and scene",
@@ -8513,15 +18913,19 @@ Hidden-line drawing of the visible document from a camera (crates/hlr): hard edg
 - `too_complex`
 - `save_failed`
 - `unknown_scene` — That Scene no longer exists — it may have been deleted.
+- `unknown_entity`
+- `unknown_occurrence`
+- `too_many_occurrences` — This model has more placed parts than Hew can list at once.
 
-### `hew.view.snapshot`
+### `hew.view.show`
 
 - **Version:** 1
 - **Tier:** Standard
-- **Class:** solitary
-- **Served:** host
+- **Class:** read-only
+- **Served:** kernel
+- **Permission:** view
 
-Render the attached document to PNG, headless-rendered via a software rasterizer (a live host may render through its viewport instead) — bytes base64 by default, or a path on hosts with filesystem access.
+Show hidden objects, groups, and component instances again.
 
 **Params schema:**
 
@@ -8529,6 +18933,109 @@ Render the attached document to PNG, headless-rendered via a software rasterizer
 {
   "additionalProperties": false,
   "properties": {
+    "ids": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "ids"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "hidden": {
+      "description": "every hidden object, group, and instance",
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "hidden"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `unknown_entity`
+- `not_a_node`
+
+### `hew.view.show_all`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** read-only
+- **Served:** kernel
+- **Permission:** view
+
+Show every hidden object, group, and component instance. Hidden tags stay hidden.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {},
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "hidden": {
+      "items": {
+        "type": "string"
+      },
+      "maxItems": 0,
+      "type": "array"
+    }
+  },
+  "required": [
+    "hidden"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:** none.
+
+### `hew.view.snapshot`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** solitary
+- **Served:** host
+- **Permission:** model.read
+
+Render the attached document to PNG, rendered by the host's software rasterizer, identically in the app and in hew-cli, optionally of a selection on a transparent background — bytes base64 by default, or a path on hosts with filesystem access.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "background": {
+      "description": "\"transparent\", #rrggbb, or #rrggbbaa; the fill of pixels no surface touches (defaults to the rasterizer's light gray). The id, depth, and normals passes are unaffected.",
+      "type": "string"
+    },
     "camera": {
       "additionalProperties": false,
       "description": "mutually exclusive with view",
@@ -8605,6 +19112,15 @@ Render the attached document to PNG, headless-rendered via a software rasterizer
       "description": "defaults to false; when true, also returns a camera-space normals pass as an RGB PNG: (n * 0.5 + 0.5) * 255 per axis, x right, y up, z toward the viewer, background (128, 128, 255)",
       "type": "boolean"
     },
+    "orient": {
+      "default": "world",
+      "description": "part renders the one selection root in its part frame: the named view (iso when none) means the frame's axes, front looking along the frame's +y, top along -z, right along -x. Needs a selection of exactly one entity and no camera",
+      "enum": [
+        "world",
+        "part"
+      ],
+      "type": "string"
+    },
     "path": {
       "description": "when given, the PNG is written here instead of returned inline, honored by hosts with filesystem access and refused typed elsewhere (mirrors hew.doc.export)",
       "type": "string"
@@ -8612,6 +19128,43 @@ Render the attached document to PNG, headless-rendered via a software rasterizer
     "scene": {
       "description": "a Scene's id: renders through its resolved camera and hidden sets (Document::resolve_scene) instead of the document's own — falls back to the usual cameraless resolution when the Scene captures no camera. Mutually exclusive with camera and view. The Scene's section plane, if any, is NOT rendered headlessly at 1.0.",
       "type": "string"
+    },
+    "scope": {
+      "default": "all",
+      "description": "all (the default) takes every leaf under the target; own takes a container's direct objects and its groups' objects, never a nested instance's members. On an object both are the same",
+      "enum": [
+        "own",
+        "all"
+      ],
+      "type": "string"
+    },
+    "selection": {
+      "description": "render only these: node ids, occurrence locators {path}, or a definition's cmp_ id (its members at the identity pose, one picture however many times it is placed). With no camera or view the camera is a fitted isometric over the selection, never the document's saved camera; view fits that standard view to the selection. Mutually exclusive with scene.",
+      "items": {
+        "oneOf": [
+          {
+            "type": "string"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "path": {
+                "items": {
+                  "type": "string"
+                },
+                "minItems": 1,
+                "type": "array"
+              }
+            },
+            "required": [
+              "path"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "minItems": 1,
+      "type": "array"
     },
     "view": {
       "description": "a named standard view fitted to the scene bounding box; mutually exclusive with camera and scene",
@@ -8714,7 +19267,11 @@ Render the attached document to PNG, headless-rendered via a software rasterizer
 - `host_capability_missing`
 - `nothing_to_render`
 - `save_failed`
+- `unknown_entity`
+- `unknown_occurrence`
 - `unknown_scene` — That Scene no longer exists — it may have been deleted.
+- `too_many_occurrences` — This model has more placed parts than Hew can list at once.
+- `no_part_frame` — That part has no faces to measure.
 
 ### `hew.view.units`
 
@@ -8722,6 +19279,7 @@ Render the attached document to PNG, headless-rendered via a software rasterizer
 - **Tier:** Standard
 - **Class:** solitary
 - **Served:** host
+- **Permission:** view
 
 Set the app's displayed length-unit format (app/src/settings/units.ts's LengthFormat) — an app-level display PREFERENCE, never document state or file-format data.
 
@@ -8771,6 +19329,7 @@ Set the app's displayed length-unit format (app/src/settings/units.ts's LengthFo
 - **Tier:** Standard
 - **Class:** solitary
 - **Served:** host
+- **Permission:** view
 
 Frame all visible geometry in the live viewport (View > Zoom Extents). A view effect, not a document edit (mutates_document = false).
 
@@ -8796,5 +19355,78 @@ Frame all visible geometry in the live viewport (View > Zoom Extents). A view ef
 
 **Refusals:**
 
+- `host_capability_missing`
+
+### `hew.view.zoom_to`
+
+- **Version:** 1
+- **Tier:** Standard
+- **Class:** read-only
+- **Served:** host
+- **Permission:** view
+
+Frame the named entities in the live viewport. padding widens the box on every side by that fraction of its largest extent (default 0.1). Answers the box before padding.
+
+**Params schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "ids": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "padding": {
+      "description": "defaults to 0.1",
+      "maximum": 2,
+      "minimum": 0,
+      "type": "number"
+    }
+  },
+  "required": [
+    "ids"
+  ],
+  "type": "object"
+}
+```
+
+**Result schema:**
+
+```json
+{
+  "additionalProperties": false,
+  "properties": {
+    "max": {
+      "items": {
+        "type": "number"
+      },
+      "maxItems": 3,
+      "minItems": 3,
+      "type": "array"
+    },
+    "min": {
+      "items": {
+        "type": "number"
+      },
+      "maxItems": 3,
+      "minItems": 3,
+      "type": "array"
+    }
+  },
+  "required": [
+    "min",
+    "max"
+  ],
+  "type": "object"
+}
+```
+
+**Refusals:**
+
+- `unknown_entity`
+- `nothing_to_frame`
 - `host_capability_missing`
 

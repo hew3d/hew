@@ -57,6 +57,7 @@ use crate::math::{Point3, Vec3};
 use crate::sketch::{CurveGeom, Profile};
 use crate::tol;
 use crate::topo::{Object, SurfaceRef};
+use crate::trig;
 
 /// One offset boundary loop: `points[k] → points[k+1]` (cyclic) is edge `k`,
 /// carrying the offset circle it is a facet of when the source edge belonged
@@ -228,11 +229,14 @@ pub fn offset_face_boundary(
             // A cap rim edge: the neighboring wall carries the cylinder.
             let twin = he.twin?;
             let neighbor = object.loops()[object.half_edges()[twin].loop_id].face;
-            let SurfaceRef::Cylinder {
+            let Some(SurfaceRef::Cylinder {
                 axis_point,
                 axis,
                 radius,
-            } = object.faces()[neighbor].surface?;
+            }) = object.faces()[neighbor].surface
+            else {
+                return None;
+            };
             // The cap circle only exists where the axis meets this plane
             // perpendicularly.
             let along = axis.dot(normal);
@@ -392,7 +396,7 @@ pub(crate) fn offset_loop(
         let (u_ax, v_ax) = plane_axes(normal);
         let angle_of = |p: Point3, c: Point3| -> f64 {
             let r = p - c;
-            r.dot(v_ax).atan2(r.dot(u_ax))
+            trig::atan2(r.dot(v_ax), r.dot(u_ax))
         };
         // Angular progress from `from` in sweep direction `s`, in [0, τ).
         let progress = |theta: f64, from: f64, s: f64| -> f64 {
@@ -649,8 +653,8 @@ mod tests {
         let p = |deg: f64| {
             let a = deg.to_radians();
             Point3::new(
-                center.x + radius * a.cos(),
-                center.y + radius * a.sin(),
+                center.x + radius * trig::cos(a),
+                center.y + radius * trig::sin(a),
                 0.0,
             )
         };
