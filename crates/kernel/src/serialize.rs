@@ -2735,13 +2735,17 @@ impl Object {
                 let dicts: FaceDicts = match any {
                     0 => (Vec::new(), Vec::new()),
                     1 => {
-                        let mut oa = Vec::with_capacity(outer.len());
+                        // An absent entry is its one flag byte, so each edge
+                        // needs at least one byte of what remains.
+                        r.require_items(outer.len(), 1)?;
+                        let mut oa = r.allocate_vec(outer.len())?;
                         for _ in 0..outer.len() {
                             oa.push(read_attr_dict(&mut r)?);
                         }
-                        let mut ha = Vec::with_capacity(holes.len());
+                        let mut ha = r.allocate_vec(holes.len())?;
                         for hole in &holes {
-                            let mut this = Vec::with_capacity(hole.len());
+                            r.require_items(hole.len(), 1)?;
+                            let mut this = r.allocate_vec(hole.len())?;
                             for _ in 0..hole.len() {
                                 this.push(read_attr_dict(&mut r)?);
                             }
@@ -2779,13 +2783,15 @@ impl Object {
                             }),
                         }
                     };
-                    let mut os = Vec::with_capacity(outer.len());
+                    r.require_items(outer.len(), 1)?;
+                    let mut os = r.allocate_vec(outer.len())?;
                     for _ in 0..outer.len() {
                         os.push(read_flag(&mut r)?);
                     }
-                    let mut hs = Vec::with_capacity(holes.len());
+                    let mut hs = r.allocate_vec(holes.len())?;
                     for hole in &holes {
-                        let mut this = Vec::with_capacity(hole.len());
+                        r.require_items(hole.len(), 1)?;
+                        let mut this = r.allocate_vec(hole.len())?;
                         for _ in 0..hole.len() {
                             this.push(read_flag(&mut r)?);
                         }

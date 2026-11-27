@@ -832,10 +832,15 @@ contents do not describe valid geometry.
   must check that its count fits the remaining encoded bytes: at least 24 bytes
   per vertex, 4 per loop index, 16 per hole (its count and at least three
   indices), and 24 per face (the v1 minimum, with later versions adding
-  fields). Compare against `remaining_bytes / minimum_item_bytes` rather than
-  multiplying an untrusted count. Insufficient bytes are truncation, detected
-  before allocating for the announced count. Decoder collection reservations
-  must be fallible and report allocation failure as a typed decode error.
+  fields). Inside a face, a per-edge block whose flag is 1 (soft flags,
+  edge curves, polygon claims, edge dictionaries, crease flags) needs at
+  least 1 byte per loop edge: a soft or crease entry is one flag byte, and
+  every other entry starts with one. Compare against
+  `remaining_bytes / minimum_item_bytes` rather than multiplying an
+  untrusted count. Insufficient bytes are truncation, detected
+  before allocating for the announced count. A reservation sized by a count
+  announced in the geometry buffer must also be fallible, reporting
+  allocation failure as a typed decode error.
   These checks do not change the encoding or its version.
 - **Structural corruption** — an out-of-range vertex index, a loop under 3
   vertices (`outer_count`/`hole_vertex_count < 3`), any flag byte outside
