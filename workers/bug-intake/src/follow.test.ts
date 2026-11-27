@@ -246,6 +246,22 @@ describe('GET /report/<id>/thread', () => {
   })
 })
 
+describe('thread-route limit over IPv6', () => {
+  test('addresses from one /64 share the per-client limit', async () => {
+    const t = await buildTestEnv()
+    const { id, follow } = await send(t)
+    const windowMs = 10 * 60 * 1000
+    const bucketBefore = Math.floor(Date.now() / windowMs)
+    for (let i = 0; i < THREAD_RATE_WINDOW_MAX; i++) {
+      assert.equal((await thread(t, id, follow!, { ip: `2001:db8:5:6::${(i + 1).toString(16)}` })).status, 200)
+    }
+    const limited = await thread(t, id, follow!, { ip: '2001:db8:5:6:ffff:ffff:ffff:ffff' })
+    // Only a window that rolled over mid-test may let the sibling through.
+    if (Math.floor(Date.now() / windowMs) === bucketBefore) assert.equal(limited.status, 429)
+    assert.equal((await thread(t, id, follow!, { ip: '2001:db8:5:7::1' })).status, 200, 'another /64 is unaffected')
+  })
+})
+
 describe('POST /report/<id>/thread', () => {
   test('201 {"seq"}; emails the maintainer; updates the row caches', async () => {
     const t = await buildTestEnv({ overrides: { NOTIFY_TO: 'me@example.com', NOTIFY_FROM: 'bot@example.com' } })

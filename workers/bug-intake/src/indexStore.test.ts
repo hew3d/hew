@@ -11,6 +11,8 @@ import {
   MAX_UPLOAD_BYTES,
   EMAIL_THREAD_RESERVE,
   STORE_CEILING_BYTES,
+  ABANDON_TIMEOUT_MS,
+  CLIENT_PENDING_BYTES,
   IDLE_PRUNE_TIMEOUT_MS, UPLOAD_LIFETIME_MS } from './constants.ts'
 import { FakeDurableObjectStorage } from './testSupport/fakeDurableObject.ts'
 
@@ -201,6 +203,81 @@ describe('IndexStore: concurrent upload budget per client', () => {
     const blocked = await store.reserveReport('new-client', now, reservation({ id: 'extra', sizeBytes: 1 }))
     assert.ok(!blocked.ok && blocked.reason === 'rate-limited')
     assert.equal(await store.totalStoredBytes(), MAX_UPLOAD_BYTES + 100)
+  })
+})
+
+describe('IndexStore: when a blocked client may retry', () => {
+  // The retry time assumes that releasing every unfinished upload always makes
+  // room, which holds only while one report cannot exceed the client budget.
+  test('the client budget holds at least one maximum-size report', () => {
+    assert.ok(CLIENT_PENDING_BYTES >= MAX_UPLOAD_BYTES)
+  })
+
+  const minute = 60 * 1000
+
+  async function blockedFor(store: IndexStore, at: number, sizeBytes: number = MAX_UPLOAD_BYTES): Promise<number> {
+    const result = await store.reserveReport('client', at, reservation({ id: 'retry', receivedAt: at, sizeBytes }))
+    assert.ok(!result.ok && result.reason === 'rate-limited')
+    assert.equal(result.cause, 'unfinished-upload')
+    return result.retryAfterMs
+  }
+
+  test('the wait runs to the abandonment of the unfinished upload, counted from its last piece', async () => {
+    const store = makeStore()
+    await store.reserveReport('client', now, reservation({ id: 'stalled', sizeBytes: MAX_UPLOAD_BYTES }))
+    assert.equal(await blockedFor(store, now + minute), ABANDON_TIMEOUT_MS - minute)
+    await store.touchActivity('stalled', now + 4 * minute)
+    assert.equal(await blockedFor(store, now + 5 * minute), ABANDON_TIMEOUT_MS - minute)
+  })
+
+  test('the wait covers only as many unfinished uploads as must go, in expiry order', async () => {
+    const store = makeStore()
+    const third = Math.floor(MAX_UPLOAD_BYTES / 3)
+    // Inserted newest-expiry first, so row order is not expiry order.
+    for (const [id, activity] of [['c', 2], ['a', 0], ['b', 1]] as const) {
+      await store.reserveReport('client', now, reservation({ id, sizeBytes: third }))
+      await store.touchActivity(id, now + activity * minute)
+    }
+    const at = now + 3 * minute
+    const spare = MAX_UPLOAD_BYTES - 3 * third
+    assert.equal(await blockedFor(store, at, spare + 1), ABANDON_TIMEOUT_MS - 3 * minute, 'one upload is enough')
+    assert.equal(await blockedFor(store, at, spare + third + 1), ABANDON_TIMEOUT_MS - 2 * minute, 'two are needed')
+    assert.equal(await blockedFor(store, at), ABANDON_TIMEOUT_MS - minute, 'all three are needed')
+  })
+
+  test('the wait never runs past the upload lifetime, however recent its activity', async () => {
+    const store = makeStore()
+    await store.reserveReport('client', now, reservation({ id: 'slow', sizeBytes: MAX_UPLOAD_BYTES }))
+    const at = now + UPLOAD_LIFETIME_MS - 2 * minute
+    await store.touchActivity('slow', at)
+    assert.equal(await blockedFor(store, at), 2 * minute)
+  })
+
+  test('a row that outlived its abandonment time waits for the idle prune', async () => {
+    const store = makeStore()
+    await store.reserveReport('client', now, reservation({ id: 'missed', sizeBytes: MAX_UPLOAD_BYTES }))
+    const at = now + ABANDON_TIMEOUT_MS + minute
+    const wait = await blockedFor(store, at)
+    assert.equal(wait, IDLE_PRUNE_TIMEOUT_MS - ABANDON_TIMEOUT_MS - minute + 1)
+    assert.deepEqual(await store.findAndDeleteIdleUncommittedIds(at + wait - 1, IDLE_PRUNE_TIMEOUT_MS), [])
+    assert.deepEqual(await store.findAndDeleteIdleUncommittedIds(at + wait, IDLE_PRUNE_TIMEOUT_MS), ['missed'])
+  })
+
+  test('UTC midnight ends the wait early, because the client identity rotates', async () => {
+    const store = makeStore()
+    const late = Date.parse('2026-09-13T23:58:00.000Z')
+    await store.reserveReport('client', late, reservation({ id: 'late', receivedAt: late, sizeBytes: MAX_UPLOAD_BYTES }))
+    assert.equal(await blockedFor(store, late), 2 * minute)
+  })
+
+  test('the submission limit does not name an unfinished upload as its cause', async () => {
+    const store = makeStore()
+    for (let i = 0; i < RATE_LIMIT_WINDOW_MAX; i++) {
+      await store.reserveReport('client', now, reservation({ id: `w-${i}` }))
+    }
+    const blocked = await store.reserveReport('client', now, reservation({ id: 'over' }))
+    assert.ok(!blocked.ok && blocked.reason === 'rate-limited')
+    assert.equal(blocked.cause, undefined)
   })
 })
 

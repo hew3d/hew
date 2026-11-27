@@ -565,6 +565,10 @@ msgstr ""
 msgid "{mendable, plural, one {# shape needs} other {# shapes need}}"
 msgstr ""
 
+#: src/panels/unfinishedUploadText.ts
+msgid "{minutes, plural, one {An earlier upload from your network hasn’t finished. Try again in about # minute.} other {An earlier upload from your network hasn’t finished. Try again in about # minutes.}}"
+msgstr ""
+
 #: src/library/sourceModel.ts
 msgid "{minutes, plural, one {Checked # minute ago} other {Checked # minutes ago}}"
 msgstr ""
@@ -1693,6 +1697,10 @@ msgstr ""
 
 #: src/tools/ArcTool.ts
 msgid "An arc stays on its drawing plane. Move the cursor along the plane, or press an arrow key to change it, then type the length."
+msgstr ""
+
+#: src/panels/unfinishedUploadText.ts
+msgid "An earlier upload from your network hasn’t finished. Try again in a few minutes."
 msgstr ""
 
 #: src/library/sourceMessages.ts

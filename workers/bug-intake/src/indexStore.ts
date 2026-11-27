@@ -47,6 +47,7 @@ import {
   STORE_CEILING_BYTES,
   UPLOAD_LIFETIME_MS,
   CLIENT_PENDING_BYTES,
+  ABANDON_TIMEOUT_MS,
   IDLE_PRUNE_TIMEOUT_MS,
   THREAD_RATE_WINDOW_MAX,
 } from './constants.ts'
@@ -113,11 +114,48 @@ export interface ThreadCachePatch {
 
 export type ReserveResult =
   | { ok: true }
-  | { ok: false; reason: 'rate-limited'; retryAfterMs: number }
+  | { ok: false; reason: 'rate-limited'; retryAfterMs: number; cause?: 'unfinished-upload' }
   | { ok: false; reason: 'full' }
 
 /** See `commitReport`'s doc comment. */
 export type CommitReportOutcome = 'flipped' | 'already-committed' | 'not-found'
+
+/** The columns of an unfinished upload that decide when it lets go of its
+ *  client's budget. */
+interface PendingRow {
+  sizeBytes: number
+  receivedAt: number
+  lastActivity: number
+}
+
+/** When an unfinished upload releases its reservation if nothing more is
+ *  heard from it. Its `ReportDrop`'s abandonment alarm normally does that
+ *  (`ABANDON_TIMEOUT_MS` after the last piece, never past the upload's
+ *  absolute lifetime). A row that has outlived that time is left to the idle
+ *  prune, which runs before a START once `IDLE_PRUNE_TIMEOUT_MS` or the
+ *  lifetime has passed. */
+function releaseAt(row: PendingRow, now: number): number {
+  const lifetimeEnd = row.receivedAt + UPLOAD_LIFETIME_MS
+  const alarm = Math.min(row.lastActivity + ABANDON_TIMEOUT_MS, lifetimeEnd)
+  if (alarm > now) return alarm
+  // The prune's comparisons are strict, hence the extra millisecond.
+  return Math.min(row.lastActivity + IDLE_PRUNE_TIMEOUT_MS, lifetimeEnd) + 1
+}
+
+/** When enough of `pending` has been released to give back `excess` bytes:
+ *  the release time of the last upload that has to go, taking them in the
+ *  order they expire. A commit or delete can free the budget sooner. */
+function budgetReleaseAt(pending: readonly PendingRow[], excess: number, now: number): number {
+  const releases = pending.map((row) => ({ at: releaseAt(row, now), bytes: row.sizeBytes })).sort((a, b) => a.at - b.at)
+  let freed = 0
+  for (const release of releases) {
+    freed += release.bytes
+    if (freed >= excess) return release.at
+  }
+  // Unreachable: a single report never exceeds the budget on its own, so
+  // releasing every pending upload always covers the excess.
+  return now + IDLE_PRUNE_TIMEOUT_MS
+}
 
 function utcDay(now: number): string {
   return new Date(now).toISOString().slice(0, 10)
@@ -321,13 +359,20 @@ export class IndexStore {
     }
 
     const pending = this.storage.sql
-      .exec<{ total: number | null }>('SELECT SUM(sizeBytes) AS total FROM reports WHERE clientHash = ? AND committed = 0', clientHash)
-      .toArray()[0]?.total ?? 0
-    if (pending + entry.sizeBytes > CLIENT_PENDING_BYTES) {
-      // The existing rate-limited response keeps this admission limit in
-      // the same wire contract. Abandonment/pruning releases stalled
-      // reservations; a successful commit or delete releases it sooner.
-      return { ok: false, reason: 'rate-limited', retryAfterMs: IDLE_PRUNE_TIMEOUT_MS }
+      .exec<PendingRow>('SELECT sizeBytes, receivedAt, lastActivity FROM reports WHERE clientHash = ? AND committed = 0', clientHash)
+      .toArray()
+    const excess = pending.reduce((sum, row) => sum + row.sizeBytes, entry.sizeBytes) - CLIENT_PENDING_BYTES
+    if (excess > 0) {
+      // The existing rate-limited reason keeps this admission limit in the
+      // same wire contract; `cause` lets the client say what is in the way.
+      const dayEnd = Date.parse(`${day}T00:00:00.000Z`) + 24 * 60 * 60 * 1000
+      return {
+        ok: false,
+        reason: 'rate-limited',
+        cause: 'unfinished-upload',
+        // The client's hash changes at UTC midnight, and the budget with it.
+        retryAfterMs: Math.min(budgetReleaseAt(pending, excess, now), dayEnd) - now,
+      }
     }
 
     this.storage.sql.exec(

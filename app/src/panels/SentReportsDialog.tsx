@@ -13,6 +13,7 @@ import type { ReactNode } from 'react'
 import { useLingui } from '@lingui/react/macro'
 import { getFollowHost, compareVersions, unreadCount, type FollowHost, type FollowedReport, type ThreadMessage } from '../io/followHost'
 import { ReportError } from '../io/reportClient'
+import { unfinishedUploadText } from './unfinishedUploadText'
 import { buildFollowUpUpload, detectPlatform, type FollowUpFile } from '../log/reportBundle'
 import { getFailedOpen } from '../log/failedOpen'
 import { isTauri } from '../io/fileHost'
@@ -325,6 +326,8 @@ export function SentReportsDialog({ onClose, initialId = null, onCheckForUpdates
               ? t`Too many requests right now. Try again in ${secs} seconds.`
               : t`Too many requests right now. Try again in a few minutes.`
           }
+          case 'unfinishedUpload':
+            return unfinishedUploadText(err.retryAfter)
           case 'full':
             return t`The report service is temporarily full. Try again later.`
           case 'tooLarge':

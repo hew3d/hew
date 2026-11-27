@@ -187,6 +187,11 @@ export function handleIdentity(): Response {
 // START — POST /report/
 // ---------------------------------------------------------------------------
 
+function unfinishedUploadMessage(retryAfterSeconds: number): string {
+  const minutes = Math.ceil(retryAfterSeconds / 60)
+  return `An earlier upload from your network has not finished. Try again in about ${minutes} ${minutes === 1 ? 'minute' : 'minutes'}.`
+}
+
 /** `POST /report/` (also `/report`) — begins an upload with its first
  *  piece. Order, cheapest first: declared `Content-Length` for THIS piece
  *  (`411`/`413`); `Content-Type` (`400`); `Hew-Upload-Length` for the WHOLE
@@ -311,7 +316,14 @@ export async function handleStart(request: Request, env: BugIntakeEnv): Promise<
 
   if (!reservation.ok) {
     if (reservation.reason === 'rate-limited') {
-      return jsonResponse(429, { error: 'rate-limited' }, { 'retry-after': String(Math.ceil(reservation.retryAfterMs / 1000)) })
+      const retryAfter = Math.max(1, Math.ceil(reservation.retryAfterMs / 1000))
+      // `error` stays `rate-limited` either way: a client that knows only
+      // that code still reads this as a 429 it understands.
+      const body =
+        reservation.cause === 'unfinished-upload'
+          ? { error: 'rate-limited', reason: reservation.cause, message: unfinishedUploadMessage(retryAfter) }
+          : { error: 'rate-limited' }
+      return jsonResponse(429, body, { 'retry-after': String(retryAfter) })
     }
     return jsonResponse(507, { error: 'full' })
   }

@@ -596,11 +596,7 @@ fn thread_error(status: reqwest::StatusCode, retry_after: Option<u64>, body: &st
 
 async fn thread_failure(response: reqwest::Response) -> ReportError {
     let status = response.status();
-    let retry_after = response
-        .headers()
-        .get(reqwest::header::RETRY_AFTER)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.trim().parse::<u64>().ok());
+    let retry_after = report_client::retry_after_seconds(response.headers());
     let body = response.text().await.unwrap_or_default();
     thread_error(status, retry_after, &body)
 }
@@ -1512,6 +1508,18 @@ mod tests {
             None,
             r#"{"error":"other"}"#
         )));
+    }
+
+    #[test]
+    fn a_rate_limited_thread_response_keeps_its_wait() {
+        let response = tauri::http::Response::builder()
+            .status(429)
+            .header("retry-after", "30")
+            .body(r#"{"error":"rate-limited"}"#)
+            .unwrap();
+        let e = tauri::async_runtime::block_on(thread_failure(reqwest::Response::from(response)));
+        assert!(matches!(e.kind, ReportErrorKind::RateLimited));
+        assert_eq!(e.retry_after, Some(30));
     }
 
     #[test]

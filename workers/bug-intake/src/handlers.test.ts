@@ -42,6 +42,7 @@ import {
   IDLE_PRUNE_TIMEOUT_MS,
   INDEX_DO_NAME,
   UPLOAD_LIFETIME_MS,
+  ABANDON_TIMEOUT_MS,
 } from './constants.ts'
 import { FakeDurableObjectNamespace, type FakeDurableObjectStorage } from './testSupport/fakeDurableObject.ts'
 import type { BugIntakeEnv, ReportDropStub, ReportIndexStub, ReportThreadStub } from './types.ts'
@@ -561,6 +562,32 @@ describe('START: rate limiting and storage ceiling', () => {
     assert.equal(res.status, 201)
   })
 
+  test('addresses from one IPv6 /64 share the submission limit and the upload budget', async () => {
+    const env = makeEnv()
+    for (let i = 0; i < RATE_LIMIT_WINDOW_MAX; i++) {
+      const { res } = await startBundle(env, validBundle(), { 'cf-connecting-ip': `2001:db8:5:6::${i + 1}` })
+      assert.equal(res.status, 201)
+    }
+    const sibling = await startBundle(env, validBundle(), { 'cf-connecting-ip': '2001:DB8:5:6:ffff:ffff:ffff:ffff' })
+    assert.equal(sibling.res.status, 429)
+    const neighbour = await startBundle(env, validBundle(), { 'cf-connecting-ip': '2001:db8:5:7::1' })
+    assert.equal(neighbour.res.status, 201)
+
+    const index = env.REPORT_INDEX.get(env.REPORT_INDEX.idFromName(INDEX_DO_NAME))
+    const clientHash = await hashClient(env.IP_HASH_SECRET!, '2001:db8:9:9::1', Date.now())
+    await index.reserveReport(clientHash, Date.now(), {
+      id: 'HEW-BUDG-0006',
+      receivedAt: Date.now(),
+      appVersion: '1.0.0',
+      platform: 'web',
+      descriptionPreview: 'upload in progress',
+      sizeBytes: MAX_UPLOAD_BYTES,
+    })
+    const blocked = await startBundle(env, validBundle(), { 'cf-connecting-ip': '2001:db8:9:9:1234::5678' })
+    assert.equal(blocked.res.status, 429)
+    assert.equal(((await blocked.res.json()) as { reason?: string }).reason, 'unfinished-upload')
+  })
+
   test('the client IP is never stored anywhere reachable from the index', async () => {
     const env = makeEnv()
     const ip = '198.51.100.42'
@@ -607,8 +634,18 @@ describe('START: rate limiting and storage ceiling', () => {
     }), { ok: true })
     const blocked = await startBundle(env, validBundle(), { 'cf-connecting-ip': ip })
     assert.equal(blocked.res.status, 429)
-    assert.deepEqual(await blocked.res.json(), { error: 'rate-limited' })
-    assert.ok(Number(blocked.res.headers.get('retry-after')) > 0)
+    const retryAfter = Number(blocked.res.headers.get('retry-after'))
+    // The abandonment time (less whatever this test has taken so far), or
+    // UTC midnight if that comes first.
+    const toMidnight = Math.ceil((86_400_000 - (Date.now() % 86_400_000)) / 1000)
+    const expected = Math.min(ABANDON_TIMEOUT_MS / 1000, toMidnight)
+    assert.ok(retryAfter > expected - 60 && retryAfter <= expected + 1, `retry-after ${retryAfter}`)
+    const minutes = Math.ceil(retryAfter / 60)
+    assert.deepEqual(await blocked.res.json(), {
+      error: 'rate-limited',
+      reason: 'unfinished-upload',
+      message: `An earlier upload from your network has not finished. Try again in about ${minutes} ${minutes === 1 ? 'minute' : 'minutes'}.`,
+    })
 
     const other = await startBundle(env, validBundle(), { 'cf-connecting-ip': '203.0.113.78' })
     assert.equal(other.res.status, 201)
