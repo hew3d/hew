@@ -803,7 +803,14 @@ mod tests {
             l.local_addr().unwrap().port()
         };
         let url = format!("http://127.0.0.1:{port}/a");
-        assert_eq!(run(&url, 100, &loopback()), Err(RemoteFetchError::Network));
+        // Windows retries a refused connect for about two seconds before it
+        // reports it, which is all the connect timeout of `loopback()`, so
+        // this one takes the app's connect timeout.
+        let opts = FetchOpts {
+            connect_timeout: FetchOpts::default().connect_timeout,
+            ..loopback()
+        };
+        assert_eq!(run(&url, 100, &opts), Err(RemoteFetchError::Network));
     }
 
     // ---- no URL in any log (decision 28) ----------------------------------

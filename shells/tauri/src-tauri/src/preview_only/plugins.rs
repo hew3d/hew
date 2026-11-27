@@ -3958,12 +3958,23 @@ mod tests {
             &manifest("com.example.a", "1.0.0", &[], &[]),
         );
         let picked = record_pick(&state, &pkg, PickKind::Package).unwrap();
-        let link = temp.0.join("link.hewplugin");
-        std::os::unix::fs::symlink(&pkg, &link).unwrap();
-        for path in [
-            link.to_string_lossy().into_owned(),
-            "/nonexistent/a.hewplugin".into(),
-        ] {
+        // Another string that opens the picked file: a symlink, or on
+        // Windows, where making one takes a privilege, the same path in
+        // capitals.
+        #[cfg(unix)]
+        let alias = {
+            let link = temp.0.join("link.hewplugin");
+            std::os::unix::fs::symlink(&pkg, &link).unwrap();
+            link.to_string_lossy().into_owned()
+        };
+        #[cfg(windows)]
+        let alias = picked.to_uppercase();
+        assert_ne!(alias, picked);
+        assert!(
+            std::path::Path::new(&alias).is_file(),
+            "{alias} opens the pick"
+        );
+        for path in [alias, "/nonexistent/a.hewplugin".into()] {
             assert_eq!(
                 refusal_name(&stage_file("main", &state, &path, NOW).unwrap_err()),
                 "path_not_picked",

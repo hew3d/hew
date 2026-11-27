@@ -618,12 +618,15 @@ fn a_folder_package_follows_the_package_rules() {
     std::fs::write(src.join("hew-plugin.json"), manifest_json(ID, &[])).unwrap();
     std::fs::write(src.join("dist/background.js"), b"x").unwrap();
     store::read_package_dir(&src).expect("a plain folder reads");
-    std::fs::write(src.join("trailing."), b"x").unwrap();
+    // Through the canonical path: on Windows that is the `\\?\` form, which
+    // keeps a trailing dot instead of silently dropping it.
+    let trailing = std::fs::canonicalize(&src).unwrap().join("trailing.");
+    std::fs::write(&trailing, b"x").unwrap();
     assert_eq!(
         store::read_package_dir(&src).unwrap_err().name(),
         "package_path_invalid"
     );
-    std::fs::remove_file(src.join("trailing.")).unwrap();
+    std::fs::remove_file(&trailing).unwrap();
     std::fs::write(
         src.join("big.bin"),
         vec![0u8; plugin_host::MAX_ENTRY_BYTES + 1],

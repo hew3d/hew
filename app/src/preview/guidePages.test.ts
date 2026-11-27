@@ -26,7 +26,7 @@
  */
 
 import { readFileSync, readdirSync, statSync } from 'node:fs'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, join, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 
@@ -92,7 +92,8 @@ function chapters(): Chapter[] {
     const front = /^---\n([\s\S]*?)\n---\n/.exec(text)?.[1] ?? ''
     const list = /^preview:\s*\[(.*)\]\s*$/m.exec(front)?.[1] ?? ''
     return {
-      slug: file.slice(LEARN.length + 1).replace(/\.md$/, ''),
+      // `/` on every platform: slugs are compared with links and folder names.
+      slug: file.slice(LEARN.length + 1).split(sep).join('/').replace(/\.md$/, ''),
       text: text.slice(text.indexOf('\n---\n', 4) + 5),
       preview: list.split(',').map((s) => s.trim()).filter(Boolean),
     }

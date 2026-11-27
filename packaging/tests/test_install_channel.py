@@ -34,7 +34,8 @@ class InstallChannelMarkerTests(unittest.TestCase):
         self.assertEqual(len(commands), 1, commands)
         prefix = self.tmp / 'app'
         prefix.mkdir()
-        subprocess.run(['sh', '-ec', commands[0].replace('/app', str(prefix))], check=True)
+        # With `/` separators: `sh` would eat the backslashes of a Windows path.
+        subprocess.run(['sh', '-ec', commands[0].replace('/app', prefix.as_posix())], check=True)
         self.assertEqual(first_line(prefix / MARKER), 'flatpak')
 
     def test_pacman_package_function_writes_the_pacman_marker(self):

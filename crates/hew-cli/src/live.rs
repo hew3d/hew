@@ -1790,7 +1790,8 @@ mod tests {
         absolutize_open_path(&mut bare);
         let path = bare.params.unwrap()["path"].as_str().unwrap().to_string();
         assert!(Path::new(&path).is_absolute(), "{path}");
-        assert!(path.ends_with("models/house.hew"));
+        // By component: Windows writes the separators its own way.
+        assert!(Path::new(&path).ends_with("models/house.hew"), "{path}");
 
         let mut wrapped = request(
             "hew.doc.transact",
@@ -1889,9 +1890,16 @@ mod tests {
 
     #[test]
     fn absolute_paths_and_other_commands_are_left_alone() {
-        let mut abs = request("hew.doc.open", json!({ "path": "/m/a.hew" }));
+        // On Windows a path with no drive letter is relative to the current
+        // drive, so an absolute one needs the letter.
+        let given = if cfg!(windows) {
+            r"C:\m\a.hew"
+        } else {
+            "/m/a.hew"
+        };
+        let mut abs = request("hew.doc.open", json!({ "path": given }));
         absolutize_open_path(&mut abs);
-        assert_eq!(abs.params.unwrap()["path"], "/m/a.hew");
+        assert_eq!(abs.params.unwrap()["path"], given);
         let mut other = request(
             "hew.doc.export",
             json!({ "path": "rel.stl", "format": "stl" }),
@@ -1944,10 +1952,17 @@ mod tests {
     /// too long on macOS once a test-specific subdirectory and filename are
     /// appended — `AF_UNIX` paths are capped at `SUN_LEN` (~104 bytes on
     /// macOS/BSD), so socket fixtures bind directly under `/tmp` instead.
+    /// Windows has no `/tmp`, and discovery there trusts a plain file only
+    /// under `%LOCALAPPDATA%`, where the temp dir is by default.
     fn short_socket_path(tag: &str) -> PathBuf {
         static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        PathBuf::from("/tmp").join(format!("hew-{tag}-{}-{n}.sock", std::process::id()))
+        let base = if cfg!(windows) {
+            std::env::temp_dir()
+        } else {
+            PathBuf::from("/tmp")
+        };
+        base.join(format!("hew-{tag}-{}-{n}.sock", std::process::id()))
     }
 
     fn write_instance_file(dir: &Path, pid: u32, socket: &str, token: &str, version: &str) {
@@ -2034,10 +2049,11 @@ mod tests {
     #[test]
     fn discover_in_finds_a_live_instance_and_ignores_non_matching_files() {
         let dir = scratch_dir("basic");
+        let sock = short_socket_path("basic");
         write_instance_file(
             &dir,
             std::process::id(),
-            "/tmp/whatever.sock",
+            sock.to_str().unwrap(),
             "tok-a",
             "1.2.3",
         );
@@ -2051,6 +2067,7 @@ mod tests {
         assert_eq!(found[0].token, "tok-a");
         assert_eq!(found[0].version, "1.2.3");
 
+        let _ = std::fs::remove_file(&sock);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

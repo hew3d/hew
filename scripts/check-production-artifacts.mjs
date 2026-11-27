@@ -291,7 +291,7 @@ const loaders = registry.filter((f) => f.loader)
   const collect = (path) => {
     if (statSync(path).isDirectory()) {
       for (const name of readdirSync(path)) if (!skipDirs.has(name)) collect(join(path, name))
-    } else if (!/\.test\.[cm]?[jt]sx?$/.test(path) && !/(^|\/)(preview\.rs|preview-features\.json)$/.test(path) && !/\.(png|svg|ico|wasm|woff2?|ttf)$/.test(path)) {
+    } else if (!/\.test\.[cm]?[jt]sx?$/.test(path) && !/(^|\/)(preview\.rs|preview-features\.json)$/.test(path.split(sep).join('/')) && !/\.(png|svg|ico|wasm|woff2?|ttf)$/.test(path)) {
       sources.push(path)
     }
   }

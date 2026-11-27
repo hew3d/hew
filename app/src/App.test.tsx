@@ -4881,6 +4881,13 @@ describe('App — native Smooth check marks after a refused level', () => {
     delete (window as unknown as Record<string, unknown>).__TAURI_INTERNALS__
   })
 
+  // Each menu push loads `invoke` with its own dynamic import, and under
+  // Vitest imports in flight together can resolve out of order: a push made
+  // at mount could land after the one for a later selection and read as the
+  // latest state. The tests let the imports in flight finish before they make
+  // the next push.
+  const pushesLanded = () => act(async () => { await vi.dynamicImportSettled() })
+
   afterEach(() => {
     nativeMenu.on = false
     nativeMenu.menuAction = null
@@ -4897,9 +4904,17 @@ describe('App — native Smooth check marks after a refused level', () => {
     nativeMenu.on = true
     try {
       await renderAndLoad()
+      await pushesLanded()
       act(() => window.__hew_test!.selectObjects(['1']))
       const syncs = () => nativeMenu.invoke.mock.calls.filter((c) => c[0] === 'sync_menu_state')
-      await waitFor(() => expect(syncs().length).toBeGreaterThan(0), { timeout: 15_000 })
+      // The selection's own push must be in before the count is taken: it
+      // already carries the old level, so counted later it would pass for the
+      // push that follows the refusal.
+      await waitFor(() => {
+        const push = syncs()[syncs().length - 1]?.[1] as { enabled: Record<string, boolean> } | undefined
+        expect(push?.enabled['object-smooth-2']).toBe(true)
+      }, { timeout: 15_000 })
+      await pushesLanded()
       const before = syncs().length
 
       // The native item arrives as a menu-action event, after muda has
@@ -4932,6 +4947,7 @@ describe('App — native Smooth check marks after a refused level', () => {
         nativeMenu.invoke.mockClear()
         const { unmount } = render(<App />)
         await waitFor(() => screen.getByTitle('Rectangle (R)'), { timeout: 2000 })
+        await pushesLanded()
         act(() => window.__hew_test!.selectObjects(['1']))
         await waitFor(() => {
           const calls = nativeMenu.invoke.mock.calls.filter((c) => c[0] === 'sync_menu_state')

@@ -19,7 +19,7 @@
 
 import { execFileSync, spawnSync } from 'node:child_process'
 import { mkdirSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync } from 'node:fs'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, join, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import * as THREE from 'three'
@@ -27,8 +27,12 @@ import type { PreviewFeature } from './registry'
 import { createWall } from './wall'
 import { chainItems, chainText, dispatchMap, parseSubmenu, pruneChain } from './nativeChains'
 
-const HERE = dirname(fileURLToPath(import.meta.url))
-const SRC = resolve(HERE, '..')
+/** The scans below filter and report source files by path, so those paths are
+ *  written with `/` on every platform; with Windows' `\` the folder filters
+ *  would match nothing. */
+const slashed = (path: string): string => path.split(sep).join('/')
+const HERE = slashed(dirname(fileURLToPath(import.meta.url)))
+const SRC = slashed(resolve(HERE, '..'))
 const ROOT = resolve(HERE, '../../..')
 const FEATURES = (JSON.parse(readFileSync(join(ROOT, 'preview-features.json'), 'utf8')) as { features: PreviewFeature[] })
   .features
@@ -165,10 +169,10 @@ function paletteIds(app: App): Set<string> {
 function sourceFiles(dir: string): string[] {
   const out: string[] = []
   for (const name of readdirSync(dir)) {
-    const p = join(dir, name)
+    const p = slashed(join(dir, name))
     if (name === 'wasm' || name === 'locales' || name === 'node_modules') continue
     if (statSync(p).isDirectory()) out.push(...sourceFiles(p))
-    else if (/\.tsx?$/.test(name) && !/\.test\.tsx?$/.test(name) && !p.includes(`${join(SRC, 'preview')}/`)) out.push(p)
+    else if (/\.tsx?$/.test(name) && !/\.test\.tsx?$/.test(name) && !p.includes(`${SRC}/preview/`)) out.push(p)
   }
   return out
 }
@@ -211,8 +215,8 @@ describe('the registry file', () => {
   it('preview-only code is imported only in loaderRoots.ts, each import behind the build literal', () => {
     // A dynamic import behind a constant from another module still ships its
     // chunk, so the literal has to be in the importing module itself.
-    const importers = [...sourceFiles(SRC), ...readdirSync(HERE).filter((n) => /\.tsx?$/.test(n) && !/\.test\.tsx?$/.test(n)).map((n) => join(HERE, n))]
-      .filter((f) => !f.includes(`${join(SRC, 'plugins')}/`))
+    const importers = [...sourceFiles(SRC), ...readdirSync(HERE).filter((n) => /\.tsx?$/.test(n) && !/\.test\.tsx?$/.test(n)).map((n) => `${HERE}/${n}`)]
+      .filter((f) => !f.includes(`${SRC}/plugins/`))
       .filter((f) => /(from|import\()\s*['"`][./]+\/plugins(\/|['"`])/.test(readFileSync(f, 'utf8')))
       .map((f) => f.slice(SRC.length + 1))
     expect(importers).toEqual(['preview/loaderRoots.ts'])
@@ -242,7 +246,7 @@ describe('the registry file', () => {
     expect(valueImport("import type { HostToRealm } from '../../../sdk/plugin/src/protocol'")).toEqual([])
     expect(valueImport("export type { HostToRealm } from '../../../sdk/plugin/src/protocol'")).toEqual([])
     const offenders = sourceFiles(SRC)
-      .filter((f) => !f.includes(`${join(SRC, 'plugins')}/`))
+      .filter((f) => !f.includes(`${SRC}/plugins/`))
       .flatMap((f) => valueImport(readFileSync(f, 'utf8')).map((m) => `${f.slice(SRC.length + 1)}: ${m}`))
     expect(offenders).toEqual([])
   })
@@ -644,7 +648,7 @@ describe('the wall at its entry points', () => {
     // switch before it loads anything; nothing else names the host's entry.
     expect(app).toContain("loadPluginHost === null || !loaderEnabled('plugins')) return")
     const starters = sourceFiles(SRC)
-      .filter((f) => !f.includes(`${join(SRC, 'plugins')}/`))
+      .filter((f) => !f.includes(`${SRC}/plugins/`))
       .filter((f) => /startPluginHost|plugins\/host/.test(readFileSync(f, 'utf8')))
       .map((f) => f.slice(SRC.length + 1))
     expect(starters).toEqual([])

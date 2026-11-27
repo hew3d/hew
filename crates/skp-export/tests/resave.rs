@@ -2635,7 +2635,10 @@ fn with_dictionaries(m: &mut Model, owners: Vec<(Owner, &str)>) -> Vec<u8> {
             }],
         });
     }
-    let file = std::env::temp_dir().join(format!("hew-resave-{}.skp", std::process::id()));
+    // One file per call: tests run side by side in one process.
+    static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let file = std::env::temp_dir().join(format!("hew-resave-{}-{n}.skp", std::process::id()));
     m.write(&file).unwrap();
     let bytes = std::fs::read(&file).unwrap();
     std::fs::remove_file(&file).unwrap();

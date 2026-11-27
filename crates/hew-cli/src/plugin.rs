@@ -117,10 +117,10 @@ pub fn absolute_folder(dir: &Path) -> Result<String, String> {
 fn plain(path: PathBuf) -> PathBuf {
     #[cfg(windows)]
     {
-        if let Some(rest) = path.to_str().and_then(|p| p.strip_prefix(r"\\?\")) {
-            if !rest.starts_with("UNC\\") {
-                return PathBuf::from(rest);
-            }
+        if let Some(rest) = path.to_str().and_then(|p| p.strip_prefix(r"\\?\"))
+            && !rest.starts_with("UNC\\")
+        {
+            return PathBuf::from(rest);
         }
     }
     path

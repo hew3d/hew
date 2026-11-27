@@ -124,6 +124,7 @@ fn tally(tree: &Path) -> u64 {
     v["bytes"].as_u64().unwrap()
 }
 
+#[cfg(unix)]
 fn unreadable<T>() -> Result<T, InstallError> {
     Err(InstallError::StorageUnreadable)
 }

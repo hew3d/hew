@@ -1,3 +1,8 @@
+# Text is checked out with LF on every platform, whatever core.autocrlf
+# says: tests and gate checks compare source files and generated files byte
+# for byte. This rule comes first so that the ones below override it.
+* text=auto eol=lf
+
 # The realm boot script and its pinned hash are byte-exact: the content
 # security policy allows the script by the SHA-256 of these very bytes, so no
 # checkout may rewrite their line endings.
