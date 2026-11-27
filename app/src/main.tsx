@@ -15,6 +15,9 @@ import { isCoarsePointer, isLinux } from './platform'
 const LibraryWindow = React.lazy(() =>
   import('./panels/LibraryWindow.tsx').then((m) => ({ default: m.LibraryWindow })),
 )
+const UpdateWindow = React.lazy(() =>
+  import('./updater/UpdateWindow.tsx').then((m) => ({ default: m.UpdateWindow })),
+)
 import { isTauri } from './io/fileHost'
 import { initThemeSync } from './theme/applyTheme'
 import { i18n } from '@lingui/core'
@@ -22,6 +25,8 @@ import { I18nProvider } from '@lingui/react'
 import { startI18n } from './i18n/activate'
 import { seedLocaleLengthUnit } from './shop/localeUnits'
 import { installStrandedPressFix } from './strandedPress'
+import { previewBuild, rootAllowed } from './preview'
+import { ProbeRoot } from './preview/loaderRoots'
 
 // The Settings window (Tauri: a separate webview; web: unused — the modal
 // fallback renders inline in App) loads this same entry with a `#settings`
@@ -30,6 +35,16 @@ import { installStrandedPressFix } from './strandedPress'
 // the same with `#library`.
 const isSettingsWindow = window.location.hash.startsWith('#settings')
 const isLibraryWindow = window.location.hash.startsWith('#library')
+// The update window (Tauri only, opened by the shell) uses `#update`.
+const isUpdateWindow = isTauri && window.location.hash.startsWith('#update')
+
+// The realm probe root: measures sandboxed-frame behavior on the engine it
+// runs in. It belongs to the Preview feature "plugins" and the Preview wall is
+// its only gate (docs/dev/DEVELOPMENT.md "Preview features", "Code loading"):
+// the hash selects it only in a preview build whose Plugins switch is on. The
+// build flag comes first so a production build drops the root's name, and the
+// component is `null` there (src/preview/loaderRoots.ts keeps its code out).
+const isProbeWindow = previewBuild && rootAllowed('plugin-probe') && window.location.hash.startsWith('#plugin-probe')
 
 // Shop Mode (`ShopApp`, `shop/shellMode.ts`): a THIRD render root selected
 // the same hash-branch way as Settings/Library above, but — unlike those
@@ -90,7 +105,7 @@ try {
 // windows), and offline availability at the workbench — no wifi, no
 // problem — is the entire point of it existing (`shop/ShopApp.tsx`'s doc
 // comment). Do not add `isShopWindow` to this condition.
-if (!isSettingsWindow && !isLibraryWindow && !isTauri && import.meta.env.PROD && 'serviceWorker' in navigator) {
+if (!isSettingsWindow && !isLibraryWindow && !isUpdateWindow && !isProbeWindow && !isTauri && import.meta.env.PROD && 'serviceWorker' in navigator) {
   import('virtual:pwa-register').then(({ registerSW }) =>
     registerSW({ immediate: true }),
   )
@@ -115,18 +130,26 @@ if (!isSettingsWindow && !isLibraryWindow && !isTauri && import.meta.env.PROD &&
 // First boot of the editor: default the length format from the region
 // (Architectural in the US, Millimeters in Japan) before anything reads it.
 // Never overrides a persisted choice; satellite windows inherit the result.
-if (!isSettingsWindow && !isLibraryWindow && !isShopWindow) seedLocaleLengthUnit()
+if (!isSettingsWindow && !isLibraryWindow && !isUpdateWindow && !isShopWindow) seedLocaleLengthUnit()
 
 void startI18n().then(() => {
   ReactDOM.createRoot(document.getElementById('root')!).render(
     <React.StrictMode>
       <I18nProvider i18n={i18n}>
         <ErrorBoundary>
-          {isSettingsWindow ? (
+          {isProbeWindow && ProbeRoot ? (
+            <React.Suspense fallback={null}>
+              <ProbeRoot />
+            </React.Suspense>
+          ) : isSettingsWindow ? (
             <SettingsWindow />
           ) : isLibraryWindow ? (
             <React.Suspense fallback={null}>
               <LibraryWindow />
+            </React.Suspense>
+          ) : isUpdateWindow ? (
+            <React.Suspense fallback={null}>
+              <UpdateWindow />
             </React.Suspense>
           ) : isShopWindow ? (
             <ShopApp />

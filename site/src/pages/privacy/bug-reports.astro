@@ -82,6 +82,59 @@ import BaseLayout from '../../layouts/BaseLayout.astro';
         for it to be removed.
       </p>
 
+      <h2 id="following-a-report">Following a report</h2>
+      <p>
+        The Report Bug dialog has a checkbox, <strong>Let me know what happens
+        with this report</strong>. It is ticked by default, and Hew remembers
+        your choice. If you untick it, Hew keeps nothing for that report.
+      </p>
+      <p>
+        If it is ticked, Hew keeps a private random key for the report on
+        this computer, along with the report ID, the date sent, your Hew
+        version, and the first line of the description. On the desktop app
+        these go in a file named <code>followed-reports.json</code> in the
+        app's config folder, readable only by your user account. On the web
+        they go in the browser's local storage for the app. The key is not an
+        account or an identity, and no email address is asked for.
+      </p>
+      <p>
+        When Hew starts, about 15 seconds after launch, it checks each
+        followed report that is still unresolved and was last checked more
+        than six hours ago. Each check is one small request to the same
+        private bug-report service, with the key in a request header and never
+        in the address. Checking stops on its own once you have seen a final
+        status (Fixed or Closed), or after a year.
+      </p>
+      <p>
+        <strong>Help ▸ Sent Reports…</strong> lists your followed reports
+        with their status and shows the conversation with Hew's developer. It
+        lets you reply, attach a file, check now, or forget a report. Replies
+        and attachments go to the same private service that receives reports,
+        and the developer is emailed about each one, the way a new report
+        emails them. Replies are plain text, up to 4,000 characters, 20 a day
+        per report, and 200 messages per thread.
+      </p>
+      <p>
+        <strong>Forget this report</strong> deletes the key on this computer
+        and asks the service to delete the conversation at once. The report
+        itself stays with the developer.
+      </p>
+      <p>
+        The service keeps a conversation until 30 days after you have seen a
+        final status, or one year after the last activity, whichever comes
+        first. That can be longer than the 90 days a report itself is kept,
+        because a "fixed in version" note may come later.
+      </p>
+      <p>
+        Following belongs to one computer or browser profile, so a report
+        cannot be followed from another machine. Clearing browser data clears
+        the key on the web; the service removes the conversation later. The
+        self-hosted web build cannot send reports, so it has nothing to
+        follow. The desktop app already makes a silent request to GitHub at
+        launch to check for updates. The follow check is smaller, is chosen
+        for each report, and ends by itself.
+      </p>
+
       <h2>What's never stored</h2>
       <p>
         Your IP address is never stored. A submission is only checked

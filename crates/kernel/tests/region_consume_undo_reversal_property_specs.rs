@@ -11,6 +11,7 @@
 //! establishes. A separate redo/undo round trip checks the same holds
 //! after replaying the action, not just after a single undo.
 
+use kernel::trig;
 use kernel::{
     CurveGeom, Document, FollowMePath, MIN_CIRCLE_SEGMENTS, Plane, Point3, SketchId,
     SketchRegionId, Vec3,
@@ -83,7 +84,7 @@ fn draw_shape(
             let ring: Vec<Point3> = (0..n)
                 .map(|k| {
                     let a = std::f64::consts::TAU * k as f64 / n as f64;
-                    center + Vec3::new(r * a.cos(), r * a.sin(), 0.0)
+                    center + Vec3::new(r * trig::cos(a), r * trig::sin(a), 0.0)
                 })
                 .collect();
             sk.begin_curve_with(CurveGeom { center, radius: r })
@@ -201,7 +202,7 @@ proptest! {
         let ring: Vec<Point3> = (0..n)
             .map(|k| {
                 let a = std::f64::consts::TAU * k as f64 / n as f64;
-                center + Vec3::new(radius * a.cos(), radius * a.sin(), 0.0)
+                center + Vec3::new(radius * trig::cos(a), radius * trig::sin(a), 0.0)
             })
             .collect();
         let path_sk = doc.sketch_mut(path_sketch).expect("sketch is live");

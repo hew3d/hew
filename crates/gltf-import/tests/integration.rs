@@ -856,3 +856,52 @@ fn cyclic_node_graph_terminates_instead_of_overflowing() {
         "cyclic-node import should terminate with a scene"
     );
 }
+
+/// `cube_gltf`'s cube under three nested nodes, each scaled by `s`: each
+/// scale is a finite f32, but they compose to `s³`.
+fn nested_scale_cube_gltf(s: f32) -> Vec<u8> {
+    let base = String::from_utf8(cube_gltf()).unwrap();
+    let nodes = format!(
+        r#""nodes": [
+    {{ "name": "Outer", "scale": [{s:e}, {s:e}, {s:e}], "children": [1] }},
+    {{ "name": "Middle", "scale": [{s:e}, {s:e}, {s:e}], "children": [2] }},
+    {{ "mesh": 0, "name": "Cube", "scale": [{s:e}, {s:e}, {s:e}] }}
+  ],"#
+    );
+    let out = base.replace(r#""nodes": [{ "mesh": 0, "name": "Cube" }],"#, &nodes);
+    assert_ne!(out, base, "the node list was replaced");
+    out.into_bytes()
+}
+
+/// Nested node scales that bake a cube out to 1e78 m or more on a side
+/// leave each face too large for a plane (its Newell vector overflows its
+/// length): the import skips the mesh with a reason instead of building a
+/// solid no file reopens, and the document still saves and reopens. The
+/// same file at 1e15 m (1e5 per node) imports as one watertight solid.
+#[test]
+fn a_cube_too_large_for_its_face_planes_is_skipped_with_a_reason() {
+    // 1e78 m, and 1e90 m, where the heal's scale-relative sliver gate
+    // overflows too and must keep the faces for the kernel to refuse.
+    for s in [1e26, 1e30] {
+        let GltfScene { scene, missing, .. } =
+            gltf_import::import(&nested_scale_cube_gltf(s)).expect("parse");
+        let mut doc = Document::new();
+        let (report, _) = doc.ingest(scene, missing).expect("ingest");
+        assert_eq!(report.objects_created, 0, "{s:e}: nothing built");
+        assert_eq!(report.skipped.len(), 1, "{s:e}: the cube is skipped");
+        assert!(
+            !report.skipped[0].reason.is_empty(),
+            "{s:e}: the skip carries a reason"
+        );
+        Document::load(&doc.save()).expect("the document reopens");
+    }
+
+    let GltfScene { scene, missing, .. } =
+        gltf_import::import(&nested_scale_cube_gltf(1e5)).expect("parse");
+    let mut doc = Document::new();
+    let (report, _) = doc.ingest(scene, missing).expect("ingest");
+    assert_eq!(report.objects_created, 1);
+    assert_eq!(report.watertight, 1);
+    assert!(report.skipped.is_empty());
+    Document::load(&doc.save()).expect("the document reopens");
+}

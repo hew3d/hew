@@ -51,6 +51,11 @@
  * instance's own members are in scope — a plain world object or a member of
  * some OTHER instance is not a target while editing this one (`_pickWorldObject`).
  *
+ * A face reached through a placement of a LINKED set (a copy made by Move,
+ * Paste, ...) is a target at the top level too: it slices the shared shape
+ * with `slice_def_member`, so every copy follows. Other components keep the
+ * rule above.
+ *
  * Explicitly OUT of scope for this slice (deferrals):
  *   - Free (non-axis-aligned, non-face) plane orientation: / only
  *     calls for axis-aligned-or-on-a-face, so there's no "drag to rotate the
@@ -82,7 +87,8 @@ import { axisColorForDirection, axisColorsForTheme } from '../viewport/axisColor
 import { getResolvedTheme } from '../settings/theme'
 import type { FaceEligible } from './faceDraw'
 
-export type OnSliceCommitted = (objectId: bigint) => void
+/** `placement` is set when the slice went through a linked copy: select that copy, not the shared part. */
+export type OnSliceCommitted = (objectId: bigint, placement?: bigint) => void
 export type OnToast = (message: string, code?: string) => void
 export type OnMeasurement = (text: string) => void
 
@@ -188,7 +194,7 @@ export class SliceTool implements Tool {
   /** World Object (or, inside an instance context, a def member) under the
    *  cursor via pick_face, or null if none/out-of-scope. Refreshed on every
    *  move/down. */
-  private lastPickObject: { object: bigint; isMember: boolean } | null = null
+  private lastPickObject: { object: bigint; isMember: boolean; instance: bigint | null } | null = null
 
   /** The current editing context (component-edit-parity.md phase A1). When
    *  it's an INSTANCE, a member face becomes a legal slice target, routed
@@ -216,6 +222,14 @@ export class SliceTool implements Tool {
     this._faceEligible = pred
   }
 
+  /** Whether a face reached through a linked copy may be sliced (the
+   *  Viewport's rule: the copy must be directly selectable, not buried in a
+   *  closed group). Null = any linked copy. */
+  private _placementEligible: FaceEligible | null = null
+  setPlacementEligibility(pred: FaceEligible | null): void {
+    this._placementEligible = pred
+  }
+
   constructor(
     wasmScene: WasmScene,
     previewGroup: THREE.Group,
@@ -233,26 +247,29 @@ export class SliceTool implements Tool {
   // ── Optional Tool interface extensions ─────────────────────────────────
 
   capturingInput(): boolean {
-    // Slice has no multi-stage gesture, but the VCB offset is always live so
-    // typed digits never leak through to tool-switch shortcuts while this
-    // tool is active (mirrors Protractor/TapeMeasure capturing during their
-    // hover/preview phase).
-    return true
+    // Only a typed offset is captured input. Everything else (Space, the tool
+    // letters, bare digits that are not opening an offset) belongs to the
+    // shortcut table, as with Tape Measure's idle buffer.
+    return this.typed !== ''
+  }
+
+  /** Per-key capture: only a digit, `.` or `-` opens the offset buffer; once
+   *  it is open, the full length grammar and Enter are Slice's. Arrows and
+   *  Shift are not captured here: they reach `onKey` through the idle path. */
+  capturesKey(key: string): boolean {
+    if (this.typed !== '') return key === 'Enter' || isLengthInputKey(key)
+    return /^[0-9.-]$/.test(key)
   }
 
   /**
-   * Unlike `capturingInput` above (deliberately unconditional), this is
-   * precise: only the plane LOCK is a genuinely armed, Escape-cancelable
-   * gesture (`onKey`'s Escape lifts the lock first, matching this exactly).
-   * Consulted by the Viewport's `toolHasArmedGesture` (component-edit-
-   * parity.md phase A2) so Escape can still pop the edit-context path while
-   * Slice is merely hovering — using the blanket `capturingInput()` here
-   * would make Escape never reach the context pop at all while Slice is the
-   * active tool, which is wrong: an unlocked hover has nothing worth
-   * protecting from a context change.
+   * A genuinely armed, Escape-cancelable gesture: the plane LOCK or a typed
+   * offset (`onKey`'s Escape clears the buffer first, then lifts the lock,
+   * matching this exactly). Consulted by the Viewport's `toolHasArmedGesture`
+   * (component-edit-parity.md phase A2) so Escape can still pop the
+   * edit-context path while Slice is merely hovering.
    */
   hasArmedGesture(): boolean {
-    return this.lockedNormal !== null
+    return this.lockedNormal !== null || this.typed !== ''
   }
 
   // ── Tool interface ──────────────────────────────────────────────────────
@@ -278,9 +295,13 @@ export class SliceTool implements Tool {
 
   onKey(ev: KeyboardEvent): void {
     if (ev.key === 'Escape') {
-      // First Esc lifts the plane lock (back to follow-the-hovered-face mode);
-      // a second Esc (unlocked) cancels the tool.
-      if (this.lockedNormal !== null) {
+      // First Esc clears a typed offset, then the plane lock (back to
+      // follow-the-hovered-face mode); the next Esc (unlocked) cancels the tool.
+      if (this.typed !== '') {
+        this.typed = ''
+        this.onMeasurementCb('')
+        this._refreshPreview()
+      } else if (this.lockedNormal !== null) {
         this.lockedNormal = null
         this._refreshPreview()
       } else {
@@ -329,7 +350,9 @@ export class SliceTool implements Tool {
       return
     }
 
-    if (isLengthInputKey(ev.key)) {
+    // Only a digit, `.` or `-` opens the buffer (see `capturesKey`); a stray
+    // letter or space reaching here with nothing typed is not input.
+    if (this.capturesKey(ev.key) && ev.key !== 'Enter') {
       this.typed = editLengthBuffer(this.typed, ev.key, getLengthUnit())
       this.onMeasurementCb(this._typedReadout())
       this._refreshPreview()
@@ -387,7 +410,7 @@ export class SliceTool implements Tool {
    *  component instance's own definition (component-edit-parity.md phase
    *  A2), only THAT instance's own members qualify instead (a plain world
    *  object or a different instance's member is out of scope there). */
-  private _pickWorldObject(ray: Ray): { object: bigint; isMember: boolean } | null {
+  private _pickWorldObject(ray: Ray): { object: bigint; isMember: boolean; instance: bigint | null } | null {
     const pick = this.wasmScene.pick_face(
       ray.origin[0], ray.origin[1], ray.origin[2],
       ray.direction[0], ray.direction[1], ray.direction[2],
@@ -397,14 +420,27 @@ export class SliceTool implements Tool {
       const instance = pick.instance()
       const activeInstance = this._activeInstance
       if (activeInstance !== null) {
-        return instance === activeInstance ? { object: pick.object(), isMember: true } : null
+        return instance === activeInstance ? { object: pick.object(), isMember: true, instance: activeInstance } : null
+      }
+      // A face reached through a placement of a linked set (a copy) slices
+      // through the shared shape, so every copy follows — no context to
+      // enter first. Not while a group or component is open for editing:
+      // the kernel refuses that (ExplodeSessionScope).
+      if (
+        instance !== undefined &&
+        this._editContext.kind === 'top' &&
+        this.wasmScene.is_linked(instance) &&
+        this.wasmScene.session_stack().length === 0 &&
+        (this._placementEligible === null || this._placementEligible(pick.object(), instance))
+      ) {
+        return { object: pick.object(), isMember: true, instance }
       }
       // An injected predicate (an open explode session's object scope) can
       // reject a plain top-level object the tool-local policy below would
       // otherwise accept — outside geometry must not become a slice target.
       if (this._faceEligible !== null && !this._faceEligible(pick.object(), instance)) return null
       if (instance !== undefined) return null // instanced geometry — out of scope
-      return { object: pick.object(), isMember: false }
+      return { object: pick.object(), isMember: false, instance: null }
     } finally {
       pick.free()
     }
@@ -448,11 +484,15 @@ export class SliceTool implements Tool {
 
     const plane = new Float64Array([point[0], point[1], point[2], normal[0], normal[1], normal[2]])
     try {
-      const results = target.isMember && this._activeInstance !== null
-        ? this.wasmScene.slice_def_member(this._activeInstance, target.object, plane)
+      const results = target.isMember && target.instance !== null
+        ? this.wasmScene.slice_def_member(target.instance, target.object, plane)
         : this.wasmScene.slice_object(target.object, plane)
       if (results.length > 0) {
-        this.onSliceCommitted(results[0])
+        // Through a linked copy at the top level the pieces are parts of the
+        // shared shape: hand back the copy that was picked.
+        const throughCopy = target.isMember && target.instance !== null && this._activeInstance === null
+        if (throughCopy) this.onSliceCommitted(results[0], target.instance ?? undefined)
+        else this.onSliceCommitted(results[0])
       }
     } catch (err) {
       const code = parseKernelErrorCode(err)

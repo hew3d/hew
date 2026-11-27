@@ -39,6 +39,7 @@
 //! strokes are tool-layer state (the UI buffers the polyline and commits when
 //! it closes). This keeps every committed state a valid solid.
 
+use crate::attr::AttrDict;
 use crate::geom2d::{
     boundaries_contact, boundaries_contact_away_from_shared, hole_leaves_outer,
     interior_point_of_loops, point_inside_polygon, point_near_segment, polygon_is_simple,
@@ -48,8 +49,11 @@ use crate::ids::{EdgeId, FaceId, HalfEdgeId, LoopId, MaterialId, VertexId};
 use crate::math::{Plane, Point3, Vec3};
 use crate::sketch::Profile;
 use crate::tol;
-use crate::topo::{Edge, Face, HalfEdge, Loop, LoopKind, Object, Vertex, WatertightState};
+use crate::topo::{
+    AttrSlot, Edge, Face, HalfEdge, Loop, LoopKind, Object, Vertex, WatertightState,
+};
 use crate::transform::{Transform, TransformError};
+use crate::trig;
 
 /// The explicit combination modes (ARCHITECTURE.md: combining Objects is always a
 /// deliberate user action; nothing ever welds implicitly).
@@ -63,13 +67,48 @@ pub enum BooleanOp {
     Intersect,
 }
 
-/// Which operand of a two-Object operation an error refers to.
+/// Which operand of a boolean an error refers to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Operand {
     /// The first operand (`a`).
     A,
     /// The second operand (`b`).
     B,
+    /// The operand at this 1-based place in a combine of more than two
+    /// (the third and later).
+    Nth(u32),
+}
+
+impl Operand {
+    /// The operand at 0-based `index` of a combine: the first, the second,
+    /// or its place.
+    pub fn at(index: usize) -> Operand {
+        match index {
+            0 => Operand::A,
+            1 => Operand::B,
+            n => Operand::Nth(n as u32 + 1),
+        }
+    }
+
+    /// The operand's place in words: "first", "second", "third", "4th",
+    /// "21st".
+    pub fn ordinal(self) -> String {
+        match self {
+            Operand::A => "first".to_string(),
+            Operand::B => "second".to_string(),
+            Operand::Nth(3) => "third".to_string(),
+            Operand::Nth(n) => {
+                let suffix = match (n % 10, n % 100) {
+                    (_, 11..=13) => "th",
+                    (1, _) => "st",
+                    (2, _) => "nd",
+                    (3, _) => "rd",
+                    _ => "th",
+                };
+                format!("{n}{suffix}")
+            }
+        }
+    }
 }
 
 /// What `push_pull` changed.
@@ -107,8 +146,9 @@ pub enum LoopImprintPlan {
     Nothing,
 }
 
-/// What `split_face` changed.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// What `split_face` changed. (`vertex_ends` carries f64 positions, so
+/// this is `PartialEq` but not `Eq`.)
+#[derive(Debug, Clone, PartialEq)]
 pub struct FaceSplitReport {
     /// The two faces replacing the input face. A cut with both ends on one
     /// hole loop keeps the input face's handle as `new_faces[0]` (its
@@ -122,6 +162,11 @@ pub struct FaceSplitReport {
     /// Pre-existing boundary edges split by the path endpoints: the now-dead
     /// handle and its two fragments.
     pub split_boundary_edges: Vec<(EdgeId, [EdgeId; 2])>,
+    /// The path's ends that met a vertex already there (not a point split
+    /// into a boundary edge), each once. The undo merge keeps them: such a
+    /// vertex may have been the joint of a straight run before the split,
+    /// and healing it away would not give that run back.
+    pub vertex_ends: Vec<Point3>,
 }
 
 /// What `split_face_inner` changed: a closed loop imprinted strictly inside a
@@ -197,10 +242,15 @@ pub struct FaceMergeInnerReport {
     /// or an arc-and-line shape and undoing gives the curve back, not a plain
     /// polygon that would boss into faceted walls.
     pub curves: Vec<Option<crate::sketch::CurveGeom>>,
+    /// The attribute dictionary each dissolved loop edge carried, in
+    /// `curves` order; empty when none carried one. Undo re-imprints with
+    /// them, so the loop's edges come back with their dictionaries.
+    pub edge_attrs: Vec<crate::attr::AttrDict>,
 }
 
-/// What `transform_sub_face` changed: an imprint slid, turned, or scaled on
-/// its face in place. (`xf` carries f64s, so `PartialEq` but not `Eq`.)
+/// What `transform_sub_face` changed: an imprint slid, turned, scaled, or
+/// mirrored on its face in place. (`xf` carries f64s, so `PartialEq` but
+/// not `Eq`.)
 #[derive(Debug, Clone, PartialEq)]
 pub struct TransformSubFaceReport {
     /// The moved sub-face (handle unchanged).
@@ -303,6 +353,18 @@ pub enum FollowMeError {
     /// itself). Also raised for a lathe profile touching its own axis of
     /// revolution on a NON-circular path — the on-axis vertex never advances.
     PathTooTight,
+    /// A closed path's corner profile hanging inside the loop (a rebate
+    /// drawn on a board's end face at a corner of the face it runs around,
+    /// design §2b) is too wide to sit inside the corner: it reaches half the
+    /// length of a side it runs along or more (a side runs between real
+    /// corners; a vertex where the path runs straight on does not end
+    /// one), so the sweeps along the
+    /// shorter side would fold into each other where they meet. The same
+    /// fold [`FollowMeError::PathTooTight`] names, told apart so the person
+    /// hears where the profile has to go. Draw it at a corner of the path,
+    /// square to the edge it starts along, and narrower than half the
+    /// shortest side.
+    ProfileTooWideForCorner,
     /// The profile CROSSES the revolution axis of a drawn-circle path in a way
     /// that cannot be revolved into one faithful solid (design §9.2): only an
     /// analytic circle centered on the axis (the sphere) splits losslessly.
@@ -322,8 +384,42 @@ pub enum FollowMeError {
     SweepSelfIntersects,
     /// The sweep produced geometry that is degenerate or fails the topology
     /// validator. Reported instead of panicking, mirroring
-    /// [`ExtrudeError::DegenerateGeometry`].
+    /// [`ExtrudeError::DegenerateGeometry`]. Also raised for invalid
+    /// [`SweepOptions`] and for a twisted or scaled sweep through a pole.
     SweepDegenerate,
+    /// Twist and end scale were asked of a closed path: a twist around a
+    /// loop cannot close its seam (true-curves.md §5.2).
+    TwistNeedsOpenPath,
+}
+
+/// Twist and end scale for Follow Me (true-curves.md §5.2, decision I-18).
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct SweepOptions {
+    /// Total twist over the swept length, radians (right-hand rule about
+    /// the path direction).
+    pub twist: f64,
+    /// Scale of the end profile relative to the start (1.0 = none), > 0.
+    pub end_scale: f64,
+    /// Stations per path segment (≥ 1); `None` places one every 15° of
+    /// twist (one per segment for a scale-only sweep).
+    pub stations: Option<u32>,
+}
+
+impl Default for SweepOptions {
+    fn default() -> Self {
+        SweepOptions {
+            twist: 0.0,
+            end_scale: 1.0,
+            stations: None,
+        }
+    }
+}
+
+impl SweepOptions {
+    /// No twist, no scale, automatic stations: plain Follow Me.
+    pub fn is_default(&self) -> bool {
+        self.twist == 0.0 && self.end_scale == 1.0 && self.stations.is_none()
+    }
 }
 
 /// Typed failures of push/pull.
@@ -363,12 +459,17 @@ pub enum PushPullError {
     /// cylinder would vanish into its own axis. Refused; the object is
     /// untouched.
     RadiusVanishes,
-    /// Whole-wall push/pull on an attributed cylinder wall: a neighboring
-    /// face would be bent off any single plane by the radial offset (e.g. a
-    /// stepped or bossed wall touching the cylinder's seam, where some of
-    /// its vertices follow the wall and others are pinned elsewhere).
-    /// Refused rather than folded — neighbors may translate, stretch, or
-    /// pivot with the wall, but never cease to be planar.
+    /// A face touching the moved face would be bent off any single plane
+    /// by the move. Two cases: whole-wall push/pull on an attributed
+    /// cylinder wall whose radial offset carries some of a neighbor's
+    /// vertices and not others (a stepped or bossed wall touching the
+    /// cylinder's seam); and a flat push whose boundary corner is shared
+    /// with a face that meets the moved face at that vertex only (no
+    /// common edge, so it is not a side wall) and whose plane does not
+    /// contain the sweep, as the planarized fans of a Deformed or imported
+    /// solid leave at a corner. Refused rather than folded — neighbors may
+    /// translate, stretch, or pivot with the move, but never cease to be
+    /// planar.
     WallNeighborNonPlanar,
 }
 
@@ -465,10 +566,13 @@ pub enum StickyError {
     /// `merge_inner_face`: the face is not an imprinted sub-face (its boundary is
     /// not a single closed loop twinned entirely with one parent's hole loop).
     NotAnInnerFace,
-    /// `transform_sub_face`: the transform is not an in-plane similarity of
-    /// the parent face — it tilts the imprint off its face, mirrors it,
-    /// scales it non-uniformly, or is singular. An imprint only slides,
-    /// turns, and scales ON the face it was drawn on.
+    /// `transform_sub_face`: the transform does not map the parent face's
+    /// plane onto itself as a similarity — it tilts or lifts the imprint
+    /// off its face, scales or shears it non-uniformly, or is singular. A
+    /// map that turns the normal over but keeps the plane (a mirror across
+    /// the face's own plane, a point reflection through a point of it) is
+    /// accepted: an imprint slides, turns, scales, and mirrors ON the face
+    /// it was drawn on.
     NotInPlane,
     /// `transform_sub_face`: a hole of the imprint is not itself a flat
     /// nested imprint (a boss or recess was raised inside it), so the loop
@@ -490,7 +594,7 @@ pub enum StickyError {
 }
 
 /// Typed failures of boolean combination.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum BooleanError {
     /// An operand is not watertight; booleans are volume algebra and need
     /// volumes.
@@ -504,10 +608,125 @@ pub enum BooleanError {
     EmptyResult,
     /// The frame-mapping transform is singular.
     SingularTransform,
+    /// The frame-mapping transform would leave a face of the second
+    /// operand off its plane: rounding far from the origin, where a face
+    /// flat before the map cannot stay flat after it
+    /// ([`crate::TransformError::FaceNotFlat`], whose code and meaning it
+    /// shares). Nothing about the solids' contact; moving the operands
+    /// nearer the origin clears it. Distinct from
+    /// [`BooleanError::OperandFaceNotFlat`], a face that is not flat to
+    /// begin with.
+    FaceNotFlat,
     /// Operands touch in a way with no manifold result (coincident faces,
     /// edge-on-face tangency). Refused rather than repaired; nudge or use a
     /// merge-group container instead.
     DegenerateContact,
+    /// A face of an operand is not flat enough to cut, and could not be
+    /// split into flat triangles through its own vertices where the cut
+    /// reaches it. Imported geometry is flat only to the import tolerance
+    /// ([`tol::IMPORT_PLANE_DIST`]); the boolean triangulates such a face
+    /// where the other operand comes near it, and refuses, naming the
+    /// face, when that fails. Nothing is moved to make the face flat
+    /// (DEVELOPMENT.md rule 4).
+    OperandFaceNotFlat {
+        /// Which operand.
+        which: Operand,
+        /// The face, in that operand (for `b`, its own face id).
+        face: FaceId,
+    },
+    /// The arrangement could not resolve where the operands meet: a seam
+    /// or a face boundary would not imprint, a kept piece had no plane, the
+    /// welded pieces did not form valid faces, or a face of the result
+    /// would not be flat to the plane it carries. Unlike
+    /// [`BooleanError::DegenerateContact`] this is not a verdict about how
+    /// the solids touch; moving one slightly usually gives an answer.
+    ArrangementFailed,
+    /// The result would keep a face too thin to have a plane: narrower than
+    /// [`tol::MIN_FACE_WIDTH`] (10 nm) and smaller than the area floor.
+    /// The boolean merges pieces of its own cut narrower than
+    /// [`tol::FEATURE_MIN`] into their neighbors ([`BooleanTidy`]), so
+    /// this is raised only where that tidy could not give a valid solid and
+    /// the untidied result is not one either; moving either operand by a
+    /// hundredth of a millimeter clears it.
+    ResultTooThin,
+    /// Subtract removed no volume: the operands are disjoint or only touch
+    /// (along a face, an edge, or a corner), so the result would be `a`
+    /// unchanged. Refused rather than returned as a no-op that reads like a
+    /// cut; move the cutter so it passes through `a`.
+    NothingRemoved,
+    /// An operand face is not planar within its object's tolerance. `at`:
+    /// a point on the offending face.
+    NonPlanarInput {
+        /// A point on the offending face.
+        at: Point3,
+    },
+    /// An operand face has (near-)zero area or a sub-tolerance edge. Model
+    /// Health's "Remove degenerate faces" clears it. `at`: a point on it.
+    DegenerateInput {
+        /// A point on the offending face.
+        at: Point3,
+    },
+}
+
+/// What a boolean merged out of its own cut (DEVELOPMENT.md rule 4).
+///
+/// A cut through dense geometry leaves faces far narrower than anything a
+/// person can see, print or measure where it passes near a vertex or an
+/// edge. When the cut leaves a face narrower than [`tol::FEATURE_MIN`]
+/// (0.1 µm), the boolean welds the points of its cut around it, moving
+/// none farther than [`tol::TIDY_REACH`] and never changing an operand,
+/// and counts what it did here. A tidy that cannot give a valid solid is
+/// discarded for the untidied result, whose too-thin faces are counted
+/// as `slivers_kept`. All zero (the default) when nothing was too thin.
+/// Accumulates: each boolean adds to it.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct BooleanTidy {
+    /// Faces under [`tol::FEATURE_MIN`] the weld removed.
+    pub slivers_merged: u32,
+    /// Faces under [`tol::FEATURE_MIN`] the result still holds: left in
+    /// place because the tidy fell back to the untidied result, or because
+    /// the weld could not reach them.
+    pub slivers_kept: u32,
+    /// Distinct points the weld moved.
+    pub points_moved: u32,
+    /// The farthest any point moved (meters, at most
+    /// [`tol::TIDY_REACH`]).
+    pub max_move: f64,
+    /// Faces split into flat triangles because a moved point left them
+    /// bent past the result's planarity tolerance.
+    pub faces_split: u32,
+    /// One point per place the weld merged something, in the frame of the
+    /// boolean's first operand: the first [`BooleanTidy::MAX_SITES`].
+    pub sites: Vec<Point3>,
+    /// How many such places there were.
+    pub sites_total: u32,
+}
+
+impl BooleanTidy {
+    /// How many sites [`BooleanTidy::sites`] lists.
+    pub const MAX_SITES: usize = 16;
+
+    /// Whether anything was merged or kept, so there is something to
+    /// report.
+    pub fn is_empty(&self) -> bool {
+        self.slivers_merged == 0 && self.slivers_kept == 0
+    }
+
+    /// Adds `other`'s counts to this one, its sites (moved by `to_frame`)
+    /// after these up to [`BooleanTidy::MAX_SITES`].
+    pub fn absorb(&mut self, other: &BooleanTidy, to_frame: &Transform) {
+        self.slivers_merged += other.slivers_merged;
+        self.slivers_kept += other.slivers_kept;
+        self.points_moved += other.points_moved;
+        self.max_move = self.max_move.max(other.max_move);
+        self.faces_split += other.faces_split;
+        for &p in &other.sites {
+            if self.sites.len() < Self::MAX_SITES {
+                self.sites.push(to_frame.apply_point(p));
+            }
+        }
+        self.sites_total += other.sites_total;
+    }
 }
 
 /// Typed failures of [`Object::slice`].
@@ -525,28 +744,17 @@ pub enum SliceError {
     Degenerate,
 }
 
-/// An analytic surface reference under `transform` (map-or-drop): a
-/// cylinder maps under a similarity of scale `scale`, and drops otherwise.
-fn map_surface(
+/// An analytic surface reference under `transform` (map-or-drop): every
+/// class maps under a similarity of scale `scale`
+/// ([`SurfaceRef::mapped`](crate::topo::SurfaceRef::mapped)), and drops
+/// otherwise.
+pub(crate) fn map_surface(
     surface: Option<crate::topo::SurfaceRef>,
     transform: &Transform,
     scale: Option<f64>,
 ) -> Option<crate::topo::SurfaceRef> {
     match (surface, scale) {
-        (
-            Some(crate::topo::SurfaceRef::Cylinder {
-                axis_point,
-                axis,
-                radius,
-            }),
-            Some(s),
-        ) => transform.apply_vector(axis).normalized().ok().map(|axis| {
-            crate::topo::SurfaceRef::Cylinder {
-                axis_point: transform.apply_point(axis_point),
-                axis,
-                radius: radius * s,
-            }
-        }),
+        (Some(s), Some(scale)) => s.mapped(transform, scale),
         _ => None,
     }
 }
@@ -592,7 +800,7 @@ fn map_uv_frame(
 
 /// A per-edge circle claim under `transform` (map-or-drop): the center maps
 /// as a point and the radius scales under a similarity; dropped otherwise.
-fn map_curve(
+pub(crate) fn map_curve(
     curve: Option<crate::sketch::CurveGeom>,
     transform: &Transform,
     scale: Option<f64>,
@@ -671,6 +879,10 @@ impl std::fmt::Display for FollowMeError {
             FollowMeError::PathTooTight => {
                 "path bends tighter than the profile is wide; the sweep would fold into itself"
             }
+            FollowMeError::ProfileTooWideForCorner => {
+                "a corner profile inside the loop reaches half a side it runs along; \
+                 the sweep would fold into itself"
+            }
             FollowMeError::ProfileCrossesAxis => {
                 "profile crosses the lathe axis and cannot be revolved into one solid; \
                  revolve a one-sided profile instead"
@@ -681,6 +893,7 @@ impl std::fmt::Display for FollowMeError {
             }
             FollowMeError::SweepSelfIntersects => "swept solid would intersect itself",
             FollowMeError::SweepDegenerate => "sweep produced degenerate or invalid geometry",
+            FollowMeError::TwistNeedsOpenPath => "twist and end scale need an open path",
         };
         write!(f, "{msg}")
     }
@@ -701,7 +914,7 @@ impl std::fmt::Display for PushPullError {
                 "wall offset would shrink the cylinder radius to nothing"
             }
             PushPullError::WallNeighborNonPlanar => {
-                "wall offset would bend a neighboring face off its plane"
+                "the move would bend a face touching the moved face off its plane"
             }
         };
         write!(f, "{msg}")
@@ -758,7 +971,12 @@ impl std::fmt::Display for StickyError {
                 write!(f, "face is not an imprinted sub-face")
             }
             StickyError::NotInPlane => {
-                write!(f, "transform is not an in-plane similarity of the face")
+                write!(
+                    f,
+                    "transform is not a similarity that keeps the face's plane \
+                     (an in-plane move, turn, scale, or mirror, with the normal \
+                     kept or turned over)"
+                )
             }
             StickyError::NestedNotFlat => {
                 write!(
@@ -802,14 +1020,46 @@ impl std::fmt::Display for BooleanError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             BooleanError::OperandNotSolid { which } => {
-                write!(f, "boolean operand {which:?} is not watertight")
+                write!(
+                    f,
+                    "the {} boolean operand is not watertight",
+                    which.ordinal()
+                )
             }
             BooleanError::EmptyResult => write!(f, "boolean result is empty"),
             BooleanError::SingularTransform => {
                 write!(f, "operand transform is singular")
             }
+            BooleanError::FaceNotFlat => {
+                write!(f, "operand transform would leave a face off its plane")
+            }
             BooleanError::DegenerateContact => {
                 write!(f, "operands touch degenerately; no manifold result exists")
+            }
+            BooleanError::OperandFaceNotFlat { which, .. } => {
+                write!(
+                    f,
+                    "a face of the {} boolean operand is not flat enough to cut",
+                    which.ordinal()
+                )
+            }
+            BooleanError::ArrangementFailed => {
+                write!(f, "the boolean could not resolve where the operands meet")
+            }
+            BooleanError::ResultTooThin => {
+                write!(f, "the result would keep a face too thin to have a plane")
+            }
+            BooleanError::NothingRemoved => {
+                write!(
+                    f,
+                    "subtract removed no volume; the operands are disjoint or only touch"
+                )
+            }
+            BooleanError::NonPlanarInput { at } => {
+                write!(f, "an operand face near {at:?} is not planar")
+            }
+            BooleanError::DegenerateInput { at } => {
+                write!(f, "an operand face near {at:?} has no area")
             }
         }
     }
@@ -817,53 +1067,113 @@ impl std::fmt::Display for BooleanError {
 
 impl std::error::Error for BooleanError {}
 
+// `DocumentError` is `Eq`. The positions a refusal carries are finite
+// (taken from validated operand geometry), so equality is reflexive on
+// every value a refusal holds.
+impl Eq for BooleanError {}
+
 impl Object {
     /// Bakes an affine `transform` into this object's geometry: every vertex is
-    /// moved by `transform` and every face plane is remapped (the
-    /// inverse-transpose rule via [`Transform::apply_plane`]), in place.
+    /// moved by `transform` and every face plane is remapped, in place: a
+    /// plane that is its outer ring's refit becomes the mapped ring's refit,
+    /// any other is mapped by the inverse-transpose rule
+    /// ([`Transform::apply_plane_following_winding`]), and either falls
+    /// back to the other when the face would not reopen on it from a file
+    /// (a point off it beyond the planarity tolerance, or a plane the
+    /// writer would not store).
     ///
     /// Topology is untouched — no element is added or removed — so all handles
     /// stay valid and the watertightness state is preserved. This is what
     /// move/rotate/scale commit, and how a boolean brings an operand into a
     /// shared frame.
     ///
+    /// A reflection (determinant < 0, e.g. a negative scale) bakes like any
+    /// other map: the geometry is mirrored and then every face is turned
+    /// over (see [`Object::reverse_all_faces`]), because a reflection
+    /// reverses every loop's winding and mapping vertices alone would leave
+    /// an inside-out shell. Twin pairing, handles and per-face attributes
+    /// are kept, so the solid stays right side out.
+    ///
     /// Validated up front so the mutation is transactional (the strong
-    /// guarantee): a singular linear part is [`TransformError::Singular`] and an
-    /// orientation-flipping one (determinant < 0, e.g. a negative scale) is
-    /// [`TransformError::Reflection`] — both refused before any vertex moves, so
-    /// the object is never left half-transformed or inside-out. A shrink that
+    /// guarantee): a singular linear part is [`TransformError::Singular`],
+    /// refused before any vertex moves, so
+    /// the object is never left half-transformed. A shrink that
     /// would leave some face too small for a saved file to recompute its
-    /// plane (twice its area under 1e-12 m²) is singular at this geometry's
-    /// scale and refused [`TransformError::Singular`] the same way, as is an
+    /// plane (twice its area under 1e-12 m² and narrower than
+    /// [`tol::MIN_FACE_WIDTH`](crate::tol::MIN_FACE_WIDTH), the
+    /// [`crate::math::Plane::from_polygon`] rule) is singular at this
+    /// geometry's scale and refused [`TransformError::Singular`] the same way, as is an
     /// invertible but extremely anisotropic map that squashes some face's
-    /// plane to no direction. A map that would leave a face's texture frame
+    /// plane to no direction when its mapped ring's refit will not do
+    /// either. A map that would leave a face's texture frame
     /// degenerate (an extreme stretch) is
-    /// [`TransformError::DegenerateTextureFrame`], refused the same way.
+    /// [`TransformError::DegenerateTextureFrame`], refused the same way. A
+    /// map that leaves some face with no plane it would reopen on, its
+    /// points off both its mapped plane and its mapped ring's refit beyond
+    /// the planarity tolerance (rounding, for a face far from the origin),
+    /// is [`TransformError::FaceNotFlat`], refused the same way, as is one
+    /// that leaves a face whose analytic surface maps along with no such
+    /// plane that surface also agrees with.
     /// [`Object::check_transform`] answers the same question without
     /// moving anything.
     pub fn apply_transform(&mut self, transform: &Transform) -> Result<(), TransformError> {
         let planes = self.transformed_planes(transform)?;
-        for v in self.vertices.values_mut() {
-            v.position = transform.apply_point(v.position);
-        }
         // Analytic surface references map under similarities (rotation ×
         // uniform scale — the maps that keep a cylinder a cylinder) and DROP
         // under anything else (map-or-drop, the true-curves design).
         let scale = transform.similarity_scale();
+        // A dropped claim leaves soft seams (E1): mark them while the claims
+        // that make an edge a seam or a tangent rail still exist.
+        if scale.is_none() {
+            crate::rederive::soften_before_claim_drop(self);
+        }
+        for v in self.vertices.values_mut() {
+            v.position = transform.apply_point(v.position);
+        }
         for (f, plane) in self.faces.values_mut().zip(planes) {
             f.plane = plane;
             f.surface = map_surface(f.surface, transform, scale);
             f.uv_frame = map_uv_frame(f.uv_frame, transform);
+            // A blend tag rides with the claims: kept under a similarity,
+            // dropped where a non-similarity drops them.
+            if scale.is_none() {
+                f.blend = None;
+            }
         }
         // Per-edge analytic circle claims follow the same map-or-drop rule:
         // a similarity maps the center as a point and scales the radius; any
         // non-similarity drops the claim (an ellipse is not a circle).
-        for e in self.edges.values_mut() {
-            e.curve = map_curve(e.curve, transform, scale);
-            e.polygon = map_curve(e.polygon, transform, scale);
+        // `map_curve(None)` is `None`, so a mesh with no claimed edge (every
+        // scan) leaves the edge table alone — and shared with any undo
+        // snapshot of it (crate::shared).
+        if self
+            .edges
+            .values()
+            .any(|e| e.curve.is_some() || e.polygon.is_some())
+        {
+            for e in self.edges.values_mut() {
+                e.curve = map_curve(e.curve, transform, scale);
+                e.polygon = map_curve(e.polygon, transform, scale);
+            }
+        }
+        // A reflection turns every face over, which the stored rings of a
+        // blend record do not follow: the records are dropped then (the
+        // blend tags stay, and Remove/Resize restore by derivation, as for
+        // a file older than the records).
+        let record_scale = scale.filter(|_| transform.determinant() > 0.0);
+        self.transform_blend_records(transform, record_scale);
+        if transform.determinant() < 0.0 {
+            self.turn_faces_over_after_reflection();
         }
         self.check_invariants();
         Ok(())
+    }
+
+    /// Turns every face over after a reflection mapped the vertices, so the
+    /// loops wind counter-clockwise seen from the outward normal again.
+    fn turn_faces_over_after_reflection(&mut self) {
+        let all: std::collections::BTreeSet<FaceId> = self.faces.keys().collect();
+        self.reverse_faces(&all);
     }
 
     /// Whether [`Object::apply_transform`] would accept `transform`, without
@@ -876,35 +1186,83 @@ impl Object {
 
     /// The validation half of [`Object::apply_transform`]: every face's
     /// plane under `transform`, in face order, or the refusal. A singular
-    /// linear part, an orientation flip, a face ring too small afterwards
-    /// for a saved file to recompute its plane, a plane the map squashes
-    /// to no direction (an invertible but extremely anisotropic scale), or
-    /// a texture frame it squashes (checked with the ring, so a session's
-    /// replay bake skips it as it skips the ring) are all refused here,
-    /// before any vertex moves.
+    /// linear part, a face ring too small afterwards
+    /// for a saved file to recompute its plane, a texture frame the map
+    /// squashes, or a face with no plane it would reopen on (neither its
+    /// mapped plane nor its mapped ring's refit:
+    /// [`TransformError::Singular`] when the mapped plane has no
+    /// direction, else [`TransformError::FaceNotFlat`]) are all refused
+    /// here, before any vertex moves. The last three are
+    /// checked with the ring, so a session's replay bake skips them as it
+    /// skips the ring.
     fn transformed_planes(&self, transform: &Transform) -> Result<Vec<Plane>, TransformError> {
         self.transformed_planes_impl(transform, true)
     }
 
+    /// Every face's plane under `transform`, in face order, as the plane
+    /// stored next to its mapped (not yet turned over) loop.
+    ///
+    /// Each face has two candidates: the refit of its mapped outer ring
+    /// ([`crate::serialize::outer_ring_plane`]) and its plane mapped
+    /// ([`Transform::apply_plane_following_winding_near`] through its first
+    /// outer vertex, so rounding far from the origin stays at the scale of
+    /// the face). A face whose plane is its ring's refit (bit for bit)
+    /// tries the refit first, so it keeps that property and a file still
+    /// omits its plane; any other face (one carrying a plane from
+    /// elsewhere, such as a boolean piece on its source face's plane)
+    /// tries its mapped plane first. With `reopen_check`, the face takes
+    /// the first candidate it would reopen on from a file
+    /// ([`crate::serialize::face_plane_reopens`]: every mapped boundary
+    /// point within the planarity tolerance, and a plane the writer
+    /// stores) and that its mapped analytic surface, if it keeps one,
+    /// agrees with ([`crate::surface::validate_face_claim`]); with
+    /// neither, the map is refused, [`TransformError::Singular`]
+    /// when the mapped plane has no direction and
+    /// [`TransformError::FaceNotFlat`] otherwise. Without it (a session's
+    /// replay bake) the face takes the first candidate that exists, one
+    /// holding every mapped point preferred.
     fn transformed_planes_impl(
         &self,
         transform: &Transform,
         reopen_check: bool,
     ) -> Result<Vec<Plane>, TransformError> {
-        // `inverse()` fails iff the linear part is singular; a negative
-        // determinant would invert every face's winding.
+        // `inverse()` fails iff the linear part is singular. A negative
+        // determinant is accepted: `apply_transform` turns the faces over.
         transform.inverse()?;
-        if transform.determinant() < 0.0 {
-            return Err(TransformError::Reflection);
-        }
+        let reflects = transform.determinant() < 0.0;
+        let tol = self.planarity_tol;
+        // The claims ride along under a similarity (`apply_transform`), and
+        // the validator holds each to its face's plane and points.
+        let scale = transform.similarity_scale();
+        let mut claim_points: Vec<Point3> = Vec::new();
         let mut planes = Vec::with_capacity(self.faces.len());
+        let mut old_ring: Vec<Point3> = Vec::new();
+        let mut ring: Vec<Point3> = Vec::new();
+        let mut holes: Vec<Point3> = Vec::new();
         for face in self.faces.values() {
+            old_ring.clear();
+            old_ring.extend(self.loop_positions(face.outer_loop));
+            ring.clear();
+            ring.extend(old_ring.iter().map(|&p| transform.apply_point(p)));
+            holes.clear();
+            holes.extend(
+                face.inner_loops
+                    .iter()
+                    .flat_map(|&l| self.loop_positions(l))
+                    .map(|p| transform.apply_point(p)),
+            );
+            // The refit a file gives the face once it is turned over (a
+            // reflection runs the loop the other way), stated for the loop
+            // as mapped: `apply_transform` flips it back exactly.
+            let imported = tol > crate::tol::PLANE_DIST;
+            let refit = if reflects {
+                let reversed: Vec<Point3> = ring.iter().rev().copied().collect();
+                crate::serialize::outer_ring_plane(&reversed, imported).map(|p| p.flipped())
+            } else {
+                crate::serialize::outer_ring_plane(&ring, imported)
+            };
             if reopen_check {
-                let ring: Vec<Point3> = self
-                    .loop_positions(face.outer_loop)
-                    .map(|p| transform.apply_point(p))
-                    .collect();
-                if crate::serialize::outer_ring_plane(&ring).is_err() {
+                if refit.is_err() {
                     return Err(TransformError::Singular);
                 }
                 // A valid texture frame must stay valid: the map is
@@ -918,7 +1276,70 @@ impl Object {
                     return Err(TransformError::DegenerateTextureFrame);
                 }
             }
-            planes.push(transform.apply_plane(&face.plane)?);
+            let points = || ring.iter().chain(&holes).copied();
+            let derived = crate::serialize::outer_ring_plane(&old_ring, imported)
+                .is_ok_and(|p| p.same_bits(&face.plane));
+            // Winding-following on purpose: each plane is stored next to
+            // its mapped loop, and under a reflection `apply_transform`
+            // then turns face, plane and loop over together, which lands
+            // the plane on the outward side.
+            let mapped = transform.apply_plane_following_winding_near(&face.plane, old_ring[0]);
+            // The candidates, best first: a face on its ring's refit stays
+            // on the mapped ring's refit, any other keeps its own plane
+            // mapped; either falls back to the other.
+            let candidates = if derived {
+                [refit.as_ref().ok().copied(), mapped.as_ref().ok().copied()]
+            } else {
+                [mapped.as_ref().ok().copied(), refit.as_ref().ok().copied()]
+            };
+            // A face's analytic surface, mapped as `apply_transform` maps
+            // it, must agree with the plane the face takes: the validator
+            // (and a file's reader) hold the claim's axis parallel to that
+            // plane. Far from the origin the ring's refit tilts by its
+            // vertices' rounding over the width of a narrow facet, past
+            // what a cylinder wall allows, while the mapped plane keeps the
+            // exact turn of the normal; so a claimed face takes the first
+            // candidate its claim also holds on.
+            let claim = map_surface(face.surface, transform, scale);
+            if claim.is_some() {
+                claim_points.clear();
+                claim_points.extend(points());
+            }
+            let claim_holds = |plane: &Plane| {
+                claim.is_none_or(|c| {
+                    crate::surface::validate_face_claim(&c, plane, &claim_points, tol)
+                })
+            };
+            let plane = if let Ok(refit) = &refit
+                && reopen_check
+            {
+                // The first plane the face reopens on from a file: one the
+                // writer stores, holding every mapped point (and the
+                // face's mapped claim).
+                let reopens =
+                    |c: &Plane| crate::serialize::face_plane_reopens(c, refit, points(), tol);
+                let found = candidates
+                    .into_iter()
+                    .flatten()
+                    .find(|c| reopens(c) && claim_holds(c));
+                match (found, &mapped) {
+                    (Some(plane), _) => plane,
+                    (None, Err(_)) => return Err(TransformError::Singular),
+                    (None, Ok(_)) => return Err(TransformError::FaceNotFlat),
+                }
+            } else {
+                // A replay bake: the first candidate that exists, one that
+                // holds the mapped points (and the mapped claim) preferred.
+                let holds = |plane: &Plane| points().all(|p| plane.signed_distance(p).abs() <= tol);
+                let mut existing = candidates.into_iter().flatten();
+                let first = existing.clone().next();
+                let both = existing.clone().find(|c| holds(c) && claim_holds(c));
+                match both.or_else(|| existing.find(holds)).or(first) {
+                    Some(plane) => plane,
+                    None => return Err(mapped.err().unwrap_or(TransformError::Singular)),
+                }
+            };
+            planes.push(plane);
         }
         Ok(planes)
     }
@@ -932,14 +1353,15 @@ impl Object {
     /// run the full [`Object::check_transform`] first and refuse typed.
     ///
     /// A similarity with a non-singular determinant (at least 1e-12, so a
-    /// scale of at least 1e-4) maps every plane to one with a direction,
-    /// and keeps orientation, so this cannot fail for one; it panics on
+    /// scale of at least 1e-4) maps every plane to one with a direction, so
+    /// this cannot fail for one; a reflecting pose turns every face over as
+    /// [`Object::apply_transform`] does. It panics on
     /// anything else (a caller bug — the pose was validated a similarity
     /// when the session opened).
     pub(crate) fn apply_session_pose(&mut self, pose: &Transform) {
         let planes = self
             .transformed_planes_impl(pose, false)
-            .expect("a non-singular orientation-keeping similarity maps every plane");
+            .expect("a non-singular similarity maps every plane");
         for v in self.vertices.values_mut() {
             v.position = pose.apply_point(v.position);
         }
@@ -948,10 +1370,19 @@ impl Object {
             f.plane = plane;
             f.surface = map_surface(f.surface, pose, scale);
             f.uv_frame = map_uv_frame(f.uv_frame, pose);
+            if scale.is_none() {
+                f.blend = None;
+            }
         }
         for e in self.edges.values_mut() {
             e.curve = map_curve(e.curve, pose, scale);
             e.polygon = map_curve(e.polygon, pose, scale);
+        }
+        // Records drop under a reflection (see `apply_transform`).
+        let record_scale = scale.filter(|_| pose.determinant() > 0.0);
+        self.transform_blend_records(pose, record_scale);
+        if pose.determinant() < 0.0 {
+            self.turn_faces_over_after_reflection();
         }
         self.check_invariants();
     }
@@ -969,6 +1400,58 @@ impl Object {
             face.back_material = face.back_material.map(f);
         }
         self.default_material = self.default_material.map(f);
+        // The paint of faces a blend consumed lives in its record until the
+        // blend is removed. The record table is copy-on-write: an empty
+        // one is not written.
+        if self.blend_records.is_empty() {
+            return;
+        }
+        for rec in self.blend_records.values_mut() {
+            for face in &mut rec.consumed {
+                face.attrs.material = face.attrs.material.map(f);
+                face.attrs.back_material = face.attrs.back_material.map(f);
+            }
+        }
+    }
+
+    /// The materials the object's blend records carry (the paint of faces a
+    /// blend consumed, which comes back when the blend is removed): part of
+    /// what the object references, alongside its faces and default.
+    pub(crate) fn blend_record_materials(&self) -> Vec<MaterialId> {
+        self.blend_records
+            .values()
+            .flat_map(|r| r.consumed.iter())
+            .flat_map(|f| f.attrs.material.into_iter().chain(f.attrs.back_material))
+            .collect()
+    }
+
+    /// Forgets material `id` wherever a blend record carries it (the face
+    /// comes back unpainted): how many record faces changed.
+    pub(crate) fn clear_blend_record_material(&mut self, id: MaterialId) -> usize {
+        let mut n = 0;
+        // The record table is copy-on-write: write it only when some record
+        // carries `id`.
+        let carries = self.blend_records.values().any(|r| {
+            r.consumed
+                .iter()
+                .any(|f| f.attrs.material == Some(id) || f.attrs.back_material == Some(id))
+        });
+        if !carries {
+            return 0;
+        }
+        for rec in self.blend_records.values_mut() {
+            for face in &mut rec.consumed {
+                if face.attrs.material == Some(id) {
+                    face.attrs.material = None;
+                    n += 1;
+                }
+                if face.attrs.back_material == Some(id) {
+                    face.attrs.back_material = None;
+                    n += 1;
+                }
+            }
+        }
+        n
     }
 
     /// The birth of every solid: sweeps a closed [`Profile`] by `distance`
@@ -1073,7 +1556,12 @@ impl Object {
             // Near cap plane: same as profile plane but with inverted normal.
             // Build from the reversed outer boundary.
             let rev_outer: Vec<Point3> = outer.iter().rev().copied().collect();
-            Plane::from_polygon(&rev_outer).map_err(|_| ExtrudeError::DegenerateGeometry)?
+            crate::serialize::own_ring_plane(
+                &rev_outer,
+                &positions[n_outer..total_near],
+                crate::tol::PLANE_DIST,
+            )
+            .map_err(|_| ExtrudeError::DegenerateGeometry)?
         };
 
         let near_outer_reversed: Vec<usize> = (0..n_outer).rev().collect();
@@ -1108,7 +1596,12 @@ impl Object {
         let far_cap_plane = {
             let far_outer_pts: Vec<Point3> =
                 (0..n_outer).map(|i| positions[total_near + i]).collect();
-            Plane::from_polygon(&far_outer_pts).map_err(|_| ExtrudeError::DegenerateGeometry)?
+            crate::serialize::own_ring_plane(
+                &far_outer_pts,
+                &positions[total_near + n_outer..],
+                crate::tol::PLANE_DIST,
+            )
+            .map_err(|_| ExtrudeError::DegenerateGeometry)?
         };
 
         face_specs.push((far_outer, far_inner_loops, far_cap_plane, None));
@@ -1128,7 +1621,8 @@ impl Object {
                 positions[a_far],
             ];
             let wall_plane =
-                Plane::from_polygon(&wall_pts).map_err(|_| ExtrudeError::DegenerateGeometry)?;
+                crate::serialize::own_ring_plane(&wall_pts, &[], crate::tol::PLANE_DIST)
+                    .map_err(|_| ExtrudeError::DegenerateGeometry)?;
             face_specs.push((
                 vec![a_near, b_near, b_far, a_far],
                 vec![],
@@ -1156,7 +1650,8 @@ impl Object {
                     positions[a_far],
                 ];
                 let wall_plane =
-                    Plane::from_polygon(&wall_pts).map_err(|_| ExtrudeError::DegenerateGeometry)?;
+                    crate::serialize::own_ring_plane(&wall_pts, &[], crate::tol::PLANE_DIST)
+                        .map_err(|_| ExtrudeError::DegenerateGeometry)?;
                 face_specs.push((
                     vec![a_near, b_near, b_far, a_far],
                     vec![],
@@ -1181,8 +1676,11 @@ impl Object {
                         .map(|l| l.into_iter().rev().collect())
                         .collect();
                     let pts: Vec<Point3> = rev_outer.iter().map(|&i| positions[i]).collect();
+                    let hole_pts: Vec<Point3> =
+                        rev_inners.iter().flatten().map(|&i| positions[i]).collect();
                     let plane =
-                        Plane::from_polygon(&pts).map_err(|_| ExtrudeError::DegenerateGeometry)?;
+                        crate::serialize::own_ring_plane(&pts, &hole_pts, crate::tol::PLANE_DIST)
+                            .map_err(|_| ExtrudeError::DegenerateGeometry)?;
                     Ok((rev_outer, rev_inners, plane, surface))
                 })
                 .collect::<Result<Vec<_>, ExtrudeError>>()?;
@@ -1191,9 +1689,38 @@ impl Object {
         // Freshly extruded faces take the default material and no UV frame.
         let face_specs: Vec<_> = face_specs
             .into_iter()
-            .map(|(outer, inners, plane, surface)| (outer, inners, plane, None, None, surface))
+            .map(|(outer, inners, plane, surface)| {
+                (outer, inners, plane, None, None, surface, AttrDict::new())
+            })
             .collect();
-        let obj = Object::from_faces_with_holes(&positions, &face_specs);
+        let mut obj = Object::from_faces_with_holes(&positions, &face_specs);
+        // E1: the vertical seam between two walls swept from one smooth
+        // analytic-less chain (a circle stretched before it was extruded) is
+        // soft, so the wall shades as the curve the user drew. A chain with
+        // an analytic record needs no mark: its walls share a cylinder.
+        let mut soft_pairs: Vec<(usize, usize)> = Vec::new();
+        for j in 0..n_outer {
+            let prev = (j + n_outer - 1) % n_outer;
+            if let (Some(a), Some(b)) = (profile.outer_smooth(prev), profile.outer_smooth(j))
+                && a == b
+            {
+                soft_pairs.push((j, total_near + j));
+            }
+        }
+        for (i, hole) in holes.iter().enumerate() {
+            let n_hole = hole.len();
+            for k in 0..n_hole {
+                let prev = (k + n_hole - 1) % n_hole;
+                if let (Some(a), Some(b)) =
+                    (profile.hole_smooth(i, prev), profile.hole_smooth(i, k))
+                    && a == b
+                {
+                    let near = hole_near_start[i] + k;
+                    soft_pairs.push((near, total_near + near));
+                }
+            }
+        }
+        mark_soft_edges(&mut obj, &soft_pairs);
         // Note: extrusion stamps side-wall FACES with `SurfaceRef` (above) but
         // does NOT stamp cap EDGES with the profile's circle. A cap whose
         // outer loop is a circle can only be pushed *through* into the
@@ -1241,6 +1768,23 @@ impl Object {
     /// lands on the plane (design §2a) — the sweep starts where the
     /// profile is and follows the path's shape, and any lateral offset is
     /// preserved as-is. The profile itself is never re-oriented (rule 4).
+    /// A closed path may also seam at a CORNER the profile plane passes
+    /// through square to one of its flanks (design §2b): outside the loop,
+    /// the corner's wedge closes the seam; wholly inside it (a rebate drawn
+    /// on a board's end face at a corner of the face it runs around), the
+    /// ring is carried along that flank onto the corner's miter plane and
+    /// the loop closes there — the solid the profile makes slid along the
+    /// flank to mid-run. A profile on both sides of the corner refuses
+    /// [`FollowMeError::PathTooTight`]; an inside one reaching half the
+    /// length of a side it runs along refuses
+    /// [`FollowMeError::ProfileTooWideForCorner`].
+    ///
+    /// A path vertex where the path runs straight on (both its segments
+    /// plain — a face's rim gets one wherever an imprint ends on it) is no
+    /// corner: it stays a station, its walls keeping the joint, unless that
+    /// station folds the sweep, and then the sweep is retried once through
+    /// the path's real corners only — sides are counted between those, and
+    /// a fold that remains refuses as above.
     ///
     /// `path_curves` carries the path's per-segment analytic attribution —
     /// one entry per segment (`path.len() - 1` open, `path.len()` closed
@@ -1269,9 +1813,12 @@ impl Object {
     /// direction through the transported curve center); each such wall is
     /// stamped [`SurfaceRef::Cylinder`](crate::topo::SurfaceRef) after the
     /// claim is verified against the validator's own predicates, and left
-    /// unstamped if floating-point transport drifted (map-or-drop). Walls
-    /// swept around a path *turn* are toroidal and stay honestly faceted
-    /// (no torus [`SurfaceRef`](crate::topo::SurfaceRef) exists). Cap edges
+    /// unstamped if floating-point transport drifted (map-or-drop). Along a
+    /// band of a drawn arc or circle the walls lie on surfaces of revolution
+    /// about that arc's axis and are stamped the same way: a straight profile
+    /// edge sweeps a cone (or a cylinder), an arc sweeps a torus, or a sphere
+    /// when its center sits on the axis — pole triangles included. Walls
+    /// swept around a free polyline turn stay honestly faceted. Cap edges
     /// carry no curve claims, matching extrusion.
     ///
     /// The result is validated, must be watertight, and is checked globally
@@ -1289,7 +1836,14 @@ impl Object {
         closed: bool,
         path_curves: &[Option<crate::sketch::CurveGeom>],
     ) -> Result<Object, FollowMeError> {
-        Self::from_follow_me_auto(profile, path, closed, path_curves, None)
+        Self::from_follow_me_auto(
+            profile,
+            path,
+            closed,
+            path_curves,
+            None,
+            &SweepOptions::default(),
+        )
     }
 
     /// [`Object::from_follow_me`], stopped after `stop_len` of arc length
@@ -1316,7 +1870,43 @@ impl Object {
         path_curves: &[Option<crate::sketch::CurveGeom>],
         stop_len: f64,
     ) -> Result<Object, FollowMeError> {
-        Self::from_follow_me_auto(profile, path, closed, path_curves, Some(stop_len))
+        Self::from_follow_me_auto(
+            profile,
+            path,
+            closed,
+            path_curves,
+            Some(stop_len),
+            &SweepOptions::default(),
+        )
+    }
+
+    /// Follow Me with twist and end scale (true-curves.md §5.2). Default
+    /// options give exactly [`Object::from_follow_me`] /
+    /// [`Object::from_follow_me_to`] (same bytes, claims included).
+    /// Otherwise every placement Follow Me accepts (the anchor ladder,
+    /// auto-orientation, stops) still applies, the path gains stations
+    /// every 15° of twist (or `opts.stations` per segment), each station
+    /// ring is turned by `twist · f` about the path direction and scaled by
+    /// `1 + (end_scale − 1) · f` about the transported profile centroid (`f`
+    /// the arc-length fraction), and the result is generated: planar caps,
+    /// planar or triangulated band faces, soft seams inside the profile's
+    /// curves and at inserted stations, no surface claims.
+    ///
+    /// # Errors
+    /// Everything [`Object::from_follow_me`] raises, plus
+    /// [`FollowMeError::TwistNeedsOpenPath`] for a closed path and
+    /// [`FollowMeError::SweepDegenerate`] for a non-finite twist or scale,
+    /// a scale at or under `POINT_MERGE`, `stations == Some(0)`, or a
+    /// profile touching a circular path's axis.
+    pub fn from_follow_me_with(
+        profile: &Profile,
+        path: &[Point3],
+        closed: bool,
+        path_curves: &[Option<crate::sketch::CurveGeom>],
+        stop_len: Option<f64>,
+        opts: SweepOptions,
+    ) -> Result<Object, FollowMeError> {
+        Self::from_follow_me_auto(profile, path, closed, path_curves, stop_len, &opts)
     }
 
     /// Auto-orientation (design §2c): a profile whose plane is nowhere
@@ -1335,6 +1925,44 @@ impl Object {
         closed: bool,
         path_curves: &[Option<crate::sketch::CurveGeom>],
         stop_len: Option<f64>,
+        opts: &SweepOptions,
+    ) -> Result<Object, FollowMeError> {
+        // A vertex where the path runs straight on is no corner (an
+        // imprint ending on a face's rim leaves one, #75). It stays a
+        // station of the sweep — its walls keep the joint, as they always
+        // have — unless that station is what folds the sweep: one sitting
+        // inside a corner's miter span, nearer the corner than the profile
+        // is wide, reads as a side too short for the profile where the
+        // path runs straight on. Then the sweep reads the path through its
+        // real corners only — every walk below (anchor candidates, the
+        // corner seam and its sides, the fold, the stations, the advance
+        // check) — and a real fold still refuses, now counted between
+        // true corners.
+        match Self::from_follow_me_on(profile, path, closed, path_curves, stop_len, opts) {
+            Err(
+                e @ (FollowMeError::PathTooTight
+                | FollowMeError::ProfileTooWideForCorner
+                | FollowMeError::PathReverses),
+            ) => {
+                let (straight, curves) = drop_straight_path_vertices(path, closed, path_curves);
+                if straight.len() == path.len() {
+                    return Err(e);
+                }
+                Self::from_follow_me_on(profile, &straight, closed, &curves, stop_len, opts)
+            }
+            r => r,
+        }
+    }
+
+    /// The anchor ladder and auto-orientation of
+    /// [`Object::from_follow_me_auto`] on one reading of the path.
+    fn from_follow_me_on(
+        profile: &Profile,
+        path: &[Point3],
+        closed: bool,
+        path_curves: &[Option<crate::sketch::CurveGeom>],
+        stop_len: Option<f64>,
+        opts: &SweepOptions,
     ) -> Result<Object, FollowMeError> {
         let ladder = |profile: &Profile| -> Result<Object, FollowMeError> {
             // Anchor retry ladder (design §2d): walk candidates nearest-
@@ -1344,9 +1972,20 @@ impl Object {
             // surfaces if every rung refuses.
             let mut first_err = None;
             for skip in 0..64usize {
-                match Self::from_follow_me_impl(profile, path, closed, path_curves, stop_len, skip)
-                {
-                    Err(e @ (FollowMeError::PathTooTight | FollowMeError::PathReverses)) => {
+                match Self::from_follow_me_impl(
+                    profile,
+                    path,
+                    closed,
+                    path_curves,
+                    stop_len,
+                    skip,
+                    opts,
+                ) {
+                    Err(
+                        e @ (FollowMeError::PathTooTight
+                        | FollowMeError::ProfileTooWideForCorner
+                        | FollowMeError::PathReverses),
+                    ) => {
                         if first_err.is_none() {
                             first_err = Some(e);
                         }
@@ -1378,7 +2017,23 @@ impl Object {
         path_curves: &[Option<crate::sketch::CurveGeom>],
         stop_len: Option<f64>,
         skip_anchors: usize,
+        opts: &SweepOptions,
     ) -> Result<Object, FollowMeError> {
+        // Twist and end scale (true-curves.md §5.2): checked at entry; with
+        // default options the plain pipeline runs untouched.
+        let generated = !opts.is_default();
+        if generated {
+            if closed {
+                return Err(FollowMeError::TwistNeedsOpenPath);
+            }
+            if !opts.twist.is_finite()
+                || !opts.end_scale.is_finite()
+                || opts.end_scale <= tol::POINT_MERGE
+                || opts.stations == Some(0)
+            {
+                return Err(FollowMeError::SweepDegenerate);
+            }
+        }
         // A NEGATIVE stop (design §10a) sweeps |stop| the OTHER way from
         // the seam — the closed-loop drag direction. An open path has one
         // direction from its seam end; a reversed stop there is a sweep
@@ -1926,6 +2581,107 @@ impl Object {
                 (pts, band_curves)
             };
 
+        // ---- a corner profile hanging inside the loop (design §2b) ------
+        // The corner seam's wedge closes the loop only for a profile on the
+        // far side of the corner from its incoming flank (outside the
+        // loop): a ring vertex on the near side would have to run backward
+        // across the wedge. A profile wholly on the near side — a rebate
+        // drawn on a board's end face at a corner of the face it runs
+        // around — is the cross-section of the loop's sweep where it leaves
+        // the corner: slid along the perpendicular flank to mid-run, it is
+        // a split seam whose sweep already closes. So the seam moves onto
+        // the corner's own miter plane instead: the ring is carried along
+        // that flank onto it (exactly the transport the sweep itself does)
+        // and the loop closes there, at the corner vertex, with no wedge.
+        // The solid is the mid-run placement's. A profile on both sides of
+        // the corner still refuses through the wedge (the fold it is).
+        let (pts, band_curves, seam_shift) = {
+            let (mut pts, mut band_curves) = (pts, band_curves);
+            let mut seam_shift: Option<(Vec3, Plane)> = None;
+            if closed && corner_seam && pts.len() >= 4 {
+                let last = pts.len() - 1; // pts[last] is the corner again
+                let c = pts[0];
+                let d_out = (pts[1] - c)
+                    .normalized()
+                    .map_err(|_| FollowMeError::PathSegmentTooShort)?;
+                let d_in = (c - pts[last - 1])
+                    .normalized()
+                    .map_err(|_| FollowMeError::PathSegmentTooShort)?;
+                let ring = profile
+                    .outer()
+                    .iter()
+                    .chain(profile.holes().iter().flatten());
+                let sides: Vec<f64> = ring.map(|&p| (p - c).dot(d_in)).collect();
+                let inward = sides.iter().all(|&s| s <= tol::POINT_MERGE)
+                    && sides.iter().any(|&s| s < -tol::POINT_MERGE);
+                if inward {
+                    let miter = (d_in + d_out)
+                        .normalized()
+                        .and_then(|b| Plane::from_point_normal(c, b))
+                        .map_err(|_| FollowMeError::PathReverses)?;
+                    pts.truncate(last);
+                    band_curves.truncate(last);
+                    corner_seam = false;
+                    seam_shift = Some((d_out, miter));
+                }
+            }
+            (pts, band_curves, seam_shift)
+        };
+        // Station 0's plane: the profile's own, or the corner's miter plane
+        // the ring was carried onto (above).
+        let seam_plane = seam_shift.map_or(plane, |(_, miter)| miter);
+
+        // Twist stations (true-curves.md §5.2): split each segment into
+        // `k_s` collinear sub-segments so a station step turns at most 15°
+        // (a scale-only sweep keeps one: a linear scale between two
+        // parallel stations keeps the bands planar). Sub-segments keep
+        // their segment's curve; `inserted` marks the new points, whose
+        // transverse seams are soft.
+        let (pts, band_curves, inserted) = if generated {
+            let segs = pts.len() - 1;
+            let lens: Vec<f64> = (0..segs).map(|i| (pts[i + 1] - pts[i]).length()).collect();
+            let total: f64 = lens.iter().sum();
+            let step = std::f64::consts::PI / 12.0;
+            let per_segment: Vec<usize> = (0..segs)
+                .map(|i| match opts.stations {
+                    Some(k) => k as usize,
+                    // A whole number of steps (to rounding) is not one more.
+                    None => ((opts.twist.abs() * lens[i] / total / step - tol::TWIST_STEP_ROUNDING)
+                        .ceil() as usize)
+                        .max(1),
+                })
+                .collect();
+            // A huge typed twist or station count refuses instead of
+            // building millions of stations (the Deform and Loft caps).
+            let stations = per_segment.iter().fold(0usize, |n, &k| n.saturating_add(k));
+            let points =
+                profile.outer().len() + profile.holes().iter().map(Vec::len).sum::<usize>();
+            if stations > crate::deform::MAX_STATIONS
+                || stations.saturating_mul(points) > crate::deform::MAX_SKIN_QUADS
+            {
+                return Err(FollowMeError::SweepDegenerate);
+            }
+            let mut out = vec![pts[0]];
+            let mut bands = Vec::new();
+            let mut inserted = vec![false];
+            for i in 0..segs {
+                let k = per_segment[i];
+                for t in 1..=k {
+                    out.push(if t == k {
+                        pts[i + 1]
+                    } else {
+                        pts[i] + (pts[i + 1] - pts[i]) * (t as f64 / k as f64)
+                    });
+                    bands.push(band_curves.get(i).copied().flatten());
+                    inserted.push(t < k);
+                }
+            }
+            (out, bands, inserted)
+        } else {
+            let n = pts.len();
+            (pts, band_curves, vec![false; n])
+        };
+
         let m = pts.len();
         let seg_count = if closed { m } else { m - 1 };
         let mut dirs: Vec<Vec3> = Vec::with_capacity(seg_count);
@@ -1949,12 +2705,13 @@ impl Object {
 
         // Station planes: 0 is the profile plane; interior stations are
         // miter planes (bisector normal); an open path's last station is
-        // the end-cap plane perpendicular to the final segment. (A closed
+        // the end-cap plane perpendicular to the final segment (to the drawn
+        // arc's tangent at the end when that segment is a facet of one). (A closed
         // path's wrap joint back to station 0 is between the two collinear
         // halves of the split anchor segment — its miter plane IS the
         // profile plane, already station 0.)
         let mut station_planes: Vec<Plane> = Vec::with_capacity(m);
-        station_planes.push(plane);
+        station_planes.push(seam_plane);
         for s in 1..m {
             let normal = if closed || s < m - 1 {
                 let bisector = (dirs[s - 1] + dirs[s % seg_count])
@@ -1970,6 +2727,21 @@ impl Object {
                     return Err(FollowMeError::PathReverses);
                 }
                 bisector
+            } else if let Some(g) = band_curves.get(s - 1).copied().flatten() {
+                // An open path ending on a drawn arc ends perpendicular to the
+                // ARC, exactly as its start is measured against the arc's
+                // tangent: the end cap is the radial plane through the end
+                // vertex, so the last band is a turned copy of the others
+                // (and keeps its surface stamp) instead of a half-facet tilt.
+                let axis = (pts[s - 1] - g.center)
+                    .cross(dirs[s - 1])
+                    .normalized()
+                    .map_err(|_| FollowMeError::PathReverses)?;
+                let t = axis
+                    .cross(pts[s] - g.center)
+                    .normalized()
+                    .map_err(|_| FollowMeError::PathReverses)?;
+                if t.dot(dirs[s - 1]) < 0.0 { -t } else { t }
             } else {
                 dirs[s - 1]
             };
@@ -2011,6 +2783,10 @@ impl Object {
         if has_poles && stop_len.is_some() && !closed {
             return Err(FollowMeError::PartialSweepOnPole);
         }
+        // A twisted pole has no defined meaning.
+        if generated && has_poles {
+            return Err(FollowMeError::SweepDegenerate);
+        }
 
         struct WallEdge {
             a: usize,
@@ -2046,6 +2822,23 @@ impl Object {
             }
         }
 
+        // A seam moved onto a corner's miter plane carries every carrier
+        // there along the flank the sweep leaves by (the corner section).
+        if let Some((d_out, miter)) = seam_shift {
+            let denom = d_out.dot(miter.normal());
+            for v in &mut base {
+                *v = *v + d_out * (-miter.signed_distance(*v) / denom);
+            }
+        }
+
+        // The twist pivot (true-curves.md §5.2): the profile's outer-loop
+        // area centroid, carried like every other carrier so each station
+        // turns and scales about its own transported centroid.
+        let pivot = generated.then(|| {
+            base.push(crate::station::area_centroid(outer, n).unwrap_or(outer[0]));
+            base.len() - 1
+        });
+
         // Transport the carriers station by station: each travels along the
         // incoming segment direction onto the next station plane. Every
         // wall quad is planar by construction — consecutive stations differ
@@ -2073,12 +2866,12 @@ impl Object {
             // identically in exact arithmetic (design §1); a profile only
             // *nearly* perpendicular to its segment fails here.
             let dir = dirs[m - 1];
-            let denom = dir.dot(plane.normal());
+            let denom = dir.dot(seam_plane.normal());
             if denom.abs() < tol::NORMALIZE_MIN_LENGTH {
                 return Err(FollowMeError::PathReverses);
             }
             for (j, &v) in stations[m - 1].iter().take(ring_size).enumerate() {
-                let landed = v + dir * (-plane.signed_distance(v) / denom);
+                let landed = v + dir * (-seam_plane.signed_distance(v) / denom);
                 if !landed.approx_eq(stations[0][j], tol::POINT_MERGE) {
                     return Err(FollowMeError::ProfileNotPerpendicular);
                 }
@@ -2112,9 +2905,32 @@ impl Object {
                     continue;
                 }
                 if adv <= tol::POINT_MERGE {
-                    return Err(FollowMeError::PathTooTight);
+                    // A corner profile carried onto the corner's miter
+                    // plane (inside the loop) folds only by being too wide
+                    // for the corner: say so, so the copy says where the
+                    // profile has to go (#75).
+                    return Err(if seam_shift.is_some() {
+                        FollowMeError::ProfileTooWideForCorner
+                    } else {
+                        FollowMeError::PathTooTight
+                    });
                 }
             }
+        }
+
+        if let Some(pivot) = pivot {
+            return Self::assemble_twisted_sweep(
+                profile,
+                &pts,
+                &dirs,
+                &station_planes,
+                &stations,
+                &band_curves,
+                &inserted,
+                ring_size,
+                pivot,
+                opts,
+            );
         }
 
         // ---- assemble faces ---------------------------------------------
@@ -2160,6 +2976,77 @@ impl Object {
                     radius: ra,
                 })
             };
+        // Surfaces of revolution (true-curves.md §5.1): along a band of a
+        // drawn arc or circle, the ring at each station is the previous one
+        // turned about the arc's axis, so a wall swept by a profile edge lies
+        // on the surface that edge sweeps: a straight edge sweeps a cone (or
+        // a cylinder, or a flat ring), an arc sweeps a torus (a sphere when
+        // its center is on the axis). Tried after the cylinder stamps above,
+        // on full quads and pole triangles alike, and stamped only when the
+        // claim holds on the face's own vertices (map-or-drop).
+        let revolution_claim = |sidx: usize,
+                                we: &WallEdge,
+                                ring_pts: &[Point3],
+                                wall_plane: &Plane|
+         -> Option<crate::topo::SurfaceRef> {
+            let g_path = band_curves.get(sidx).copied().flatten()?;
+            let c = g_path.center;
+            let a = (pts[sidx] - c).cross(dirs[sidx]).normalized().ok()?;
+            let split = |x: Point3| {
+                let d = x - c;
+                let t = d.dot(a);
+                (t, (d - a * t).length())
+            };
+            let (p, q) = (stations[sidx][we.a], stations[sidx][we.b]);
+            let candidate = match we.curve {
+                Some((center_idx, radius)) => {
+                    let gc = stations[sidx][center_idx];
+                    let (tc, rc) = split(gc);
+                    if rc <= tol::POINT_MERGE {
+                        Some(crate::topo::SurfaceRef::Sphere { center: gc, radius })
+                    } else {
+                        crate::topo::SurfaceRef::torus_or_sphere(c + a * tc, a, rc, radius)
+                    }
+                }
+                None => {
+                    let ((tp, rp), (tq, rq)) = (split(p), split(q));
+                    if (rp - rq).abs() <= tol::POINT_MERGE {
+                        Some(crate::topo::SurfaceRef::Cylinder {
+                            axis_point: c,
+                            axis: a,
+                            radius: rp,
+                        })
+                    } else if (tp - tq).abs() <= tol::POINT_MERGE {
+                        None // an annular plane ring: already planar
+                    } else {
+                        let t_apex = tp - rp * (tq - tp) / (rq - rp);
+                        let (lo, hi) = (tp.min(tq), tp.max(tq));
+                        if t_apex > lo + tol::POINT_MERGE && t_apex < hi - tol::POINT_MERGE {
+                            None // the profile edge crosses the axis
+                        } else {
+                            let toward = if (tp + tq) * 0.5 - t_apex >= 0.0 {
+                                a
+                            } else {
+                                -a
+                            };
+                            Some(crate::topo::SurfaceRef::Cone {
+                                apex: c + a * t_apex,
+                                axis: toward,
+                                half_angle: trig::atan((rq - rp).abs() / (tq - tp).abs()),
+                            })
+                        }
+                    }
+                }
+            }?;
+            (candidate.holds_on(ring_pts, wall_plane, tol::PLANE_DIST)
+                && crate::surface::validate_face_claim(
+                    &candidate,
+                    wall_plane,
+                    ring_pts,
+                    tol::PLANE_DIST,
+                ))
+            .then_some(candidate)
+        };
         // Soft transverse joints, as global position-index pairs (the
         // profile-edge ring edge at each station whose two adjacent bands
         // share one curve). Wrap joint included for closed sweeps.
@@ -2179,20 +3066,27 @@ impl Object {
                     _ => false,
                 }
             };
+        // E1: two edges of one smooth analytic-less chain (a circle stretched
+        // before the sweep) share a smooth key, which joins them exactly as a
+        // shared CurveGeom does.
+        let same_key =
+            |a: Option<u32>, b: Option<u32>| matches!((a, b), (Some(x), Some(y)) if x == y);
         let soft_after: Vec<bool> = {
             let mut v = Vec::with_capacity(wall_edges.len());
             for k in 0..n_outer {
-                v.push(same_geom(
-                    profile.outer_curve(k),
-                    profile.outer_curve((k + 1) % n_outer),
-                ));
+                let next = (k + 1) % n_outer;
+                v.push(
+                    same_geom(profile.outer_curve(k), profile.outer_curve(next))
+                        || same_key(profile.outer_smooth(k), profile.outer_smooth(next)),
+                );
             }
             for (i, hole) in holes.iter().enumerate() {
                 for k in 0..hole.len() {
-                    v.push(same_geom(
-                        profile.hole_curve(i, k),
-                        profile.hole_curve(i, (k + 1) % hole.len()),
-                    ));
+                    let next = (k + 1) % hole.len();
+                    v.push(
+                        same_geom(profile.hole_curve(i, k), profile.hole_curve(i, next))
+                            || same_key(profile.hole_smooth(i, k), profile.hole_smooth(i, next)),
+                    );
                 }
             }
             v
@@ -2256,8 +3150,9 @@ impl Object {
                         continue; // fully on-axis wall: interior, suppressed.
                     }
                     let ring_pts: Vec<Point3> = ring.iter().map(|&g| positions[g]).collect();
-                    let wall_plane = Plane::from_polygon(&ring_pts)
-                        .map_err(|_| FollowMeError::SweepDegenerate)?;
+                    let wall_plane =
+                        crate::serialize::own_ring_plane(&ring_pts, &[], crate::tol::PLANE_DIST)
+                            .map_err(|_| FollowMeError::SweepDegenerate)?;
                     // Cylinder stamps apply only to a full, un-collapsed quad.
                     let surface = if ring.len() == 4 {
                         we.curve
@@ -2277,6 +3172,8 @@ impl Object {
                     } else {
                         None
                     };
+                    let surface =
+                        surface.or_else(|| revolution_claim(s, we, &ring_pts, &wall_plane));
                     face_specs.push((ring, vec![], wall_plane, surface));
                     let (ga, gb) = (gidx(s, we.a), gidx(s, we.b));
                     if ga != gb && s > 0 && same_band_curve(s - 1, s) {
@@ -2345,8 +3242,9 @@ impl Object {
                         continue; // fully hinge-welded wall: nothing to emit.
                     }
                     let ring_pts: Vec<Point3> = ring.iter().map(|&g| positions[g]).collect();
-                    let wall_plane = Plane::from_polygon(&ring_pts)
-                        .map_err(|_| FollowMeError::SweepDegenerate)?;
+                    let wall_plane =
+                        crate::serialize::own_ring_plane(&ring_pts, &[], crate::tol::PLANE_DIST)
+                            .map_err(|_| FollowMeError::SweepDegenerate)?;
                     // Cylinder stamps apply only to a full, un-collapsed quad.
                     let surface = if ring.len() == 4 {
                         we.curve
@@ -2366,6 +3264,8 @@ impl Object {
                     } else {
                         None
                     };
+                    let surface =
+                        surface.or_else(|| revolution_claim(s, we, &ring_pts, &wall_plane));
                     face_specs.push((ring, vec![], wall_plane, surface));
                     let (ga, gb) = (gid[s][we.a], gid[s][we.b]);
                     if ga != gb && s > 0 && same_band_curve(s - 1, s) {
@@ -2406,8 +3306,17 @@ impl Object {
                     .map(|(i, h)| (0..h.len()).rev().map(|k| hole_starts[i] + k).collect())
                     .collect();
                 let near_pts: Vec<Point3> = near_outer.iter().map(|&j| positions[j]).collect();
-                let near_plane =
-                    Plane::from_polygon(&near_pts).map_err(|_| FollowMeError::SweepDegenerate)?;
+                let near_holes: Vec<Point3> = near_inners
+                    .iter()
+                    .flatten()
+                    .map(|&j| positions[j])
+                    .collect();
+                let near_plane = crate::serialize::own_ring_plane(
+                    &near_pts,
+                    &near_holes,
+                    crate::tol::PLANE_DIST,
+                )
+                .map_err(|_| FollowMeError::SweepDegenerate)?;
                 face_specs.push((near_outer, near_inners, near_plane, None));
 
                 let far = m - 1;
@@ -2418,8 +3327,11 @@ impl Object {
                     .map(|(i, h)| (0..h.len()).map(|k| idx(far, hole_starts[i] + k)).collect())
                     .collect();
                 let far_pts: Vec<Point3> = far_outer.iter().map(|&j| positions[j]).collect();
+                let far_holes: Vec<Point3> =
+                    far_inners.iter().flatten().map(|&j| positions[j]).collect();
                 let far_plane =
-                    Plane::from_polygon(&far_pts).map_err(|_| FollowMeError::SweepDegenerate)?;
+                    crate::serialize::own_ring_plane(&far_pts, &far_holes, crate::tol::PLANE_DIST)
+                        .map_err(|_| FollowMeError::SweepDegenerate)?;
                 face_specs.push((far_outer, far_inners, far_plane, None));
             }
 
@@ -2433,8 +3345,9 @@ impl Object {
                         idx(s_next, we.a),
                     ];
                     let quad_pts: Vec<Point3> = quad.iter().map(|&j| positions[j]).collect();
-                    let wall_plane = Plane::from_polygon(&quad_pts)
-                        .map_err(|_| FollowMeError::SweepDegenerate)?;
+                    let wall_plane =
+                        crate::serialize::own_ring_plane(&quad_pts, &[], crate::tol::PLANE_DIST)
+                            .map_err(|_| FollowMeError::SweepDegenerate)?;
                     let surface = we
                         .curve
                         .and_then(|(center_idx, radius)| {
@@ -2449,7 +3362,8 @@ impl Object {
                         .or_else(|| {
                             band_cylinder(s, positions[quad[0]], positions[quad[1]])
                                 .filter(|sr| cylinder_claim_holds(&quad_pts, &wall_plane, sr))
-                        });
+                        })
+                        .or_else(|| revolution_claim(s, we, &quad_pts, &wall_plane));
                     if s > 0 && same_band_curve(s - 1, s) {
                         soft_pairs.push((idx(s, we.a), idx(s, we.b)));
                     }
@@ -2482,8 +3396,14 @@ impl Object {
                         .map(|l| l.into_iter().rev().collect())
                         .collect();
                     let pts_rev: Vec<Point3> = rev_outer.iter().map(|&i| positions[i]).collect();
-                    let plane = Plane::from_polygon(&pts_rev)
-                        .map_err(|_| FollowMeError::SweepDegenerate)?;
+                    let hole_pts: Vec<Point3> =
+                        rev_inners.iter().flatten().map(|&i| positions[i]).collect();
+                    let plane = crate::serialize::own_ring_plane(
+                        &pts_rev,
+                        &hole_pts,
+                        crate::tol::PLANE_DIST,
+                    )
+                    .map_err(|_| FollowMeError::SweepDegenerate)?;
                     Ok((rev_outer, rev_inners, plane, surface))
                 })
                 .collect::<Result<Vec<_>, FollowMeError>>()?;
@@ -2491,7 +3411,7 @@ impl Object {
 
         let face_specs: Vec<_> = face_specs
             .into_iter()
-            .map(|(o, i, p, surf)| (o, i, p, None, None, surf))
+            .map(|(o, i, p, surf)| (o, i, p, None, None, surf, AttrDict::new()))
             .collect();
         let mut obj = Object::from_faces_with_holes(&positions, &face_specs);
         // Mark the collected soft transverse joints (design §7b) on the
@@ -2559,6 +3479,123 @@ impl Object {
         Ok(obj)
     }
 
+    /// Twist and end scale's assembly (true-curves.md §5.2): turns and
+    /// scales every transported station ring about its pivot carrier, then
+    /// builds the skin (planar caps, soft seams inside the profile's curves
+    /// and at inserted stations, a hard seam at a sharp path corner).
+    #[allow(clippy::too_many_arguments)]
+    fn assemble_twisted_sweep(
+        profile: &Profile,
+        pts: &[Point3],
+        dirs: &[Vec3],
+        station_planes: &[Plane],
+        stations: &[Vec<Point3>],
+        band_curves: &[Option<crate::sketch::CurveGeom>],
+        inserted: &[bool],
+        ring_size: usize,
+        pivot: usize,
+        opts: &SweepOptions,
+    ) -> Result<Object, FollowMeError> {
+        let m = pts.len();
+        let mut cum = vec![0.0_f64; m];
+        for s in 1..m {
+            cum[s] = cum[s - 1] + (pts[s] - pts[s - 1]).length();
+        }
+        let total = cum[m - 1];
+        if total <= tol::POINT_MERGE {
+            return Err(FollowMeError::SweepDegenerate);
+        }
+        let outer = profile.outer();
+        let holes = profile.holes();
+        let mut lens = vec![outer.len()];
+        lens.extend(holes.iter().map(Vec::len));
+        let mut rings: Vec<Vec<Vec<Point3>>> = Vec::with_capacity(m);
+        for s in 0..m {
+            let f = cum[s] / total;
+            let along = if s == 0 { dirs[0] } else { dirs[s - 1] };
+            let mut axis = station_planes[s].normal();
+            if axis.dot(along) < 0.0 {
+                axis = -axis;
+            }
+            let c = stations[s][pivot];
+            let angle = opts.twist * f;
+            let scale = 1.0 + (opts.end_scale - 1.0) * f;
+            let moved: Vec<Point3> = stations[s][..ring_size]
+                .iter()
+                .map(|&p| {
+                    let r = crate::station::rotate_about(p, c, axis, angle);
+                    c + (r - c) * scale
+                })
+                .collect();
+            let mut loops = Vec::with_capacity(lens.len());
+            let mut at = 0;
+            for &len in &lens {
+                loops.push(moved[at..at + len].to_vec());
+                at += len;
+            }
+            rings.push(loops);
+        }
+        let same_geom = |a: Option<crate::sketch::CurveGeom>,
+                         b: Option<crate::sketch::CurveGeom>| match (a, b) {
+            (Some(x), Some(y)) => {
+                x.center.approx_eq(y.center, tol::POINT_MERGE)
+                    && (x.radius - y.radius).abs() <= tol::POINT_MERGE
+            }
+            _ => false,
+        };
+        let same_key =
+            |a: Option<u32>, b: Option<u32>| matches!((a, b), (Some(x), Some(y)) if x == y);
+        // Profile vertex j sits between edges j−1 and j of its loop.
+        let mut column_smooth = Vec::with_capacity(lens.len());
+        column_smooth.push(
+            (0..outer.len())
+                .map(|j| {
+                    let prev = (j + outer.len() - 1) % outer.len();
+                    same_geom(profile.outer_curve(prev), profile.outer_curve(j))
+                        || same_key(profile.outer_smooth(prev), profile.outer_smooth(j))
+                })
+                .collect::<Vec<bool>>(),
+        );
+        for (i, hole) in holes.iter().enumerate() {
+            column_smooth.push(
+                (0..hole.len())
+                    .map(|j| {
+                        let prev = (j + hole.len() - 1) % hole.len();
+                        same_geom(profile.hole_curve(i, prev), profile.hole_curve(i, j))
+                            || same_key(profile.hole_smooth(i, prev), profile.hole_smooth(i, j))
+                    })
+                    .collect(),
+            );
+        }
+        let station_smooth: Vec<bool> = (0..m)
+            .map(|s| {
+                inserted[s]
+                    || (s > 0
+                        && s + 1 < m
+                        && same_geom(
+                            band_curves.get(s - 1).copied().flatten(),
+                            band_curves.get(s).copied().flatten(),
+                        ))
+            })
+            .collect();
+        crate::station::build_skin(&crate::station::SkinSpec {
+            stations: rings,
+            column_smooth,
+            station_smooth,
+            cap_start: true,
+            cap_end: true,
+            claims: None,
+            material: None,
+            column_fade: None,
+        })
+        .map_err(|e| match e {
+            crate::shape_error::ShapeError::SelfIntersecting { .. } => {
+                FollowMeError::SweepSelfIntersects
+            }
+            _ => FollowMeError::SweepDegenerate,
+        })
+    }
+
     /// SketchUp's signature move on any FLAT face: translates `face` rigidly
     /// by `distance` along its outward normal (positive = outward, adding
     /// material; negative = inward, removing it) and rebuilds the side walls.
@@ -2584,7 +3621,13 @@ impl Object {
     ///   neighbor simply extends — the shared ring translates in place, no wall
     ///   is minted. A purely transverse boundary (a box face) keeps the
     ///   bit-identical fast path: pulling a box's top up yields a taller box
-    ///   with 6 faces.
+    ///   with 6 faces. The fast path refuses typed
+    ///   ([`PushPullError::NonManifoldResult`]) only a translation that would
+    ///   fold a neighbor's outline over a fixed part of its own boundary (a
+    ///   step's low top pulled past the high top); a neighbor vertex merely
+    ///   ahead of the face, off to the side, does not limit it.
+    ///   [`Object::push_pull_overshoots`] reports such a fold, so callers take
+    ///   the boolean path instead.
     /// - **Coplanar neighbor** (a `split_face` sibling sub-face) and **slanted
     ///   neighbor** (a wedge/chamfer face, adjacent facets of an N-gon prism,
     ///   any face produced by Slice) are handled identically: the shared edge
@@ -2692,7 +3735,15 @@ impl Object {
         // chord of a logical wall, and push/pull on it means "offset the
         // wall's radius", never "translate this one facet"
         // (the true-curves design §4.6).
-        if self.faces[face].surface.is_some() {
+        //
+        // Only cylinders take it: a face claiming a sphere, torus or cone
+        // with no blend tag is pushed like any planar face, and the moved
+        // facet drops its claim below (map-or-drop) — exactly what a Follow
+        // Me band always got.
+        if matches!(
+            self.faces[face].surface,
+            Some(crate::topo::SurfaceRef::Cylinder { .. })
+        ) {
             return self.offset_cylinder_wall(face, distance, guards);
         }
 
@@ -2743,29 +3794,11 @@ impl Object {
         //   build a wall along the shared edge.
         // - otherwise: a slanted neighbor — treated identically to a coplanar
         //   one (unweld and build a wall; see the contract above).
-        let mut edge_kinds: std::collections::BTreeMap<HalfEdgeId, BoundaryEdgeKind> =
-            std::collections::BTreeMap::new();
-        for &loop_id in &boundary_loops {
-            for h in self.loop_half_edges(loop_id) {
-                let Some(twin_h) = self.half_edges[h].twin else {
-                    // No twin means an open boundary edge; ObjectNotSolid above
-                    // should have already refused this, but guard anyway.
-                    return Err(PushPullError::NonManifoldResult);
-                };
-                let neighbor_loop = self.half_edges[twin_h].loop_id;
-                let neighbor_face = self.loops[neighbor_loop].face;
-                let normal_neighbor = self.faces[neighbor_face].plane.normal();
-                let dot = face_normal.dot(normal_neighbor).abs();
-                let kind = if dot <= tol::NORMAL_DIRECTION {
-                    BoundaryEdgeKind::Transverse
-                } else if dot >= 1.0 - tol::NORMAL_DIRECTION {
-                    BoundaryEdgeKind::Coplanar
-                } else {
-                    BoundaryEdgeKind::Slanted
-                };
-                edge_kinds.insert(h, kind);
-            }
-        }
+        // No twin means an open boundary edge; ObjectNotSolid above should
+        // have already refused this, but guard anyway.
+        let edge_kinds = self
+            .boundary_edge_kinds(face, &boundary_loops)
+            .ok_or(PushPullError::NonManifoldResult)?;
         let has_coplanar = edge_kinds
             .values()
             .any(|k| matches!(k, BoundaryEdgeKind::Coplanar));
@@ -2779,21 +3812,6 @@ impl Object {
         // is therefore no longer a special case — every non-transverse edge
         // builds a wall, every transverse one extends its neighbor seamlessly.
         let has_wall = has_coplanar || has_slanted;
-
-        // Endpoints of a Coplanar boundary edge (a `split_face` cut shared
-        // with a sibling sub-face): the coplanar-aware mutation unwelds along
-        // these on purpose, so a "fixed" occurrence of either endpoint on a
-        // neighbor wall is never an obstruction.
-        let coplanar_adjacent_vertices: std::collections::BTreeSet<VertexId> = boundary_loops
-            .iter()
-            .flat_map(|&loop_id| self.loop_half_edges(loop_id))
-            .filter(|h| matches!(edge_kinds[h], BoundaryEdgeKind::Coplanar))
-            .flat_map(|h| {
-                let origin = self.half_edges[h].origin;
-                let dest = self.half_edges[self.half_edges[h].next].origin;
-                [origin, dest]
-            })
-            .collect();
 
         // This sweep may exactly close a step built by an earlier
         // coplanar-aware push ( inverse) — detected structurally, the same
@@ -2845,12 +3863,16 @@ impl Object {
         }
 
         // Interior-obstruction guard, PURE-TRANSLATE (fast path) only: moving
-        // the shared ring in place would fold a neighbor face whose FIXED
-        // vertices sit closer along the sweep than the push depth past them
-        // into a self-intersecting shell — every face stays planar and
-        // manifold, so the validator cannot see it. Refuse at the nearest
-        // fixed neighbor vertex strictly in front of the sweep. Skipped in
-        // three cases:
+        // the shared ring in place would fold a neighbor face whose outline
+        // the moving ring sweeps across into a self-intersecting shell —
+        // every face stays planar and manifold, so the validator cannot see
+        // it. Refuse when the region a neighbor's moving boundary sweeps
+        // holds a fixed part of that neighbor's boundary
+        // ([`Object::translation_folds_a_neighbor`]); a neighbor vertex ahead
+        // of the face but off to the side of that region folds nothing (#93,
+        // KB-35). [`Object::push_pull_overshoots`] asks the same question, so
+        // the app routes such a push to the boolean path first and this is
+        // the backstop. Skipped in three cases:
         //   (1) a collapse;
         //   (2) history replay (GuardMode not Enforced, rule 9) — the
         //       recorded-state proof supersedes this best-effort heuristic,
@@ -2865,34 +3887,16 @@ impl Object {
         //       angle, and both directions are instead bounded by validating
         //       the built result for self-intersection below (which still
         //       catches a distant-geometry collision on a non-convex solid).
-        if !is_collapse && guards == GuardMode::Enforced && !has_wall {
-            let moved_face_plane = self.faces[face].plane;
-            // +1 along the outward normal for an outward push, -1 inward.
-            let along = distance.signum();
-            let mut neighbor_limit = f64::INFINITY;
-            for &nf in &neighbor_faces {
-                let loops: Vec<LoopId> = std::iter::once(self.faces[nf].outer_loop)
-                    .chain(self.faces[nf].inner_loops.iter().copied())
-                    .collect();
-                for loop_id in loops {
-                    for h in self.loop_half_edges(loop_id) {
-                        let vid = self.half_edges[h].origin;
-                        if moved_vertices.contains(&vid)
-                            || coplanar_adjacent_vertices.contains(&vid)
-                        {
-                            continue;
-                        }
-                        let ahead =
-                            along * moved_face_plane.signed_distance(self.vertices[vid].position);
-                        if ahead > tol::POINT_MERGE && ahead < neighbor_limit {
-                            neighbor_limit = ahead;
-                        }
-                    }
-                }
-            }
-            if distance.abs() >= neighbor_limit - tol::POINT_MERGE {
-                return Err(PushPullError::NonManifoldResult);
-            }
+        if !is_collapse
+            && guards == GuardMode::Enforced
+            && !has_wall
+            && self.translation_folds_a_neighbor(
+                &moved_vertices,
+                sweep,
+                &self.faces_reshaped_in_plane(face, &moved_vertices),
+            )
+        {
+            return Err(PushPullError::NonManifoldResult);
         }
 
         // Vertices this sweep translates IN PLACE (every vertex on the fast
@@ -2928,8 +3932,19 @@ impl Object {
             } else {
                 moved_vertices.clone()
             };
-            if self.moving_vertices_pin_a_face(face, &in_place) {
-                return Err(PushPullError::NonManifoldResult);
+            let pinned = self.faces_pinned_by_moving(face, &in_place);
+            if !pinned.is_empty() {
+                // An analytic claim on either side (a cylinder wall facet
+                // pushed, or one the touch vertex holds) is the non-manifold
+                // case; a plain planar face dragged off its plane by a plain
+                // one is named as such.
+                let claimed = self.faces[face].surface.is_some()
+                    || pinned.iter().any(|&p| self.faces[p].surface.is_some());
+                return Err(if claimed {
+                    PushPullError::NonManifoldResult
+                } else {
+                    PushPullError::WallNeighborNonPlanar
+                });
             }
         }
 
@@ -3019,6 +4034,26 @@ impl Object {
         // still lie on the same (infinite) cylinder.
         if let Some(f) = obj.faces.get_mut(face) {
             f.surface = None;
+            f.blend = None;
+        }
+        // A stretched neighbour keeps a cylinder claim (its plane and the
+        // axis are unchanged), but a sphere, torus or cone facet whose
+        // vertices moved along the push is in general no longer a chord facet
+        // of its surface: re-check those claims and drop the ones that no
+        // longer hold (map-or-drop; never move geometry to keep a claim).
+        for &nf in &neighbor_faces {
+            let Some(f) = obj.faces.get(nf) else { continue };
+            let Some(claim) = f.surface else { continue };
+            if matches!(claim, crate::topo::SurfaceRef::Cylinder { .. }) {
+                continue;
+            }
+            let points: Vec<Point3> = std::iter::once(f.outer_loop)
+                .chain(f.inner_loops.iter().copied())
+                .flat_map(|l| obj.loop_positions(l))
+                .collect();
+            if !crate::surface::validate_face_claim(&claim, &f.plane, &points, obj.planarity_tol) {
+                obj.faces[nf].surface = None;
+            }
         }
         // A moved subset of vertices carries an imprinted circle's endpoints
         // off its stored center (a pushed circle's rim, or a hole ring pushed
@@ -3031,6 +4066,15 @@ impl Object {
         // dropped so a stale one never trips the validator.
         obj.map_translated_edge_curves(self, &moved_vertices, sweep);
         obj.drop_stale_edge_curves();
+
+        // A face that meets the moved face at a corner only (no shared
+        // edge, so Step 2 never classified it: the fans Deform's planarizer
+        // and imports leave at a vertex) kept that corner while it moved.
+        // When its plane does not contain the sweep it is off its plane
+        // now. Refused typed, never folded.
+        if face_bent_at_vertices(&obj, &moved_vertices, face).is_some() {
+            return Err(PushPullError::WallNeighborNonPlanar);
+        }
 
         // Step 6: Validate (debug) and the always-on release-safe backstop
         //: a near-degenerate sweep that slips past the guards above yet
@@ -3200,7 +4244,10 @@ impl Object {
             axis_point,
             axis,
             radius,
-        } = surface;
+        } = surface
+        else {
+            unreachable!("offset_cylinder_wall is only routed to for cylinder walls");
+        };
 
         // Radial orientation of the picked facet: a chord plane sits at
         // apothem distance from the axis, on the interior side of an outer
@@ -3269,6 +4316,12 @@ impl Object {
             })
             .map(|(fid, _)| fid)
             .collect();
+        // A face that cannot stay planar is refused as `WallNeighborNonPlanar`,
+        // but only after every other reshaped face has been refit: a hole
+        // ring that escapes its face, or a boundary that folds, is the more
+        // specific refusal, and which of the two faces is visited first (slot
+        // order) must not decide the verdict.
+        let mut bent = false;
         for &fid in &affected {
             // Planarity first, so a genuinely bent neighbor reports as
             // WallNeighborNonPlanar rather than whatever downstream check a
@@ -3276,19 +4329,25 @@ impl Object {
             // is the reference plane; every loop vertex must still lie on
             // one plane within the object's planarity tolerance.
             let outer_pts: Vec<Point3> = obj.loop_positions(obj.faces[fid].outer_loop).collect();
-            let fit = Plane::from_polygon(&outer_pts)
-                .map_err(|_| PushPullError::WallNeighborNonPlanar)?;
+            let Ok(fit) = ring_plane(&obj, &outer_pts) else {
+                bent = true;
+                continue;
+            };
             let loops: Vec<LoopId> = std::iter::once(obj.faces[fid].outer_loop)
                 .chain(obj.faces[fid].inner_loops.iter().copied())
                 .collect();
-            for l in loops {
-                for p in obj.loop_positions(l) {
-                    if fit.signed_distance(p).abs() > obj.planarity_tol {
-                        return Err(PushPullError::WallNeighborNonPlanar);
-                    }
-                }
+            let planar = loops.iter().all(|&l| {
+                obj.loop_positions(l)
+                    .all(|p| fit.signed_distance(p).abs() <= obj.planarity_tol)
+            });
+            if !planar {
+                bent = true;
+                continue;
             }
             refit_face_plane(&mut obj, fid)?;
+        }
+        if bent {
+            return Err(PushPullError::WallNeighborNonPlanar);
         }
 
         // Hole loops of a reshaped face must also stay clear of EACH OTHER —
@@ -3613,7 +4672,7 @@ impl Object {
         face: FaceId,
         loop_path: &[Point3],
     ) -> Result<FaceSplitInnerReport, StickyError> {
-        self.split_face_inner_impl(face, loop_path, None, &[])
+        self.split_face_inner_impl(face, loop_path, None, &[], &[])
     }
 
     /// [`Object::split_face_inner`] carrying the analytic circle the imprinted
@@ -3639,7 +4698,7 @@ impl Object {
         let curves = curve
             .map(|g| vec![Some(g); loop_path.len()])
             .unwrap_or_default();
-        self.split_face_inner_impl(face, loop_path, None, &curves)
+        self.split_face_inner_impl(face, loop_path, None, &curves, &[])
     }
 
     /// [`Object::split_face_inner`] with a per-edge analytic claim: `curves[k]`
@@ -3659,7 +4718,7 @@ impl Object {
         loop_path: &[Point3],
         curves: &[Option<crate::sketch::CurveGeom>],
     ) -> Result<FaceSplitInnerReport, StickyError> {
-        self.split_face_inner_impl(face, loop_path, None, curves)
+        self.split_face_inner_impl(face, loop_path, None, curves, &[])
     }
 
     /// [`Object::split_face_inner`] with explicit attributes for the created
@@ -3677,20 +4736,25 @@ impl Object {
         loop_path: &[Point3],
         restore: Option<crate::topo::FaceAttrs>,
     ) -> Result<FaceSplitInnerReport, StickyError> {
-        self.split_face_inner_impl(face, loop_path, restore, &[])
+        self.split_face_inner_impl(face, loop_path, restore, &[], &[])
     }
 
     /// Shared body of the [`Object::split_face_inner`] family. `restore` is
     /// the undo attribute snapshot (see [`Object::split_face_inner_with_attrs`]);
     /// `curve` stamps the imprinted loop's edges (see
-    /// [`Object::split_face_inner_with_curve`]). Crate-internal so history's
-    /// dispatch can supply both at once.
+    /// [`Object::split_face_inner_with_curve`]). `edge_attrs` gives each
+    /// loop edge back the attribute dictionary it carried when a
+    /// `merge_inner_face` dissolved it ([`FaceMergeInnerReport::edge_attrs`]),
+    /// in the same per-edge order as `curves`; empty gives every new edge
+    /// none (the forward/tool semantics). Crate-internal so history's
+    /// dispatch can supply them all at once.
     pub(crate) fn split_face_inner_impl(
         &mut self,
         face: FaceId,
         loop_path: &[Point3],
         restore: Option<crate::topo::FaceAttrs>,
         curves: &[Option<crate::sketch::CurveGeom>],
+        edge_attrs: &[crate::attr::AttrDict],
     ) -> Result<FaceSplitInnerReport, StickyError> {
         // ---- validation (no mutation) ----
         if !self.faces.contains_key(face) {
@@ -3701,6 +4765,9 @@ impl Object {
         }
         if !curves.is_empty() && curves.len() != loop_path.len() {
             return Err(StickyError::CurveClaimOffLoop);
+        }
+        if !edge_attrs.is_empty() && edge_attrs.len() != loop_path.len() {
+            return Err(StickyError::WouldCorrupt);
         }
         let face_plane = self.faces[face].plane;
         let normal = face_plane.normal();
@@ -3733,6 +4800,16 @@ impl Object {
             (0..n).map(|i| curves[(2 * n - 2 - i) % n]).collect()
         } else {
             curves.to_vec()
+        };
+        // Edge dictionaries follow the winding the same way.
+        let edge_attrs: Vec<crate::attr::AttrDict> = if edge_attrs.is_empty() {
+            vec![crate::attr::AttrDict::new(); n]
+        } else if reversed {
+            (0..n)
+                .map(|i| edge_attrs[(2 * n - 2 - i) % n].clone())
+                .collect()
+        } else {
+            edge_attrs.to_vec()
         };
 
         // The caller owns the analytic truth: a supplied circle claim must
@@ -3792,6 +4869,8 @@ impl Object {
             back_material: sub_attrs.back_material,
             uv_frame: sub_attrs.uv_frame,
             surface: sub_attrs.surface,
+            blend: sub_attrs.blend,
+            attrs: sub_attrs.attrs,
         });
         obj.loops[sub_loop].face = sub_face;
 
@@ -3840,8 +4919,11 @@ impl Object {
                 twin_half_edge: Some(h_hole[k]),
                 curve: curves[k],
                 soft: false,
+                crease: false,
                 polygon: None,
+                attrs: AttrSlot::NONE,
             });
+            obj.set_edge_attrs(edge, edge_attrs[k].clone());
             obj.half_edges[h_sub[k]].edge = edge;
             obj.half_edges[h_hole[k]].edge = edge;
             new_edges.push(edge);
@@ -3942,6 +5024,23 @@ impl Object {
             .iter()
             .map(|&h| self.edges[self.half_edges[h].edge].curve)
             .collect();
+        // ...and each loop edge's attribute dictionary (empty when no loop
+        // edge carries one, the common case).
+        let edge_attrs: Vec<crate::attr::AttrDict> = if h_sub
+            .iter()
+            .all(|&h| self.edges[self.half_edges[h].edge].attrs.is_none())
+        {
+            Vec::new()
+        } else {
+            h_sub
+                .iter()
+                .map(|&h| {
+                    self.edge_attrs(self.half_edges[h].edge)
+                        .cloned()
+                        .unwrap_or_default()
+                })
+                .collect()
+        };
 
         // ---- removal surgery on a clone ----
         let mut obj = self.clone();
@@ -3979,6 +5078,7 @@ impl Object {
             loop_path,
             sub_face_attrs,
             curves,
+            edge_attrs,
         })
     }
 
@@ -4192,26 +5292,36 @@ impl Object {
         Ok(adopted)
     }
 
-    /// Slide, turn, or scale an imprint on its face, in place: every vertex
-    /// of `sub_face`'s outer loop — and, recursively, of every flat imprint
-    /// nested inside it — moves by `xf`; no handle changes, so a selection
-    /// of the sub-face survives the edit. `Edge::curve` claims on the moved
-    /// loops map with it (center as a point, radius by the scale), so a
-    /// moved circle still pushes through as a smooth cylinder.
+    /// Slide, turn, scale, or mirror an imprint on its face, in place: every
+    /// vertex of `sub_face`'s outer loop — and, recursively, of every flat
+    /// imprint nested inside it — moves by `xf`; no handle changes, so a
+    /// selection of the sub-face survives the edit. `Edge::curve` claims on
+    /// the moved loops map with it (center as a point, radius by the
+    /// scale), so a moved circle still pushes through as a smooth cylinder.
     ///
-    /// `xf` must be an in-plane similarity of the parent face — translation
-    /// in the plane, rotation about the normal, uniform positive scale, or
-    /// any composition — else [`StickyError::NotInPlane`]. The moved outer
-    /// loop must still sit strictly inside the parent and clear of its
-    /// boundary ([`StickyError::LoopNotStrictlyInside`]). Another shape,
-    /// boss, recess, or hole on the parent that the moved shape comes to
-    /// fully ENCLOSE is adopted — it becomes a hole of the innermost moved
-    /// shape around it, exactly as drawing around it would — while one it
-    /// would cross, touch, or land inside refuses
-    /// [`StickyError::LoopNotStrictlyInside`]. A hole of the imprint holding
-    /// anything but a flat nested imprint refuses [`StickyError::NestedNotFlat`]
-    /// (a shape holding a boss cannot slide). Not an imprint at all:
-    /// [`StickyError::NotAnInnerFace`].
+    /// `xf` must be a similarity that maps the parent face's plane onto
+    /// itself — translation in the plane, rotation about the normal,
+    /// uniform scale about a point of the plane, a mirror across a line in
+    /// the plane, and also a map that turns the normal over while keeping
+    /// the plane (a mirror across the face's own plane, a point reflection
+    /// through a point of it, a half turn about a line in it), or any
+    /// composition — else [`StickyError::NotInPlane`]. Only the loop's
+    /// orientation in the plane matters: when
+    /// `det(xf) · (moved normal · normal) < 0` (an in-plane mirror) the
+    /// moved loops are run the other way afterwards and stay
+    /// counter-clockwise about the parent's normal; otherwise (a point
+    /// reflection, a mirror across the face plane) nothing is reversed.
+    /// Handles are kept either way. The moved outer loop must still sit
+    /// strictly inside the parent and clear of its boundary
+    /// ([`StickyError::LoopNotStrictlyInside`]). Another shape, boss,
+    /// recess, or hole on the parent that the moved shape comes to fully
+    /// ENCLOSE is adopted — it becomes a hole of the innermost moved shape
+    /// around it, exactly as drawing around it would — while one it would
+    /// cross, touch, or land inside refuses
+    /// [`StickyError::LoopNotStrictlyInside`]. A hole of the imprint
+    /// holding anything but a flat nested imprint refuses
+    /// [`StickyError::NestedNotFlat`] (a shape holding a boss cannot
+    /// slide). Not an imprint at all: [`StickyError::NotAnInnerFace`].
     ///
     /// Reversed by the same op with [`TransformSubFaceReport::inverse`],
     /// pinning [`TransformSubFaceReport::adopted`].
@@ -4250,18 +5360,31 @@ impl Object {
             .imprint_parent(sub_face)
             .ok_or(StickyError::NotAnInnerFace)?;
         let scale = xf.similarity_scale().ok_or(StickyError::NotInPlane)?;
-        if xf.determinant() <= 0.0 {
-            return Err(StickyError::NotInPlane);
-        }
         let inverse = xf.inverse().map_err(|_| StickyError::NotInPlane)?;
         let plane = self.faces[parent].plane;
         let normal = plane.normal();
-        // The plane must map onto itself: normal preserved (up to the
-        // similarity's scale), and the moved loop still on it.
+        // The plane must map onto itself: the normal kept or turned over
+        // (up to the similarity's scale), and the moved loop still on it
+        // (checked below). Turning the normal over is no refusal: a map
+        // that keeps the plane — a mirror across the face's own plane, a
+        // point reflection through a point of it, a half turn about a line
+        // in it — acts on the loop as a move within the plane.
         let moved_normal = xf.apply_vector(normal) * (1.0 / scale);
-        if (moved_normal - normal).length() >= tol::NORMAL_DIRECTION {
+        if (moved_normal - normal).length() >= tol::NORMAL_DIRECTION
+            && (moved_normal + normal).length() >= tol::NORMAL_DIRECTION
+        {
             return Err(StickyError::NotInPlane);
         }
+        // What matters for the loop is its orientation IN the plane: seen
+        // from the normal, the moved loops' winding reverses exactly when
+        // the map's orientation and its action on the normal disagree
+        // (det(xf) · (moved_normal · normal) < 0) — an in-plane mirror, or
+        // a half turn about an in-plane line. A point reflection or a
+        // mirror across the face plane flips both and reverses nothing.
+        // Reversed loops are run the other way after the move so they stay
+        // counter-clockwise about the parent's normal; the face planes do
+        // not change.
+        let reverses = xf.determinant() * moved_normal.dot(normal) < 0.0;
         // Resolve each pinned ring to the hole loop it names. A ring that
         // names no live hole is a recorded-inverse mismatch — a kernel bug by
         // the history contract — refused typed rather than guessed.
@@ -4358,6 +5481,26 @@ impl Object {
         for &v in &verts {
             let p = obj.vertices[v].position;
             obj.vertices[v].position = xf.apply_point(p);
+        }
+        if reverses {
+            // Every loop whose vertices moved: each moved face's outer loop
+            // and the hole loop it is twinned with (the parent's own hole
+            // for the imprint, a moved face's hole for a nested one). The
+            // set is closed under twinning, and a pinned hole, which did
+            // not move, is not in it.
+            let mut flipped: Vec<LoopId> = Vec::with_capacity(loops.len() * 2);
+            for &l in &loops {
+                let first = obj
+                    .loop_half_edges(l)
+                    .next()
+                    .ok_or(StickyError::WouldCorrupt)?;
+                let twin = obj.half_edges[first]
+                    .twin
+                    .ok_or(StickyError::WouldCorrupt)?;
+                flipped.push(l);
+                flipped.push(obj.half_edges[twin].loop_id);
+            }
+            obj.reverse_loops(&flipped);
         }
         for &e in &edges {
             if let Some(g) = obj.edges[e].curve {
@@ -4628,8 +5771,8 @@ impl Object {
                 obj.vertices[a[k]].position,
                 obj.vertices[a[(k + 1) % n]].position,
             ];
-            let plane =
-                Plane::from_polygon(&wall_pts).map_err(|_| PushPullError::NonManifoldResult)?;
+            let plane = crate::serialize::own_ring_plane(&wall_pts, &[], obj.planarity_tol)
+                .map_err(|_| PushPullError::NonManifoldResult)?;
             let wface = obj.faces.insert(Face {
                 outer_loop: wloop,
                 inner_loops: Vec::new(),
@@ -4648,6 +5791,8 @@ impl Object {
                     axis: normal,
                     radius: g.radius,
                 }),
+                blend: None,
+                attrs: AttrSlot::NONE,
             });
             obj.loops[wloop].face = wface;
             walls.push(wface);
@@ -4679,7 +5824,9 @@ impl Object {
                 twin_half_edge: Some(wa[k]),
                 curve: top_curve,
                 soft: false,
+                crease: false,
                 polygon: top_poly,
+                attrs: AttrSlot::NONE,
             });
             obj.half_edges[h_sub[k]].edge = e_top;
             obj.half_edges[wa[k]].edge = e_top;
@@ -4699,7 +5846,9 @@ impl Object {
                 twin_half_edge: Some(wd[prev]),
                 curve: None,
                 soft: false,
+                crease: false,
                 polygon: None,
+                attrs: AttrSlot::NONE,
             });
             obj.half_edges[wb[k]].edge = e_vert;
             obj.half_edges[wd[prev]].edge = e_vert;
@@ -4710,6 +5859,7 @@ impl Object {
         // The raised sub-face left its chord plane: its inherited analytic
         // surface claim drops (map-or-drop, the true-curves design).
         obj.faces[sub_face].surface = None;
+        obj.faces[sub_face].blend = None;
 
         let shell = obj
             .shells
@@ -5222,10 +6372,22 @@ impl Object {
 
         // --- all checks passed — clone and mutate ---
         let mut obj = self.clone();
-        let report = match anchor_hole {
+        let mut report = match anchor_hole {
             None => do_split_face(&mut obj, face, path, &ep0, &ep1)?,
             Some(hole) => do_split_face_hole(&mut obj, face, hole, path, &ep0, &ep1)?,
         };
+        for hit in [&ep0, &ep1] {
+            if let EndpointHit::Vertex(_) = hit {
+                let at = endpoint_position(self, hit);
+                if !report
+                    .vertex_ends
+                    .iter()
+                    .any(|&q| crate::retrace::bits(q) == crate::retrace::bits(at))
+                {
+                    report.vertex_ends.push(at);
+                }
+            }
+        }
         if let Some(restore) = restore {
             apply_split_restore(&mut obj, &report.new_faces, &restore);
         }
@@ -5273,10 +6435,31 @@ impl Object {
     /// split followed by a merge leaves no scar — this is what makes the
     /// identity property hold.
     ///
+    /// A run passing through a vertex that other edges also use (the faces
+    /// touch another boundary there, as a disc's arc does at the point where
+    /// its hole touches the outer loop) dissolves as the pieces that vertex
+    /// splits it into, through the re-trace that merges several runs: the
+    /// vertex survives as an end of each piece, and is healed away when it
+    /// is left a straight two-edge scar, exactly as erasing those edges
+    /// heals it. Its undo re-inserts the pieces.
+    ///
     /// # Errors
     /// See [`StickyError`]; all leave the object untouched.
     pub fn merge_faces(&mut self, edge: EdgeId) -> Result<FaceMergeReport, StickyError> {
-        self.merge_faces_impl(edge, true)
+        self.merge_faces_impl(edge, true, &[])
+    }
+
+    /// [`Object::merge_faces`] that leaves every run end at one of
+    /// `keep_vertices` (matched within [`tol::POINT_MERGE`]) in place even
+    /// when the merge leaves it a straight two-edge scar: the undo of a
+    /// split passes the split's [`FaceSplitReport::vertex_ends`], so a cut
+    /// that started at the joint of a straight run gives that joint back.
+    pub(crate) fn merge_faces_keeping(
+        &mut self,
+        edge: EdgeId,
+        keep_vertices: &[Point3],
+    ) -> Result<FaceMergeReport, StickyError> {
+        self.merge_faces_impl(edge, true, keep_vertices)
     }
 
     /// [`Object::merge_faces`], with merges along several separate runs
@@ -5287,6 +6470,7 @@ impl Object {
         &mut self,
         edge: EdgeId,
         multi_run: bool,
+        keep_vertices: &[Point3],
     ) -> Result<FaceMergeReport, StickyError> {
         // --- validation ---
         let edge_data = match self.edges.get(edge) {
@@ -5355,8 +6539,23 @@ impl Object {
         // Several separate runs between the two loops: every run dissolves
         // at once through the re-trace (two faces side by side gain a hole
         // where they enclosed another face; a face in a hole splits that
-        // hole). The face holding the hole, else `face_a`, survives.
-        let runs = self.shared_runs(loop_a, loop_b);
+        // hole). The face holding the hole, else `face_a`, survives. So does
+        // one run passing through a vertex other edges also use (a hole
+        // touching the outer loop there): that vertex outlives the dissolve,
+        // so the run goes as the pieces it splits into there, the scar it
+        // leaves heals as erasing those edges heals it, and the undo
+        // re-inserts the pieces, each boundary to boundary — one cut whose
+        // interior ran through a boundary vertex could not be replayed. The
+        // boolean seam cleanup (`!multi_run`) keeps its unsplit runs.
+        let runs: Vec<Vec<Point3>> = {
+            let runs = self.shared_run_half_edges(loop_a, loop_b);
+            let runs = if multi_run {
+                self.split_runs_at_touches(runs)
+            } else {
+                runs
+            };
+            runs.iter().map(|run| self.run_positions(run)).collect()
+        };
         if runs.len() > 1 {
             if !multi_run {
                 return Err(StickyError::SharedChainDisconnected);
@@ -5368,7 +6567,7 @@ impl Object {
                     [attrs_snapshot(self, inner), attrs_snapshot(self, owner)]
                 }
             };
-            let r = self.retrace_face_impl(keep, &[], &runs, &[], Some(keep))?;
+            let r = self.retrace_face_impl(keep, &[], &runs, &[], Some(keep), keep_vertices)?;
             debug_assert_eq!(r.faces, vec![keep], "one merged face, the survivor");
             return Ok(FaceMergeReport {
                 merged_face: keep,
@@ -5380,8 +6579,10 @@ impl Object {
         // --- clone and mutate ---
         let mut obj = self.clone();
         let report = match into_hole {
-            None => do_merge_faces(&mut obj, face_a, face_b)?,
-            Some((inner, owner, hole)) => do_merge_into_hole(&mut obj, inner, owner, hole)?,
+            None => do_merge_faces(&mut obj, face_a, face_b, keep_vertices)?,
+            Some((inner, owner, hole)) => {
+                do_merge_into_hole(&mut obj, inner, owner, hole, keep_vertices)?
+            }
         };
         obj.check_invariants();
         // Always-on backstop.
@@ -5391,10 +6592,15 @@ impl Object {
     }
 
     /// The separate runs of edges along which `loop_a` meets `loop_b`
-    /// (half-edges of one twinned into the other), each as its vertex
-    /// positions in `loop_a`'s order. Empty when they share none, and one
-    /// run when every half-edge of `loop_a` is shared.
-    pub(crate) fn shared_runs(&self, loop_a: LoopId, loop_b: LoopId) -> Vec<Vec<Point3>> {
+    /// (half-edges of one twinned into the other), each as `loop_a`'s
+    /// half-edges in loop order ([`Object::run_positions`] gives its
+    /// points). Empty when they share none, and when every half-edge of
+    /// `loop_a` is shared (one closed run has no start).
+    pub(crate) fn shared_run_half_edges(
+        &self,
+        loop_a: LoopId,
+        loop_b: LoopId,
+    ) -> Vec<Vec<HalfEdgeId>> {
         let hes: Vec<HalfEdgeId> = self.loop_half_edges(loop_a).collect();
         let shared = |h: HalfEdgeId| {
             self.half_edges[h]
@@ -5407,17 +6613,67 @@ impl Object {
             if !shared(hes[i]) || shared(hes[(i + n - 1) % n]) {
                 continue;
             }
-            let mut pts = Vec::new();
+            let mut run = Vec::new();
             let mut k = i;
             while shared(hes[k % n]) {
-                pts.push(self.vertices[self.half_edges[hes[k % n]].origin].position);
+                run.push(hes[k % n]);
                 k += 1;
             }
-            let last = hes[(k + n - 1) % n];
-            pts.push(self.vertices[self.half_edges[self.half_edges[last].next].origin].position);
-            runs.push(pts);
+            runs.push(run);
         }
         runs
+    }
+
+    /// The vertex positions of a run of consecutive loop half-edges: every
+    /// origin, then the last half-edge's destination.
+    pub(crate) fn run_positions(&self, run: &[HalfEdgeId]) -> Vec<Point3> {
+        let mut pts: Vec<Point3> = run
+            .iter()
+            .map(|&h| self.vertices[self.half_edges[h].origin].position)
+            .collect();
+        if let Some(&last) = run.last() {
+            pts.push(self.vertices[self.half_edges[self.half_edges[last].next].origin].position);
+        }
+        pts
+    }
+
+    /// Splits each run of shared half-edges at every interior vertex that
+    /// other edges also use: a point where the run touches another boundary
+    /// of the two faces (a hole touching the outer loop at one vertex, say).
+    /// Such a vertex outlives the dissolve, so it is an end of the edges
+    /// removed, not a point inside them: the merge removes the pieces, and
+    /// its undo inserts them, each running boundary to boundary. A vertex
+    /// only the run passes through departs exactly two half-edges (the run's
+    /// own, one in each loop); any more is a touch.
+    pub(crate) fn split_runs_at_touches(&self, runs: Vec<Vec<HalfEdgeId>>) -> Vec<Vec<HalfEdgeId>> {
+        let interior: std::collections::BTreeSet<VertexId> = runs
+            .iter()
+            .flat_map(|run| run.iter().skip(1))
+            .map(|&h| self.half_edges[h].origin)
+            .collect();
+        if interior.is_empty() {
+            return runs;
+        }
+        let mut departing: std::collections::BTreeMap<VertexId, usize> =
+            std::collections::BTreeMap::new();
+        for he in self.half_edges.values() {
+            if interior.contains(&he.origin) {
+                *departing.entry(he.origin).or_default() += 1;
+            }
+        }
+        let touch = |h: HalfEdgeId| departing[&self.half_edges[h].origin] > 2;
+        let mut pieces = Vec::new();
+        for run in runs {
+            let mut piece = Vec::new();
+            for (k, &h) in run.iter().enumerate() {
+                if k > 0 && touch(h) {
+                    pieces.push(std::mem::take(&mut piece));
+                }
+                piece.push(h);
+            }
+            pieces.push(piece);
+        }
+        pieces
     }
 
     /// The interior edges whose two adjacent faces are coplanar, facing the
@@ -5465,13 +6721,76 @@ impl Object {
     /// through that validated primitive, so watertightness is preserved by
     /// construction. Returns the number of edges dissolved.
     pub fn merge_coplanar_faces(&mut self, preserve: &[(Point3, Point3)]) -> usize {
+        self.merge_coplanar_faces_impl(preserve, None)
+    }
+
+    /// [`Object::merge_coplanar_faces`] over the edges between two of
+    /// `faces` only (a boolean that kept the rest of the object as it was:
+    /// every other edge is one an operand already had, which `preserve`
+    /// would keep anyway). A merge's survivor is one of the pair, so the
+    /// set stays the faces the boolean made.
+    pub(crate) fn merge_coplanar_faces_within(
+        &mut self,
+        preserve: &[(Point3, Point3)],
+        faces: &[FaceId],
+    ) -> usize {
+        self.merge_coplanar_faces_impl(preserve, Some(faces))
+    }
+
+    /// The operand edges `preserve` needs for a boolean that rebuilt only
+    /// `faces` of this object: [`Object::coplanar_edge_segments`] of the
+    /// edges on those faces.
+    pub(crate) fn coplanar_edge_segments_of(&self, faces: &[FaceId]) -> Vec<(Point3, Point3)> {
+        let mut edges: Vec<EdgeId> = Vec::new();
+        for &f in faces {
+            for l in self.face_loops(f) {
+                edges.extend(self.loop_half_edges(l).map(|h| self.half_edges[h].edge));
+            }
+        }
+        edges.sort_unstable();
+        edges.dedup();
+        edges
+            .into_iter()
+            .filter_map(|e| self.coplanar_pair_endpoints(&self.edges[e], true))
+            .collect()
+    }
+
+    fn merge_coplanar_faces_impl(
+        &mut self,
+        preserve: &[(Point3, Point3)],
+        within: Option<&[FaceId]>,
+    ) -> usize {
         let mut dissolved = 0;
+        let mut set: slotmap::SecondaryMap<FaceId, ()> = slotmap::SecondaryMap::new();
+        for &f in within.unwrap_or(&[]) {
+            set.insert(f, ());
+        }
         loop {
             // Fresh scan each round: a merge deletes its edge and one face,
             // and can expose new coplanar pairs. Slotmap key order is
             // deterministic for a deterministically built object, so the
             // merge order (and thus the result) is reproducible.
-            let candidates: Vec<EdgeId> = self.edges.keys().collect();
+            let candidates: Vec<EdgeId> = match within {
+                None => self.edges.keys().collect(),
+                Some(_) => {
+                    let face_of = |h: HalfEdgeId| self.loops[self.half_edges[h].loop_id].face;
+                    let mut c: Vec<EdgeId> = set
+                        .keys()
+                        .filter(|&f| self.faces.contains_key(f))
+                        .flat_map(|f| self.face_loops(f))
+                        .flat_map(|l| self.loop_half_edges(l).collect::<Vec<_>>())
+                        .filter(|&h| {
+                            self.half_edges[h]
+                                .twin
+                                .is_some_and(|t| set.contains_key(face_of(t)))
+                        })
+                        .map(|h| self.half_edges[h].edge)
+                        .collect();
+                    c.sort_unstable();
+                    c.dedup();
+                    c
+                }
+            };
             let mut progress = false;
             for eid in candidates {
                 // An earlier merge this round may have deleted the edge.
@@ -5495,7 +6814,7 @@ impl Object {
                 if preserved {
                     continue;
                 }
-                if self.merge_faces_impl(eid, false).is_ok() {
+                if self.merge_faces_impl(eid, false, &[]).is_ok() {
                     dissolved += 1;
                     progress = true;
                 }
@@ -5552,6 +6871,8 @@ impl Object {
             || fa.back_material != fb.back_material
             || fa.uv_frame != fb.uv_frame
             || fa.surface != fb.surface
+            || fa.blend != fb.blend
+            || !self.face_attrs_eq(face_a, face_b)
         {
             return None;
         }
@@ -5616,14 +6937,98 @@ impl Object {
     /// # Errors
     /// See [`BooleanError`]. Degenerate contact (coincident faces, tangent
     /// edges) is refused, not repaired — resolution strategies (nudging,
-    /// merge-group containers) belong to M2 UX.
+    /// merge-group containers) belong to M2 UX. A subtract whose operands
+    /// are disjoint or only touch, so that nothing is removed, refuses as
+    /// [`BooleanError::NothingRemoved`] rather than returning `a` unchanged.
+    ///
+    /// A face the cut leaves narrower than [`tol::FEATURE_MIN`] is merged
+    /// into its neighbors and logged ([`BooleanTidy`]);
+    /// [`Object::boolean_reported`] also hands back what was merged.
     pub fn boolean(
         op: BooleanOp,
         a: &Object,
         b: &Object,
         b_to_a: &Transform,
     ) -> Result<Object, BooleanError> {
-        crate::boolean::execute(op, a, b, b_to_a)
+        Object::boolean_reported(op, a, b, b_to_a, &mut BooleanTidy::default())
+    }
+
+    /// [`Object::boolean`], adding what its tidy merged to `tidy` (sites in
+    /// `a`'s frame). `tidy` is untouched on `Err`.
+    pub fn boolean_reported(
+        op: BooleanOp,
+        a: &Object,
+        b: &Object,
+        b_to_a: &Transform,
+        tidy: &mut BooleanTidy,
+    ) -> Result<Object, BooleanError> {
+        crate::boolean::execute(op, a, b, b_to_a, tidy)
+    }
+
+    /// [`Object::boolean`], also returning what it rebuilt when it kept an
+    /// operand's untouched faces in place ([`crate::boolean::BooleanTouch`]).
+    /// What the boolean's tidy merged is added to `tidy`
+    /// ([`Object::boolean_reported`]).
+    pub(crate) fn boolean_region(
+        op: BooleanOp,
+        a: &Object,
+        b: &Object,
+        b_to_a: &Transform,
+        tidy: &mut BooleanTidy,
+    ) -> Result<(Object, Option<crate::boolean::BooleanTouch>), BooleanError> {
+        crate::boolean::execute_region(op, a, b, b_to_a, tidy)
+    }
+
+    /// [`Object::boolean`] as the document commits it: the coplanar seams
+    /// the boolean introduced are dissolved
+    /// ([`Object::merge_coplanar_faces`]) while the coplanar edges either
+    /// operand already had (drawn imprints, carried into `a`'s frame
+    /// through `b_to_a`) are kept. [`Document::boolean`](crate::Document::boolean)
+    /// and the boolean through a placement commit exactly this product, so
+    /// a pure computation of the same two solids (the API's
+    /// `hew.compute.boolean`) yields the same geometry the commit would.
+    ///
+    /// # Errors
+    /// As [`Object::boolean`].
+    pub fn boolean_product(
+        op: BooleanOp,
+        a: &Object,
+        b: &Object,
+        b_to_a: &Transform,
+    ) -> Result<Object, BooleanError> {
+        Object::boolean_product_reported(op, a, b, b_to_a, &mut BooleanTidy::default())
+    }
+
+    /// [`Object::boolean_product`], adding what the boolean's tidy merged
+    /// to `tidy` ([`Object::boolean_reported`]).
+    pub fn boolean_product_reported(
+        op: BooleanOp,
+        a: &Object,
+        b: &Object,
+        b_to_a: &Transform,
+        tidy: &mut BooleanTidy,
+    ) -> Result<Object, BooleanError> {
+        let (mut result, touch) = Object::boolean_region(op, a, b, b_to_a, tidy)?;
+        let in_a = |(p, q): (Point3, Point3)| (b_to_a.apply_point(p), b_to_a.apply_point(q));
+        // A boolean that kept an operand's untouched faces looks only where
+        // it rebuilt.
+        match touch {
+            None => {
+                let mut preserve = a.coplanar_edge_segments();
+                preserve.extend(b.coplanar_edge_segments().into_iter().map(in_a));
+                result.merge_coplanar_faces(&preserve);
+            }
+            Some(touch) => {
+                let mut preserve = a.coplanar_edge_segments_of(&touch.near[0]);
+                preserve.extend(
+                    b.coplanar_edge_segments_of(&touch.near[1])
+                        .into_iter()
+                        .map(in_a),
+                );
+                result.merge_coplanar_faces_within(&preserve, &touch.new_faces);
+            }
+        }
+        Ok(result)
     }
 
     /// Partition this Object's faces into connected components by shared-edge
@@ -5651,9 +7056,11 @@ impl Object {
         if components.len() <= 1 {
             return vec![self.clone()];
         }
+        let claims = self.edge_claims_by_piece(&components);
         components
-            .into_iter()
-            .map(|faces| self.rebuild_component(&faces))
+            .iter()
+            .zip(&claims)
+            .map(|(faces, claims)| self.rebuild_component_with(faces, claims))
             .collect()
     }
 
@@ -5719,9 +7126,11 @@ impl Object {
         }
         if positive.len() == components.len() {
             // No cavities: every component is its own discrete solid.
+            let claims = self.edge_claims_by_piece(&components);
             return components
-                .into_iter()
-                .map(|faces| self.rebuild_component(&faces))
+                .iter()
+                .zip(&claims)
+                .map(|(faces, claims)| self.rebuild_component_with(faces, claims))
                 .collect();
         }
 
@@ -5769,9 +7178,11 @@ impl Object {
                 None => return vec![self.clone()],
             }
         }
+        let claims = self.edge_claims_by_piece(&grouped);
         grouped
-            .into_iter()
-            .map(|faces| self.rebuild_component(&faces))
+            .iter()
+            .zip(&claims)
+            .map(|(faces, claims)| self.rebuild_component_with(faces, claims))
             .collect()
     }
 
@@ -5840,8 +7251,18 @@ impl Object {
     /// [`Object::split_connected_components`]; `faces` must form a closed shell
     /// for the result to be watertight (the splitter guarantees this for a
     /// valid manifold).
-    #[allow(clippy::type_complexity)] // mirrors from_faces_with_holes' spec tuple
     pub(crate) fn rebuild_component(&self, faces: &[FaceId]) -> Object {
+        self.rebuild_component_with(faces, &self.edge_claims())
+    }
+
+    /// [`Object::rebuild_component`] with this object's edge claims built
+    /// once by the caller, for a split into many pieces.
+    #[allow(clippy::type_complexity)] // mirrors from_faces_with_holes' spec tuple
+    pub(crate) fn rebuild_component_with(
+        &self,
+        faces: &[FaceId],
+        claims: &crate::repair::EdgeClaims,
+    ) -> Object {
         // Remap a loop's vertices to dense local indices, appending unseen
         // positions in first-encounter order (deterministic given the loop and
         // face iteration order).
@@ -5865,14 +7286,7 @@ impl Object {
         let mut positions: Vec<Point3> = Vec::new();
         let mut local_index: std::collections::BTreeMap<VertexId, usize> =
             std::collections::BTreeMap::new();
-        let mut specs: Vec<(
-            Vec<usize>,
-            Vec<Vec<usize>>,
-            Plane,
-            crate::material::FaceMaterial,
-            Option<crate::material::UvFrame>,
-            Option<crate::topo::SurfaceRef>,
-        )> = Vec::with_capacity(faces.len());
+        let mut specs: Vec<crate::build::FaceSpec> = Vec::with_capacity(faces.len());
         for &fid in faces {
             let face = &self.faces[fid];
             let outer = loop_indices(self, face.outer_loop, &mut positions, &mut local_index);
@@ -5888,6 +7302,9 @@ impl Object {
                 face.material,
                 face.uv_frame,
                 face.surface,
+                // Each face keeps its own dictionary; edges are rebuilt
+                // fresh and carry none (like their curve claims).
+                self.face_attrs(fid).cloned().unwrap_or_default(),
             ));
         }
 
@@ -5895,9 +7312,17 @@ impl Object {
         let backs: Vec<crate::material::FaceMaterial> =
             faces.iter().map(|&f| self.faces[f].back_material).collect();
         obj.set_built_back_materials(&backs);
+        let blends: Vec<Option<crate::topo::BlendTag>> =
+            faces.iter().map(|&f| self.faces[f].blend).collect();
+        obj.set_built_blends(&blends);
+        // Every edge of a piece is an edge of this object, unchanged: it
+        // keeps its soft, crease, curve and polygon marks.
+        obj.apply_edge_claims(claims);
         // Carry over object-level state the rebuild path does not know about.
         obj.default_material = self.default_material;
         obj.planarity_tol = self.planarity_tol;
+        // The records of the blends this piece carries.
+        obj.set_blend_records(self.blend_records().clone());
         obj.check_invariants();
         obj
     }
@@ -5921,6 +7346,16 @@ impl Object {
     /// On any `Err`, nothing is produced (the caller's source object is
     /// untouched).
     pub fn slice(&self, plane: &Plane) -> Result<(Object, Object), SliceError> {
+        self.slice_reported(plane, &mut BooleanTidy::default())
+    }
+
+    /// [`Object::slice`], adding what its two booleans' tidy merged to
+    /// `tidy` (sites in this object's frame); `tidy` is untouched on `Err`.
+    pub fn slice_reported(
+        &self,
+        plane: &Plane,
+        tidy: &mut BooleanTidy,
+    ) -> Result<(Object, Object), SliceError> {
         if self.watertight != WatertightState::Watertight {
             return Err(SliceError::NotSolid);
         }
@@ -5998,10 +7433,13 @@ impl Object {
             BooleanError::OperandNotSolid { .. } => SliceError::NotSolid,
             _ => SliceError::Degenerate,
         };
-        let positive = Object::boolean(BooleanOp::Intersect, self, &plus_box, &Transform::IDENTITY)
-            .map_err(map_bool)?;
+        let mut both = BooleanTidy::default();
+        let id = &Transform::IDENTITY;
+        let positive =
+            Object::boolean_reported(BooleanOp::Intersect, self, &plus_box, id, &mut both)
+                .map_err(map_bool)?;
         let negative =
-            Object::boolean(BooleanOp::Intersect, self, &minus_box, &Transform::IDENTITY)
+            Object::boolean_reported(BooleanOp::Intersect, self, &minus_box, id, &mut both)
                 .map_err(map_bool)?;
 
         positive.check_invariants();
@@ -6010,6 +7448,7 @@ impl Object {
         // piece rather than hand back invalid solids.
         positive.validate().map_err(|_| SliceError::Degenerate)?;
         negative.validate().map_err(|_| SliceError::Degenerate)?;
+        tidy.absorb(&both, id);
         Ok((positive, negative))
     }
 
@@ -6033,15 +7472,28 @@ impl Object {
     /// vertex is pinned by a face it shares no edge with
     /// ([`Object::moved_ring_is_pinned`]) is through at ANY distance, since
     /// no translation of its ring can leave that other face planar.
+    /// So is a push the flat path would take as a pure in-place translation
+    /// that folds a neighbor face's outline over a fixed part of its own
+    /// boundary ([`Object::translation_folds_a_neighbor`]: a step's low top
+    /// pushed down past a slot that reaches the step) — the flat path can
+    /// only refuse it, while the boolean cuts or grows the solid as it
+    /// should.
     /// Returns `false` for non-solids, stale faces, and attributed cylinder
     /// walls (which never overshoot: push/pull on them is a radial offset of
     /// the whole logical wall, the true-curves design §4.6, and deep pushes
     /// refuse there with a typed error).
     pub fn push_pull_overshoots(&self, face: FaceId, distance: f64) -> bool {
-        if self.faces.get(face).is_some_and(|f| f.surface.is_some()) {
+        if self
+            .faces
+            .get(face)
+            .is_some_and(|f| matches!(f.surface, Some(crate::topo::SurfaceRef::Cylinder { .. })))
+        {
             return false;
         }
         if self.moved_ring_is_pinned(face) {
+            return true;
+        }
+        if self.flat_translation_folds(face, distance) {
             return true;
         }
         let (opposing, blocking, reach) = if distance >= 0.0 {
@@ -6063,6 +7515,200 @@ impl Object {
             (None, None) => return false,
         };
         reach >= depth - tol::POINT_MERGE
+    }
+
+    /// How each boundary half-edge of `face` (over `boundary_loops`, its
+    /// outer loop and holes) relates to the neighbor across it, judged by
+    /// the angle between their normals. `None` if an edge has no twin (an
+    /// open boundary: not a solid).
+    fn boundary_edge_kinds(
+        &self,
+        face: FaceId,
+        boundary_loops: &[LoopId],
+    ) -> Option<std::collections::BTreeMap<HalfEdgeId, BoundaryEdgeKind>> {
+        let face_normal = self.faces[face].plane.normal();
+        let mut kinds = std::collections::BTreeMap::new();
+        for &loop_id in boundary_loops {
+            for h in self.loop_half_edges(loop_id) {
+                let twin_h = self.half_edges[h].twin?;
+                let neighbor_face = self.loops[self.half_edges[twin_h].loop_id].face;
+                let dot = face_normal
+                    .dot(self.faces[neighbor_face].plane.normal())
+                    .abs();
+                let kind = if dot <= tol::NORMAL_DIRECTION {
+                    BoundaryEdgeKind::Transverse
+                } else if dot >= 1.0 - tol::NORMAL_DIRECTION {
+                    BoundaryEdgeKind::Coplanar
+                } else {
+                    BoundaryEdgeKind::Slanted
+                };
+                kinds.insert(h, kind);
+            }
+        }
+        Some(kinds)
+    }
+
+    /// Whether [`Object::push_pull`] of `face` by `distance` would take the
+    /// pure-translate path (every boundary edge transverse, no step to
+    /// collapse) and that translation would fold a neighbor
+    /// ([`Object::translation_folds_a_neighbor`]) — the push its
+    /// obstruction guard refuses. `false` for anything the flat path would
+    /// not translate in place.
+    fn flat_translation_folds(&self, face: FaceId, distance: f64) -> bool {
+        if self.watertight != WatertightState::Watertight
+            || !distance.is_finite()
+            || distance.abs() < tol::POINT_MERGE
+        {
+            return false;
+        }
+        let Some(f) = self.faces.get(face) else {
+            return false;
+        };
+        if f.surface.is_some() {
+            return false;
+        }
+        let boundary_loops: Vec<LoopId> = std::iter::once(f.outer_loop)
+            .chain(f.inner_loops.iter().copied())
+            .collect();
+        let Some(edge_kinds) = self.boundary_edge_kinds(face, &boundary_loops) else {
+            return false;
+        };
+        if edge_kinds
+            .values()
+            .any(|k| !matches!(k, BoundaryEdgeKind::Transverse))
+        {
+            return false;
+        }
+        let sweep = f.plane.normal() * distance;
+        if !find_collapse_plans(self, face, &boundary_loops, &edge_kinds, sweep).is_empty() {
+            return false;
+        }
+        let mut moved: std::collections::BTreeSet<VertexId> = std::collections::BTreeSet::new();
+        for &loop_id in &boundary_loops {
+            for h in self.loop_half_edges(loop_id) {
+                moved.insert(self.half_edges[h].origin);
+            }
+        }
+        let reshaped = self.faces_reshaped_in_plane(face, &moved);
+        self.translation_folds_a_neighbor(&moved, sweep, &reshaped)
+    }
+
+    /// The faces an in-place translation of `face`'s ring (`moved`, along
+    /// its normal) reshapes within their own planes: every other face
+    /// holding a moved vertex whose plane holds the sweep direction. On the
+    /// flat path these are `face`'s edge neighbors and also any face that
+    /// meets `face` at a vertex only — a wall's sub-face below an imprinted
+    /// diagonal from a top corner, whose outline the sinking corner swings
+    /// the diagonal across. Its outline folds the same way an edge
+    /// neighbor's does ([`Object::translation_folds_a_neighbor`]). (A face
+    /// holding a moved vertex whose plane the sweep LEAVES is pinned
+    /// instead, [`Object::moving_vertices_pin_a_face`].) In [`FaceId`]
+    /// order.
+    fn faces_reshaped_in_plane(
+        &self,
+        face: FaceId,
+        moved: &std::collections::BTreeSet<VertexId>,
+    ) -> Vec<FaceId> {
+        let Some(f) = self.faces.get(face) else {
+            return Vec::new();
+        };
+        let normal = f.plane.normal();
+        let mut out: std::collections::BTreeSet<FaceId> = std::collections::BTreeSet::new();
+        for he in self.half_edges.values() {
+            if !moved.contains(&he.origin) {
+                continue;
+            }
+            let other = self.loops[he.loop_id].face;
+            if other != face
+                && self.faces[other].plane.normal().dot(normal).abs() <= tol::NORMAL_DIRECTION
+            {
+                out.insert(other);
+            }
+        }
+        out.into_iter().collect()
+    }
+
+    /// Whether translating the vertices `moved` by `sweep` folds one of
+    /// `neighbors` (the faces the translation reshapes in their own planes,
+    /// [`Object::faces_reshaped_in_plane`]: those sharing an edge with the
+    /// moved face, and those meeting it at a vertex only). Each neighbor's
+    /// outline changes only where it holds a moved vertex: an edge between
+    /// two moved vertices sweeps the parallelogram between its old and new
+    /// positions, and an edge from a fixed vertex to a moved one sweeps the
+    /// triangle the moving end draws.
+    /// The new outline crosses itself exactly when one of those regions
+    /// holds a fixed part of the neighbor's boundary — a fixed vertex
+    /// (within [`tol::POINT_MERGE`], the region's own fixed corner aside),
+    /// a fixed edge reaching more than that tolerance into it, or the fixed
+    /// end of a moving edge lying on the path its other end travels. A
+    /// fixed vertex ahead of the face but beside every such region (a rim
+    /// vertex of a cylinder's top beside a block's wall, #93; a slot's
+    /// corner beside a step's low top, KB-35) folds nothing.
+    fn translation_folds_a_neighbor(
+        &self,
+        moved: &std::collections::BTreeSet<VertexId>,
+        sweep: Vec3,
+        neighbors: &[FaceId],
+    ) -> bool {
+        let eps = tol::POINT_MERGE;
+        for &nf in neighbors {
+            let (u, v) = crate::geom2d::plane_axes(self.faces[nf].plane.normal());
+            let flat = |p: Point3| [p.to_vec().dot(u), p.to_vec().dot(v)];
+            let s = [sweep.dot(u), sweep.dot(v)];
+            let ahead = |p: [f64; 2]| [p[0] + s[0], p[1] + s[1]];
+            // Regions: the swept polygon, and its fixed corner (a triangle's)
+            // with the moving end whose path it must not lie on.
+            let mut regions: Vec<SweptRegion> = Vec::new();
+            let mut fixed_points: Vec<(VertexId, [f64; 2])> = Vec::new();
+            let mut fixed_edges: Vec<([f64; 2], [f64; 2])> = Vec::new();
+            let face = &self.faces[nf];
+            for loop_id in std::iter::once(face.outer_loop).chain(face.inner_loops.iter().copied())
+            {
+                for h in self.loop_half_edges(loop_id) {
+                    let o = self.half_edges[h].origin;
+                    let d = self.half_edges[self.half_edges[h].next].origin;
+                    let (po, pd) = (
+                        flat(self.vertices[o].position),
+                        flat(self.vertices[d].position),
+                    );
+                    match (moved.contains(&o), moved.contains(&d)) {
+                        (true, true) => regions.push((vec![po, pd, ahead(pd), ahead(po)], None)),
+                        (true, false) => {
+                            regions.push((vec![pd, po, ahead(po)], Some((d, po))));
+                        }
+                        (false, true) => {
+                            regions.push((vec![po, pd, ahead(pd)], Some((o, pd))));
+                        }
+                        (false, false) => fixed_edges.push((po, pd)),
+                    }
+                    if !moved.contains(&o) {
+                        fixed_points.push((o, po));
+                    }
+                }
+            }
+            for (poly, corner) in &regions {
+                if let Some((_, from)) = corner {
+                    // The moving end runs into or past the edge's fixed end.
+                    if dist_to_segment_2d(poly[0], *from, ahead(*from)) <= eps {
+                        return true;
+                    }
+                }
+                let own = corner.map(|(c, _)| c);
+                if fixed_points
+                    .iter()
+                    .any(|&(id, q)| Some(id) != own && in_convex_2d(q, poly, eps))
+                {
+                    return true;
+                }
+                if fixed_edges
+                    .iter()
+                    .any(|&(a, b)| segment_enters_convex_2d(a, b, poly, eps))
+                {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     /// Whether translating `face`'s boundary ring in place would drag a
@@ -6101,11 +7747,22 @@ impl Object {
         face: FaceId,
         moving: &std::collections::BTreeSet<VertexId>,
     ) -> bool {
+        !self.faces_pinned_by_moving(face, moving).is_empty()
+    }
+
+    /// The faces [`Object::moving_vertices_pin_a_face`] finds: those that
+    /// share a moving vertex with `face` but no edge, and whose plane the
+    /// sweep leaves.
+    fn faces_pinned_by_moving(
+        &self,
+        face: FaceId,
+        moving: &std::collections::BTreeSet<VertexId>,
+    ) -> Vec<FaceId> {
         if self.watertight != WatertightState::Watertight {
-            return false;
+            return Vec::new();
         }
         let Some(f) = self.faces.get(face) else {
-            return false;
+            return Vec::new();
         };
         let normal = f.plane.normal();
         let mut neighbors: std::collections::BTreeSet<FaceId> = std::collections::BTreeSet::new();
@@ -6116,15 +7773,20 @@ impl Object {
                 }
             }
         }
-        self.half_edges.values().any(|he| {
+        let mut pinned = std::collections::BTreeSet::new();
+        for he in self.half_edges.values() {
             if !moving.contains(&he.origin) {
-                return false;
+                continue;
             }
             let other = self.loops[he.loop_id].face;
-            other != face
+            if other != face
                 && !neighbors.contains(&other)
                 && self.faces[other].plane.normal().dot(normal).abs() > tol::NORMAL_DIRECTION
-        })
+            {
+                pinned.insert(other);
+            }
+        }
+        pinned.into_iter().collect()
     }
 
     /// The inward distance from `face`'s plane to the nearest CO-FACING wall
@@ -6288,6 +7950,51 @@ impl Object {
     /// attribution stays parallel to the profile boundaries. `None` when
     /// the face is stale or its boundary fails profile validation.
     pub(crate) fn profile_from_face(&self, face: FaceId) -> Option<Profile> {
+        self.profile_from_face_impl(face, false)
+    }
+
+    /// [`Object::profile_from_face`], and an edge with no circle claim of
+    /// its own takes the circle its neighbor face's surface claim cuts in
+    /// this face's plane, when that claim is a surface of revolution about
+    /// an axis square to the face (a cylinder, cone or torus) or a sphere,
+    /// and both ends lie on that circle. An extruded circle's cap rim gets
+    /// its circle back this way: extrusion stamps the wall, not the rim.
+    pub(crate) fn profile_from_face_with_rims(&self, face: FaceId) -> Option<Profile> {
+        self.profile_from_face_impl(face, true)
+    }
+
+    /// The circle `claim` cuts in `plane` through `p` and `q`, when `claim`
+    /// is a surface of revolution about an axis square to `plane` (or a
+    /// sphere) and both points lie on it.
+    fn rim_circle_of(
+        claim: &crate::topo::SurfaceRef,
+        plane: &Plane,
+        p: Point3,
+        q: Point3,
+    ) -> Option<crate::sketch::CurveGeom> {
+        use crate::topo::SurfaceRef;
+        let n = plane.normal();
+        let (on_axis, axis) = match *claim {
+            SurfaceRef::Cylinder {
+                axis_point, axis, ..
+            } => (axis_point, Some(axis)),
+            SurfaceRef::Cone { apex, axis, .. } => (apex, Some(axis)),
+            SurfaceRef::Torus { center, axis, .. } => (center, Some(axis)),
+            SurfaceRef::Sphere { center, .. } => (center, None),
+        };
+        if axis.is_some_and(|a| a.dot(n).abs() < 1.0 - tol::NORMAL_DIRECTION) {
+            return None;
+        }
+        if claim.distance(p).abs() > tol::PLANE_DIST || claim.distance(q).abs() > tol::PLANE_DIST {
+            return None;
+        }
+        let center = on_axis - n * plane.signed_distance(on_axis);
+        let (rp, rq) = ((p - center).length(), (q - center).length());
+        ((rp - rq).abs() <= tol::PLANE_DIST && rp > tol::POINT_MERGE)
+            .then_some(crate::sketch::CurveGeom { center, radius: rp })
+    }
+
+    fn profile_from_face_impl(&self, face: FaceId, derive_rims: bool) -> Option<Profile> {
         let f = self.faces.get(face)?;
         let outer: Vec<Point3> = self.loop_positions(f.outer_loop).collect();
         let holes: Vec<Vec<Point3>> = f
@@ -6303,9 +8010,23 @@ impl Object {
             self.loop_half_edges(lid)
                 .map(|h| {
                     let he = self.half_edges[h];
-                    let g = self.edges[he.edge].curve?;
                     let p = self.vertices[he.origin].position;
                     let q = self.vertices[self.half_edges[he.next].origin].position;
+                    let edge = &self.edges[he.edge];
+                    let g = match edge.curve {
+                        Some(g) => g,
+                        None if derive_rims => {
+                            let twin = if edge.half_edge == h {
+                                edge.twin_half_edge?
+                            } else {
+                                edge.half_edge
+                            };
+                            let other = self.loops[self.half_edges[twin].loop_id].face;
+                            let claim = self.faces[other].surface?;
+                            Self::rim_circle_of(&claim, &f.plane, p, q)?
+                        }
+                        None => return None,
+                    };
                     chord_facet_ok(p, q, &g).then_some(g)
                 })
                 .collect()
@@ -6339,6 +8060,17 @@ impl Object {
     /// - [`PushPullError::NonManifoldResult`] — the swept tool is degenerate or
     ///   the contact is tangent (refused, not repaired).
     pub fn push_through(&self, face: FaceId, distance: f64) -> Result<Object, PushPullError> {
+        self.push_through_reported(face, distance, &mut BooleanTidy::default())
+    }
+
+    /// [`Object::push_through`], adding what its boolean's tidy merged to
+    /// `tidy` (sites in this object's frame); `tidy` is untouched on `Err`.
+    pub fn push_through_reported(
+        &self,
+        face: FaceId,
+        distance: f64,
+        tidy: &mut BooleanTidy,
+    ) -> Result<Object, PushPullError> {
         if self.watertight != WatertightState::Watertight {
             return Err(PushPullError::ObjectNotSolid);
         }
@@ -6358,7 +8090,8 @@ impl Object {
         } else {
             BooleanOp::Union
         };
-        match Object::boolean(op, self, &tool, &Transform::IDENTITY) {
+        let mut merged = BooleanTidy::default();
+        match Object::boolean_reported(op, self, &tool, &Transform::IDENTITY, &mut merged) {
             Ok(mut result) => {
                 // Dissolve coplanar seams the boolean introduced (a cut or
                 // grown wall flush with an existing wall must read as ONE
@@ -6373,15 +8106,109 @@ impl Object {
                 result
                     .validate()
                     .map_err(|_| PushPullError::NonManifoldResult)?;
+                tidy.absorb(&merged, &Transform::IDENTITY);
                 Ok(result)
             }
             Err(BooleanError::EmptyResult) => Err(PushPullError::WouldVanish),
+            // The tool is swept from a face of this solid, so it can remove
+            // nothing only when the sweep had no depth: a vanishing distance,
+            // not damaged geometry.
+            Err(BooleanError::NothingRemoved) => Err(PushPullError::DistanceTooSmall),
             Err(_) => Err(PushPullError::NonManifoldResult),
         }
     }
 }
 
 // ============================================================== private helpers
+
+/// One region a neighbor's moving boundary sweeps, in the neighbor's 2D
+/// frame: the polygon, and for a triangle its fixed corner with the
+/// position the edge's other end moves from
+/// ([`Object::translation_folds_a_neighbor`]).
+type SweptRegion = (Vec<[f64; 2]>, Option<(VertexId, [f64; 2])>);
+
+/// Distance from `p` to the closed segment `a`–`b`, in a face's 2D frame.
+fn dist_to_segment_2d(p: [f64; 2], a: [f64; 2], b: [f64; 2]) -> f64 {
+    let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+    let len2 = dx * dx + dy * dy;
+    let t = if len2 <= 0.0 {
+        0.0
+    } else {
+        (((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / len2).clamp(0.0, 1.0)
+    };
+    let (ex, ey) = (p[0] - (a[0] + dx * t), p[1] - (a[1] + dy * t));
+    (ex * ex + ey * ey).sqrt()
+}
+
+/// The convex polygon `poly`'s edges as `(start, unit inward normal)`, or
+/// `None` when it has no area to speak of (a swept triangle whose fixed
+/// corner lies on its moving end's path: a segment).
+fn convex_inward_edges_2d(poly: &[[f64; 2]], tol: f64) -> Option<Vec<([f64; 2], [f64; 2])>> {
+    let n = poly.len();
+    let mut area2 = 0.0;
+    let mut perimeter = 0.0;
+    for i in 0..n {
+        let (a, b) = (poly[i], poly[(i + 1) % n]);
+        area2 += a[0] * b[1] - b[0] * a[1];
+        perimeter += ((b[0] - a[0]).powi(2) + (b[1] - a[1]).powi(2)).sqrt();
+    }
+    if area2.abs() * 0.5 <= tol * perimeter {
+        return None;
+    }
+    let sign = area2.signum();
+    let mut edges = Vec::with_capacity(n);
+    for i in 0..n {
+        let (a, b) = (poly[i], poly[(i + 1) % n]);
+        let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+        let len = (dx * dx + dy * dy).sqrt();
+        if len <= tol {
+            continue;
+        }
+        // Left of a counter-clockwise edge is inside.
+        edges.push((a, [-dy / len * sign, dx / len * sign]));
+    }
+    Some(edges)
+}
+
+/// Whether `q` lies in the closed convex polygon `poly` or within `tol` of
+/// it (a degenerate polygon: within `tol` of one of its edges).
+fn in_convex_2d(q: [f64; 2], poly: &[[f64; 2]], tol: f64) -> bool {
+    match convex_inward_edges_2d(poly, tol) {
+        Some(edges) => edges
+            .iter()
+            .all(|(a, n)| (q[0] - a[0]) * n[0] + (q[1] - a[1]) * n[1] >= -tol),
+        None => {
+            let k = poly.len();
+            (0..k).any(|i| dist_to_segment_2d(q, poly[i], poly[(i + 1) % k]) <= tol)
+        }
+    }
+}
+
+/// Whether the segment `a`–`b` reaches more than `tol` inside the convex
+/// polygon `poly` (never, for a polygon with no area): clipped to the
+/// polygon shrunk by `tol`, something of it is left.
+fn segment_enters_convex_2d(a: [f64; 2], b: [f64; 2], poly: &[[f64; 2]], tol: f64) -> bool {
+    let Some(edges) = convex_inward_edges_2d(poly, tol) else {
+        return false;
+    };
+    let (mut lo, mut hi) = (0.0f64, 1.0f64);
+    for (p, n) in &edges {
+        let fa = (a[0] - p[0]) * n[0] + (a[1] - p[1]) * n[1] - tol;
+        let fb = (b[0] - p[0]) * n[0] + (b[1] - p[1]) * n[1] - tol;
+        if fa <= 0.0 && fb <= 0.0 {
+            return false;
+        }
+        if fa < 0.0 {
+            lo = lo.max(fa / (fa - fb));
+        } else if fb < 0.0 {
+            hi = hi.min(fa / (fa - fb));
+        }
+        if lo >= hi {
+            return false;
+        }
+    }
+    lo < hi
+}
 
 /// Whether `point` lies on the segment `a`→`b` within `tol` (distance to the
 /// CLAMPED closest point — a point beyond an endpoint measures to that
@@ -6402,38 +8229,40 @@ fn point_on_segment(point: Point3, a: Point3, b: Point3, tol: f64) -> bool {
 /// outer loop positions, and hole loop positions.
 pub(crate) type ShellFace = (Plane, Vec<Point3>, Vec<Vec<Point3>>);
 
-/// A point strictly inside the simple polygon `poly` (projected along
-/// `normal`), or `None` for a degenerate outline. Candidates are the
-/// vertex average and then the centroid of each corner's triangle
-/// (`p[i-1]`, `p[i]`, `p[i+1]`) — every simple polygon has a convex ear
-/// whose triangle lies inside it — and each is CHECKED with
-/// `point_inside_polygon` before being returned, so a concave outline's
-/// average sitting in its own notch is rejected rather than trusted.
-fn polygon_interior_point(poly: &[Point3], normal: Vec3) -> Option<Point3> {
+/// Points strictly inside the simple flat polygon `poly` (on z = 0, seen
+/// from +z): candidates are the vertex average and the centroid of each
+/// corner's triangle (`p[i-1]`, `p[i]`, `p[i+1]`) — every simple polygon
+/// has a convex ear whose triangle lies inside it — and each is CHECKED to
+/// lie inside and off the boundary, so a concave outline's average sitting
+/// in its own notch is rejected rather than trusted.
+fn polygon_interior_samples(poly: &[Point3]) -> Vec<Point3> {
     let n = poly.len();
     if n < 3 {
-        return None;
+        return Vec::new();
     }
     let nf = n as f64;
     let sum = poly
         .iter()
         .fold(Vec3::new(0.0, 0.0, 0.0), |acc, p| acc + p.to_vec());
-    let mean = Point3::new(sum.x / nf, sum.y / nf, sum.z / nf);
-    if point_inside_polygon(mean, poly, normal) {
-        return Some(mean);
-    }
+    let mut out = vec![Point3::new(sum.x / nf, sum.y / nf, sum.z / nf)];
     for i in 0..n {
         let (a, b, c) = (poly[(i + n - 1) % n], poly[i], poly[(i + 1) % n]);
-        let centroid = Point3::new(
+        out.push(Point3::new(
             (a.x + b.x + c.x) / 3.0,
             (a.y + b.y + c.y) / 3.0,
             (a.z + b.z + c.z) / 3.0,
-        );
-        if point_inside_polygon(centroid, poly, normal) {
-            return Some(centroid);
-        }
+        ));
     }
-    None
+    out.retain(|&p| strictly_inside_flat(p, poly));
+    out
+}
+
+/// Whether `p` lies inside the flat polygon `poly` (on z = 0) and not
+/// within [`tol::POINT_MERGE`] of its boundary, which
+/// [`point_inside_polygon`] would answer either way.
+fn strictly_inside_flat(p: Point3, poly: &[Point3]) -> bool {
+    !crate::geom2d::point_on_ring(p, poly)
+        && point_inside_polygon(p, poly, Vec3::new(0.0, 0.0, 1.0))
 }
 
 /// Whether two face outlines overlap when both are projected along
@@ -6442,37 +8271,44 @@ fn polygon_interior_point(poly: &[Point3], normal: Vec3) -> Option<Point3> {
 /// the other is the plain case; but a sub-face whose every vertex is a
 /// corner of the solid (a diagonal triangle across a box face, a face
 /// split corner to corner) has NO vertex strictly inside the far wall's
-/// outline, nor the far wall's corners inside it, and `point_inside_polygon`
-/// answers boundary points by the luck of edge orientation — so which
-/// triangle counted as "through" was a coin toss. Two more tests settle
-/// it: a point verified to lie strictly INSIDE each outline
-/// (`polygon_interior_point`) tested against the other, and a proper
+/// outline, nor the far wall's corners inside it. Two more tests settle
+/// it: points verified to lie strictly INSIDE each outline
+/// (`polygon_interior_samples`) tested against the other, and a proper
 /// crossing of the two boundaries. Mere boundary CONTACT (a shared edge, a
 /// corner touching an edge) is deliberately not overlap: a face beside the
-/// far wall's footprint slides past it, it does not punch through it. The
-/// interior sample is verified, never assumed: a concave outline's vertex
-/// average can sit in its own notch — and inside some unrelated face
-/// parked there — which would have reported overlap between two outlines
-/// that do not even touch.
+/// far wall's footprint slides past it, it does not punch through it. So
+/// every inside test here excludes points on the other outline's boundary
+/// (within [`tol::POINT_MERGE`]): `point_inside_polygon` answers those by
+/// the luck of edge orientation, which once read a shared edge as overlap
+/// in some orientations and not others (KB-35). The interior samples are
+/// verified, never assumed: a concave outline's vertex average can sit in
+/// its own notch — and inside some unrelated face parked there — which
+/// would have reported overlap between two outlines that do not even touch.
 fn footprints_overlap(a: &[Point3], b: &[Point3], normal: Vec3) -> bool {
-    if a.iter().any(|&p| point_inside_polygon(p, b, normal))
-        || b.iter().any(|&p| point_inside_polygon(p, a, normal))
-    {
-        return true;
-    }
-    if polygon_interior_point(a, normal).is_some_and(|p| point_inside_polygon(p, b, normal))
-        || polygon_interior_point(b, normal).is_some_and(|p| point_inside_polygon(p, a, normal))
-    {
-        return true;
-    }
     let (u, v) = crate::geom2d::plane_axes(normal);
-    let flat = |p: Point3| Point3::new(p.to_vec().dot(u), p.to_vec().dot(v), 0.0);
+    let flat = |p: &Point3| Point3::new(p.to_vec().dot(u), p.to_vec().dot(v), 0.0);
+    let a: Vec<Point3> = a.iter().map(flat).collect();
+    let b: Vec<Point3> = b.iter().map(flat).collect();
+    if a.iter().any(|&p| strictly_inside_flat(p, &b))
+        || b.iter().any(|&p| strictly_inside_flat(p, &a))
+    {
+        return true;
+    }
+    if polygon_interior_samples(&a)
+        .into_iter()
+        .any(|p| strictly_inside_flat(p, &b))
+        || polygon_interior_samples(&b)
+            .into_iter()
+            .any(|p| strictly_inside_flat(p, &a))
+    {
+        return true;
+    }
     let na = a.len();
     let nb = b.len();
     for i in 0..na {
-        let (p, q) = (flat(a[i]), flat(a[(i + 1) % na]));
+        let (p, q) = (a[i], a[(i + 1) % na]);
         for j in 0..nb {
-            let (r, s) = (flat(b[j]), flat(b[(j + 1) % nb]));
+            let (r, s) = (b[j], b[(j + 1) % nb]);
             if crate::geom2d::segments_cross_properly(p, q, r, s) {
                 return true;
             }
@@ -7304,6 +9140,48 @@ impl Object {
     }
 }
 
+/// A face ring's plane: the Newell fit, or on an imported object the small
+/// ring the file format accepts (D-70), so an edit next to a sub-micron
+/// facet a union left does not refuse it as degenerate.
+fn ring_plane(obj: &Object, ring: &[Point3]) -> Result<Plane, crate::math::MathError> {
+    Plane::from_polygon(ring).or_else(|e| {
+        if obj.planarity_tol > tol::PLANE_DIST {
+            crate::serialize::outer_ring_plane(ring, true)
+        } else {
+            Err(e)
+        }
+    })
+}
+
+/// The first face other than `moved` that touches any of `vertices` and
+/// whose loops no longer lie on its stored plane (within the object's
+/// planarity tolerance), or `None` when every such face is still flat.
+fn face_bent_at_vertices(
+    obj: &Object,
+    vertices: &std::collections::BTreeSet<VertexId>,
+    moved: FaceId,
+) -> Option<FaceId> {
+    let mut seen = std::collections::BTreeSet::new();
+    for (_, h) in obj.half_edges.iter() {
+        if !vertices.contains(&h.origin) {
+            continue;
+        }
+        let fid = obj.loops[h.loop_id].face;
+        if fid == moved || !seen.insert(fid) {
+            continue;
+        }
+        let f = &obj.faces[fid];
+        let bent = std::iter::once(f.outer_loop)
+            .chain(f.inner_loops.iter().copied())
+            .flat_map(|l| obj.loop_positions(l))
+            .any(|p| f.plane.signed_distance(p).abs() > obj.planarity_tol);
+        if bent {
+            return Some(fid);
+        }
+    }
+    None
+}
+
 /// Refits `face`'s plane from its current outer loop, refusing the two
 /// silent in-plane corruptions a vertex translation can produce: a boundary
 /// that self-intersects (the face folded over itself laterally), and a
@@ -7317,7 +9195,13 @@ fn refit_face_plane(obj: &mut Object, face: FaceId) -> Result<(), PushPullError>
     if !polygon_is_simple(&pts) {
         return Err(PushPullError::NonManifoldResult);
     }
-    let new_plane = Plane::from_polygon(&pts).map_err(|_| PushPullError::NonManifoldResult)?;
+    let hole_pts: Vec<Point3> = obj.faces[face]
+        .inner_loops
+        .iter()
+        .flat_map(|&l| obj.loop_positions(l))
+        .collect();
+    let new_plane = crate::serialize::own_ring_plane(&pts, &hole_pts, obj.planarity_tol)
+        .map_err(|_| PushPullError::NonManifoldResult)?;
     if new_plane.normal().dot(obj.faces[face].plane.normal()) <= 0.0 {
         return Err(PushPullError::NonManifoldResult);
     }
@@ -7500,6 +9384,72 @@ impl PoleAxis {
         let d = p - self.center;
         (d - self.dir * d.dot(self.dir)).length()
     }
+}
+
+/// `path` without its STRAIGHT vertices: a vertex lying on the segment
+/// between its two neighbors (within [`tol::POINT_MERGE`]), where the path
+/// runs straight on, and whose two segments carry no curve attribution.
+/// Such a vertex is no corner — a face's rim gets one wherever an imprint
+/// ends on it — and the path through it is the same line either way, so
+/// sweeping the merged segment is reading the path, not repairing it.
+/// As a station inside a corner's miter span it is not harmless: it
+/// splits a side in two, so a corner seam or a profile wider than the
+/// short piece reads as folding where the sweep runs straight (#75).
+/// Attributed segments are left as they are (their tangents are measured
+/// against the drawn curve, and a facet chord is never collinear with its
+/// curve neighbor). An open path's ends always stay; a closed path's wrap
+/// vertex is tested like any other. `path_curves` is kept per segment
+/// (empty stays empty).
+fn drop_straight_path_vertices(
+    path: &[Point3],
+    closed: bool,
+    path_curves: &[Option<crate::sketch::CurveGeom>],
+) -> (Vec<Point3>, Vec<Option<crate::sketch::CurveGeom>>) {
+    let mut pts = path.to_vec();
+    let mut curves = path_curves.to_vec();
+    let attributed = !curves.is_empty();
+    let min = if closed { 3 } else { 2 };
+    // Segment `i - 1` arrives at vertex `i`, segment `i` leaves it.
+    let straight_at = |pts: &[Point3], curves: &[Option<crate::sketch::CurveGeom>], i: usize| {
+        let n = pts.len();
+        let prev = (i + n - 1) % n;
+        if attributed && (curves[prev].is_some() || curves[i].is_some()) {
+            return false;
+        }
+        let (a, v, b) = (pts[prev], pts[i], pts[(i + 1) % n]);
+        let ab = b - a;
+        let len2 = ab.length_squared();
+        if len2 <= tol::POINT_MERGE * tol::POINT_MERGE
+            || v.approx_eq(a, tol::POINT_MERGE)
+            || v.approx_eq(b, tol::POINT_MERGE)
+        {
+            return false;
+        }
+        let t = (v - a).dot(ab) / len2;
+        t > 0.0 && t < 1.0 && (a + ab * t).approx_eq(v, tol::POINT_MERGE)
+    };
+    // One removal at a time, rescanning: dropping a vertex changes its
+    // neighbors' segments. Paths are short and straight runs rare.
+    loop {
+        let n = pts.len();
+        if n <= min {
+            break;
+        }
+        let interior = if closed { 0..n } else { 1..n - 1 };
+        let Some(i) = interior
+            .into_iter()
+            .find(|&i| straight_at(&pts, &curves, i))
+        else {
+            break;
+        };
+        pts.remove(i);
+        if attributed {
+            // The merged segment (prev → next) keeps segment `i - 1`'s
+            // slot; both were unattributed.
+            curves.remove(i);
+        }
+    }
+    (pts, curves)
 }
 
 /// Recovers the revolution axis when `path` is a single drawn CIRCLE — every
@@ -8027,17 +9977,22 @@ pub(crate) fn chord_facet_ok(p: Point3, q: Point3, g: &crate::sketch::CurveGeom)
         return false;
     }
     let half = ((q - p).length() / (2.0 * g.radius)).min(1.0);
-    let subtends = 2.0 * half.asin();
+    let subtends = 2.0 * trig::asin(half);
     let step = std::f64::consts::TAU / crate::sketch::MIN_CIRCLE_SEGMENTS as f64;
     subtends <= 1.5 * step
 }
 
 fn cylinder_claim_holds(quad: &[Point3], plane: &Plane, surface: &crate::topo::SurfaceRef) -> bool {
+    // Cylinder stamping only; other classes verify through
+    // `SurfaceRef::holds_on`.
     let crate::topo::SurfaceRef::Cylinder {
         axis_point,
         axis,
         radius,
-    } = *surface;
+    } = *surface
+    else {
+        return false;
+    };
     if !radius.is_finite()
         || radius <= tol::POINT_MERGE
         || (axis.length() - 1.0).abs() > tol::NORMAL_DIRECTION
@@ -8069,7 +10024,7 @@ fn cylinder_claim_holds(quad: &[Point3], plane: &Plane, surface: &crate::topo::S
 /// shared vertex or shared edge is legitimate (that is exactly how adjacent
 /// faces of a manifold touch). Grazing contact between unrelated faces
 /// (tangencies) refuses conservatively — the kernel cannot prove it safe.
-fn faces_improperly_contact(obj: &Object, a: FaceId, b: FaceId) -> bool {
+pub(crate) fn faces_improperly_contact(obj: &Object, a: FaceId, b: FaceId) -> bool {
     let verts_of = |f: FaceId| -> std::collections::BTreeSet<VertexId> {
         std::iter::once(obj.faces[f].outer_loop)
             .chain(obj.faces[f].inner_loops.iter().copied())
@@ -8231,7 +10186,10 @@ fn boundary_pokes_face(
                 } else if sdq.abs() <= tol::PLANE_DIST && is_shared_contact(q) {
                     q
                 } else {
-                    p + (q - p) * (sdp / (sdp - sdq))
+                    // On the segment: with one end within PLANE_DIST of the
+                    // plane on the other end's side, the line crosses the
+                    // plane past that end, where the segment is not.
+                    p + (q - p) * (sdp / (sdp - sdq)).clamp(0.0, 1.0)
                 };
                 if in_y_interior(c) && !is_legit_contact(c) {
                     return true;
@@ -8492,7 +10450,9 @@ fn twin_half_edges(obj: &mut Object, a: HalfEdgeId, b: HalfEdgeId) {
         twin_half_edge: Some(b),
         curve: None,
         soft: false,
+        crease: false,
         polygon: None,
+        attrs: AttrSlot::NONE,
     });
     obj.half_edges[a].twin = Some(b);
     obj.half_edges[a].edge = edge;
@@ -8722,7 +10682,9 @@ fn build_coplanar_wall(
         twin_half_edge: Some(wa),
         curve: None,
         soft: false,
+        crease: false,
         polygon: None,
+        attrs: AttrSlot::NONE,
     });
     obj.half_edges[h_sub].edge = e_top;
     obj.half_edges[wa].edge = e_top;
@@ -8748,7 +10710,8 @@ fn build_coplanar_wall(
         obj.vertices[v_a].position,
         obj.vertices[v_b].position,
     ];
-    let plane = Plane::from_polygon(&wall_pts).map_err(|_| PushPullError::NonManifoldResult)?;
+    let plane = crate::serialize::own_ring_plane(&wall_pts, &[], obj.planarity_tol)
+        .map_err(|_| PushPullError::NonManifoldResult)?;
     let wface = obj.faces.insert(Face {
         outer_loop: wloop,
         inner_loops: Vec::new(),
@@ -8757,6 +10720,8 @@ fn build_coplanar_wall(
         back_material: None,
         uv_frame: None,
         surface: None,
+        blend: None,
+        attrs: AttrSlot::NONE,
     });
     obj.loops[wloop].face = wface;
     Ok(wface)
@@ -9064,18 +11029,22 @@ fn do_split_face(
     });
 
     // Face B is a new face (face A reuses the original FaceId).
-    let face_b_id = obj.faces.insert(Face {
+    let src = &obj.faces[face];
+    let face_b = Face {
         outer_loop: loop_b_id,
         inner_loops: Vec::new(), // holes assigned below
         plane: face_plane,       // same plane as original
         // Both halves of a split inherit the original face's material, UV
         // frame ( +  extension), and analytic surface; face A keeps them by
         // reusing its FaceId.
-        material: obj.faces[face].material,
-        back_material: obj.faces[face].back_material,
-        uv_frame: obj.faces[face].uv_frame,
-        surface: obj.faces[face].surface,
-    });
+        material: src.material,
+        back_material: src.back_material,
+        uv_frame: src.uv_frame,
+        surface: src.surface,
+        blend: src.blend,
+        attrs: src.attrs,
+    };
+    let face_b_id = obj.faces.insert(face_b);
     obj.loops[loop_b_id].face = face_b_id;
 
     // 8. Wire face A's loop: chain_a + cut_bwd.
@@ -9176,6 +11145,7 @@ fn do_split_face(
         new_faces: [face, face_b_id],
         new_edges,
         split_boundary_edges,
+        vertex_ends: Vec::new(),
     })
 }
 
@@ -9267,15 +11237,19 @@ fn do_split_face_hole(
         first_half_edge: HalfEdgeId::default(),
         kind: LoopKind::Outer,
     });
-    let lune = obj.faces.insert(Face {
+    let src = &obj.faces[face];
+    let lune_face = Face {
         outer_loop: lune_loop,
         inner_loops: Vec::new(),
         plane: face_plane,
-        material: obj.faces[face].material,
-        back_material: obj.faces[face].back_material,
-        uv_frame: obj.faces[face].uv_frame,
-        surface: obj.faces[face].surface,
-    });
+        material: src.material,
+        back_material: src.back_material,
+        uv_frame: src.uv_frame,
+        surface: src.surface,
+        blend: src.blend,
+        attrs: src.attrs,
+    };
+    let lune = obj.faces.insert(lune_face);
     wire_loop_sequence(obj, &lune_seq, lune_loop, lune);
     // 8. The rerouted hole keeps its loop id (still Inner, still `face`'s).
     wire_loop_sequence(obj, &hole_seq, hole, face);
@@ -9326,6 +11300,7 @@ fn do_split_face_hole(
         new_faces: [face, lune],
         new_edges,
         split_boundary_edges,
+        vertex_ends: Vec::new(),
     })
 }
 
@@ -9417,7 +11392,9 @@ pub(crate) fn build_cut_chains(
             twin_half_edge: Some(h_bwd),
             curve: None,
             soft: false,
+            crease: false,
             polygon: None,
+            attrs: AttrSlot::NONE,
         });
         obj.half_edges[h_fwd].edge = edge_id;
         obj.half_edges[h_bwd].edge = edge_id;
@@ -9512,8 +11489,12 @@ pub(crate) fn split_boundary_edge(
     // along the exact same drawn curve the whole edge did. Read it before
     // the original `Edge` is removed below and carry it to both fragments.
     let was_soft = obj.edges[edge_id].soft;
+    let was_crease = obj.edges[edge_id].crease;
     // A piece of a polygon's side is still that polygon's side.
     let was_polygon = obj.edges[edge_id].polygon;
+    // Both fragments keep the edge's attribute dictionary (same slot: the
+    // dictionary is a value, so sharing it is safe).
+    let was_attrs = obj.edges[edge_id].attrs;
 
     // Insert the new vertex.
     let new_v = obj.vertices.insert(Vertex {
@@ -9589,14 +11570,18 @@ pub(crate) fn split_boundary_edge(
             twin_half_edge: Some(t_b),
             curve: None,
             soft: was_soft,
+            crease: was_crease,
             polygon: was_polygon,
+            attrs: was_attrs,
         });
         edge_b_id = obj.edges.insert(Edge {
             half_edge: h_b,
             twin_half_edge: Some(t_a),
             curve: None,
             soft: was_soft,
+            crease: was_crease,
             polygon: was_polygon,
+            attrs: was_attrs,
         });
         obj.half_edges[h_a].edge = edge_a_id;
         obj.half_edges[t_b].edge = edge_a_id;
@@ -9633,14 +11618,18 @@ pub(crate) fn split_boundary_edge(
             twin_half_edge: None,
             curve: None,
             soft: was_soft,
+            crease: was_crease,
             polygon: was_polygon,
+            attrs: was_attrs,
         });
         edge_b_id = obj.edges.insert(Edge {
             half_edge: h_b,
             twin_half_edge: None,
             curve: None,
             soft: was_soft,
+            crease: was_crease,
             polygon: was_polygon,
+            attrs: was_attrs,
         });
         obj.half_edges[h_a].edge = edge_a_id;
         obj.half_edges[h_b].edge = edge_b_id;
@@ -9682,10 +11671,12 @@ fn do_merge_faces(
     obj: &mut Object,
     face_a: FaceId,
     face_b: FaceId,
+    keep_vertices: &[Point3],
 ) -> Result<FaceMergeReport, StickyError> {
     let outer_a = obj.faces[face_a].outer_loop;
     let outer_b = obj.faces[face_b].outer_loop;
     let face_b_surface = obj.faces[face_b].surface;
+    let face_b_blend = obj.faces[face_b].blend;
 
     // Snapshot each input face's attribute state, pinned to a point strictly
     // inside it, BEFORE surgery: undoing this merge must give each side back
@@ -9914,8 +11905,12 @@ fn do_merge_faces(
     // input must heal identically (the determinism invariant; History replay
     // verifies redo results against the recorded state and fails typed on
     // any asymmetry).
-    let healing_removed_edges =
-        heal_run_endpoints(obj, outer_a, [chain_a_start_v, chain_b_start_v]);
+    let healing_removed_edges = heal_run_endpoints(
+        obj,
+        outer_a,
+        [chain_a_start_v, chain_b_start_v],
+        keep_vertices,
+    );
 
     // 10. Fix any remaining broken outgoing pointers (shared-chain endpoints
     //     that are still present but whose outgoing pointed into the dissolved chain).
@@ -9970,7 +11965,14 @@ fn do_merge_faces(
         }
         pts
     };
-    if let Ok(new_plane) = Plane::from_polygon(&boundary_pts) {
+    let hole_pts: Vec<Point3> = obj.faces[face_a]
+        .inner_loops
+        .iter()
+        .flat_map(|&l| obj.loop_positions(l))
+        .collect();
+    if let Ok(new_plane) =
+        crate::serialize::own_ring_plane(&boundary_pts, &hole_pts, obj.planarity_tol)
+    {
         obj.faces[face_a].plane = new_plane;
     }
     // The survivor keeps its analytic surface only when BOTH faces claimed
@@ -9979,6 +11981,10 @@ fn do_merge_faces(
     // captured before face_b died.
     if obj.faces[face_a].surface != face_b_surface {
         obj.faces[face_a].surface = None;
+    }
+    // The blend tag follows the same rule.
+    if obj.faces[face_a].blend != face_b_blend {
+        obj.faces[face_a].blend = None;
     }
     // (If refit fails, keep the original plane — shouldn't happen with valid geometry.)
 
@@ -10015,9 +12021,11 @@ fn do_merge_into_hole(
     inner: FaceId,
     owner: FaceId,
     hole: LoopId,
+    keep_vertices: &[Point3],
 ) -> Result<FaceMergeReport, StickyError> {
     let outer_in = obj.faces[inner].outer_loop;
     let inner_surface = obj.faces[inner].surface;
+    let inner_blend = obj.faces[inner].blend;
     let normal = obj.faces[owner].plane.normal();
     let prior_attrs = [attrs_snapshot(obj, inner), attrs_snapshot(obj, owner)];
 
@@ -10113,7 +12121,7 @@ fn do_merge_into_hole(
     }
 
     // 5. Heal the run's endpoints if they are now pure collinear scars.
-    let healed = heal_run_endpoints(obj, hole, [v_start, v_end]);
+    let healed = heal_run_endpoints(obj, hole, [v_start, v_end], keep_vertices);
     repair_dangling_outgoing(obj);
 
     // 6. `inner`'s holes move to `owner`; `inner` and its outer loop go.
@@ -10133,6 +12141,9 @@ fn do_merge_into_hole(
     //    (map-or-drop).
     if obj.faces[owner].surface != inner_surface {
         obj.faces[owner].surface = None;
+    }
+    if obj.faces[owner].blend != inner_blend {
+        obj.faces[owner].blend = None;
     }
 
     // 8. Post-check, walking the rerouted hole defensively: it must close
@@ -10220,17 +12231,30 @@ pub(crate) fn repair_dangling_outgoing(obj: &mut Object) {
 /// [`do_merge_into_hole`]: each dissolved run's endpoint vertex that is
 /// left a pure two-edge scar of a `split_boundary_edge` call — exactly two
 /// departing half-edges, one in `merged_loop` and one in a single
-/// neighbor loop, their edges collinear — is healed away (the two edges
-/// merge on both sides). Returns the retired edges.
+/// neighbor loop, their edges collinear and alike in `soft`, `crease`,
+/// `polygon` and attribute slot — is healed away (the two edges merge on
+/// both sides). Edges that differ in any of those marks stay apart: one
+/// edge could keep only one side's. An endpoint at one of `keep_vertices` (matched
+/// within [`tol::POINT_MERGE`]) is never healed: the undo of an insert
+/// passes the vertices the insert met already there, which may have been
+/// the joints of straight runs before it. Returns the retired edges.
 pub(crate) fn heal_run_endpoints(
     obj: &mut Object,
     merged_loop: LoopId,
     endpoint_vertices: [VertexId; 2],
+    keep_vertices: &[Point3],
 ) -> Vec<EdgeId> {
     let mut healing_removed_edges: Vec<EdgeId> = Vec::new();
     for vertex_to_heal in endpoint_vertices {
         if !obj.vertices.contains_key(vertex_to_heal) {
             continue; // healed away together with the other endpoint
+        }
+        let at = obj.vertices[vertex_to_heal].position;
+        if keep_vertices
+            .iter()
+            .any(|q| q.approx_eq(at, tol::POINT_MERGE))
+        {
+            continue; // a joint that was there before the insert
         }
 
         // Heal only true scars: V must have exactly two departing
@@ -10283,6 +12307,24 @@ pub(crate) fn heal_run_endpoints(
         };
         if !collinear {
             continue;
+        }
+
+        // The healed edge keeps h_in's edge and its marks, so the two edges
+        // must carry the same ones: a scar left by splitting one edge does
+        // (both fragments inherit the parent's), but two edges marked apart
+        // do not, and healing them would silently drop one side's mark — a
+        // soft edge swallowing a visible hard one, say — with which side
+        // wins depending on loop direction. Skip, never guess.
+        {
+            let e_in = &obj.edges[h_in_he.edge];
+            let e_out = &obj.edges[obj.half_edges[h_out].edge];
+            if e_in.soft != e_out.soft
+                || e_in.crease != e_out.crease
+                || e_in.attrs != e_out.attrs
+                || e_in.polygon != e_out.polygon
+            {
+                continue;
+            }
         }
 
         // Twin of h_in: this half-edge departs V in the neighbor face (t_out_of_v).
@@ -10368,6 +12410,89 @@ mod tests {
     use super::*;
     use crate::math::Vec3;
     use crate::topo::WatertightState;
+
+    /// `footprints_overlap` matches its doc on contact: two footprints that
+    /// only share an edge, part of one, or a corner are not overlap, while
+    /// any overlap of area is — including overlaps whose only evidence is
+    /// boundary contact plus area (collinear edges, nested footprints that
+    /// share an edge, identical ones). Checked in many orientations: the
+    /// boundary points were once answered by the ray-cast's luck, which
+    /// depends on the axes the projection picks (KB-34 residue, KB-35).
+    #[test]
+    fn footprints_overlap_counts_area_not_contact_in_every_orientation() {
+        let rect =
+            |x0: f64, y0: f64, x1: f64, y1: f64| vec![(x0, y0), (x1, y0), (x1, y1), (x0, y1)];
+        type Pair = (Vec<(f64, f64)>, Vec<(f64, f64)>);
+        let contact: Vec<Pair> = vec![
+            // A shared edge (the KB-35 slot ceiling beside the low top).
+            (rect(0.0, 0.0, 1.0, 1.0), rect(1.0, 0.0, 2.0, 1.0)),
+            // Part of an edge.
+            (rect(0.0, 0.0, 1.0, 1.0), rect(1.0, 0.25, 2.0, 0.75)),
+            // A longer edge along a shorter one.
+            (rect(0.0, 0.0, 1.0, 1.0), rect(1.0, -1.0, 2.0, 2.0)),
+            // A corner.
+            (rect(0.0, 0.0, 1.0, 1.0), rect(1.0, 1.0, 2.0, 2.0)),
+            // A corner on an edge.
+            (
+                rect(0.0, 0.0, 1.0, 1.0),
+                vec![(1.0, 0.5), (2.0, 0.0), (2.0, 1.0)],
+            ),
+        ];
+        let overlap: Vec<Pair> = vec![
+            (rect(0.0, 0.0, 2.0, 1.0), rect(1.0, 0.0, 3.0, 1.0)),
+            (rect(0.0, 0.0, 10.0, 1.0), rect(9.0, 0.0, 11.0, 1.0)),
+            (rect(0.0, 0.0, 1.0, 1.0), rect(0.0, 0.0, 1.0, 1.0)),
+            (rect(0.0, 0.0, 2.0, 2.0), rect(0.0, 0.0, 1.0, 1.0)),
+            (rect(0.0, 0.0, 2.0, 2.0), rect(1.0, 1.0, 3.0, 3.0)),
+            // A diagonal triangle over its box face: corners only.
+            (
+                vec![(0.0, 0.0), (1.0, 0.0), (0.0, 1.0)],
+                rect(0.0, 0.0, 1.0, 1.0),
+            ),
+        ];
+        let axes = [
+            Vec3::new(0.0, 0.0, 1.0),
+            Vec3::new(0.0, 1.0, 0.0),
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(0.0, 0.0, -1.0),
+            Vec3::new(0.0, -1.0, 0.0),
+            Vec3::new(-1.0, 0.0, 0.0),
+            Vec3::new(0.3, -0.5, 0.81),
+        ];
+        for normal in axes {
+            let normal = normal.normalized().unwrap();
+            for turn in 0..8 {
+                let a = f64::from(turn) * 0.7;
+                let (u, v) = crate::geom2d::plane_axes(normal);
+                let (c, s) = (trig::cos(a), trig::sin(a));
+                // The far footprint sits 0.5 deeper along the normal.
+                let place = |pts: &[(f64, f64)], depth: f64| -> Vec<Point3> {
+                    pts.iter()
+                        .map(|&(x, y)| {
+                            let (x, y) = (x * c - y * s, x * s + y * c);
+                            Point3::ORIGIN + u * x + v * y + normal * depth
+                        })
+                        .collect()
+                };
+                for (i, (p, q)) in contact.iter().enumerate() {
+                    for (p, q) in [(p, q), (q, p)] {
+                        assert!(
+                            !footprints_overlap(&place(p, 0.0), &place(q, -0.5), normal),
+                            "contact case {i} read as overlap at {normal:?} turn {turn}"
+                        );
+                    }
+                }
+                for (i, (p, q)) in overlap.iter().enumerate() {
+                    for (p, q) in [(p, q), (q, p)] {
+                        assert!(
+                            footprints_overlap(&place(p, 0.0), &place(q, -0.5), normal),
+                            "overlap case {i} missed at {normal:?} turn {turn}"
+                        );
+                    }
+                }
+            }
+        }
+    }
 
     /// The push/pull result checks hold a hole to the same containment the
     /// validator does: a hole whose vertices all sit on the outer ring but
@@ -10576,6 +12701,35 @@ mod tests {
             o.push_pull(top, d)
                 .unwrap_or_else(|e| panic!("push/pull {d}: {e:?}"));
             o.validate().expect("valid after the push/pull");
+        }
+    }
+
+    // ------------------------------------------- footprints_overlap tolerance
+
+    fn xy_rect(x0: f64, y0: f64, x1: f64, y1: f64) -> Vec<Point3> {
+        vec![
+            Point3::new(x0, y0, 0.0),
+            Point3::new(x1, y0, 0.0),
+            Point3::new(x1, y1, 0.0),
+            Point3::new(x0, y1, 0.0),
+        ]
+    }
+
+    /// Scale-independence guard, not a regression test for the crossing fix:
+    /// a bar crossing another with neither bar's corners or sampled interior
+    /// point inside the other, so only the proper-crossing test sees it, at
+    /// every scale. Old and new crossing code agree here; the old/new
+    /// difference is reachable only through the validator caller (see the
+    /// `hole_vertex_*` tests in `build.rs`), because this function's
+    /// inside-checks catch every hairline case first.
+    #[test]
+    fn footprints_overlap_sees_a_crossing_at_every_scale() {
+        let z = Vec3::new(0.0, 0.0, 1.0);
+        for k in [1e-3, 1.0, 100.0] {
+            let a = xy_rect(0.0, 0.0, 10.0 * k, k);
+            let b = xy_rect(8.9 * k, -3.0 * k, 9.9 * k, 6.0 * k);
+            assert!(footprints_overlap(&a, &b, z), "scale {k}");
+            assert!(footprints_overlap(&b, &a, z), "scale {k} swapped");
         }
     }
 
@@ -11242,6 +13396,73 @@ mod tests {
         cube.apply_session_pose(&pose.inverse().unwrap());
         for (a, b) in before.iter().zip(&corner_uvs(&cube)) {
             assert!((a[0] - b[0]).abs() < 1e-9 && (a[1] - b[1]).abs() < 1e-9);
+        }
+    }
+
+    /// A cylinder of radius 0.25 m in 48 facets, 0.4 m tall, drawn on the
+    /// ground at `(far, far)`: every wall facet claims the cylinder.
+    fn far_cylinder(far: f64) -> Object {
+        use crate::document::Document;
+        let c = Point3::new(far, far, 0.0);
+        let mut doc = Document::new();
+        let s = doc.add_sketch(Plane::from_point_normal(c, Vec3::new(0.0, 0.0, 1.0)).unwrap());
+        let sk = doc.sketch_mut(s).unwrap();
+        sk.begin_curve_with(crate::sketch::CurveGeom {
+            center: c,
+            radius: 0.25,
+        })
+        .unwrap();
+        let p = |i: usize| {
+            let a = std::f64::consts::TAU * (i % 48) as f64 / 48.0;
+            Point3::new(far + 0.25 * trig::cos(a), far + 0.25 * trig::sin(a), 0.0)
+        };
+        for i in 0..48 {
+            sk.add_segment(p(i), p(i + 1)).unwrap();
+        }
+        sk.end_curve();
+        let r = doc.extrudable_regions(s).unwrap()[0];
+        let id = doc.extrude_region(s, r, 0.4).unwrap().0;
+        doc.object(id).unwrap().clone()
+    }
+
+    /// A session pose bakes a far-out claimed cylinder (the explode-session
+    /// close and its undo) onto, for each face, the first plane its claim
+    /// agrees with: 1,000 km out the wall facets' refit tilts past what the
+    /// cylinder allows, so taking the first candidate unchecked broke the
+    /// object's invariants, while the preference lands on the exactly
+    /// mapped plane and the object stays valid with every claim.
+    #[test]
+    fn a_session_pose_bake_far_out_prefers_the_plane_its_claim_agrees_with() {
+        let far = 1e6;
+        let pivot = Point3::new(far, far, 0.2);
+        for (axis, angle) in [
+            (Vec3::new(1.0, 1.0, 0.0), 0.7),
+            (Vec3::new(0.2, -1.0, 0.4), 1.3),
+        ] {
+            let pose = Transform::translation(Point3::ORIGIN - pivot)
+                .then(&Transform::rotation(axis, angle).unwrap())
+                .then(&Transform::translation(pivot - Point3::ORIGIN));
+            let mut obj = far_cylinder(far);
+            let claims = obj.faces.values().filter(|f| f.surface.is_some()).count();
+            assert_eq!(claims, 48);
+            obj.apply_session_pose(&pose);
+            obj.validate().unwrap();
+            assert_eq!(
+                obj.faces.values().filter(|f| f.surface.is_some()).count(),
+                claims
+            );
+            for f in obj.faces.values() {
+                if let Some(c) = f.surface {
+                    let pts: Vec<Point3> = obj.loop_positions(f.outer_loop).collect();
+                    assert!(
+                        crate::surface::validate_face_claim(&c, &f.plane, &pts, obj.planarity_tol),
+                        "{axis:?} by {angle}: a claimed face sits on a plane its claim refuses"
+                    );
+                }
+            }
+            // And back, as the close's undo bakes the inverse.
+            obj.apply_session_pose(&pose.inverse().unwrap());
+            obj.validate().unwrap();
         }
     }
 }

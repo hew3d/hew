@@ -56,7 +56,7 @@ test('digits typed into the Save to Library name never retype the last rectangle
   const sketchBounds = () =>
     page.evaluate(() => {
       const h = window.__hew_test!
-      return { hash: h.getStateHash(), sketches: h.getSketchIds().length }
+      return { hash: h.getModelStateHash(), sketches: h.getSketchIds().length }
     })
   const before = await sketchBounds()
 

@@ -207,6 +207,56 @@ describe('commands', () => {
     expect(methods(planCommands(plan, choices({ perItem: ticks([['family-0', false]]) })))).toEqual([])
   })
 
+  it('rejoinSolid emits one rejoin op with the family and no cap ops', () => {
+    const cmds = planCommands(plan, choices({ split: 'rejoinSolid' }))
+    if (!cmds.ok) throw new Error(cmds.error)
+    expect(cmds.ops).toEqual([
+      { object: 5n, method: 'hew.solid.rejoin', params: { family: 0, as: 'one_solid' }, members: [5n, 6n, 7n] },
+    ])
+    // A real cascade lookup: a refused rejoin takes nothing else with it.
+    expect(cmds.options.cascade!(cmds.ops[0], cmds.ops)).toBeNull()
+    // And the cascade does fire for a refused cap in the default plan.
+    const dflt = planCommands(plan, defaultChoices('model'))
+    if (!dflt.ok) throw new Error(dflt.error)
+    expect(dflt.options.cascade!(dflt.ops[0], dflt.ops)?.ops).toEqual([dflt.ops[2]])
+  })
+
+  it('several rejoins run by descending family index, so earlier ones do not shift later indices', () => {
+    const two = buildPlan(
+      report(
+        [
+          row({ object: '1', family: 0, rims: [SEAM] }),
+          row({ object: '2', family: 0, rims: [SEAM] }),
+          row({ object: '3', family: 1, rims: [SEAM] }),
+          row({ object: '4', family: 1, rims: [SEAM] }),
+        ],
+        [{ members: ['1', '2'], shared_rims: 1 }, { members: ['3', '4'], shared_rims: 1 }],
+      ),
+    )
+    const cmds = planCommands(two, choices({ split: 'rejoinSolid' }))
+    if (!cmds.ok) throw new Error(cmds.error)
+    expect(cmds.ops.map((o) => o.params)).toEqual([
+      { family: 1, as: 'one_solid' },
+      { family: 0, as: 'one_solid' },
+    ])
+  })
+
+  it('rejoin and keepWalls plans are unchanged', () => {
+    expect(methods(planCommands(plan, choices({ split: 'rejoin' })))).toEqual([
+      ['hew.solid.cap', 5n, { rims: [0] }],
+      ['hew.solid.cap', 6n, { rims: [0] }],
+      ['hew.solid.delete_faces', 7n, null],
+    ])
+    expect(methods(planCommands(plan, choices({ split: 'keepWalls' })))).toEqual([
+      ['hew.solid.cap', 5n, { rims: [0] }],
+      ['hew.solid.cap', 6n, { rims: [0] }],
+    ])
+  })
+
+  it('per-item unticking removes the rejoin op', () => {
+    expect(methods(planCommands(plan, choices({ split: 'rejoinSolid', perItem: ticks([['family-0', false]]) })))).toEqual([])
+  })
+
   it('a refused piece only keeps the wall of its own split shape', () => {
     const two = buildPlan(
       report(
@@ -254,6 +304,28 @@ describe('Ready sentences', () => {
       'Close the openings in 2 shapes.',
       'Leave 3 objects as they are.',
     ])
+  })
+
+  it('rejoinSolid ready sentence names one solid', () => {
+    expect(readySentences(plan, choices({ split: 'rejoinSolid' }))).toEqual([
+      'Rejoin 1 split shape as one solid.',
+      'Leave 5 objects as they are.',
+    ])
+  })
+
+  it('rejoinSolid ready sentence is plural for several shapes', () => {
+    const two = buildPlan(
+      report(
+        [
+          row({ object: '1', family: 0, rims: [SEAM] }),
+          row({ object: '2', family: 0, rims: [SEAM] }),
+          row({ object: '3', family: 1, rims: [SEAM] }),
+          row({ object: '4', family: 1, rims: [SEAM] }),
+        ],
+        [{ members: ['1', '2'], shared_rims: 1 }, { members: ['3', '4'], shared_rims: 1 }],
+      ),
+    )
+    expect(readySentences(two, choices({ split: 'rejoinSolid' }))[0]).toBe('Rejoin 2 split shapes as one solid.')
   })
 
   it('reflects non-default choices', () => {
@@ -333,7 +405,7 @@ describe('families that are not split shapes', () => {
       report([row({ object: '1', family: 0, verdict: { kind: 'non_manifold' }, branching_vertices: 1 }), row({ object: '2', family: 0, ...WALL })], fam),
     )
     expect(plan.items.closerLook).toHaveLength(1)
-    expect(itemDetail(plan.items.closerLook[0])).toBe('Open edges branch')
+    expect(itemDetail(plan.items.closerLook[0])).toBe('Openings tangled together')
   })
 
   it('a piece with a shared rim makes a split shape; its seams are capped and the wall deleted', () => {
@@ -370,5 +442,82 @@ describe('freshness helpers', () => {
     )
     const out = carryPerItem(before, after, ticks([['1', true], ['family-0', false]]))
     expect([...out]).toEqual([['family-3', false]])
+  })
+})
+
+describe('closed objects listed for zero-area faces', () => {
+  it('are not something to make solid', () => {
+    const r = report([
+      row({ object: '1' }),
+      row({ object: '2', name: 'Statue', verdict: { kind: 'solid' }, rims: [], degenerate_faces: 2 }),
+    ])
+    const plan = buildPlan(r)
+    expect(plan.fix).toBe(1)
+    expect(Object.values(plan.items).flat().map((i) => i.key)).toEqual(['1'])
+  })
+})
+
+describe('needs mending (Mend)', () => {
+  const CENSUS = {
+    weld: 0.000002,
+    weldVertices: 312,
+    weldMaxGap: 0,
+    folds: 0,
+    branchingVertices: 2,
+    islands: 1,
+    pieces: 0,
+    fillRims: 7,
+    fillFlat: 3,
+    fillCurved: 4,
+    skippedRims: 0,
+  }
+  const NOTHING = { ...CENSUS, weldVertices: 0, branchingVertices: 0, fillRims: 0 }
+  const rows = [
+    row({ object: '1', name: 'Knot', verdict: { kind: 'non_manifold' }, branching_vertices: 2 }),
+    row({ object: '2', name: 'Sock', verdict: { kind: 'holes', planar: 0, warped: 1 }, rims: [WARPED] }),
+    row({ object: '3', name: 'Pipe fitting', verdict: { kind: 'non_manifold' }, branching_vertices: 1 }),
+  ]
+  const census = (r: { object: bigint }) => (r.object === 3n ? NOTHING : CENSUS)
+  const plan = buildPlan(report(rows), census)
+
+  it('items with something to mend carry the census; the rest do not', () => {
+    expect(plan.items.closerLook.map((i) => [i.name, i.mend !== null])).toEqual([
+      ['Knot', true],
+      ['Sock', true],
+      ['Pipe fitting', false],
+    ])
+  })
+
+  it('Mend is on by default and writes one mend op per item with something to mend, in the one transaction', () => {
+    expect(defaultChoices().mend).toBe('mend')
+    const r = planCommands(plan, defaultChoices())
+    expect(methods(r)).toEqual([
+      ['hew.solid.mend', 1n, { weld: true, folds: true, split: true, fill: 'holes' }],
+      ['hew.solid.mend', 2n, { weld: true, folds: true, split: true, fill: 'holes' }],
+    ])
+    expect(readySentences(plan, defaultChoices())).toEqual(['Mend 2 objects.', 'Leave 1 object as it is.'])
+  })
+
+  it('leaving them writes nothing; a tick on one item wins over the page', () => {
+    expect(methods(planCommands(plan, choices({ mend: 'leave' })))).toEqual([])
+    const one = choices({ mend: 'leave', perItem: ticks([['2', true]]) })
+    expect(methods(planCommands(plan, one)).map((m) => m[1])).toEqual([2n])
+    const off = choices({ perItem: ticks([['1', false]]) })
+    expect(methods(planCommands(plan, off)).map((m) => m[1])).toEqual([2n])
+  })
+
+  it('an item with nothing to mend never acts, whatever its tick', () => {
+    expect(itemActs(plan.items.closerLook[2], choices({ perItem: ticks([['3', true]]) }))).toBe(false)
+  })
+
+  it('"left as you chose" counts the mendable items left alone', () => {
+    expect(leftByChoice(plan, defaultChoices())).toBe(0)
+    expect(leftByChoice(plan, choices({ mend: 'leave' }))).toBe(2)
+  })
+
+  it('without a census every item stays as before and nothing mends', () => {
+    const bare = buildPlan(report(rows))
+    expect(bare.items.closerLook.every((i) => i.mend === null)).toBe(true)
+    expect(methods(planCommands(bare, defaultChoices()))).toEqual([])
   })
 })

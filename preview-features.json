@@ -1,0 +1,146 @@
+{
+  "features": [
+    {
+      "id": "fillet",
+      "name": "Fillet and Chamfer",
+      "state": "Rounds and chamfers straight, arc and swept edges. Some corners and large sizes are refused.",
+      "owner": "curves",
+      "tools": ["Fillet"],
+      "actions": ["tool-fillet", "tool-chamfer"],
+      "dockChips": ["tool-fillet"],
+      "apiCommands": ["hew.solid.fillet", "hew.solid.chamfer"],
+      "behaviors": ["fillet-profiles"]
+    },
+    {
+      "id": "loft",
+      "name": "Loft",
+      "state": "Builds a solid through two or more profiles, with optional rails.",
+      "owner": "curves",
+      "tools": ["Loft"],
+      "actions": ["tool-loft", "tool-skin"],
+      "dockChips": ["tool-loft"],
+      "apiCommands": ["hew.solid.loft"],
+      "behaviors": []
+    },
+    {
+      "id": "revolve",
+      "name": "Revolve",
+      "state": "Spins a profile around an axis into a solid.",
+      "owner": "curves",
+      "tools": ["Revolve"],
+      "actions": ["tool-revolve"],
+      "dockChips": ["tool-revolve"],
+      "apiCommands": ["hew.solid.revolve"],
+      "behaviors": []
+    },
+    {
+      "id": "deform",
+      "name": "Deform",
+      "state": "Twists, bends and tapers a solid.",
+      "owner": "curves",
+      "tools": ["Deform"],
+      "actions": ["tool-deform-twist", "tool-deform-bend", "tool-deform-taper", "tool-deform-bend-path"],
+      "dockChips": [],
+      "apiCommands": ["hew.solid.deform"],
+      "behaviors": []
+    },
+    {
+      "id": "path-array",
+      "name": "Array along Path",
+      "state": "Copies a shape along a path.",
+      "owner": "curves",
+      "tools": ["Array along Path"],
+      "actions": ["tool-path-array"],
+      "dockChips": [],
+      "apiCommands": ["hew.array.path"],
+      "behaviors": []
+    },
+    {
+      "id": "shell",
+      "name": "Shell",
+      "state": "Hollows a solid to a wall thickness.",
+      "owner": "curves",
+      "tools": ["Shell"],
+      "actions": ["tool-shell"],
+      "dockChips": ["tool-shell"],
+      "apiCommands": ["hew.solid.shell"],
+      "behaviors": []
+    },
+    {
+      "id": "project",
+      "name": "Project",
+      "state": "Engraves or embosses a shape onto a solid.",
+      "owner": "curves",
+      "tools": ["Project"],
+      "actions": ["tool-project"],
+      "dockChips": [],
+      "apiCommands": ["hew.solid.project"],
+      "behaviors": []
+    },
+    {
+      "id": "smooth",
+      "name": "Smooth",
+      "state": "Rounds a whole object from its faces, with creases (Eraser, Ctrl-click) that stay sharp.",
+      "owner": "curves",
+      "tools": [],
+      "actions": ["smooth-1", "smooth-2", "smooth-3", "bake-smooth"],
+      "dockChips": [],
+      "apiCommands": ["hew.object.smooth", "hew.object.crease", "hew.solid.bake"],
+      "behaviors": ["smooth-apply", "export-cages", "eraser-crease"]
+    },
+    {
+      "id": "soften",
+      "name": "Soften Edges",
+      "state": "Hides edges by angle so facets shade as one surface.",
+      "owner": "curves",
+      "tools": [],
+      "actions": ["soften-edges"],
+      "dockChips": [],
+      "apiCommands": ["hew.solid.soften"],
+      "behaviors": []
+    },
+    {
+      "id": "follow-me-twist",
+      "name": "Follow Me twist and scale",
+      "state": "Twists or scales a profile as it follows an open path.",
+      "owner": "curves",
+      "tools": [],
+      "actions": [],
+      "dockChips": [],
+      "apiCommands": [],
+      "behaviors": ["follow-me-twist"]
+    },
+    {
+      "id": "remove-degenerate-faces",
+      "name": "Remove degenerate faces",
+      "state": "A Model Health repair that removes zero-area faces.",
+      "owner": "curves",
+      "tools": [],
+      "actions": [],
+      "dockChips": [],
+      "apiCommands": ["hew.solid.remove_degenerate_faces"],
+      "behaviors": ["health-remove-degenerate"]
+    },
+    {
+      "id": "plugins",
+      "name": "Plugins",
+      "state": "Installs add-ons made by other people and runs them in a sandbox.",
+      "owner": "plugins",
+      "defaultOn": false,
+      "tools": [],
+      "actions": [],
+      "dockChips": [],
+      "apiCommands": ["hew.plugin.list", "hew.plugin.dev", "hew.plugin.activity", "hew.plugin.reload", "hew.permissions.request"],
+      "behaviors": ["plugin-forward"],
+      "loader": {
+        "roots": ["plugin-probe"],
+        "panes": ["plugins"],
+        "shellCommands": ["plugin_list", "plugin_pick_package", "plugin_pick_dir", "plugin_stage_file", "plugin_stage_dir", "plugin_commit", "plugin_set_enabled", "plugin_set_grant", "plugin_uninstall", "plugin_rollback", "plugin_read_file", "plugin_storage_get", "plugin_storage_set", "plugin_storage_delete", "plugin_storage_list", "plugin_dev_mode", "plugin_set_dev_mode", "plugin_dev_review", "plugin_dev_request", "plugin_dev_request_dismiss", "plugin_host_present", "plugin_doc_storage_get", "plugin_doc_storage_set", "plugin_doc_storage_delete", "plugin_doc_storage_list", "plugin_report_state", "plugin_activity_read", "plugin_console_append", "plugin_console_read"],
+        "kernelExports": ["plugin_package_from_zip", "plugin_consent", "plugin_manifest_parse", "plugin_hew_version_ok", "plugin_install_check", "plugin_grant_json", "note_plugin_state", "api_connection_set_grant", "plugin_grant_lines"],
+        "cliCommands": ["plugin"],
+        "storage": ["app data folder: com.hew3d.Hew/plugins/", "OPFS: plugins/", "localStorage keys: hew.plugin.", "BroadcastChannel: hew-plugins", "environment: HEW_PLUGIN_DIR", "plugins/<id>/storage.json", "desktop event: plugins-storage-changed", "app config folder: plugin-developer-mode", "desktop event: plugins-dev-changed", "desktop event: plugins-dev-request", "plugins/<id>/installed.json fields: needs_consent, needs_consent_reason", "OPFS plugins/<id>/installed.json field: source.origin", "app data folder: com.hew3d.Hew/plugin-data/", "OPFS: plugin-data/", "plugin-data/<id>/documents/<document-id>.json", "plugin-data/<id>/usage.json", "plugin-data/<id>/activity.json", "plugin-data/<id>/console.log, console.log.1", "desktop event: plugins-storage-changed field scope, document_id", "BroadcastChannel hew-plugins message fields: scope, document_id", "desktop event: plugins-state", "desktop event: plugins-console"],
+        "markers": ["plugin-probe", "ProbeRoot", "hew-realm", "hewProbeReport", "PluginsPane", "ConsentSheet", "webPluginStore", "hew-plugins", "The plugin says", "data-plugins-tab-icon", "01VLapYTaY8NvdSpPUYwfMX5qN5kCuRh/4+zFeJB5l0=", "createRealmFrame", "boot-1.js", "hew-nonce", "forward_cancel", "storage_reply", "plugins-dev-changed", "plugins-dev-request", "plugin-developer-mode", "hew-plugin-dev-watch", "Turn on developer mode?", "Allow this plugin's changes?", "A program on this computer asked to load a plugin", "Request to load a plugin", "Hew is still checking this plugin's folder", "plugin-data", "plugins-state", "plugins-console", "hew-plugin-activity", "Hew cannot ask for permissions here.", "Allow more for this plugin?", "It would also be able to", "It may ask for more", "Where its data is kept", "Clear view", "Turn it off and on to start it again.", "data-plugin-detail"]
+      }
+    }
+  ]
+}

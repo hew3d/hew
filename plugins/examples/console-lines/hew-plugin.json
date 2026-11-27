@@ -1,0 +1,28 @@
+{
+  "manifest": 1,
+  "id": "com.example.console-lines",
+  "name": "Console Lines",
+  "version": "0.1.0",
+  "description": "Prints the lines it is given, and can stop on purpose.",
+  "api": 1,
+  "main": "dist/background.js",
+  "permissions": ["model.read"],
+  "activation": ["on_command"],
+  "contributes": {
+    "commands": [
+      {
+        "id": "say",
+        "class": "read_only",
+        "summary": "Prints a line to the plugin's console.",
+        "params": { "type": "object", "properties": { "text": {}, "level": {} }, "additionalProperties": false },
+        "result": { "type": "object", "properties": { "done": {} }, "additionalProperties": false }
+      },
+      {
+        "id": "crash",
+        "class": "read_only",
+        "summary": "Throws an error nothing catches, which stops the plugin.",
+        "result": { "type": "object", "properties": { "done": {} }, "additionalProperties": false }
+      }
+    ]
+  }
+}

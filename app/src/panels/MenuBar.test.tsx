@@ -10,6 +10,9 @@ import { render, screen, fireEvent } from '@testing-library/react'
 import { describe, expect, it, vi, beforeEach } from 'vitest'
 import { MenuBar, type MenuBarProps } from './MenuBar'
 import { TOOLS } from '../tools/toolRegistry'
+import { requiresPreview } from '../test/requiresPreview'
+import { toolAllowed } from '../preview'
+import { actionOffered } from '../curveActions'
 
 const defaultProps: MenuBarProps = {
   name: 'Untitled',
@@ -28,6 +31,17 @@ const defaultProps: MenuBarProps = {
   canRedo: false,
 }
 
+/** Hover a submenu row open (Shape, Deform, Smooth, …) in the open dropdown. */
+function openSubmenu(label: string): void {
+  fireEvent.mouseEnter(screen.getByText(label))
+}
+
+/** Opens a submenu only where the Preview wall leaves it (a production
+ *  build has no Shape or Deform submenu). */
+function openSubmenuIfPresent(label: string): void {
+  if (screen.queryByText(label) !== null) openSubmenu(label)
+}
+
 describe('MenuBar', () => {
   beforeEach(() => {
     vi.clearAllMocks()
@@ -36,6 +50,32 @@ describe('MenuBar', () => {
   it('renders nothing when nativeMenuBar=true', () => {
     const { container } = render(<MenuBar {...defaultProps} nativeMenuBar />)
     expect(container.firstChild).toBeNull()
+  })
+
+  it('shows a passive BETA chip with the full version only in a beta build', () => {
+    vi.stubGlobal('__HEW_BETA__', true)
+    vi.stubGlobal('__HEW_VERSION__', '1.3.1+beta.deadbeef')
+    try {
+      render(<MenuBar {...defaultProps} />)
+      const chip = screen.getByTestId('beta-chip')
+      expect(chip).toHaveTextContent('BETA')
+      expect(chip).toHaveAttribute('title', '1.3.1+beta.deadbeef')
+      expect(chip.tagName).toBe('SPAN')
+      expect(chip).not.toHaveAttribute('tabindex')
+      expect(chip).not.toHaveAttribute('role')
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('renders no BETA chip in a normal build', () => {
+    vi.stubGlobal('__HEW_BETA__', false)
+    try {
+      render(<MenuBar {...defaultProps} />)
+      expect(screen.queryByTestId('beta-chip')).toBeNull()
+    } finally {
+      vi.unstubAllGlobals()
+    }
   })
 
   it('renders the bar element when nativeMenuBar=false', () => {
@@ -289,6 +329,84 @@ describe('MenuBar', () => {
     expect(onEditAction).not.toHaveBeenCalled()
   })
 
+  // --- Linked copies: Unlink / Unlink all / Select all copies, Paste independent / linked ---
+
+  it('edit_menu_gates_unlink_and_make_component_by_selection', () => {
+    const onEditAction = vi.fn()
+    const closed = { ...openGates, canMakeComponent: false, canMakeUnique: false, canUnlink: false, canUnlinkAll: false, canPromote: false }
+    const { rerender } = render(<MenuBar {...defaultProps} editGates={closed} onEditAction={onEditAction} />)
+    fireEvent.click(screen.getByRole('button', { name: /^object$/i }))
+    for (const label of ['Unlink', 'Unlink all', 'Select all copies', 'Make Component']) {
+      fireEvent.mouseDown(screen.getByText(label))
+    }
+    expect(onEditAction).not.toHaveBeenCalled()
+
+    // One linked copy among several: every copy action lights up, and Make
+    // Component is the promote even though a plain Make Component is off.
+    rerender(
+      <MenuBar {...defaultProps} editGates={{ ...closed, canUnlink: true, canUnlinkAll: true, canPromote: true }} onEditAction={onEditAction} />,
+    )
+    const commands: Array<[string, string]> = [
+      ['Unlink', 'edit-unlink'],
+      ['Unlink all', 'edit-unlink-all'],
+      ['Select all copies', 'edit-select-all-copies'],
+      ['Make Component', 'edit-make-component'],
+    ]
+    for (const [label, action] of commands) {
+      // The disabled clicks above left the menu open (see the note below).
+      if (screen.queryByText(label) === null) fireEvent.click(screen.getByRole('button', { name: /^object$/i }))
+      fireEvent.mouseDown(screen.getByText(label))
+      expect(onEditAction).toHaveBeenLastCalledWith(action)
+    }
+    // A set of one: Unlink works, Unlink all and Select all copies do not.
+    onEditAction.mockClear()
+    rerender(<MenuBar {...defaultProps} editGates={{ ...closed, canUnlink: true, canPromote: true }} onEditAction={onEditAction} />)
+    if (screen.queryByText('Unlink all') === null) fireEvent.click(screen.getByRole('button', { name: /^object$/i }))
+    fireEvent.mouseDown(screen.getByText('Unlink all'))
+    fireEvent.mouseDown(screen.getByText('Select all copies'))
+    expect(onEditAction).not.toHaveBeenCalled()
+  })
+
+  it('flip_along_items_are_gated_by_selection', () => {
+    const onEditAction = vi.fn()
+    const { rerender } = render(<MenuBar {...defaultProps} editGates={{ ...openGates, canFlip: false }} onEditAction={onEditAction} />)
+    const openFlipAlong = () => {
+      if (screen.queryByText('Flip Along') === null) fireEvent.click(screen.getByRole('button', { name: /^object$/i }))
+      fireEvent.mouseEnter(screen.getByText('Flip Along'))
+    }
+    openFlipAlong()
+    for (const label of ['Red', 'Green', 'Blue']) fireEvent.mouseDown(screen.getByText(label))
+    expect(onEditAction).not.toHaveBeenCalled()
+
+    rerender(<MenuBar {...defaultProps} editGates={{ ...openGates, canFlip: true }} onEditAction={onEditAction} />)
+    const commands: Array<[string, string]> = [
+      ['Red', 'edit-flip-red'],
+      ['Green', 'edit-flip-green'],
+      ['Blue', 'edit-flip-blue'],
+    ]
+    for (const [label, action] of commands) {
+      if (screen.queryByText(label) === null) openFlipAlong()
+      fireEvent.mouseDown(screen.getByText(label))
+      expect(onEditAction).toHaveBeenLastCalledWith(action)
+    }
+  })
+
+  it('Paste independent is always offered; Paste linked joins it only while copies default to independent', () => {
+    const onEditAction = vi.fn()
+    const gates = { ...openGates, clipboardHasContent: true }
+    const { rerender } = render(<MenuBar {...defaultProps} editGates={gates} onEditAction={onEditAction} />)
+    fireEvent.click(screen.getByRole('button', { name: /^edit$/i }))
+    expect(screen.getByText('Paste independent')).toBeInTheDocument()
+    expect(screen.queryByText('Paste linked')).toBeNull()
+    fireEvent.mouseDown(screen.getByText('Paste independent'))
+    expect(onEditAction).toHaveBeenLastCalledWith('edit-paste-independent')
+
+    rerender(<MenuBar {...defaultProps} editGates={gates} onEditAction={onEditAction} copiesLinked={false} />)
+    fireEvent.click(screen.getByRole('button', { name: /^edit$/i }))
+    fireEvent.mouseDown(screen.getByText('Paste linked'))
+    expect(onEditAction).toHaveBeenLastCalledWith('edit-paste-linked')
+  })
+
   // --- Tools menu: active tool checkmark ---
 
   it('shows a checkmark next to the active tool in the Tools menu', () => {
@@ -340,8 +458,17 @@ describe('MenuBar', () => {
     const seen = new Set<string>()
     for (const menu of [/draw/i, /^tools$/i, /camera/i]) {
       fireEvent.click(screen.getByRole('button', { name: menu }))
+      // The Tools menu keeps the Shape and Deform families in submenus.
+      if (menu.source === '^tools$') {
+        openSubmenuIfPresent('Shape')
+        openSubmenuIfPresent('Deform')
+      }
       for (const tool of TOOLS) {
         if (screen.queryByText(tool) !== null) seen.add(tool)
+      }
+      // Deform is one tool with a menu entry per mode.
+      if (['Twist', 'Bend', 'Taper', 'Bend to Path'].every((m) => screen.queryByText(m) !== null)) {
+        seen.add('Deform')
       }
     }
     for (const tool of TOOLS) {
@@ -448,6 +575,36 @@ describe('MenuBar', () => {
     fireEvent.click(screen.getByRole('button', { name: /^view$/i }))
     fireEvent.mouseDown(screen.getByText('Axes'))
     expect(onToggleAxes).toHaveBeenCalledOnce()
+  })
+
+  it('lists Tangent Edges after Guides, unchecked by default, and toggles it', () => {
+    const onToggleTangentEdges = vi.fn()
+    render(<MenuBar {...defaultProps} onToggleTangentEdges={onToggleTangentEdges} />)
+    fireEvent.click(screen.getByRole('button', { name: /^view$/i }))
+    const guides = screen.getByText('Guides')
+    const tangent = screen.getByText('Tangent Edges')
+    expect(guides.compareDocumentPosition(tangent) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(tangent.closest('div')?.textContent).not.toContain('✓')
+    fireEvent.mouseDown(tangent)
+    expect(onToggleTangentEdges).toHaveBeenCalledOnce()
+  })
+
+  it('shows a checkmark for Tangent Edges when showTangentEdges=true', () => {
+    render(<MenuBar {...defaultProps} showTangentEdges={true} />)
+    fireEvent.click(screen.getByRole('button', { name: /^view$/i }))
+    expect(screen.getByText('Tangent Edges').closest('div')?.textContent).toContain('✓')
+  })
+
+  it('view_menu_has_a_part_axes_check_item', () => {
+    const onTogglePartAxes = vi.fn()
+    const { rerender } = render(<MenuBar {...defaultProps} showPartAxes={false} onTogglePartAxes={onTogglePartAxes} />)
+    fireEvent.click(screen.getByRole('button', { name: /^view$/i }))
+    expect(screen.getByText('Part Axes').closest('div')?.textContent).not.toContain('✓')
+    fireEvent.mouseDown(screen.getByText('Part Axes'))
+    expect(onTogglePartAxes).toHaveBeenCalledOnce()
+    rerender(<MenuBar {...defaultProps} showPartAxes={true} onTogglePartAxes={onTogglePartAxes} />)
+    fireEvent.click(screen.getByRole('button', { name: /^view$/i }))
+    expect(screen.getByText('Part Axes').closest('div')?.textContent).toContain('✓')
   })
 
   it('calls onResetAxes when View > Reset Drawing Axes is mousedown-clicked', () => {
@@ -569,6 +726,20 @@ describe('MenuBar', () => {
     fireEvent.click(screen.getByRole('button', { name: /help/i }))
     fireEvent.mouseDown(screen.getByText('Report Bug…'))
     expect(onReportBug).toHaveBeenCalledOnce()
+  })
+
+  it('Help > Sent Reports… calls onSentReports and carries the (n new) suffix', () => {
+    const onSentReports = vi.fn()
+    const { unmount } = render(<MenuBar {...defaultProps} onSentReports={onSentReports} />)
+    fireEvent.click(screen.getByRole('button', { name: /help/i }))
+    fireEvent.mouseDown(screen.getByText('Sent Reports…'))
+    expect(onSentReports).toHaveBeenCalledOnce()
+    unmount()
+
+    render(<MenuBar {...defaultProps} onSentReports={onSentReports} sentReportsNew={2} />)
+    fireEvent.click(screen.getByRole('button', { name: /help/i }))
+    expect(screen.getByText('Sent Reports (2 new)…')).toBeInTheDocument()
+    expect(screen.queryByText('Sent Reports…')).not.toBeInTheDocument()
   })
 
   // --- Native menu-mode semantics ---
@@ -741,11 +912,36 @@ describe('MenuBar', () => {
     // (Follow Me shipped wired into the dispatcher but missing from both
     // menu surfaces — this pins the web one).
     const onSelectTool = vi.fn()
-    render(<MenuBar {...defaultProps} activeTool="Select" onSelectTool={onSelectTool} />)
+    const onSelectDeformMode = vi.fn()
+    render(
+      <MenuBar
+        {...defaultProps}
+        activeTool="Select"
+        onSelectTool={onSelectTool}
+        onSelectDeformMode={onSelectDeformMode}
+      />,
+    )
     for (const tool of TOOLS) {
+      if (tool === 'Deform') {
+        // Deform is one tool with four menu entries, one per mode (Twist,
+        // Bend, Taper, Bend to Path); each must be present and open it.
+        for (const [label, mode] of [
+          ['Twist', 'twist'], ['Bend', 'bend'], ['Taper', 'taper'], ['Bend to Path', 'bend-to-path'],
+        ]) {
+          fireEvent.click(screen.getByRole('button', { name: /^tools$/i }))
+          openSubmenu('Deform')
+          // "Deform" is also the row label; the mode entries are the leaves.
+          const entry = screen.queryByText(label)
+          expect(entry, `Deform mode "${label}" is missing from the Tools menu`).not.toBeNull()
+          fireEvent.mouseDown(entry as HTMLElement)
+          expect(onSelectDeformMode).toHaveBeenLastCalledWith(mode)
+        }
+        continue
+      }
       let item: HTMLElement | null = null
       for (const menu of ['draw', 'tools', 'camera']) {
         fireEvent.click(screen.getByRole('button', { name: new RegExp(`^${menu}$`, 'i') }))
+        if (menu === 'tools') openSubmenuIfPresent('Shape')
         item = screen.queryByText(tool)
         if (item !== null) break
       }
@@ -784,4 +980,204 @@ describe('MenuBar', () => {
       expect(screen.queryByText('Revert to Saved')).not.toBeInTheDocument()
     })
   })
+
+  // --- True Curves organization (docs/design/true-curves-ui-organization.md) ---
+
+  /** The row labels of the open Tools dropdown, top to bottom, with '' for
+   *  a separator (submenu contents are absent until hovered). */
+  function toolsMenuRows(): string[] {
+    const dropdown = screen.getByText('Select').parentElement?.parentElement
+    if (dropdown === null || dropdown === undefined) return []
+    return Array.from(dropdown.children).map((c) =>
+      (c.firstElementChild?.textContent ?? '').replace(/[✓▸]/g, ''),
+    )
+  }
+
+  it('Tools menu: flat list in SketchUp order with Shape and Deform submenus', () => {
+    render(<MenuBar {...defaultProps} activeTool="Select" />)
+    fireEvent.click(screen.getByRole('button', { name: /^tools$/i }))
+    const rows = toolsMenuRows()
+    // Top to bottom; '' marks a separator.
+    // The preview-build layout; a production build drops what the Preview
+    // wall withholds (a submenu with nothing left goes too), then any
+    // separator that is doubled or at an edge.
+    const full = [
+      'Select', 'Eraser', 'Paint', 'Position Texture', '',
+      'Move', 'Rotate', 'Scale', 'Flip', '',
+      'Push/Pull', 'Follow Me', 'Offset', 'Fillet', 'Chamfer', '',
+      'Shape', 'Deform', '',
+      'Slice', 'Edit Vertex', '',
+      'Tape Measure', 'Protractor', 'Dimension', 'Text', '',
+      'Drawing Axes', 'Section Plane',
+    ]
+    const shapeTools = ['Revolve', 'Loft', 'Shell', 'Project', 'Array along Path']
+    const offered = (row: string): boolean =>
+      row === 'Chamfer' ? actionOffered('tool-chamfer')
+        : row === 'Shape' ? shapeTools.some(toolAllowed)
+          : toolAllowed(row)
+    const expected = full.filter((r) => r === '' || offered(r)).filter((r, i, a) => r !== '' || (i > 0 && a[i - 1] !== '' && i < a.length - 1))
+    expect(rows).toEqual(expected)
+  })
+
+  it('Tools menu: Shape holds Revolve, Loft, Shell, Project, then Array along Path', (ctx) => {
+    requiresPreview(ctx, 'revolve', 'loft', 'shell', 'project', 'path-array')
+    const onSelectTool = vi.fn()
+    render(<MenuBar {...defaultProps} activeTool="Select" onSelectTool={onSelectTool} />)
+    fireEvent.click(screen.getByRole('button', { name: /^tools$/i }))
+    // Nothing from the family is on the flat list.
+    for (const name of ['Revolve', 'Loft', 'Shell', 'Project', 'Array along Path']) {
+      expect(screen.queryByText(name)).toBeNull()
+    }
+    openSubmenu('Shape')
+    const order = ['Revolve', 'Loft', 'Shell', 'Project', 'Array along Path']
+    const positions = order.map((n) => screen.getByText(n))
+    for (let i = 1; i < positions.length; i++) {
+      expect(positions[i - 1].compareDocumentPosition(positions[i]) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    }
+    fireEvent.mouseDown(screen.getByText('Revolve'))
+    expect(onSelectTool).toHaveBeenLastCalledWith('Revolve')
+  })
+
+  it('Tools menu: Deform holds Twist, Bend, Taper, Bend to Path and checks the running mode', (ctx) => {
+    requiresPreview(ctx, 'deform')
+    const onSelectDeformMode = vi.fn()
+    render(
+      <MenuBar {...defaultProps} activeTool="Deform" deformMode="taper" onSelectDeformMode={onSelectDeformMode} />,
+    )
+    fireEvent.click(screen.getByRole('button', { name: /^tools$/i }))
+    expect(screen.queryByText('Twist')).toBeNull()
+    openSubmenu('Deform')
+    expect(screen.getByText('Taper').textContent).toBe('✓Taper')
+    expect(screen.getByText('Twist').textContent).toBe('Twist')
+    fireEvent.mouseDown(screen.getByText('Bend to Path'))
+    expect(onSelectDeformMode).toHaveBeenLastCalledWith('bend-to-path')
+  })
+
+  // The accelerator chip is the row's second child; reading the whole row
+  // would match the label itself ("Eraser" contains E, "Push/Pull" contains P).
+  const accelChip = (label: string) => screen.getByText(label).parentElement?.children[1]?.textContent ?? ''
+
+  it('Tools menu keeps the Push/Pull accelerator P', () => {
+    render(<MenuBar {...defaultProps} activeTool="Select" />)
+    fireEvent.click(screen.getByRole('button', { name: /^tools$/i }))
+    expect(accelChip('Push/Pull')).toBe('P')
+  })
+
+  it('Tools menu keeps the Eraser accelerator E in every build', () => {
+    render(<MenuBar {...defaultProps} activeTool="Select" />)
+    fireEvent.click(screen.getByRole('button', { name: /^tools$/i }))
+    expect(accelChip('Eraser')).toBe('E')
+  })
+
+  it('Tools menu keeps the Preview accelerator Fillet Shift+F', (ctx) => {
+    requiresPreview(ctx, 'fillet')
+    render(<MenuBar {...defaultProps} activeTool="Select" />)
+    fireEvent.click(screen.getByRole('button', { name: /^tools$/i }))
+    expect(accelChip('Fillet')).toMatch(/^(Shift\+F|⇧F)$/)
+  })
+
+  it('Object menu: Smooth submenu (Off, 1, 2, 3, Bake Smooth) and Soften Edges… dispatch the palette action ids', (ctx) => {
+    requiresPreview(ctx, 'soften')
+    const onEditAction = vi.fn()
+    render(
+      <MenuBar
+        {...defaultProps}
+        editGates={{ ...openGates, canSmooth: true, canSoften: true, smoothLevel: 2 }}
+        onEditAction={onEditAction}
+      />,
+    )
+    const cases: Array<[string, string]> = [
+      ['Off', 'smooth-off'], ['1', 'smooth-1'], ['2', 'smooth-2'], ['3', 'smooth-3'],
+      ['Bake Smooth', 'bake-smooth'],
+    ]
+    for (const [label, action] of cases) {
+      fireEvent.click(screen.getByRole('button', { name: /^object$/i }))
+      openSubmenu('Smooth')
+      fireEvent.mouseDown(screen.getByText(label))
+      expect(onEditAction).toHaveBeenLastCalledWith(action)
+    }
+    fireEvent.click(screen.getByRole('button', { name: /^object$/i }))
+    fireEvent.mouseDown(screen.getByText('Soften Edges…'))
+    expect(onEditAction).toHaveBeenLastCalledWith('soften-edges')
+  })
+
+  it("Object ▸ Smooth checks the selection's level and is greyed out without a solid", (ctx) => {
+    requiresPreview(ctx, 'smooth', 'soften')
+    const onEditAction = vi.fn()
+    const { unmount } = render(
+      <MenuBar {...defaultProps} editGates={{ ...openGates, canSmooth: true, smoothLevel: 2 }} onEditAction={onEditAction} />,
+    )
+    fireEvent.click(screen.getByRole('button', { name: /^object$/i }))
+    openSubmenu('Smooth')
+    expect(screen.getByText('2').textContent).toBe('✓2')
+    expect(screen.getByText('Off').textContent).toBe('Off')
+    unmount()
+
+    render(<MenuBar {...defaultProps} editGates={{ ...openGates, canSmooth: false }} onEditAction={onEditAction} />)
+    fireEvent.click(screen.getByRole('button', { name: /^object$/i }))
+    openSubmenu('Smooth')
+    fireEvent.mouseDown(screen.getByText('Off'))
+    fireEvent.mouseDown(screen.getByText('Bake Smooth'))
+    fireEvent.mouseDown(screen.getByText('Soften Edges…'))
+    expect(onEditAction).not.toHaveBeenCalled()
+  })
+
+  it('Object ▸ Soften Edges… follows canSoften, not canSmooth', (ctx) => {
+    requiresPreview(ctx, 'soften')
+    const onEditAction = vi.fn()
+    render(<MenuBar {...defaultProps} editGates={{ ...openGates, canSmooth: true, canSoften: false }} onEditAction={onEditAction} />)
+    fireEvent.click(screen.getByRole('button', { name: /^object$/i }))
+    fireEvent.mouseDown(screen.getByText('Soften Edges…'))
+    expect(onEditAction).not.toHaveBeenCalled()
+  })
+
+  it('Object menu: Smooth and Soften Edges… sit before Make Solid…', (ctx) => {
+    requiresPreview(ctx, 'soften')
+    render(<MenuBar {...defaultProps} editGates={openGates} />)
+    fireEvent.click(screen.getByRole('button', { name: /^object$/i }))
+    const soften = screen.getByText('Soften Edges…')
+    const smooth = screen.getByText('Smooth')
+    const solid = screen.getByText('Make Solid…')
+    expect(smooth.compareDocumentPosition(soften) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(soften.compareDocumentPosition(solid) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
 })
+
+describe('MenuBar: Edit ▸ Lock and Unlock (OW-1)', () => {
+  const closed = { canGroup: false, canUngroup: false, canMakeComponent: false, canPlaceCopy: false, canExplode: false, canMakeUnique: false, canBoolean: false }
+
+  function openEdit(): void {
+    fireEvent.click(screen.getByRole('button', { name: /^edit$/i }))
+  }
+
+  it('Lock and Unlock ▸ Selected / All follow their gates', () => {
+    const onEditAction = vi.fn()
+    const { rerender } = render(<MenuBar {...defaultProps} editGates={closed} onEditAction={onEditAction} />)
+    openEdit()
+    fireEvent.mouseDown(screen.getByText('Lock'))
+    expect(onEditAction).not.toHaveBeenCalled()
+    rerender(<MenuBar {...defaultProps} editGates={{ ...closed, canLock: true, canUnlock: true, canUnlockAll: true }} onEditAction={onEditAction} />)
+    if (screen.queryByText('Lock') === null) openEdit()
+    fireEvent.mouseDown(screen.getByText('Lock'))
+    expect(onEditAction).toHaveBeenLastCalledWith('edit-lock')
+    if (screen.queryByText('Unlock') === null) openEdit()
+    openSubmenu('Unlock')
+    fireEvent.mouseDown(screen.getByText('Selected'))
+    expect(onEditAction).toHaveBeenLastCalledWith('edit-unlock-selected')
+    if (screen.queryByText('Unlock') === null) openEdit()
+    openSubmenu('Unlock')
+    fireEvent.mouseDown(screen.getByText('All'))
+    expect(onEditAction).toHaveBeenLastCalledWith('edit-unlock-all')
+  })
+
+  it('Unlock stays off when nothing is locked', () => {
+    const onEditAction = vi.fn()
+    render(<MenuBar {...defaultProps} editGates={{ ...closed, canLock: true, canUnlock: false, canUnlockAll: false }} onEditAction={onEditAction} />)
+    openEdit()
+    openSubmenu('Unlock')
+    fireEvent.mouseDown(screen.getByText('All'))
+    fireEvent.mouseDown(screen.getByText('Selected'))
+    expect(onEditAction).not.toHaveBeenCalled()
+  })
+})
+

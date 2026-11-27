@@ -185,7 +185,7 @@ test('Follow Me start cue: a flat profile beside a circular path is auto-oriente
   await hoverWorld(page, ctx, 0.35, 0, 0)
   await expect(page.getByText('will stand it upright automatically')).toBeVisible()
   // Nothing has been committed, so nothing has been refused yet either.
-  await expect(page.getByText('[ProfileNotPerpendicular]')).toHaveCount(0)
+  await expect(page.getByText("couldn't square it to the path", { exact: false })).toHaveCount(0)
 
   // Now let the kernel answer the same question. The cue is only honest if
   // the kernel agrees, so this click MUST sweep a real, watertight lathe —
@@ -193,7 +193,7 @@ test('Follow Me start cue: a flat profile beside a circular path is auto-oriente
   await page.mouse.down()
   await page.mouse.up()
   await page.waitForFunction(() => window.__hew_test!.getObjectCount() === 1)
-  await expect(page.getByText('[ProfileNotPerpendicular]')).toHaveCount(0)
+  await expect(page.getByText("couldn't square it to the path", { exact: false })).toHaveCount(0)
   expect(
     await page.evaluate(() => {
       const h = window.__hew_test!
@@ -290,7 +290,7 @@ const CORNER_CAMERA: CameraParams = {
   far: 1000,
 }
 
-test('Follow Me start cue: a corner seam beyond the corner sweeps clean; straddling it is refused PathTooTight', async ({
+test('Follow Me start cue: a corner seam beyond the corner sweeps clean; straddling it is refused', async ({
   page,
 }) => {
   const ctx = await setup(page, CORNER_CAMERA)
@@ -332,7 +332,7 @@ test('Follow Me start cue: a corner seam beyond the corner sweeps clean; straddl
   // hint, before any click.
   await hoverWorld(page, ctx, 0, -0.3, 0)
   await expect(page.getByText('starts cleanly on the path')).toBeVisible()
-  await expect(page.getByText('[PathTooTight]')).toHaveCount(0)
+  await expect(page.getByText('The path turns tighter than the profile is wide', { exact: false })).toHaveCount(0)
 
   // The kernel agrees: the click sweeps a watertight solid.
   await armAndCommit(page)
@@ -343,7 +343,7 @@ test('Follow Me start cue: a corner seam beyond the corner sweeps clean; straddl
       return h.isObjectSolid(h.getObjectIds()[0])
     }),
   ).toBe(true)
-  await expect(page.getByText('[PathTooTight]')).toHaveCount(0)
+  await expect(page.getByText('The path turns tighter than the profile is wide', { exact: false })).toHaveCount(0)
 
   // Re-pick the SAME path (the commit above returned the tool to pick-path;
   // the path sketch itself is left standing) for the overhang placement.
@@ -354,11 +354,11 @@ test('Follow Me start cue: a corner seam beyond the corner sweeps clean; straddl
   // BEFORE any click.
   await hoverWorld(page, ctx, 0, 0, 0)
   await expect(page.getByText(/hangs back over the corner/)).toBeVisible()
-  await expect(page.getByText('[PathTooTight]')).toHaveCount(0) // nothing clicked yet
+  await expect(page.getByText('The path turns tighter than the profile is wide', { exact: false })).toHaveCount(0) // nothing clicked yet
 
   // The kernel agrees: the click really is refused, and nothing new is built.
   await armAndCommit(page)
-  await expect(page.getByText('[PathTooTight]')).toBeVisible()
+  await expect(page.getByText('The path turns tighter than the profile is wide', { exact: false })).toBeVisible()
   expect(await page.evaluate(() => window.__hew_test!.getObjectCount())).toBe(1)
 })
 

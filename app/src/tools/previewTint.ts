@@ -22,3 +22,11 @@ export const PREVIEW_PUSHPULL_FALLBACK = 0xee8800
 /** Extrude-as-new-object preview (a blue, clearly apart from the orange). */
 export const PREVIEW_EXTRUDE_NEW_TOKEN = '--preview-extrude-new'
 export const PREVIEW_EXTRUDE_NEW_FALLBACK = 0x3d7fe6
+/** Detached-shape draw preview (the same blue as extrude-as-new: "new, apart"). */
+export const PREVIEW_DETACHED_TOKEN = '--preview-detached'
+export const PREVIEW_DETACHED_FALLBACK = 0x3d7fe6
+/** Draw-tool preview while the shape will JOIN the drawing under it (the
+ *  default): the same orange as a plain pull. Reverting to the plain
+ *  preview blue is a token change (set it to #4d90ff / the light value). */
+export const PREVIEW_DRAW_JOINED_TOKEN = '--preview-draw-joined'
+export const PREVIEW_DRAW_JOINED_FALLBACK = PREVIEW_PUSHPULL_FALLBACK

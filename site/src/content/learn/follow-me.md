@@ -110,6 +110,6 @@ Each refusal says what to change. Adjust the profile or path and click again —
 
 ## Curves stay curves
 
-A drawn circle swept along a straight run is a true cylinder, exactly as if you'd extruded it: it shades smooth, remembers its exact radius, and exports at any resolution — even when the run was drawn in several strokes. Around a path's turns the walls keep their honest facets and export at the resolution they were drawn.
+A drawn circle swept along a straight run is a true cylinder, exactly as if you'd extruded it: it shades smooth, remembers its exact radius, and exports at any resolution — even when the run was drawn in several strokes. Around a drawn circle's turns the walls are exact too: Hew records the true sphere, torus, or cone each lies on, so they snap and measure to their real centers and export as smooth as you ask. Around other bends the walls keep their honest facets and export at the resolution they were drawn.
 
 Where the sweep turns a corner along one continuous drawn curve — following a smooth arc, or the round of a lathe — the wall shades smoothly across that turn instead of showing a hard facet line, the same soft shading a real curved surface has. A sharp corner in the path — a straight-line miter, a picture-frame joint — stays a crisp, visible edge, because it genuinely is one.

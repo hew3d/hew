@@ -16,10 +16,11 @@
  * unaffected by that reset.
  */
 
-import { describe, it, expect, vi, beforeAll, afterAll } from 'vitest'
+import { describe, it, expect, vi, beforeAll, afterAll, beforeEach } from 'vitest'
 import * as THREE from 'three'
 import { setLengthUnit, getLengthUnit, setPrecision, DEFAULT_PRECISION } from '../settings/units'
 import { MoveTool } from './MoveTool'
+import { setCopiesLinked } from '../settings/editing'
 import { CleanModifierTap } from '../viewport/cleanModifierTap'
 import { DragCommitGate } from '../viewport/dragCommit'
 import type { Snap } from './types'
@@ -27,6 +28,13 @@ import type { Ray } from '../viewport/math'
 import type { NodeRef } from '../panels/treeModel'
 import { ctxGround, ctxOfPlane, draftRef } from './planeUnits'
 import { applyAffineToPoint } from './transformMath'
+import { SiblingPreviewMirror } from '../viewport/siblingPreview'
+import { isSessionGhost } from './transformPreview'
+
+// The tool tests below were written when every copy was independent; with
+// "Copies are linked" off the primary copy is that same independent copy.
+// The linked-copy tests turn the preference back on for themselves.
+beforeEach(() => setCopiesLinked(false))
 
 const CTX = ctxGround()
 /** Kernel keys are 16-hex strings. */
@@ -169,6 +177,7 @@ function makeWasmScene(frame: number[] = WORLD_FRAME_FLAT) {
     // --- sketch replay surface (whole-sketch Move+Alt copies). One sketch with
     // two single-edge islands: 40 (edge 10) and 41 (edge 20); replayed
     // edges get fresh ids >= 500 and land in island 77.
+    annotation_ids: vi.fn(() => []),
     sketch_island_ids: vi.fn(() => [40n, 41n]),
     sketch_island_edges: vi.fn((_s: bigint, island: bigint) =>
       island === 40n ? [10n] : island === 41n ? [20n] : [],
@@ -196,9 +205,13 @@ function makeWasmScene(frame: number[] = WORLD_FRAME_FLAT) {
     }),
     transform_sketch: vi.fn(() => { state.hash++; state.gen++ }),
     transform_sketch_island: vi.fn(() => { state.hash++; state.gen++ }),
-    transform_sketch_islands: vi.fn(() => { state.hash++; state.gen++ }),
+    transform_sketch_islands: vi.fn(() => {
+      state.hash++
+      state.gen++
+      return '{"objects":[],"sketches":[],"kept_as_sketch":[],"faces_closed":[],"cells":[]}'
+    }),
     duplicate_selection_array: vi.fn(
-      (_kinds: Uint8Array, ids: BigUint64Array, _affine: Float64Array, count: number) => {
+      (_kinds: Uint8Array, ids: BigUint64Array, _affine: Float64Array, count: number, _linked?: boolean) => {
         const out: { kind: string; id: bigint }[] = []
         for (let k = 0; k < count; k++) {
           for (let i = 0; i < ids.length; i++) {
@@ -209,6 +222,50 @@ function makeWasmScene(frame: number[] = WORLD_FRAME_FLAT) {
         state.hash++
         state.gen++
         return out
+      },
+    ),
+    // A linked copy: every loose source is wrapped as its own set, and each
+    // copy is a placement (an instance) of it.
+    duplicate_selection_array_linked: vi.fn(
+      (kinds: Uint8Array, ids: BigUint64Array, _affine: Float64Array, count: number) => {
+        const nodes: { kind: string; id: string }[] = []
+        for (let k = 0; k < count; k++) {
+          for (let i = 0; i < ids.length; i++) nodes.push({ kind: 'instance', id: String(nextId++) })
+        }
+        const linked = Array.from(ids).map((id, i) => ({
+          source: { kind: kinds[i] === 1 ? 'group' : kinds[i] === 2 ? 'instance' : 'object', id: String(id) },
+          instance: String(nextId++),
+          definition: String(nextId++),
+        })).filter((w) => w.source.kind !== 'instance')
+        state.gen++
+        return JSON.stringify({ nodes, linked })
+      },
+    ),
+    // The grid array: one copy of every source per placement (12 floats each).
+    duplicate_selection_placements: vi.fn(
+      (_kinds: Uint8Array, ids: BigUint64Array, affines: Float64Array, _linked: boolean) => {
+        const out: { kind: string; id: bigint }[] = []
+        for (let k = 0; k < affines.length / 12; k++) {
+          for (let i = 0; i < ids.length; i++) out.push({ kind: 'object', id: nextId++ })
+        }
+        state.hash++
+        state.gen++
+        return out
+      },
+    ),
+    duplicate_selection_placements_linked: vi.fn(
+      (kinds: Uint8Array, ids: BigUint64Array, affines: Float64Array) => {
+        const nodes: { kind: string; id: string }[] = []
+        for (let k = 0; k < affines.length / 12; k++) {
+          for (let i = 0; i < ids.length; i++) nodes.push({ kind: 'instance', id: String(nextId++) })
+        }
+        const linked = Array.from(ids).map((id, i) => ({
+          source: { kind: kinds[i] === 1 ? 'group' : kinds[i] === 2 ? 'instance' : 'object', id: String(id) },
+          instance: String(nextId++),
+          definition: String(nextId++),
+        })).filter((w) => w.source.kind !== 'instance')
+        state.gen++
+        return JSON.stringify({ nodes, linked })
       },
     ),
     transform_selection: vi.fn(
@@ -344,17 +401,34 @@ describe('MoveTool — locked typed-entry direction (signed by the cursor\'s sid
 })
 
 describe('MoveTool — durable Alt copy toggle', () => {
-  it('tapping Alt toggles copy mode on and off (not hold-to-copy)', () => {
+  it('tapping_the_modifier_cycles_move_copy_independent_copy', () => {
+    // With "Copies are linked" on: Move, then Copy (linked), then
+    // Independent copy, then Move again — a durable cycle, not hold-to-copy.
+    setCopiesLinked(true)
     const { tool, onCopyModeChange } = makeTool()
     expect(tool.statusHint()).toContain('start the move')
 
     tool.onKey(makeKeyEvent('Alt'))
-    expect(onCopyModeChange).toHaveBeenLastCalledWith(true)
+    expect(onCopyModeChange).toHaveBeenLastCalledWith('primary', true)
     expect(tool.statusHint()).toContain('Copy is on')
 
     tool.onKey(makeKeyEvent('Alt'))
-    expect(onCopyModeChange).toHaveBeenLastCalledWith(false)
+    expect(onCopyModeChange).toHaveBeenLastCalledWith('alternate', false)
+    expect(tool.statusHint()).toContain('Independent copy is on')
+
+    tool.onKey(makeKeyEvent('Alt'))
+    expect(onCopyModeChange).toHaveBeenLastCalledWith('off', false)
     expect(tool.statusHint()).toContain('start the move')
+  })
+
+  it('with_the_preference_off_the_default_copy_is_independent_and_the_alternate_is_linked', () => {
+    setCopiesLinked(false)
+    const { tool, onCopyModeChange } = makeTool()
+    tool.onKey(makeKeyEvent('Alt'))
+    expect(onCopyModeChange).toHaveBeenLastCalledWith('primary', false)
+    tool.onKey(makeKeyEvent('Alt'))
+    expect(onCopyModeChange).toHaveBeenLastCalledWith('alternate', true)
+    expect(tool.statusHint()).toContain('Linked copy is on')
   })
 
   it('ignores Alt autorepeat (a held Alt toggles exactly once)', () => {
@@ -363,7 +437,7 @@ describe('MoveTool — durable Alt copy toggle', () => {
     tool.onKey(makeKeyEvent('Alt', { repeat: true }))
     tool.onKey(makeKeyEvent('Alt', { repeat: true }))
     expect(onCopyModeChange).toHaveBeenCalledTimes(1)
-    expect(onCopyModeChange).toHaveBeenLastCalledWith(true)
+    expect(onCopyModeChange).toHaveBeenLastCalledWith('primary', false)
   })
 
   it('typed exact distance commits a COPY while toggled on — Alt long released', () => {
@@ -387,7 +461,8 @@ describe('MoveTool — durable Alt copy toggle', () => {
   it('typed exact distance commits a plain MOVE after toggling back off', () => {
     const { tool, scene } = makeTool()
     tool.onKey(makeKeyEvent('Alt'))
-    tool.onKey(makeKeyEvent('Alt')) // back off
+    tool.onKey(makeKeyEvent('Alt')) // the other kind of copy
+    tool.onKey(makeKeyEvent('Alt')) // back to plain Move
     beginGestureLockedX(tool)
     typeKeys(tool, '2')
     tool.onKey(makeKeyEvent('Enter'))
@@ -409,10 +484,11 @@ describe('MoveTool — copy modifier is platform-specific (Option on macOS, Ctrl
   it('toggleCopyMode() flips copy mode directly — the method a Windows/Linux Control clean tap calls', () => {
     const { tool, onCopyModeChange } = makeTool()
     tool.toggleCopyMode()
-    expect(onCopyModeChange).toHaveBeenLastCalledWith(true)
+    expect(onCopyModeChange).toHaveBeenLastCalledWith('primary', false)
     expect(tool.statusHint()).toContain('Copy is on')
     tool.toggleCopyMode()
-    expect(onCopyModeChange).toHaveBeenLastCalledWith(false)
+    tool.toggleCopyMode()
+    expect(onCopyModeChange).toHaveBeenLastCalledWith('off', false)
   })
 
   it('a bare Control keydown does NOT toggle copy mode on macOS — Option owns it here', () => {
@@ -434,7 +510,7 @@ describe('MoveTool — copy modifier is platform-specific (Option on macOS, Ctrl
     const armed = tap.onKeyUp({ key: 'Control' }, tool)
     expect(armed).not.toBeNull()
     armed!.toggleCopyMode()
-    expect(onCopyModeChange).toHaveBeenLastCalledWith(true)
+    expect(onCopyModeChange).toHaveBeenLastCalledWith('primary', false)
   })
 
   it('a Ctrl+Z chord does NOT toggle copy mode (the clean-tap combo guard)', () => {
@@ -494,7 +570,7 @@ describe('MoveTool — on Windows/Linux, Alt is NOT the copy modifier (Ctrl is)'
 
     // The Viewport's Control clean tap calls this directly on this platform.
     tool.toggleCopyMode()
-    expect(onCopyModeChange).toHaveBeenLastCalledWith(true)
+    expect(onCopyModeChange).toHaveBeenLastCalledWith('primary', false)
     expect(tool.statusHint()).toContain('Copy is on')
     expect(tool.statusHint()).toContain('Ctrl')
   })
@@ -610,6 +686,107 @@ describe('MoveTool — drawn-shape copy (playtest: "you can\'t Copy a Sketch")',
     expect(t.scene.duplicate_selection_array).toHaveBeenCalledTimes(2)
     expect(t.scene.duplicate_selection_array.mock.calls[1][3]).toBe(3)
     expect(t.scene.draft_copy_edges.mock.calls.slice(1)).toHaveLength(3)
+  })
+})
+
+describe('MoveTool — linked copies', () => {
+  function copyThenArray(t: ReturnType<typeof makeTool>, taps: number, spec: string): void {
+    for (let i = 0; i < taps; i += 1) t.tool.onKey(makeKeyEvent('Alt'))
+    beginGestureLockedX(t.tool)
+    typeKeys(t.tool, '2')
+    t.tool.onKey(makeKeyEvent('Enter'))
+    if (spec !== '') {
+      typeKeys(t.tool, spec)
+      t.tool.onKey(makeKeyEvent('Enter'))
+    }
+  }
+
+  it('a_linked_copy_passes_linked_true_to_duplicate_selection_array', () => {
+    setCopiesLinked(true)
+    const t = makeTool()
+    copyThenArray(t, 1, '')
+    // The linked call is the one that reports the wraps; the independent
+    // call is never made.
+    expect(t.scene.duplicate_selection_array_linked).toHaveBeenCalledTimes(1)
+    expect(t.scene.duplicate_selection_array).not.toHaveBeenCalled()
+    const [kinds, ids, , count] = t.scene.duplicate_selection_array_linked.mock.calls[0]
+    expect(Array.from(kinds as Uint8Array)).toEqual([0])
+    expect(Array.from(ids as BigUint64Array)).toEqual([1n])
+    expect(count).toBe(1)
+    // The copies are placements: that is what the host selects.
+    expect(t.onCommit.mock.calls.at(-1)![0][0].kind).toBe('instance')
+    // The host learns a loose node was wrapped (it needs a full refresh).
+    expect(t.tool.takeLinkedWraps()).toHaveLength(1)
+    expect(t.tool.takeLinkedWraps()).toHaveLength(0)
+  })
+
+  it('retyping_a_linked_copy_stays_linked_after_the_preference_flips_and_the_readout_says_so', () => {
+    setCopiesLinked(true)
+    const t = makeTool()
+    copyThenArray(t, 1, '')
+    expect(t.scene.duplicate_selection_array_linked).toHaveBeenCalledTimes(1)
+    t.tool.takeLinkedWraps()
+    // The preference flips while the retype window is open.
+    setCopiesLinked(false)
+    typeKeys(t.tool, '3')
+    // The readout names the kind the redo will make, not what a new copy would be.
+    expect(t.onMeasurement.mock.calls.at(-1)![0]).toMatch(/^Copy · /)
+    t.tool.onKey(makeKeyEvent('Enter'))
+    expect(t.scene.duplicate_selection_array_linked).toHaveBeenCalledTimes(2)
+    expect(t.scene.duplicate_selection_array).not.toHaveBeenCalled()
+  })
+
+  it('a_redo_that_makes_no_wraps_does_not_report_the_previous_ones', () => {
+    setCopiesLinked(true)
+    const t = makeTool()
+    // A linked copy of an instance wraps nothing; an earlier wrap must not linger.
+    copyThenArray(t, 1, '')
+    expect(t.tool.takeLinkedWraps()).toHaveLength(1)
+    t.scene.duplicate_selection_array_linked.mockImplementationOnce(() =>
+      JSON.stringify({ nodes: [{ kind: 'instance', id: '900' }], linked: [] }),
+    )
+    typeKeys(t.tool, '3')
+    t.tool.onKey(makeKeyEvent('Enter'))
+    expect(t.tool.takeLinkedWraps()).toHaveLength(0)
+  })
+
+  it('reports_its_copy_state_for_the_cursor_badge', () => {
+    setCopiesLinked(true)
+    const t = makeTool()
+    expect(t.tool.currentCopyState()).toBe('off')
+    t.tool.onKey(makeKeyEvent('Alt'))
+    expect(t.tool.currentCopyState()).toBe('primary')
+  })
+
+  it('an_array_inherits_the_mode_of_the_copy_it_follows', () => {
+    setCopiesLinked(true)
+    const linked = makeTool()
+    copyThenArray(linked, 1, 'x3')
+    expect(linked.scene.duplicate_selection_array_linked).toHaveBeenCalledTimes(2)
+    expect(linked.scene.duplicate_selection_array_linked.mock.calls[1][3]).toBe(3)
+    expect(linked.scene.duplicate_selection_array).not.toHaveBeenCalled()
+
+    // The alternate (independent) copy stays independent through its array.
+    const independent = makeTool()
+    copyThenArray(independent, 2, 'x3')
+    expect(independent.scene.duplicate_selection_array).toHaveBeenCalledTimes(2)
+    expect(independent.scene.duplicate_selection_array.mock.calls[1][4]).toBe(false)
+    expect(independent.scene.duplicate_selection_array_linked).not.toHaveBeenCalled()
+  })
+
+  it('x4_after_a_linked_copy_undoes_the_wrap_and_rewraps_to_one_set_of_five', () => {
+    setCopiesLinked(true)
+    const t = makeTool()
+    copyThenArray(t, 1, 'x4')
+    // One undo retracts the first copy together with its wrap (one history
+    // entry), then the re-resolve copies the ORIGINAL loose source again.
+    expect(t.scene.scene_undo).toHaveBeenCalledTimes(1)
+    expect(t.scene.duplicate_selection_array_linked).toHaveBeenCalledTimes(2)
+    const [, ids, , count] = t.scene.duplicate_selection_array_linked.mock.calls[1]
+    expect(Array.from(ids as BigUint64Array)).toEqual([1n])
+    expect(count).toBe(4)
+    // Four copies plus the wrapped original are the five placements.
+    expect((t.onArrayCommit.mock.calls.at(-1)![0] as NodeRef[]).length).toBe(4)
   })
 })
 
@@ -897,6 +1074,8 @@ function makeSnapSel(overrides: Partial<Snap> = {}): Snap {
 function makeWasmSceneSel() {
   return {
     history_generation: vi.fn(() => 1n),
+    // World drawing axes (the dashed base→destination line is colored against them).
+    axes: vi.fn(() => new Float64Array([0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 1])),
     transform_selection: vi.fn(),
   }
 }
@@ -1500,5 +1679,567 @@ describe('MoveTool — click-drag-release gate', () => {
     expect(gate.release(t.tool, 1, 160, 100, () => t.tool.onPointerDown(makeSnap(3, 0, 0), rayThrough(3, 0)))).toBe(true)
     expect(t.scene.duplicate_selection_array.mock.calls.length + t.onCommit.mock.calls.length).toBeGreaterThan(commits)
     expect(t.tool.gestureInFlight()).toBe(false)
+  })
+})
+
+describe('MoveTool — the drag ghost is session geometry, mirrored onto sibling placements', () => {
+  it('arming a move puts a marked ghost in the preview; the mirror follows it and clears with Esc', () => {
+    const objectsGroup = new THREE.Group()
+    const sub = new THREE.Group()
+    sub.name = 'Object_1'
+    sub.add(new THREE.Mesh(new THREE.BoxGeometry(1, 1, 1), new THREE.MeshBasicMaterial()))
+    objectsGroup.add(sub)
+    const preview = new THREE.Group()
+    const { scene } = makeWasmScene()
+    const tool = new MoveTool(scene as never, preview, objectsGroup, [{ kind: 'object', id: 1n }], vi.fn(), vi.fn(), vi.fn(), null, vi.fn(), vi.fn())
+    const root = new THREE.Group()
+    const mirror = new SiblingPreviewMirror({ source: preview, root, frames: () => [1, 0, 0, 4, 0, 1, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 0, 1, 0, 7, 0, 0, 1, 0] })
+
+    tool.onPointerDown(makeSnap(0, 0, 0), rayThrough(0, 0))
+    const ghosts = preview.children.filter(isSessionGhost)
+    expect(ghosts).toHaveLength(1)
+    mirror.sync()
+    expect(mirror.mirrorCount).toBe(2)
+
+    // The ghost rides the cursor; so do its mirrors, in place.
+    tool.onPointerMove(makeSnap(1, 0, 0), rayThrough(1, 0))
+    mirror.sync()
+    expect(mirror.lastWork).toBe('retarget')
+    const clone = (root.children[0] as THREE.Group).children[0]
+    expect(clone.position.x).toBeCloseTo(1)
+
+    tool.onKey(makeKeyEvent('Escape'))
+    mirror.sync()
+    expect(preview.children.filter(isSessionGhost)).toHaveLength(0)
+    expect(mirror.mirrorCount).toBe(0)
+  })
+})
+
+describe('MoveTool — grid arrays (two counts)', () => {
+  /** Copy 2 m along X (or Z when `up`), leaving the array window hot. `taps`
+   *  picks the copy state: 1 = the preferred kind (linked by default), 2 = independent. */
+  function copyThenGrid(
+    t: ReturnType<typeof makeTool>,
+    taps: number,
+    spec: string,
+    lock: 'ArrowRight' | 'ArrowUp' = 'ArrowRight',
+  ): void {
+    for (let i = 0; i < taps; i += 1) t.tool.onKey(makeKeyEvent('Alt'))
+    t.tool.onPointerDown(makeSnap(0, 0, 0), rayThrough(0, 0))
+    t.tool.onKey(makeKeyEvent(lock))
+    typeKeys(t.tool, '2')
+    t.tool.onKey(makeKeyEvent('Enter'))
+    if (spec !== '') {
+      typeKeys(t.tool, spec)
+      t.tool.onKey(makeKeyEvent('Enter'))
+    }
+  }
+
+  /** The slot translations of the latest placements call, as "x,y,z" strings. */
+  function slots(call: unknown[]): string[] {
+    const a = call[2] as Float64Array
+    const out: string[] = []
+    for (let k = 0; k < a.length; k += 12) out.push([a[k + 3], a[k + 7], a[k + 11]].map((n) => String(Math.round(n * 1e9) / 1e9 + 0)).join(','))
+    return out
+  }
+
+  beforeEach(() => setCopiesLinked(true))
+
+  it('a_two_count_spec_lands_a_grid_in_one_undo_step', () => {
+    const t = makeTool()
+    copyThenGrid(t, 2, 'x4,x3')
+    // One undo retracts the first copy; the grid is one placements call.
+    expect(t.scene.scene_undo).toHaveBeenCalledTimes(1)
+    expect(t.scene.duplicate_selection_placements).toHaveBeenCalledTimes(1)
+    const call = t.scene.duplicate_selection_placements.mock.calls[0]
+    expect(Array.from(call[1] as BigUint64Array)).toEqual([1n])
+    expect((call[2] as Float64Array).length).toBe(19 * 12)
+    expect(call[3]).toBe(false)
+    expect((t.onArrayCommit.mock.calls.at(-1)![0] as NodeRef[]).length).toBe(19)
+  })
+
+  it('the_grid_has_count_plus_one_by_count2_plus_one_slots_and_skips_the_original', () => {
+    const t = makeTool()
+    copyThenGrid(t, 2, '4x,3x')
+    const got = slots(t.scene.duplicate_selection_placements.mock.calls[0])
+    expect(got).toHaveLength(19)
+    expect(got).not.toContain('0,0,0')
+    const want: string[] = []
+    for (let i = 0; i <= 4; i++) for (let j = 0; j <= 3; j++) if (i + j > 0) want.push(`${2 * i},${2 * j},0`)
+    expect(got).toEqual(want)
+    expect(new Set(got).size).toBe(19)
+  })
+
+  it('direction_two_defaults_to_the_horizontal_perpendicular', () => {
+    const t = makeTool()
+    copyThenGrid(t, 2, 'x1,x2')
+    // A move along +X puts the rows along +Y, one move length apart.
+    expect(slots(t.scene.duplicate_selection_placements.mock.calls[0])).toEqual([
+      '0,2,0', '0,4,0', '2,0,0', '2,2,0', '2,4,0',
+    ])
+  })
+
+  it('direction_two_is_x_when_the_move_is_vertical', () => {
+    const t = makeTool()
+    copyThenGrid(t, 2, 'x1,x2', 'ArrowUp')
+    expect(slots(t.scene.duplicate_selection_placements.mock.calls[0])).toEqual([
+      '2,0,0', '4,0,0', '0,0,2', '2,0,2', '4,0,2',
+    ])
+  })
+
+  it('an_arrow_key_held_at_enter_sets_direction_two', () => {
+    const t = makeTool()
+    copyThenGrid(t, 2, '')
+    typeKeys(t.tool, 'x1,x1')
+    t.tool.onKey(makeKeyEvent('ArrowUp'))
+    t.tool.onKey(makeKeyEvent('Enter'))
+    expect(slots(t.scene.duplicate_selection_placements.mock.calls[0])).toEqual(['0,0,2', '2,0,0', '2,0,2'])
+  })
+
+  it('an_arrow_key_while_hot_re_resolves_direction_two', () => {
+    const t = makeTool()
+    copyThenGrid(t, 2, 'x1,x1')
+    expect(t.scene.duplicate_selection_placements).toHaveBeenCalledTimes(1)
+    expect(slots(t.scene.duplicate_selection_placements.mock.calls[0])).toContain('0,2,0')
+    t.tool.onKey(makeKeyEvent('ArrowUp'))
+    // The first grid is retracted (one undo) and the new one laid in its place.
+    expect(t.scene.scene_undo).toHaveBeenCalledTimes(2)
+    expect(t.scene.duplicate_selection_placements).toHaveBeenCalledTimes(2)
+    expect(slots(t.scene.duplicate_selection_placements.mock.calls[1])).toEqual(['0,0,2', '2,0,0', '2,0,2'])
+    expect(t.tool.statusHint()).toContain('blue')
+    // A key parallel to the move is refused and changes nothing.
+    t.tool.onKey(makeKeyEvent('ArrowRight'))
+    expect(t.scene.duplicate_selection_placements).toHaveBeenCalledTimes(2)
+    expect(t.onToast).toHaveBeenCalled()
+  })
+
+  it('an_arrow_key_with_a_two_count_spec_in_progress_only_remembers_the_axis', () => {
+    const t = makeTool()
+    copyThenGrid(t, 2, '')
+    typeKeys(t.tool, 'x2,')
+    t.tool.onKey(makeKeyEvent('ArrowUp'))
+    expect(t.scene.scene_undo).not.toHaveBeenCalled()
+    expect(t.scene.duplicate_selection_placements).not.toHaveBeenCalled()
+  })
+
+  it('arrows_pass_through_to_the_global_handler_without_a_grid_or_a_two_count_buffer', () => {
+    // A hot plain copy, with nothing typed or a plain row spec typed: arrows are not Move's.
+    const t = makeTool()
+    copyThenGrid(t, 2, '')
+    for (const k of ['ArrowRight', 'ArrowLeft', 'ArrowUp', 'ArrowDown']) expect(t.tool.capturesKey(k)).toBe(false)
+    typeKeys(t.tool, 'x3')
+    expect(t.tool.capturesKey('ArrowUp')).toBe(false)
+    t.tool.onKey(makeKeyEvent('Enter')) // a plain row is laid
+    expect(t.tool.capturesKey('ArrowUp')).toBe(false)
+    t.tool.onKey(makeKeyEvent('ArrowRight'))
+    expect(t.onToast).not.toHaveBeenCalled()
+    expect(t.scene.scene_undo).toHaveBeenCalledTimes(1)
+    // A comma in the buffer, or a laid grid, makes them Move's.
+    typeKeys(t.tool, 'x2,')
+    expect(t.tool.capturesKey('ArrowUp')).toBe(true)
+    t.tool.onKey(makeKeyEvent('Backspace'))
+    t.tool.onKey(makeKeyEvent('Backspace'))
+    t.tool.onKey(makeKeyEvent('Backspace'))
+    typeKeys(t.tool, 'x2,x2')
+    t.tool.onKey(makeKeyEvent('Enter'))
+    expect(t.tool.capturesKey('ArrowUp')).toBe(true)
+  })
+
+  it('a_pending_arrow_with_text_in_the_buffer_leaves_the_hint_on_the_laid_axis', () => {
+    const t = makeTool()
+    copyThenGrid(t, 2, 'x1,x1')
+    expect(t.tool.statusHint()).toContain('green')
+    typeKeys(t.tool, 'x2')
+    t.tool.onKey(makeKeyEvent('ArrowUp'))
+    // The grid on screen is still on green; nothing re-laid yet.
+    expect(t.scene.duplicate_selection_placements).toHaveBeenCalledTimes(1)
+    expect(t.tool.statusHint()).toContain('green')
+    expect(t.tool.statusHint()).not.toContain('blue')
+    typeKeys(t.tool, ',x1')
+    t.tool.onKey(makeKeyEvent('Enter'))
+    expect(slots(t.scene.duplicate_selection_placements.mock.calls[1])).toEqual(['0,0,2', '2,0,0', '2,0,2', '4,0,0', '4,0,2'])
+    expect(t.tool.statusHint()).toContain('blue')
+  })
+
+  it('a_grid_on_a_diagonal_move_says_rows_run_across_the_move', () => {
+    const t = makeTool()
+    t.tool.onKey(makeKeyEvent('Alt'))
+    t.tool.onKey(makeKeyEvent('Alt'))
+    t.tool.onPointerDown(makeSnap(0, 0, 0), rayThrough(0, 0))
+    t.tool.onPointerMove(makeSnap(1, 1, 0), rayThrough(1, 1))
+    typeKeys(t.tool, '2')
+    t.tool.onKey(makeKeyEvent('Enter'))
+    typeKeys(t.tool, 'x1,x1')
+    t.tool.onKey(makeKeyEvent('Enter'))
+    expect(t.scene.duplicate_selection_placements).toHaveBeenCalledTimes(1)
+    const hint = t.tool.statusHint()
+    expect(hint).toContain('across the move')
+    expect(hint).not.toContain('Type 3x')
+  })
+
+  it('an_arrow_axis_near_parallel_to_the_move_is_refused_with_a_toast', () => {
+    const t = makeTool()
+    t.tool.onKey(makeKeyEvent('Alt'))
+    t.tool.onKey(makeKeyEvent('Alt'))
+    t.tool.onPointerDown(makeSnap(0, 0, 0), rayThrough(0, 0))
+    t.tool.onPointerMove(makeSnap(10, 0.5, 0), rayThrough(10, 0.5)) // about 3 degrees off red
+    typeKeys(t.tool, '2')
+    t.tool.onKey(makeKeyEvent('Enter'))
+    typeKeys(t.tool, 'x1,x1')
+    t.tool.onKey(makeKeyEvent('Enter'))
+    expect(t.scene.duplicate_selection_placements).toHaveBeenCalledTimes(1)
+    t.tool.onKey(makeKeyEvent('ArrowRight'))
+    expect(t.scene.duplicate_selection_placements).toHaveBeenCalledTimes(1)
+    expect(t.onToast).toHaveBeenCalledTimes(1)
+  })
+
+  it('re_entering_a_spec_replaces_the_grid', () => {
+    const t = makeTool()
+    copyThenGrid(t, 2, 'x6')
+    expect(t.scene.duplicate_selection_array).toHaveBeenCalledTimes(2)
+    typeKeys(t.tool, 'x3,x2')
+    t.tool.onKey(makeKeyEvent('Enter'))
+    // The row of six is retracted by one undo, then the grid lands in one call.
+    expect(t.scene.scene_undo).toHaveBeenCalledTimes(2)
+    expect(t.scene.duplicate_selection_placements).toHaveBeenCalledTimes(1)
+    expect((t.scene.duplicate_selection_placements.mock.calls[0][2] as Float64Array).length).toBe(11 * 12)
+    // And a plain count afterwards replaces the grid again.
+    typeKeys(t.tool, 'x2')
+    t.tool.onKey(makeKeyEvent('Enter'))
+    expect(t.scene.scene_undo).toHaveBeenCalledTimes(3)
+    expect(t.scene.duplicate_selection_array.mock.calls.at(-1)![3]).toBe(2)
+  })
+
+  it('the_grid_inherits_the_copy_mode', () => {
+    const linked = makeTool()
+    copyThenGrid(linked, 1, 'x4,x3')
+    expect(linked.scene.duplicate_selection_placements_linked).toHaveBeenCalledTimes(1)
+    expect(linked.scene.duplicate_selection_placements).not.toHaveBeenCalled()
+    expect((linked.scene.duplicate_selection_placements_linked.mock.calls[0][2] as Float64Array).length).toBe(19 * 12)
+    expect(linked.tool.takeLinkedWraps()).toHaveLength(1)
+
+    setCopiesLinked(false)
+    const flipped = makeTool()
+    copyThenGrid(flipped, 2, 'x4,x3') // the alternate kind is linked when the preference is off
+    expect(flipped.scene.duplicate_selection_placements_linked).toHaveBeenCalledTimes(1)
+  })
+
+  it('a_product_over_the_cap_toasts_and_changes_nothing', () => {
+    const t = makeTool()
+    copyThenGrid(t, 2, 'x40,x40')
+    expect(t.onToast).toHaveBeenCalledWith(expect.stringContaining('limited to'))
+    expect(t.scene.scene_undo).not.toHaveBeenCalled()
+    expect(t.scene.duplicate_selection_placements).not.toHaveBeenCalled()
+    // 999 placements is the largest grid that fits: 49 x 19 slots minus one = 999.
+    typeKeys(t.tool, 'x49,x19')
+    t.tool.onKey(makeKeyEvent('Enter'))
+    expect(t.scene.duplicate_selection_placements).toHaveBeenCalledTimes(1)
+  })
+
+  it('slash_n_still_divides_the_distance_and_is_linked_in_linked_mode', () => {
+    const t = makeTool()
+    copyThenGrid(t, 1, '/4')
+    expect(t.scene.duplicate_selection_array_linked).toHaveBeenCalledTimes(2)
+    const [, , affine, count] = t.scene.duplicate_selection_array_linked.mock.calls[1]
+    expect(translationOf(affine as Float64Array)).toEqual([0.5, 0, 0])
+    expect(count).toBe(4)
+  })
+
+  it('the_grid_buffer_is_typed_with_a_comma_and_reads_back_with_the_glyph', () => {
+    const t = makeTool()
+    copyThenGrid(t, 2, '')
+    expect(t.tool.capturesKey(',')).toBe(true)
+    typeKeys(t.tool, 'x4,x3')
+    expect(t.onMeasurement).toHaveBeenLastCalledWith('×4, ×3')
+    expect(t.tool.statusHint()).toContain('4x,3x')
+  })
+
+  it('a_distance_typed_after_a_grid_re_spaces_the_whole_grid', () => {
+    const t = makeTool()
+    copyThenGrid(t, 2, 'x1,x1')
+    typeKeys(t.tool, '3')
+    t.tool.onKey(makeKeyEvent('Enter'))
+    expect(t.scene.duplicate_selection_placements).toHaveBeenCalledTimes(2)
+    expect(slots(t.scene.duplicate_selection_placements.mock.calls[1])).toEqual(['0,3,0', '3,0,0', '3,3,0'])
+  })
+})
+
+describe('MoveTool — a click-taken selection lasts only for the gesture (SketchUp pre-highlight rule)', () => {
+  const NODE: NodeRef = { kind: 'object', id: 7n }
+
+  /** A tool with nothing selected whose click takes NODE. */
+  function makeAcquiring() {
+    const t = makeTool([])
+    const acquire = vi.fn(() => [NODE])
+    const release = vi.fn()
+    t.tool.setSelectionAcquirer(acquire, release)
+    return { ...t, acquire, release }
+  }
+
+  /** Click NODE at the origin, then click 2 m along X. */
+  function moveTwoAlongX(tool: MoveTool): void {
+    tool.onPointerDown(makeSnap(0, 0, 0), rayThrough(0, 0))
+    tool.onPointerMove(makeSnap(2, 0, 0), rayThrough(2, 0))
+    tool.onPointerDown(makeSnap(2, 0, 0), rayThrough(2, 0))
+  }
+
+  it('a landed move empties the selection again', () => {
+    const t = makeAcquiring()
+    moveTwoAlongX(t.tool)
+    expect(t.scene.transform_selection).toHaveBeenCalledTimes(1)
+    expect(t.release).toHaveBeenCalledTimes(1)
+    // The tool's own cache is empty too: the next click takes again.
+    t.tool.onPointerDown(makeSnap(5, 0, 0), rayThrough(5, 0))
+    expect(t.acquire).toHaveBeenCalledTimes(2)
+  })
+
+  it('Esc mid-gesture, and a click in place, give the selection back', () => {
+    const esc = makeAcquiring()
+    esc.tool.onPointerDown(makeSnap(0, 0, 0), rayThrough(0, 0))
+    esc.tool.onKey(makeKeyEvent('Escape'))
+    expect(esc.release).toHaveBeenCalledTimes(1)
+
+    const inPlace = makeAcquiring()
+    inPlace.tool.onPointerDown(makeSnap(0, 0, 0), rayThrough(0, 0))
+    inPlace.tool.onPointerDown(makeSnap(0, 0, 0), rayThrough(0, 0))
+    expect(inPlace.scene.transform_selection).not.toHaveBeenCalled()
+    expect(inPlace.release).toHaveBeenCalledTimes(1)
+  })
+
+  it('a refused move gives the selection back', () => {
+    const t = makeAcquiring()
+    t.scene.transform_selection.mockImplementationOnce(() => { throw new Error('InvalidTransform: refused') })
+    moveTwoAlongX(t.tool)
+    expect(t.onToast).toHaveBeenCalled()
+    expect(t.release).toHaveBeenCalledTimes(1)
+  })
+
+  it('a distance typed before the cursor left the base point gives the selection back', () => {
+    const t = makeAcquiring()
+    t.tool.onPointerDown(makeSnap(0, 0, 0), rayThrough(0, 0))
+    typeKeys(t.tool, '2')
+    t.tool.onKey(makeKeyEvent('Enter'))
+    expect(t.scene.transform_selection).not.toHaveBeenCalled()
+    expect(t.tool.capturingInput()).toBe(false)
+    expect(t.release).toHaveBeenCalledTimes(1)
+  })
+
+  it('a refused retype leaves the gesture\'s release to the retype that lands', () => {
+    const t = makeAcquiring()
+    moveTwoAlongX(t.tool)
+    expect(t.release).toHaveBeenCalledTimes(1)
+
+    t.scene.transform_selection.mockImplementationOnce(() => { throw new Error('InvalidTransform: refused') })
+    typeKeys(t.tool, '3')
+    t.tool.onKey(makeKeyEvent('Enter'))
+    expect(t.onToast).toHaveBeenCalled()
+    expect(t.release).toHaveBeenCalledTimes(1)
+
+    typeKeys(t.tool, '4')
+    t.tool.onKey(makeKeyEvent('Enter'))
+    expect(t.scene.transform_selection).toHaveBeenCalledTimes(3)
+    expect(t.release).toHaveBeenCalledTimes(2)
+  })
+
+  it('a copy, and its ×N array, leave nothing selected either — the array still fans from the source', () => {
+    const t = makeAcquiring()
+    t.tool.onKey(makeKeyEvent('Alt'))
+    moveTwoAlongX(t.tool)
+    expect(t.scene.duplicate_selection_array).toHaveBeenCalledTimes(1)
+    expect(t.release).toHaveBeenCalledTimes(1)
+
+    typeKeys(t.tool, '3x')
+    t.tool.onKey(makeKeyEvent('Enter'))
+    const [, ids, , count] = t.scene.duplicate_selection_array.mock.calls.at(-1)!
+    expect(Array.from(ids as BigUint64Array)).toEqual([7n])
+    expect(count).toBe(3)
+    expect(t.release).toHaveBeenCalledTimes(2)
+  })
+
+  it('a selection made beforehand is kept, and copies become it', () => {
+    const t = makeTool([NODE])
+    const release = vi.fn()
+    t.tool.setSelectionAcquirer(() => [{ kind: 'object', id: 99n }], release)
+    moveTwoAlongX(t.tool)
+    expect(release).not.toHaveBeenCalled()
+
+    t.tool.onKey(makeKeyEvent('Alt'))
+    moveTwoAlongX(t.tool)
+    expect(release).not.toHaveBeenCalled()
+    expect(t.onCommit).toHaveBeenLastCalledWith([{ kind: 'object', id: expect.any(BigInt) }])
+  })
+
+  it('a retyped distance re-lands with nothing selected; once something else is selected, it is left alone', () => {
+    const t = makeAcquiring()
+    moveTwoAlongX(t.tool)
+    expect(t.release).toHaveBeenCalledTimes(1)
+
+    typeKeys(t.tool, '3')
+    t.tool.onKey(makeKeyEvent('Enter'))
+    expect(t.scene.transform_selection).toHaveBeenCalledTimes(2)
+    expect(t.release).toHaveBeenCalledTimes(2)
+
+    t.tool.setSelection([{ kind: 'object', id: 3n }]) // picked in the Outliner
+    typeKeys(t.tool, '4')
+    t.tool.onKey(makeKeyEvent('Enter'))
+    expect(t.scene.transform_selection).toHaveBeenCalledTimes(3)
+    expect(t.release).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe('MoveTool — what a click would take (clickAcquire, the hover highlight)', () => {
+  it('idle with nothing selected: a node under the cursor', () => {
+    const t = makeTool([])
+    t.tool.setSelectionAcquirer(() => null)
+    expect(t.tool.clickAcquire()).toEqual({ guides: false, nodes: true })
+  })
+
+  it('a guide first when guides can be taken; with a guide selected, only another guide', () => {
+    const t = makeTool([])
+    t.tool.setSelectionAcquirer(() => null)
+    t.tool.setGuideHooks(() => null, vi.fn())
+    expect(t.tool.clickAcquire()).toEqual({ guides: true, nodes: true })
+    t.tool.setGuideTarget(5n)
+    expect(t.tool.clickAcquire()).toEqual({ guides: true, nodes: false })
+  })
+
+  it('nothing with a selection, or mid-gesture', () => {
+    const selected = makeTool([{ kind: 'object', id: 1n }])
+    selected.tool.setSelectionAcquirer(() => null)
+    expect(selected.tool.clickAcquire()).toBeNull()
+
+    const t = makeTool([])
+    t.tool.setSelectionAcquirer(() => [{ kind: 'object', id: 7n }])
+    t.tool.onPointerDown(makeSnap(0, 0, 0), rayThrough(0, 0))
+    expect(t.tool.clickAcquire()).toBeNull()
+  })
+})
+
+describe('MoveTool — dashed line from the base point to the destination', () => {
+  function dashedLines(preview: THREE.Object3D): THREE.LineSegments[] {
+    const out: THREE.LineSegments[] = []
+    preview.traverse((o) => {
+      if (o instanceof THREE.LineSegments && o.material instanceof THREE.LineDashedMaterial) out.push(o)
+    })
+    return out
+  }
+
+  it('follows the destination while the move runs and goes with the commit', () => {
+    const preview = new THREE.Group()
+    const { scene } = makeWasmScene()
+    const tool = new MoveTool(scene as never, preview, null, [{ kind: 'object', id: 1n }], vi.fn(), vi.fn(), vi.fn(), null)
+    tool.onPointerDown(makeSnap(0, 0, 0), rayThrough(0, 0))
+    tool.onPointerMove(makeSnap(2, 3, 0), rayThrough(2, 3))
+
+    const [line] = dashedLines(preview)
+    expect(line).toBeDefined()
+    const pos = line.geometry.getAttribute('position')
+    expect([pos.getX(0), pos.getY(0), pos.getX(1), pos.getY(1)]).toEqual([0, 0, 2, 3])
+
+    tool.onPointerDown(makeSnap(2, 3, 0), rayThrough(2, 3))
+    expect(dashedLines(preview)).toHaveLength(0)
+  })
+})
+
+// ── Lock (OW-1): locked items are left behind ──
+describe('MoveTool — locked items are left behind', () => {
+  /** Object 2 is locked; everything else is free. */
+  function lockObject2(scene: unknown): void {
+    const s = scene as Record<string, unknown>
+    s.node_frozen = vi.fn((kind: number, id: bigint) => (kind === 0 && id === 2n ? { kind: 'object', id } : undefined))
+    s.node_locked = vi.fn((kind: number, id: bigint) => kind === 0 && id === 2n)
+    s.group_members = vi.fn(() => [])
+    s.definition_usage = vi.fn(() => 1)
+  }
+
+  it('a mixed selection moves the unlocked box only, with one "left alone" toast', () => {
+    const { tool, scene, onToast } = makeTool([{ kind: 'object', id: 1n }, { kind: 'object', id: 2n }])
+    lockObject2(scene)
+    tool.onPointerDown(makeSnap(0, 0, 0), rayThrough(0, 0))
+    expect(onToast).toHaveBeenCalledTimes(1)
+    expect(onToast).toHaveBeenCalledWith('1 locked item was left alone.')
+    tool.onPointerDown(makeSnap(3, 0, 0), rayThrough(3, 0))
+    expect(scene.transform_selection).toHaveBeenCalledTimes(1)
+    const [kinds, ids] = (scene.transform_selection as ReturnType<typeof vi.fn>).mock.calls[0]
+    expect(Array.from(kinds)).toEqual([0])
+    expect(Array.from(ids)).toEqual([1n])
+  })
+
+  it('a selection that is all locked does not start: the toast is the Locked line with its target', () => {
+    const { tool, scene, onToast } = makeTool([{ kind: 'object', id: 2n }])
+    lockObject2(scene)
+    tool.onPointerDown(makeSnap(0, 0, 0), rayThrough(0, 0))
+    expect(onToast).toHaveBeenCalledWith('Locked', 'LockedHint:object:2')
+    expect(tool.capturingInput()).toBe(false)
+    tool.onPointerDown(makeSnap(3, 0, 0), rayThrough(3, 0))
+    expect(scene.transform_selection).not.toHaveBeenCalled()
+  })
+
+  it('copy mode copies a locked object and leaves the original where it is', () => {
+    const { tool, scene, onToast } = makeTool([{ kind: 'object', id: 2n }])
+    lockObject2(scene)
+    tool.onKey(makeKeyEvent('Alt'))
+    tool.onPointerDown(makeSnap(0, 0, 0), rayThrough(0, 0))
+    expect(onToast).not.toHaveBeenCalled()
+    tool.onPointerDown(makeSnap(3, 0, 0), rayThrough(3, 0))
+    expect(scene.transform_selection).not.toHaveBeenCalled()
+    expect(scene.duplicate_selection_array).toHaveBeenCalledTimes(1)
+    const [kinds, ids] = (scene.duplicate_selection_array as ReturnType<typeof vi.fn>).mock.calls[0]
+    expect(Array.from(kinds)).toEqual([0])
+    expect(Array.from(ids)).toEqual([2n])
+  })
+
+  it('copy mode still refuses a node frozen by a locked group above it', () => {
+    const { tool, scene, onToast } = makeTool([{ kind: 'object', id: 1n }])
+    const s = scene as unknown as Record<string, unknown>
+    s.node_frozen = vi.fn(() => ({ kind: 'group', id: 9n }))
+    s.node_locked = vi.fn(() => false)
+    s.group_members = vi.fn(() => [])
+    s.definition_usage = vi.fn(() => 1)
+    tool.onKey(makeKeyEvent('Alt'))
+    tool.onPointerDown(makeSnap(0, 0, 0), rayThrough(0, 0))
+    expect(onToast).toHaveBeenCalledWith('Locked', 'LockedHint:group:9')
+    expect(tool.capturingInput()).toBe(false)
+  })
+
+  it('copy mode refuses a locked box that sits in a locked group, naming the group', () => {
+    // The kernel answers the box itself as the cause when it is locked too;
+    // the group above is what keeps the copy from landing.
+    const { tool, scene, onToast } = makeTool([{ kind: 'object', id: 2n }])
+    const s = scene as unknown as Record<string, unknown>
+    s.node_locked = vi.fn(() => true)
+    s.node_frozen = vi.fn((kind: number, id: bigint) => ({ kind: kind === 1 ? 'group' : 'object', id }))
+    s.node_parent = vi.fn((kind: number, id: bigint) => (kind === 0 && id === 2n ? 9n : undefined))
+    s.owner_definition = vi.fn(() => undefined)
+    s.instances_of = vi.fn(() => [])
+    s.group_members = vi.fn(() => [])
+    s.definition_usage = vi.fn(() => 1)
+    tool.onKey(makeKeyEvent('Alt'))
+    tool.onPointerDown(makeSnap(0, 0, 0), rayThrough(0, 0))
+    expect(onToast).toHaveBeenCalledWith('Locked', 'LockedHint:group:9')
+    expect(tool.capturingInput()).toBe(false)
+    expect(scene.duplicate_selection_array).not.toHaveBeenCalled()
+  })
+
+  it('digits typed after a refused click are swallowed, not sent to the view hotkeys', () => {
+    const { tool, scene } = makeTool([{ kind: 'object', id: 2n }])
+    lockObject2(scene)
+    expect(tool.capturesKey('3')).toBe(false)
+    tool.onPointerDown(makeSnap(0, 0, 0), rayThrough(0, 0)) // refused: it is locked
+    expect(tool.capturesKey('3')).toBe(true)
+    expect(tool.capturesKey('-')).toBe(true)
+    expect(tool.capturesKey('v')).toBe(false)
+    // The next click, or Escape, gives the keys back.
+    tool.onKey(makeKeyEvent('Escape'))
+    expect(tool.capturesKey('3')).toBe(false)
+  })
+
+  it('an unlocked selection moves with no toast', () => {
+    const { tool, scene, onToast } = makeTool([{ kind: 'object', id: 1n }])
+    lockObject2(scene)
+    tool.onPointerDown(makeSnap(0, 0, 0), rayThrough(0, 0))
+    tool.onPointerDown(makeSnap(3, 0, 0), rayThrough(3, 0))
+    expect(onToast).not.toHaveBeenCalled()
+    expect(scene.transform_selection).toHaveBeenCalledTimes(1)
   })
 })

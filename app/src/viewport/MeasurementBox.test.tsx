@@ -1,6 +1,6 @@
 import { render, screen } from '@testing-library/react'
 import { describe, it, expect } from 'vitest'
-import { MeasurementBox } from './MeasurementBox'
+import { MEASUREMENT_BOX_TOP_PX, MeasurementBox, measurementBoxBottomPx } from './MeasurementBox'
 
 describe('MeasurementBox', () => {
   it('renders nothing when value is empty', () => {
@@ -53,7 +53,7 @@ describe('MeasurementBox', () => {
     it('defaults to the editor placement/style when omitted — byte-identical to before this prop existed', () => {
       const { container } = render(<MeasurementBox toolName="Move" value="1m" />)
       const root = container.firstChild as HTMLElement
-      expect(root.style.top).toBe('16px')
+      expect(root.style.bottom).toBe('16px')
       expect(root.style.right).toBe('16px')
       expect(root.style.left).toBe('')
     })
@@ -120,15 +120,73 @@ describe('MeasurementBox', () => {
     })
   })
 
-  it('docks top-right by default and bottom-right when asked', () => {
+  it('docks bottom-right by default and under the die stack when top-right is asked', () => {
     const { rerender } = render(<MeasurementBox toolName="Move" value="1m" />)
-    const top = screen.getByTestId('measurement-box')
-    expect(top.style.top).toBe('16px')
-    expect(top.style.bottom).toBe('')
-    rerender(<MeasurementBox toolName="Move" value="1m" position="bottom-right" />)
     const bottom = screen.getByTestId('measurement-box')
     expect(bottom.style.bottom).toBe('16px')
     expect(bottom.style.top).toBe('')
     expect(bottom.style.right).toBe('16px')
+    rerender(<MeasurementBox toolName="Move" value="1m" position="top-right" />)
+    const top = screen.getByTestId('measurement-box')
+    // Below the die (16 + 76), its 6 px gap and 16 px pips, then a 10 px gap.
+    expect(top.style.top).toBe(`${MEASUREMENT_BOX_TOP_PX}px`)
+    expect(MEASUREMENT_BOX_TOP_PX).toBe(124)
+    expect(top.style.bottom).toBe('')
+    expect(top.style.right).toBe('16px')
+  })
+
+  describe('measurementBoxBottomPx (lifts above the contextual dock)', () => {
+    const container = { left: 0, right: 1000, top: 0, bottom: 700 }
+    // A 200 x 30 box at its normal spot, bottom-right.
+    const box = { left: 784, right: 984, top: 654, bottom: 684 }
+    it('stays at 16 px with no dock', () => {
+      expect(measurementBoxBottomPx(box, null, container)).toBe(16)
+    })
+    it('stays at 16 px when 12 px or more clear of the dock', () => {
+      const dock = { left: 300, right: 772, top: 630, bottom: 682 }
+      expect(measurementBoxBottomPx(box, dock, container)).toBe(16)
+    })
+    it('lifts to 12 px above the dock when the gap is under 12 px', () => {
+      const dock = { left: 300, right: 780, top: 630, bottom: 682 }
+      expect(measurementBoxBottomPx(box, dock, container)).toBe(700 - 630 + 12)
+    })
+    it('lifts when the dock overlaps the box sideways', () => {
+      const dock = { left: 400, right: 900, top: 630, bottom: 682 }
+      expect(measurementBoxBottomPx(box, dock, container)).toBe(82)
+    })
+  })
+
+  it('applies the lift measured against a real dock element', () => {
+    const rect = (r: { left: number; right: number; top: number; bottom: number }) => () =>
+      ({ ...r, x: r.left, y: r.top, width: r.right - r.left, height: r.bottom - r.top, toJSON: () => ({}) }) as DOMRect
+    const host = document.createElement('div')
+    document.body.appendChild(host)
+    host.style.position = 'relative'
+    host.getBoundingClientRect = rect({ left: 0, right: 1000, top: 0, bottom: 700 })
+    const dock = document.createElement('div')
+    dock.setAttribute('data-testid', 'contextual-dock')
+    dock.getBoundingClientRect = rect({ left: 300, right: 790, top: 630, bottom: 682 })
+    host.appendChild(dock)
+    const slot = document.createElement('div')
+    host.appendChild(slot)
+    const proto = HTMLElement.prototype
+    const orig = Object.getOwnPropertyDescriptor(proto, 'offsetParent')
+    Object.defineProperty(proto, 'offsetParent', { configurable: true, get: () => host })
+    const origRect = Element.prototype.getBoundingClientRect
+    Element.prototype.getBoundingClientRect = function (this: Element) {
+      if (this.getAttribute('data-testid') !== 'measurement-box') return origRect.call(this)
+      // Like a real layout, the box moves up as its `bottom` grows.
+      const lifted = parseFloat((this as HTMLElement).style.bottom || '16') - 16
+      return rect({ left: 784, right: 984, top: 654 - lifted, bottom: 684 - lifted })()
+    }
+    try {
+      render(<MeasurementBox toolName="Move" value="1m" />, { container: slot })
+      expect(screen.getByTestId('measurement-box').style.bottom).toBe('82px')
+    } finally {
+      Element.prototype.getBoundingClientRect = origRect
+      if (orig) Object.defineProperty(proto, 'offsetParent', orig)
+      else delete (proto as unknown as Record<string, unknown>).offsetParent
+      host.remove()
+    }
   })
 })

@@ -46,6 +46,7 @@
  * build step.
  */
 
+import { previewBuild } from './preview'
 import { readFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -194,10 +195,15 @@ const transformRs = readRust('crates/kernel/src/transform.rs')
 const mathRs = readRust('crates/kernel/src/math.rs')
 const serializeRs = readRust('crates/kernel/src/serialize.rs')
 const repairRs = readRust('crates/kernel/src/repair.rs')
+const shapeErrorRs = readRust('crates/kernel/src/shape_error.rs')
+const blendErrorRs = readRust('crates/kernel/src/blend/error.rs')
 const wasmApiRs = readRust('crates/wasm-api/src/lib.rs')
 // The Scenes boundary lives in its own module (docs/design/scenes.md §3.3)
 // and mints its own literal codes.
 const wasmScenesApiRs = readRust('crates/wasm-api/src/scenes_api.rs')
+// The true-curves boundary (blends, shapes, Smooth) mints its own literal
+// codes too.
+const wasmCurvesApiRs = readRust('crates/wasm-api/src/curves_api.rs')
 
 // `DocumentError` variants that delegate their CODE to an inner typed error
 // instead of contributing their own field name — derived structurally by
@@ -241,10 +247,18 @@ const LEAF_ENUMS: ReadonlyArray<readonly [string, string]> = [
   ['MathError', mathRs],
   ['LoadError', serializeRs],
   ['RepairError', repairRs],
+  ['ShapeError', shapeErrorRs],
+  ['BlendError', blendErrorRs],
 ]
 const leafErrorCodes = LEAF_ENUMS.flatMap(([name, source]) => extractEnumVariants(source, name))
 
-const literalCodes = [...new Set([...extractLiteralCodes(wasmApiRs), ...extractLiteralCodes(wasmScenesApiRs)])]
+const literalCodes = [
+  ...new Set([
+    ...extractLiteralCodes(wasmApiRs),
+    ...extractLiteralCodes(wasmScenesApiRs),
+    ...extractLiteralCodes(wasmCurvesApiRs),
+  ]),
+]
 
 /** Every error code the wasm boundary can emit, derived structurally from
  * the checked-in Rust sources (see the module doc comment above). */
@@ -317,8 +331,11 @@ describe('kernelErrorMessage — coverage', () => {
 
   it('has copy for every kernel error code the boundary can emit (derived structurally from the Rust sources)', () => {
     const described = new Set(describedErrorCodes())
+    // The crease refusals' copy is compiled out of a production build, where
+    // `hew.object.crease` is refused before the kernel can raise them.
+    const compiledOut = new Set(previewBuild ? [] : ['CreaseOnSoftEdge', 'CreaseOnBoundary'])
     const missing = DERIVED_KERNEL_ERROR_CODES.filter(
-      (c) => !described.has(c) && !WRAPPER_CODES.has(c),
+      (c) => !described.has(c) && !WRAPPER_CODES.has(c) && !compiledOut.has(c),
     )
     expect(missing).toEqual([])
   })
@@ -327,7 +344,7 @@ describe('kernelErrorMessage — coverage', () => {
     // The app itself emits a few refusals through the same "CODE: copy"
     // toast convention without a kernel enum behind them — enumerate them
     // here so the guard still catches genuinely stale kernel copy.
-    const APP_ERROR_CODES = ['InvalidSelection', 'NestedComponentInContext', 'RegionNotPushable', 'RegionSliver']
+    const APP_ERROR_CODES = ['EnterRefused', 'InvalidSelection', 'NestedComponentInContext', 'RegionNotPushable', 'RegionSliver']
     const known = new Set([...DERIVED_KERNEL_ERROR_CODES, ...APP_ERROR_CODES, ...WRAPPER_CODES])
     const orphans = describedErrorCodes().filter((c) => !known.has(c))
     expect(orphans).toEqual([])
@@ -350,7 +367,7 @@ describe('kernelErrorMessage — coverage', () => {
     for (const code of [
       'WouldVanish', 'NonManifoldResult', 'RadiusVanishes', 'DistanceTooSmall',
       'EndpointNotOnBoundary', 'DegenerateContact', 'PlaneMissesSolid',
-      'MixedParents', 'CannotExplodeReflected', 'WouldRetopologize',
+      'MixedParents', 'ExplodeSessionPoseUnsupported', 'WouldRetopologize',
       'RestoreConflicts', 'WallNeighborNonPlanar',
     ]) {
       const sentences = kernelErrorMessage(code, '').match(/[.!?](\s|$)/g) ?? []
@@ -385,8 +402,8 @@ describe('friendlyErrorText', () => {
     // the toast intact, not buried in the unknown-code fallback.
     const skp =
       'SKP: unsupported SketchUp version {21.1.0}: open it in SketchUp (the ' +
-      'free web app works) and save it again as a current .skp, or ' +
-      'File ▸ Save As ▸ SketchUp Version 2017, then import that'
+      'free web app works) and save it again as a current .skp, then ' +
+      'import that'
     expect(friendlyErrorText(new Error(skp))).toBe(skp.slice('SKP: '.length))
     expect(friendlyErrorText(new Error('DAE: missing <library_geometries>'))).toBe(
       'missing <library_geometries>',
@@ -416,7 +433,8 @@ describe('isErrorLevelCode', () => {
     // The three group-boolean refusals must not render one level softer than
     // OperandNotSolid (adversarial review, minor).
     for (const code of [
-      'OperandNotSolid', 'DegenerateContact', 'EmptyResult',
+      'OperandNotSolid', 'DegenerateContact', 'EmptyResult', 'NothingRemoved',
+      'OperandFaceNotFlat', 'ArrangementFailed', 'ResultTooThin',
       'BooleanOperandHasInstance', 'BooleanOperandNotSolid', 'BooleanOperandEmpty',
     ]) {
       expect(isErrorLevelCode(code), code).toBe(true)
@@ -433,6 +451,7 @@ describe('isErrorLevelCode', () => {
     for (const code of [
       'WouldVanish', 'NonManifoldResult', 'ObjectNotSolid', 'DegenerateGeometry',
       'OperandNotSolid', 'DegenerateContact', 'EmptyResult', 'SingularTransform',
+      'NothingRemoved', 'OperandFaceNotFlat', 'ArrangementFailed', 'ResultTooThin',
       'BooleanOperandHasInstance', 'BooleanOperandNotSolid', 'BooleanOperandEmpty',
     ]) {
       expect(described.has(code), `${code} has copy`).toBe(true)

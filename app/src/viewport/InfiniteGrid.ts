@@ -249,6 +249,14 @@ export class InfiniteGrid {
     ;(this.material.uniforms.uMajorColor.value as THREE.Color).set(majorColor)
   }
 
+  /** The ground fill color and whether it paints (test accessor). */
+  getGroundInfo(): { color: number; filled: boolean } {
+    return {
+      color: (this.material.uniforms.uGroundColor.value as THREE.Color).getHex(),
+      filled: this.material.uniforms.uGroundAlpha.value === 1,
+    }
+  }
+
   /** Whether the plane paints its ground color between the lines (a
    * document style without a ground draws the lines alone). */
   setGroundFilled(filled: boolean): void {

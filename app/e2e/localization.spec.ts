@@ -51,7 +51,7 @@ test.describe('pseudo-locale boot', () => {
   })
 
   test('the command palette finds Push/Pull by its English name under pseudo labels', async ({ page }) => {
-    await page.keyboard.press('Control+/')
+    await page.keyboard.press('ControlOrMeta+/')
     const dialog = page.getByRole('dialog')
     await expect(dialog).toBeVisible()
     await page.keyboard.type('push')

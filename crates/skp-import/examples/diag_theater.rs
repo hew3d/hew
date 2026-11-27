@@ -89,20 +89,20 @@ fn collect_tags(scene: &ImportScene, out: &mut BTreeSet<String>) {
 
 fn main() {
     let skp_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../openskp/corpus/third-party/theater-2017.skp");
+        .join("../../../skpwright/corpus/third-party/theater-2017.skp");
     let dae_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../openskp/corpus/third-party/theater-2017.dae");
+        .join("../../../skpwright/corpus/third-party/theater-2017.dae");
     let skp_bytes = std::fs::read(&skp_path).expect("theater skp");
 
-    // ── Stage 0: raw OpenSKP model ──
-    let model = openskp::Model::parse(&skp_bytes).expect("openskp parse");
-    println!("== OpenSKP raw ==");
+    // ── Stage 0: raw Skpwright model ──
+    let model = skpwright::Model::parse(&skp_bytes).expect("skpwright parse");
+    println!("== Skpwright raw ==");
     println!("layers: {}", model.layers.len());
     println!("definitions: {}", model.definitions.len());
     println!("instances (records): {}", model.instances.len());
     println!("geometry runs: {}", model.geometry.len());
     let scene_nodes = model.scene();
-    fn count_nodes(nodes: &[openskp::Node]) -> usize {
+    fn count_nodes(nodes: &[skpwright::Node]) -> usize {
         nodes.iter().map(|n| 1 + count_nodes(&n.children)).sum()
     }
     println!(
@@ -112,7 +112,7 @@ fn main() {
 
     // Layer slot usage: which layers are referenced by scene nodes / faces
     let mut node_slots: BTreeSet<u16> = BTreeSet::new();
-    fn slots(nodes: &[openskp::Node], out: &mut BTreeSet<u16>) {
+    fn slots(nodes: &[skpwright::Node], out: &mut BTreeSet<u16>) {
         for n in nodes {
             out.insert(n.layer);
             slots(&n.children, out);

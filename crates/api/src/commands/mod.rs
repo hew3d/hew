@@ -43,6 +43,9 @@ pub struct Ctx<'a> {
     /// The label the executing command was given with `"as"`, if any —
     /// where its face tokens land.
     pub current_label: Option<String>,
+    /// The calling connection's grant: what a command checks for its own
+    /// finer-grained rules (the attribute namespace rule, §8).
+    pub grant: &'a crate::grant::Grant,
 }
 
 impl Ctx<'_> {
@@ -62,6 +65,26 @@ impl Ctx<'_> {
                 .insert(key.to_string(), (object, face));
         }
     }
+}
+
+/// `result` with the document's clock added as top-level members:
+/// `generation` ([`kernel::Document::history_generation`], which an abort
+/// rewinds with the stacks) and `epoch` ([`kernel::Document::document_epoch`],
+/// which never runs backwards). Every `hew.query.*` result and
+/// `hew.history.status` carry both (docs/agents/HEW_API.md §7), so a
+/// client always has the value `expect_generation` wants at hand.
+pub(crate) fn with_clock(
+    doc: &kernel::Document,
+    mut result: serde_json::Value,
+) -> serde_json::Value {
+    if let Some(map) = result.as_object_mut() {
+        map.insert(
+            "generation".into(),
+            serde_json::json!(doc.history_generation()),
+        );
+        map.insert("epoch".into(), serde_json::json!(doc.document_epoch()));
+    }
+    result
 }
 
 /// One command implementation.
@@ -99,30 +122,159 @@ pub(super) fn run_sketch_gesture<T>(
     }
 }
 
+/// What a drawing edit closed (wireframe faces §4.2, §5): the free sketches
+/// the close pass made a face in, and the cells the solid search made.
+#[derive(Debug, Default)]
+pub(super) struct Closed {
+    pub faces_closed: Vec<kernel::SketchId>,
+    pub cells: Vec<kernel::CellOutcome>,
+}
+
+impl Closed {
+    /// From a draft's report.
+    pub fn of(report: &kernel::DraftReport) -> Closed {
+        Closed {
+            faces_closed: report.faces_closed.clone(),
+            cells: report.cells.clone(),
+        }
+    }
+
+    /// Adds the optional result fields of the drawing commands
+    /// (docs/agents/HEW_API.md §7): `faces_closed`, the public ids of the
+    /// free sketches that now hold a face the edit closed on another plane
+    /// (a face a solid consumed in the same step is not listed: see
+    /// `solid`), and `solid: {object_id, grew}`, the first solid the edit
+    /// made from closed faces. Each is present only when non-empty.
+    pub fn annotate(&self, ctx: &Ctx, out: &mut serde_json::Value) {
+        let faces: Vec<String> = self
+            .faces_closed
+            .iter()
+            .filter(|&&s| ctx.doc.sketch(s).is_some())
+            .filter_map(|&s| {
+                let entity = kernel::EntityRef::Sketch(s);
+                ctx.doc
+                    .sid_of(&entity)
+                    .map(|sid| crate::ids::public_id(&entity, sid))
+            })
+            .collect();
+        if !faces.is_empty() {
+            out["faces_closed"] = serde_json::json!(faces);
+        }
+        if let Some(solid) = solid_of(ctx, &self.cells) {
+            out["solid"] = solid;
+        }
+    }
+}
+
+/// `{object_id, grew}` for the first solid among `cells` (a new Object, a
+/// grown one, or one whose union refused), or `None` when there is none.
+pub(super) fn solid_of(ctx: &Ctx, cells: &[kernel::CellOutcome]) -> Option<serde_json::Value> {
+    cells.iter().find_map(|c| {
+        let (object, grew) = match *c {
+            kernel::CellOutcome::Created(o) => (o, false),
+            kernel::CellOutcome::Grew { to, .. } => (to, true),
+            kernel::CellOutcome::Unjoined { object, .. } => (object, false),
+            kernel::CellOutcome::Declined(_) => return None,
+        };
+        let entity = kernel::EntityRef::Object(object);
+        let sid = ctx.doc.sid_of(&entity)?;
+        Some(serde_json::json!({
+            "object_id": crate::ids::public_id(&entity, sid),
+            "grew": grew,
+        }))
+    })
+}
+
+/// [`run_sketch_gesture`] for the drawing commands: the gesture ends
+/// through [`kernel::Document::end_sketch_gesture_closing_faces`], so the
+/// rules of wireframe faces §4.2 and §5 apply to API drawing as to pointer
+/// drawing, inside the gesture's one undo step.
+pub(super) fn run_drawing_gesture<T>(
+    ctx: &mut Ctx,
+    sketch: kernel::SketchId,
+    body: impl FnOnce(&mut kernel::Sketch) -> Result<T, CmdError>,
+) -> Result<(T, Closed), CmdError> {
+    ctx.doc.begin_sketch_gesture(sketch)?;
+    let outcome = match ctx.doc.sketch_mut(sketch) {
+        Some(s) => body(s),
+        None => Err(CmdError::Internal("sketch vanished mid-gesture".into())),
+    };
+    match outcome {
+        Ok(v) => {
+            let (_, faces_closed, cells) = ctx.doc.end_sketch_gesture_closing_faces(sketch)?;
+            Ok((
+                v,
+                Closed {
+                    faces_closed,
+                    cells,
+                },
+            ))
+        }
+        Err(e) => {
+            // A refused body closes nothing (the envelope rolls back).
+            let _ = ctx.doc.end_sketch_gesture(sketch);
+            Err(e)
+        }
+    }
+}
+
+pub mod array;
 pub mod attrs;
+pub mod blend;
 /// Shared camera-spec parsing for `hew.view.snapshot` (doc.rs) and
 /// `hew.view.camera` (view.rs) — not a command namespace of its own, so
 /// it carries no `handler`.
 mod camera;
+pub mod compute;
 pub mod doc;
 pub mod draft;
 pub mod entity;
+pub mod geo;
 pub mod health;
 pub mod history;
 pub mod library;
+pub mod object;
+pub mod parts;
+pub mod plugin;
 pub mod print;
 pub mod query;
 pub mod scenes;
+pub mod selection;
+pub mod shape;
 pub mod sketch;
 pub mod solid;
 pub mod structure;
 pub mod style;
 pub mod view;
 
+/// The handler a first-party command runs, after the Preview wall
+/// ([`crate::preview::check`]): the dispatcher's ONE execution choke point.
+/// Every path that runs a command (a plain request, a transaction's
+/// commands, a dry run, the solitary fast path, a call made while serving a
+/// plugin forward) resolves its handler here, so a production build refuses
+/// a preview command, or a preview parameter, `preview_only` on all of
+/// them. A command with no handler refuses `unimplemented` (§14).
+pub fn resolve(name: &str, params: &serde_json::Value) -> Result<Handler, Refusal> {
+    crate::preview::check(name, params)?;
+    handler(name).ok_or_else(|| {
+        Refusal::api(
+            "unimplemented",
+            &format!("{name} is declared but not implemented yet in this build."),
+        )
+    })
+}
+
 /// The handler table, partitioned per namespace so each module owns its
-/// own match — a `None` answers the `unimplemented` refusal (§14).
+/// own match — a `None` answers the `unimplemented` refusal (§14). A
+/// production build has no handler for a preview command
+/// ([`crate::preview::command_allowed`]); run commands through
+/// [`resolve`], which also checks their parameters.
 pub fn handler(name: &str) -> Option<Handler> {
+    if crate::preview::command_allowed(name).is_err() {
+        return None;
+    }
     query::handler(name)
+        .or_else(|| parts::handler(name))
         .or_else(|| sketch::handler(name))
         .or_else(|| draft::handler(name))
         .or_else(|| solid::handler(name))
@@ -134,7 +286,15 @@ pub fn handler(name: &str) -> Option<Handler> {
         .or_else(|| history::handler(name))
         .or_else(|| doc::handler(name))
         .or_else(|| view::handler(name))
+        .or_else(|| selection::handler(name))
         .or_else(|| scenes::handler(name))
+        .or_else(|| geo::handler(name))
         .or_else(|| print::handler(name))
         .or_else(|| library::handler(name))
+        .or_else(|| compute::handler(name))
+        .or_else(|| blend::handler(name))
+        .or_else(|| shape::handler(name))
+        .or_else(|| object::handler(name))
+        .or_else(|| array::handler(name))
+        .or_else(|| plugin::handler(name))
 }

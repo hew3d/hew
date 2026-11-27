@@ -360,19 +360,31 @@ fn a_damaged_exif_block_leaves_the_picture_unturned() {
 /// `check` answers what the kernel's ingest would do with a picture's
 /// recipe, before any document sees it: the recipe `import` returns
 /// checks clean, and the same recipe shrunk past what the kernel can find
-/// a plane for is refused typed (`ImageTooSmall`) with the kernel's
-/// reason, the very reason ingest would skip the face with.
+/// a plane for (10 × 3.3 nm: twice its area under 1e-12 m² and narrower
+/// than `kernel::tol::MIN_FACE_WIDTH`) is refused typed (`ImageTooSmall`)
+/// with the kernel's reason, the very reason ingest would skip the face
+/// with. Shrunk to 0.1 × 0.033 µm, which the area floor alone used to
+/// refuse, it is 50 nm wide and checks clean now.
 #[test]
 fn check_refuses_a_recipe_the_kernel_would_not_build() {
     let png = png_header(300, 100);
-    let mut out = import(&png, None, "x", &Placement::ground(1.0)).unwrap();
+    let shrunk = |k: f64| {
+        let mut out = import(&png, None, "x", &Placement::ground(1.0)).unwrap();
+        let kernel::ImportNode::Mesh(mesh) = &mut out.scene.defs[0].children[0] else {
+            panic!("the definition holds the picture's mesh");
+        };
+        for p in &mut mesh.positions {
+            *p = Point3::new(p.x * k, p.y * k, 0.0);
+        }
+        out
+    };
+    let out = import(&png, None, "x", &Placement::ground(1.0)).unwrap();
     assert_eq!(check(&out.scene), Ok(()));
-    let kernel::ImportNode::Mesh(mesh) = &mut out.scene.defs[0].children[0] else {
+    assert_eq!(check(&shrunk(1e-7).scene), Ok(()), "50 nm wide: kept now");
+    let out = shrunk(1e-8);
+    let kernel::ImportNode::Mesh(mesh) = &out.scene.defs[0].children[0] else {
         panic!("the definition holds the picture's mesh");
     };
-    for p in &mut mesh.positions {
-        *p = Point3::new(p.x * 1e-7, p.y * 1e-7, 0.0);
-    }
     let reason = mesh.check_builds().unwrap_err().to_string();
     let err = check(&out.scene).unwrap_err();
     assert_eq!(err, ImageError::Unbuildable(reason.clone()));

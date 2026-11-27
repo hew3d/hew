@@ -1,10 +1,16 @@
+// Test-only, and outside the determinism-critical kernel scope (kernel /
+// inference / tessellate / mesh-heal): transcendentals here build the
+// inputs and expectations of a native test, never a document a user keeps.
+// Suppress the workspace clippy.toml ban for this integration-test crate.
+#![allow(clippy::disallowed_methods)]
+
 //! Hew -> `.skp` -> Hew: a document written by `skp-export` and read back
 //! by `skp-import` is the same document, on both containers.
 //!
 //! Sources: every `skp-import` fixture (2017 and its 2026 twin) imported
 //! into a fresh document, and `fixtures/native.hew`, drawn in Hew. The
 //! comparison is a canonical digest of what the user sees and edits — the
-//! node tree with names, tags, hidden state, poses and attributes, each
+//! node tree with names, tags, hidden state, locks, poses and attributes, each
 //! Object's faces (positions to a micron, each face's effective material,
 //! textured corners' UVs), its soft edges, circle claims and curved faces,
 //! definitions, sketches with their curves, the tag registry, guides, the
@@ -53,15 +59,15 @@ fn round_trip(label: &str, source: &Document, target: Target) -> Result<(), Stri
     let written =
         export(source, target, WriteEnv::system()).map_err(|e| format!("{label}: {e}"))?;
     let model =
-        openskp::Model::parse(&written.bytes).map_err(|e| format!("{label}: reread: {e:?}"))?;
+        skpwright::Model::parse(&written.bytes).map_err(|e| format!("{label}: reread: {e:?}"))?;
     let desync: Vec<_> = model.diagnostics.iter().filter(|d| d.is_desync()).collect();
     if !desync.is_empty() {
         return Err(format!(
             "{label}: written file reads with desyncs: {desync:?}"
         ));
     }
-    if target == Target::Skp2017 {
-        openskp::verify(&written.bytes).map_err(|e| format!("{label}: 2017 grammar: {e:?}"))?;
+    if target != Target::Skp2026 {
+        skpwright::verify(&written.bytes).map_err(|e| format!("{label}: 2017 grammar: {e:?}"))?;
     }
     let back = import(&written.bytes);
     let a = digest(source);
@@ -112,7 +118,7 @@ fn every_fixture_survives_hew_to_skp_to_hew() {
         source
             .ingest(out.scene, out.textures_missing)
             .expect("ingests");
-        for target in [Target::Skp2026, Target::Skp2017] {
+        for target in common::all_targets() {
             n += 1;
             if let Err(e) = round_trip(&label, &source, target) {
                 failures.push(e);
@@ -124,7 +130,7 @@ fn every_fixture_survives_hew_to_skp_to_hew() {
             .unwrap(),
     )
     .unwrap();
-    for target in [Target::Skp2026, Target::Skp2017] {
+    for target in common::all_targets() {
         n += 1;
         if let Err(e) = round_trip("native.hew", &native, target) {
             failures.push(e);
@@ -154,7 +160,7 @@ fn every_fixture_survives_hew_to_skp_to_hew() {
 #[test]
 fn an_empty_document_writes_to_both_containers() {
     let doc = Document::new();
-    for target in [Target::Skp2026, Target::Skp2017] {
+    for target in common::all_targets() {
         round_trip("empty", &doc, target).unwrap();
     }
 }
@@ -168,11 +174,11 @@ fn a_face_is_written_with_its_back_paint() {
     // and a closed solid's face, whose inside is never seen, on its front
     // only.
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../skp-import/tests/fixtures");
-    let names = |m: &openskp::Model| -> Vec<(Option<String>, Option<String>)> {
+    let names = |m: &skpwright::Model| -> Vec<(Option<String>, Option<String>)> {
         let name = |s: Option<u16>| {
             s.and_then(|s| m.material_of(s)).map(|x| match x {
-                openskp::Material::Solid { name, .. }
-                | openskp::Material::Textured { name, .. } => name.clone(),
+                skpwright::Material::Solid { name, .. }
+                | skpwright::Material::Textured { name, .. } => name.clone(),
             })
         };
         let mut v: Vec<_> = m
@@ -186,22 +192,22 @@ fn a_face_is_written_with_its_back_paint() {
         v
     };
     let bytes = std::fs::read(root.join("back-material.skp")).unwrap();
-    let source = openskp::Model::parse(&bytes).unwrap();
+    let source = skpwright::Model::parse(&bytes).unwrap();
     let painted: Vec<_> = names(&source)
         .into_iter()
         .filter(|(f, b)| b.is_some() && b != f)
         .collect();
     assert_eq!(painted.len(), 1, "{:?}", names(&source));
     let doc = import(&bytes);
-    for target in [Target::Skp2026, Target::Skp2017] {
+    for target in common::all_targets() {
         let written = export(&doc, target, WriteEnv::system()).unwrap();
-        let back = names(&openskp::Model::parse(&written.bytes).unwrap());
+        let back = names(&skpwright::Model::parse(&written.bytes).unwrap());
         assert!(back.contains(&painted[0]), "{target:?}: {back:?}");
     }
     let doc = import(&std::fs::read(root.join("box-two-materials.skp")).unwrap());
-    for target in [Target::Skp2026, Target::Skp2017] {
+    for target in common::all_targets() {
         let written = export(&doc, target, WriteEnv::system()).unwrap();
-        let m = openskp::Model::parse(&written.bytes).unwrap();
+        let m = skpwright::Model::parse(&written.bytes).unwrap();
         let faces: Vec<_> = m
             .geometry
             .iter()
@@ -241,7 +247,7 @@ fn a_stretched_components_circles_survive() {
         0.0, 0.0, 0.7, 0.0,
     ]);
     doc.transform_instance(instance, &stretch).unwrap();
-    for target in [Target::Skp2026, Target::Skp2017] {
+    for target in common::all_targets() {
         round_trip("stretched component", &doc, target).unwrap();
     }
 }
@@ -251,15 +257,15 @@ fn a_production_models_whole_export_reads_back_as_written() {
     // theater: SketchUp meshes that are not manifold open split into
     // pieces, some closed. Written whole and read back, each piece is the
     // faces Hew wrote, turned as Hew had them. (The file sits beside the
-    // OpenSKP dev clone; skipped elsewhere.)
+    // Skpwright dev clone; skipped elsewhere.)
     let p = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../openskp/corpus/third-party/theater-2017.skp");
+        .join("../../../skpwright/corpus/third-party/theater-2017.skp");
     let Ok(bytes) = std::fs::read(&p) else {
-        eprintln!("skipped: no ../openskp checkout");
+        eprintln!("skipped: no ../skpwright checkout");
         return;
     };
     let doc = import(&bytes);
-    for target in [Target::Skp2026, Target::Skp2017] {
+    for target in common::all_targets() {
         round_trip("theater", &doc, target).unwrap();
     }
 }
@@ -348,7 +354,7 @@ fn has_touching_hole(doc: &Document) -> bool {
 fn a_hole_touching_its_faces_outer_loop_survives_hew_to_skp_to_hew() {
     let source = tangent_circle_box();
     assert!(has_touching_hole(&source));
-    for target in [Target::Skp2026, Target::Skp2017] {
+    for target in common::all_targets() {
         round_trip("tangent circle", &source, target).unwrap_or_else(|e| panic!("{e}"));
         let written = export(&source, target, WriteEnv::system()).expect("writes");
         let back = import(&written.bytes);
@@ -363,5 +369,210 @@ fn a_hole_touching_its_faces_outer_loop_survives_hew_to_skp_to_hew() {
                 "{target:?}: nothing dropped to sketch drawing"
             );
         }
+    }
+}
+
+/// Each sketch's regions as `(outer ring length, holes, has a face)`,
+/// sorted, with its plane (a definition's in its own frame) and imported
+/// mark; world sketches and every definition's.
+fn faced_regions(doc: &Document) -> Vec<String> {
+    let mut out: Vec<String> = doc
+        .sketch_ids()
+        .into_iter()
+        .chain(
+            doc.component_ids()
+                .into_iter()
+                .flat_map(|c| doc.def_member_sketches(c).unwrap_or_default()),
+        )
+        .map(|s| {
+            let sk = doc.sketch(s).unwrap();
+            let mut regions: Vec<(usize, usize, bool)> = sk
+                .regions()
+                .values()
+                .map(|r| (r.outer.len(), r.holes.len(), !r.faceless))
+                .collect();
+            regions.sort();
+            let n = sk.plane().normal();
+            format!(
+                "n [{:.3} {:.3} {:.3}] d {:.4} imported {} regions {regions:?}",
+                n.x,
+                n.y,
+                n.z,
+                sk.plane().signed_distance(kernel::Point3::ORIGIN),
+                doc.sketch_is_imported(s),
+            )
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+/// Drawing made in Hew: a rectangle with a rectangular hole (the hole's
+/// own region filled too), a circle on a wall, a hexagon, a closed arc
+/// segment, one loop of bare edges with no face, and a rectangle in a
+/// group and in a placed component.
+fn drawn_regions_doc() -> Document {
+    use kernel::{CurveGeom, Plane, Point3, SketchCurveKind, Vec3};
+    let p = Point3::new;
+    let mut doc = Document::new();
+    let ring = |pts: &[Point3]| -> Vec<(Point3, Point3)> {
+        (0..pts.len())
+            .map(|i| (pts[i], pts[(i + 1) % pts.len()]))
+            .collect()
+    };
+    // The rectangle with a hole, on the ground.
+    let ground = Plane::from_point_normal(Point3::ORIGIN, Vec3::new(0., 0., 1.)).unwrap();
+    let s = doc.add_sketch(ground);
+    let sk = doc.sketch_mut(s).unwrap();
+    for (a, b) in ring(&[p(0., 0., 0.), p(2., 0., 0.), p(2., 1., 0.), p(0., 1., 0.)])
+        .into_iter()
+        .chain(ring(&[
+            p(0.5, 0.25, 0.),
+            p(1.0, 0.25, 0.),
+            p(1.0, 0.75, 0.),
+            p(0.5, 0.75, 0.),
+        ]))
+    {
+        sk.add_segment(a, b).unwrap();
+    }
+    // A circle on the wall x = 5.
+    let wall = Plane::from_point_normal(p(5., 0., 0.), Vec3::new(1., 0., 0.)).unwrap();
+    let s = doc.add_sketch(wall);
+    let sk = doc.sketch_mut(s).unwrap();
+    let (c, r, n) = (p(5., 1., 1.), 0.4, 24);
+    sk.begin_curve_with(CurveGeom {
+        center: c,
+        radius: r,
+    })
+    .unwrap();
+    let rim: Vec<Point3> = (0..n)
+        .map(|i| {
+            let t = std::f64::consts::TAU * f64::from(i) / f64::from(n);
+            p(5., c.y + r * t.cos(), c.z + r * t.sin())
+        })
+        .collect();
+    for (a, b) in ring(&rim) {
+        sk.add_segment(a, b).unwrap();
+    }
+    sk.end_curve();
+    // A hexagon (a polygon claim) on a raised plane.
+    let raised = Plane::from_point_normal(p(0., 0., 2.), Vec3::new(0., 0., 1.)).unwrap();
+    let s = doc.add_sketch(raised);
+    let sk = doc.sketch_mut(s).unwrap();
+    let (c, r) = (p(0., 5., 2.), 0.5);
+    sk.begin_curve_with_kind(
+        CurveGeom {
+            center: c,
+            radius: r,
+        },
+        SketchCurveKind::Polygon,
+    )
+    .unwrap();
+    let hex: Vec<Point3> = (0..6)
+        .map(|i| {
+            let t = std::f64::consts::TAU * f64::from(i) / 6.;
+            p(c.x + r * t.cos(), c.y + r * t.sin(), 2.)
+        })
+        .collect();
+    for (a, b) in ring(&hex) {
+        sk.add_segment(a, b).unwrap();
+    }
+    sk.end_curve();
+    // A closed arc segment (a half disk: the arc and its chord), on the
+    // wall y = 8.
+    let back = Plane::from_point_normal(p(0., 8., 0.), Vec3::new(0., 1., 0.)).unwrap();
+    let s = doc.add_sketch(back);
+    let sk = doc.sketch_mut(s).unwrap();
+    let (c, r) = (p(3., 8., 1.), 0.5);
+    sk.begin_curve_with(CurveGeom {
+        center: c,
+        radius: r,
+    })
+    .unwrap();
+    let arc: Vec<Point3> = (0..=12)
+        .map(|i| {
+            let t = std::f64::consts::PI * f64::from(i) / 12.;
+            p(c.x + r * t.cos(), 8., c.z + r * t.sin())
+        })
+        .collect();
+    for w in arc.windows(2) {
+        sk.add_segment(w[0], w[1]).unwrap();
+    }
+    sk.end_curve();
+    sk.add_segment(arc[12], arc[0]).unwrap();
+    // A loop of bare edges with no face, on a plane of its own.
+    let high = Plane::from_point_normal(p(0., 0., 4.), Vec3::new(0., 0., 1.)).unwrap();
+    let s = doc.add_sketch(high);
+    let sk = doc.sketch_mut(s).unwrap();
+    for (a, b) in ring(&[p(0., 0., 4.), p(1., 0., 4.), p(1., 1., 4.), p(0., 1., 4.)]) {
+        sk.add_segment(a, b).unwrap();
+    }
+    sk.make_regions_faceless();
+    // A filled rectangle in a group, and one in a component placed off
+    // the origin: each list's drawing reads back in its own frame.
+    let mut boxed = |x0: f64| {
+        let foot = Plane::from_point_normal(p(x0, 0., 0.), Vec3::new(0., 0., 1.)).unwrap();
+        let s = doc.add_sketch(foot);
+        let sk = doc.sketch_mut(s).unwrap();
+        for (a, b) in ring(&[
+            p(x0, 0., 0.),
+            p(x0 + 1., 0., 0.),
+            p(x0 + 1., 1., 0.),
+            p(x0, 1., 0.),
+        ]) {
+            sk.add_segment(a, b).unwrap();
+        }
+        let region = sk.regions().keys().next().unwrap();
+        let (o, _) = doc.extrude_region(s, region, 1.).unwrap();
+        let (g, _) = doc.group_nodes(&[kernel::NodeId::Object(o)]).unwrap();
+        let lid = Plane::from_point_normal(p(x0, 0., 3.), Vec3::new(0., 0., 1.)).unwrap();
+        let s = doc.add_sketch(lid);
+        let sk = doc.sketch_mut(s).unwrap();
+        for (a, b) in ring(&[
+            p(x0, 0., 3.),
+            p(x0 + 0.5, 0., 3.),
+            p(x0 + 0.5, 0.5, 3.),
+            p(x0, 0.5, 3.),
+        ]) {
+            sk.add_segment(a, b).unwrap();
+        }
+        doc.set_sketch_group(s, Some(g)).unwrap();
+        g
+    };
+    boxed(20.);
+    let g = boxed(30.);
+    let (_, inst, _) = doc.make_component(&[kernel::NodeId::Group(g)]).unwrap();
+    doc.transform_instance(
+        inst,
+        &kernel::Transform::translation(Vec3::new(0., 10., 0.5)),
+    )
+    .unwrap();
+    doc
+}
+
+/// A region drawn in Hew has a face, and a `.skp` Hew writes holds it as
+/// a SketchUp face on the region's edges: reopened, the region is filled
+/// again, exactly as before the save. A loop with no face stays a loop
+/// alone, and nothing drawn in Hew comes back marked imported.
+#[test]
+fn drawn_regions_reopen_with_their_faces() {
+    let source = drawn_regions_doc();
+    let before = faced_regions(&source);
+    assert_eq!(
+        before.iter().filter(|s| s.contains("true)")).count(),
+        6,
+        "six filled shapes: {before:#?}"
+    );
+    assert!(
+        before
+            .iter()
+            .any(|s| s.contains("d -4.0000") && s.contains("(4, 0, false)")),
+        "the bare loop has no face: {before:#?}"
+    );
+    for target in common::all_targets() {
+        let written = export(&source, target, WriteEnv::system()).expect("writes");
+        let back = import(&written.bytes);
+        assert_eq!(faced_regions(&back), before, "{target:?}");
+        round_trip("drawn regions", &source, target).unwrap_or_else(|e| panic!("{e}"));
     }
 }

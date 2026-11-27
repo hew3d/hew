@@ -28,16 +28,21 @@ import {
 } from '../library/itemFiles'
 import {
   buildLibraryItem,
+  builtInProfileItem,
   collectionTreeFromPaths,
   erroredItem,
   filterItems,
+  isBuiltInItem,
   normalizeCollectionPath,
   sortListItems,
   type ListSortColumn,
   type ListSortDirection,
   type LibraryScope,
 } from '../library/libraryModel'
+import { behaviorEnabled } from '../preview'
+import { bundledProfiles, profileShapeOfBytes, profileThumbnailPng } from '../library/profiles'
 import type { LibraryCategory, LibraryFileEntry, LibraryItem } from '../library/types'
+import type { MarkedState } from '../library/libraryUpdates'
 import { measureGridColumns } from './library/gridMeasure'
 import { GridViewGlyph, ListViewGlyph, CloseGlyph, SearchGlyph } from './library/icons'
 import { LibraryDetailPane } from './library/LibraryDetailPane'
@@ -53,6 +58,19 @@ import { i18n, type MessageDescriptor } from '@lingui/core'
 import { msg, plural, t as tCore } from '@lingui/core/macro'
 import { Trans, useLingui } from '@lingui/react/macro'
 import { LibraryMenu, revealLabel } from './library/LibraryMenu'
+import { barModel, localSourceInfo, type SourceViewTarget } from '../library/sourceModel'
+import type { SourcesBinding } from '../library/sourcesDeps'
+import type { LocalState } from '../library/sources'
+import { useSourceActions, type Outcome } from '../library/useSourceActions'
+import { useSources } from '../library/useSources'
+import { AddSourceDialog } from './library/AddSourceDialog'
+import { CatalogView } from './library/CatalogView'
+import { SourceBrowser } from './library/SourceBrowser'
+import { SourceConfirm } from './library/SourceConfirm'
+import { SourcesBlock } from './library/SourcesBlock'
+import { SOURCES_CSS } from './library/sourcesCss'
+import { SourceUpdateBar } from './SourceUpdateBar'
+import { SourceUpdateReview } from './SourceUpdateReview'
 import { LibraryTile, tileElementId } from './library/LibraryTile'
 import { isComposingKey } from '../input/keyboard'
 
@@ -181,16 +199,28 @@ export interface LibraryDialogProps {
   onClose(): void
   /** hew.library source_id → live placement count in the open document. */
   placements: Record<string, number>
+  /** hew.library source_id → where the model's copies stand against the item,
+   * for items that differ (the panel's marks and the detail pane's line). */
+  linkStates?: Record<string, MarkedState>
+  /** Open the Review list for the parts that differ from the Library. */
+  onReviewUpdates?(): void
   /** Insert a component/model item (closes the modal; App arms cursor placement). */
   onInsert(item: LibraryItem, bytes: Uint8Array): void
   /** Open the item as its own document. */
   onOpenAsDocument(item: LibraryItem, bytes: Uint8Array): void
+  /** Open the Library's own file for editing; saving updates the Library. */
+  onEdit?(item: LibraryItem): void
   /** Material primary action: copy into palette + arm Paint (App closes modal). */
   onPaintWith(item: LibraryItem, bytes: Uint8Array): void
   /** Material secondary action: copy into palette, keep the modal open. */
   onAddToPalette(item: LibraryItem, bytes: Uint8Array): void
   /** Optional: which of this material item's palette entries already exist in the doc. */
   materialInPalette?(bytes: Uint8Array): Promise<boolean>
+  /** Profile primary action: arm the Fillet tool with this profile (closes the
+   * browser). `bytes` is null for a built-in, which App reads from the kernel. */
+  onUseProfile?(item: LibraryItem, bytes: Uint8Array | null): void
+  /** A built-in profile's "Save a copy": App opens the save prompt for it. */
+  onSaveProfileCopy?(item: LibraryItem): void
   /**
    * How the browser is hosted. `'modal'` (default): the web build's in-app
    * overlay — scrim, fixed size, z-2000 band. `'window'`: the content of a
@@ -198,6 +228,10 @@ export interface LibraryDialogProps {
    * scrim, fills the window, and `onClose` closes that window.
    */
   variant?: 'modal' | 'window'
+  /** Library sources (docs/design/shared-library-sources.md): the sources
+   * module and its change feed. Absent, the dialog has no Sources block, no
+   * bar and makes no request. */
+  sources?: SourcesBinding
 }
 
 /** The sidebar's "All" row (finding #4) lists every item at once — its
@@ -211,6 +245,8 @@ const CATEGORIES: { value: LibraryCategory | 'all'; label: MessageDescriptor }[]
   { value: 'component', label: msg`Components` },
   { value: 'material', label: msg`Materials` },
   { value: 'model', label: msg`Models` },
+  // Profiles belong to the Fillet preview (the Preview wall hides them).
+  ...(behaviorEnabled('fillet-profiles') ? [{ value: 'profile' as const, label: msg`Profiles` }] : []),
 ]
 
 const SCOPES: { value: LibraryScope; label: MessageDescriptor }[] = [
@@ -224,6 +260,7 @@ const CATEGORY_LABEL: Record<LibraryCategory | 'all', MessageDescriptor> = {
   component: msg`Components`,
   material: msg`Materials`,
   model: msg`Models`,
+  profile: msg`Profiles`,
 }
 
 /** The empty-category sentence, whole per category so each language can
@@ -238,6 +275,8 @@ function emptyCategoryText(category: LibraryCategory | 'all'): string {
       return tCore`No materials here yet.`
     case 'model':
       return tCore`No models here yet.`
+    case 'profile':
+      return tCore`No profiles here yet.`
   }
 }
 
@@ -255,6 +294,7 @@ function deleteConfirmCopy(displayName: string): { title: string; message: strin
 function defaultActionLabel(item: LibraryItem): string {
   if (item.category === 'component') return tCore`Insert`
   if (item.category === 'model') return tCore`Open`
+  if (item.category === 'profile') return tCore`Use`
   return tCore`Paint`
 }
 
@@ -262,6 +302,7 @@ function defaultActionLabel(item: LibraryItem): string {
 function otherActionLabel(item: LibraryItem): string {
   if (item.category === 'component') return tCore`Open`
   if (item.category === 'model') return tCore`Insert`
+  if (item.category === 'profile') return isBuiltInItem(item) ? tCore`Save a copy` : tCore`Open for editing`
   return tCore`Add to Palette`
 }
 
@@ -269,21 +310,29 @@ function describeError(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
 }
 
-/** "1 item" / "N items" — the footer count. */
-function itemCountLabel(n: number): string {
-  return plural(n, { one: '# item', other: '# items' })
+/** "1 item" / "N items" — the footer count, with the built-ins among them
+ *  named ("9 items, 7 built-in") so an empty folder doesn't look full. */
+function itemCountLabel(n: number, builtIn = 0): string {
+  const total = plural(n, { one: '# item', other: '# items' })
+  return builtIn > 0 ? tCore`${total}, ${builtIn} built-in` : total
 }
 
 export function LibraryDialog({
   open,
   onClose,
   placements,
+  linkStates,
+  onReviewUpdates,
   onInsert,
   onOpenAsDocument,
+  onEdit,
   onPaintWith,
   onAddToPalette,
   materialInPalette,
+  onUseProfile,
+  onSaveProfileCopy,
   variant = 'modal',
+  sources,
 }: LibraryDialogProps) {
   const { t } = useLingui()
   const [items, setItems] = useState<LibraryItem[]>([])
@@ -343,6 +392,14 @@ export function LibraryDialog({
   // back to the user. Cleared on the next successful mutation or selection
   // change (see the dedicated effect below).
   const [actionError, setActionError] = useState<string | null>(null)
+  /** Why the last Add on a catalog row failed. */
+  const [catalogAddError, setCatalogAddError] = useState<string | null>(null)
+  // Sources: what the center and detail columns show instead of the Library
+  // (a source, the catalog, a catalog preview), the Add dialog, and the
+  // last-check stamp "Later" was pressed at.
+  const [sourceView, setSourceView] = useState<SourceViewTarget | null>(null)
+  const [showAddSource, setShowAddSource] = useState(false)
+  const [laterStamp, setLaterStamp] = useState<string | null>(null)
 
   // Bytes are cached per file name (needed for every action callback); manage
   // mutations re-read the current bytes from the store instead (see
@@ -421,7 +478,18 @@ export function LibraryDialog({
             built.push(erroredItem(file, '', err instanceof Error ? err.message : String(err)))
           }
         }
-        if (!cancelled) setItems(built)
+        if (!cancelled) {
+          // The built-in profiles ride at the end of the list: bundled with
+          // the app, never files in the folder.
+          // Without the Fillet preview there are no profiles: neither the
+          // built-in ones nor a profile file in the folder is listed.
+          const profiles = behaviorEnabled('fillet-profiles')
+          const builtIns = profiles
+            ? (await bundledProfiles().catch(() => [])).map((p) => builtInProfileItem(p.id, p.name))
+            : []
+          const listed = profiles ? built : built.filter((i) => i.category !== 'profile')
+          if (!cancelled) setItems([...listed, ...builtIns])
+        }
       } catch (err) {
         // list()/webStorage() themselves rejected (storage failure, a lazy
         // backend that couldn't load) — an empty grid would misreport this
@@ -537,6 +605,11 @@ export function LibraryDialog({
     setActionError(null)
   }, [selectedFileName])
 
+  // A catalog Add failure belongs to the catalog view it happened in.
+  useEffect(() => {
+    setCatalogAddError(null)
+  }, [sourceView])
+
   // --- Thumbnails (components/models — materials render their own swatch) ---
   useEffect(() => {
     if (!open) return
@@ -546,6 +619,39 @@ export function LibraryDialog({
       for (const item of items) {
         if (item.error || item.category === 'material') continue
         if (thumbUrlsRef.current.has(item.contentHash)) continue
+        if (item.category === 'profile') {
+          // A profile's thumbnail is the end-on section of an edge cut with it,
+          // rendered from its shape (and cached the same way).
+          let ppng = isBuiltInItem(item) ? null : await store.readThumbnail(item.contentHash)
+          if (cancelled) return
+          if (ppng === null) {
+            const shape = isBuiltInItem(item)
+              ? (await bundledProfiles()).find((b) => b.id === item.file.fileName)?.shape
+              : await (async () => {
+                  const b = bytesRef.current.get(item.file.fileName)
+                  return b ? (await profileShapeOfBytes(b))?.shape : undefined
+                })()
+            if (shape === undefined) continue
+            try {
+              ppng = await profileThumbnailPng(shape, 128)
+            } catch {
+              continue // an odd shape costs its own thumbnail, not the rest
+            }
+            if (cancelled) return
+            if (!isBuiltInItem(item)) {
+              try {
+                await store.writeThumbnail(item.contentHash, ppng)
+              } catch {
+                /* the thumbnail cache is optional */
+              }
+            }
+          }
+          if (!cancelled) {
+            thumbUrlsRef.current.set(item.contentHash, URL.createObjectURL(new Blob([new Uint8Array(ppng)], { type: 'image/png' })))
+            bumpVersion()
+          }
+          continue
+        }
         let png = await store.readThumbnail(item.contentHash)
         if (cancelled) return
         if (png === null) {
@@ -687,8 +793,12 @@ export function LibraryDialog({
     const itemPaths = items.map((i) => i.meta.collection).filter((c): c is string => c !== undefined)
     return collectionTreeFromPaths([...itemPaths, ...localCollections])
   }, [items, localCollections])
+  // The built-in profiles are Library items like any other: listed and
+  // counted under All and Profiles alike. Only the "get started" hint and
+  // the footer tell them apart from the folder's own files.
+  const userItemCount = useMemo(() => items.filter((i) => !isBuiltInItem(i)).length, [items])
   const categoryCounts = useMemo(() => {
-    const counts: Record<LibraryCategory | 'all', number> = { all: items.length, component: 0, material: 0, model: 0 }
+    const counts: Record<LibraryCategory | 'all', number> = { all: items.length, component: 0, material: 0, model: 0, profile: 0 }
     for (const item of items) counts[item.category] += 1
     return counts
   }, [items])
@@ -708,9 +818,113 @@ export function LibraryDialog({
   const selectedItem = displayItems.find((i) => i.file.fileName === selectedFileName) ?? null
   const menuItem = menuFor !== null ? (items.find((i) => i.file.fileName === menuFor.fileName) ?? null) : null
 
+  // --- Sources (design 7.5) ------------------------------------------------
+  const sourcesOff = sources !== undefined && !sources.available()
+  const srcState = useSources(sources, open, reloadToken)
+  const snapshot = srcState.snapshot
+  const sourceActions = useSourceActions({
+    binding: sources,
+    snapshot,
+    refresh: srcState.refresh,
+    bumpLibrary: () => setReloadToken((n) => n + 1),
+    insertFile: insertSourceFile,
+  })
+  const localByFile = useMemo(() => new Map(snapshot.locals.map((l) => [l.file, l])), [snapshot.locals])
+  const statusBySource = useMemo(() => new Map(snapshot.statuses.map((s) => [s.entry.source, s])), [snapshot.statuses])
+  const bar = useMemo(() => barModel(snapshot), [snapshot])
+  const addedSources = useMemo(() => new Set(snapshot.statuses.map((s) => s.entry.source)), [snapshot.statuses])
+  useEffect(() => {
+    if (!open) {
+      setSourceView(null)
+      setShowAddSource(false)
+    }
+  }, [open])
+
+  /** A local item's state against its source, from the cached listing. An
+   * item whose note is not in the snapshot yet reads "not checked". */
+  function localStateOf(item: LibraryItem | null): LocalState | undefined {
+    const note = item?.meta.remote
+    if (item === null || note === undefined || item.meta.id === undefined) return undefined
+    return (
+      localByFile.get(item.file.fileName) ?? {
+        id: item.meta.id,
+        file: item.file.fileName,
+        name: item.displayName,
+        note,
+        state: 'unchecked',
+        edited: note.edited === true,
+        kept: false,
+      }
+    )
+  }
+  /** The "newer at the source" mark: a newer version the user has not set aside. */
+  function sourceNewerOf(item: LibraryItem): boolean {
+    if (sourcesOff) return false
+    const local = localByFile.get(item.file.fileName)
+    if (local === undefined || local.state !== 'newer' || local.kept) return false
+    return statusBySource.get(local.note.source)?.removed === null
+  }
+  function sourceInfoOf(item: LibraryItem | null) {
+    const local = localStateOf(item)
+    return local === undefined ? undefined : localSourceInfo(local, statusBySource.get(local.note.source), sourcesOff)
+  }
+  /** Adds the item's file to the placement flow once it is in the Library. */
+  async function insertSourceFile(file: string): Promise<void> {
+    const store = libraryStore()
+    const bytes = await store.read(file)
+    const [hash, summary] = await Promise.all([sha256Hex(bytes), readItemSummary(bytes)])
+    bytesRef.current.set(file, bytes)
+    onInsert(buildLibraryItem({ fileName: file, size: bytes.length, mtimeMs: Date.now() }, summary, hash), bytes)
+  }
+  async function handleUpdateFromSource(item: LibraryItem) {
+    const note = item.meta.remote
+    if (note === undefined || item.meta.id === undefined) return
+    // The answer to a replace/keep question runs a second update; its result lands here too.
+    const show = (o: Outcome): void => {
+      if (!o.ok && o.message !== undefined) setActionError(o.message.text)
+      else if (o.ok) setActionError(o.notice?.text ?? null)
+    }
+    const out = await sourceActions.updateItem({ source: note.source, id: item.meta.id, name: item.displayName, file: item.file.fileName }, show)
+    if (out.ok || out.pending !== true) show(out)
+  }
+  async function handleUnlinkFromSource(item: LibraryItem) {
+    const note = item.meta.remote
+    if (note === undefined || item.meta.id === undefined) return
+    const out = await sourceActions.unlink(note.source, item.meta.id)
+    if (!out.ok && out.message !== undefined) setActionError(out.message.text)
+    else if (out.ok) setActionError(null)
+  }
+  const browseTarget = sourceView !== null && sourceView.kind !== 'catalog' ? sourceView : null
+  function showCatalog() {
+    setShowAddSource(false)
+    setSourceView({ kind: 'catalog' })
+  }
+  function localThumbFor(file: string): string | null {
+    const item = items.find((i) => i.file.fileName === file)
+    return item === undefined ? null : (thumbUrlsRef.current.get(item.contentHash) ?? null)
+  }
+
   function placementCountOf(item: LibraryItem | null): number {
     if (item?.meta.id === undefined) return 0
     return placements[item.meta.id] ?? 0
+  }
+
+  function linkStateOf(item: LibraryItem | null): MarkedState | undefined {
+    if (item?.meta.id === undefined) return undefined
+    return linkStates?.[item.meta.id]
+  }
+
+  /** Components and models that read can be opened in place; materials have
+   * no edit (change one in a model, then Save to Library), profiles keep
+   * "Open for editing", built-ins are not files. */
+  function canEdit(item: LibraryItem | null): boolean {
+    return (
+      onEdit !== undefined &&
+      item !== null &&
+      (item.category === 'component' || item.category === 'model') &&
+      item.error === undefined &&
+      !isBuiltInItem(item)
+    )
   }
 
   // --- Category-default / other action dispatch ---------------------------
@@ -737,7 +951,8 @@ export function LibraryDialog({
           { id: 'delete', label: t`Delete from Library…` },
         ]
       : [
-          { id: 'open', label: t`Open as Document` },
+          ...(canEdit(item) ? [{ id: 'edit', label: t`Edit` }] : []),
+          { id: 'open', label: item.category === 'profile' ? t`Open for Editing` : t`Open as Document` },
           { id: 'rename', label: t`Rename` },
           { id: 'collection', label: t`Add to Collection` },
           { id: 'sep1', label: '', separator: true },
@@ -748,13 +963,17 @@ export function LibraryDialog({
             ? [{ id: 'removeSourceInfo', label: t`Remove Source Info` }]
             : []),
           ...(canReveal ? [{ id: 'reveal', label: i18n._(revealLabel) }] : []),
+          ...nativeSourceEntries(item),
           { id: 'sep2', label: '', separator: true },
           { id: 'delete', label: t`Delete from Library…` },
         ]
     const picked = await popupNativeMenu(entries)
     if (picked === 'open') handleOpenAsDocument(item)
+    else if (picked === 'edit') onEdit?.(item)
     else if (picked === 'rerender') void handleRerenderThumbnail(item)
     else if (picked === 'removeSourceInfo') handleRemoveSourceInfo(item)
+    else if (picked === 'updateSource') void handleUpdateFromSource(item)
+    else if (picked === 'unlinkSource') void handleUnlinkFromSource(item)
     else if (picked === 'reveal') void handleReveal(item)
     else if (picked === 'delete') {
       const copy = deleteConfirmCopy(item.displayName)
@@ -763,6 +982,19 @@ export function LibraryDialog({
     }
     // 'rename'/'collection' just select the item — the detail pane's name
     // field and Collection dropdown are always live (edit-in-place).
+  }
+
+  /** The native menu's source rows: only for an item with a note. The shell
+   * shows whatever entries it is given, so the rows need no shell change. */
+  function nativeSourceEntries(item: LibraryItem) {
+    const info = sourceInfoOf(item)
+    if (info === undefined) return []
+    const name = info.sourceName
+    return [
+      { id: 'sepSource', label: '', separator: true },
+      ...(info.canUpdate ? [{ id: 'updateSource', label: t`Update from source` }] : []),
+      { id: 'unlinkSource', label: t`Unlink from ${name}` },
+    ]
   }
 
   function handleOpenAsDocument(item: LibraryItem) {
@@ -777,13 +1009,20 @@ export function LibraryDialog({
     const bytes = bytesFor(item)
     if (bytes) onAddToPalette(item, bytes)
   }
+  function handleUseProfile(item: LibraryItem) {
+    onUseProfile?.(item, isBuiltInItem(item) ? null : (bytesFor(item) ?? null))
+  }
   function runDefaultAction(item: LibraryItem) {
-    if (item.category === 'component') handleInsert(item)
+    if (item.category === 'profile') handleUseProfile(item)
+    else if (item.category === 'component') handleInsert(item)
     else if (item.category === 'model') handleOpenAsDocument(item)
     else handlePaintWith(item)
   }
   function runOtherAction(item: LibraryItem) {
-    if (item.category === 'component') handleOpenAsDocument(item)
+    if (item.category === 'profile') {
+      if (isBuiltInItem(item)) onSaveProfileCopy?.(item)
+      else handleOpenAsDocument(item)
+    } else if (item.category === 'component') handleOpenAsDocument(item)
     else if (item.category === 'model') handleInsert(item)
     else handleAddToPalette(item)
   }
@@ -852,7 +1091,13 @@ export function LibraryDialog({
     const bytes = bytesRef.current.get(item.file.fileName)
     if (!bytes) return
     try {
-      const png = await renderItemThumbnail(bytes, 256)
+      let png: Uint8Array | null
+      if (item.category === 'profile') {
+        const shape = (await profileShapeOfBytes(bytes))?.shape
+        png = shape === undefined ? null : await profileThumbnailPng(shape, 128)
+      } else {
+        png = await renderItemThumbnail(bytes, 256)
+      }
       if (png === null) return
       await libraryStore().writeThumbnail(item.contentHash, png)
       const old = thumbUrlsRef.current.get(item.contentHash)
@@ -912,6 +1157,8 @@ export function LibraryDialog({
   async function handleDelete(item: LibraryItem) {
     try {
       await libraryStore().remove(item.file.fileName)
+      // A deleted item of a followed source is not offered again.
+      if (sources !== undefined && item.meta.id !== undefined) void sources.sources.noteDeleted(item.meta.id, item.meta.remote)
       bytesRef.current.delete(item.file.fileName)
       const oldThumb = thumbUrlsRef.current.get(item.contentHash)
       if (oldThumb) {
@@ -1082,6 +1329,8 @@ export function LibraryDialog({
         return
       }
       if (menuFor !== null) return
+      // A source's own view handles its keys itself.
+      if (sourceView !== null) return
       const target = e.target as HTMLElement | null
       const isTextInput =
         target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement || target?.isContentEditable === true
@@ -1152,6 +1401,8 @@ export function LibraryDialog({
   }
 
   function openMenuFor(item: LibraryItem, anchor: HTMLElement) {
+    // Built-in profiles have nothing to manage: no rename, delete or move.
+    if (isBuiltInItem(item)) return
     if (variant === 'window') {
       void openNativeMenu(item)
       return
@@ -1189,6 +1440,16 @@ export function LibraryDialog({
           </header>
         )}
 
+        {sources !== undefined && !sourcesOff && snapshot.loaded && snapshot.stamp !== laterStamp && (
+          <SourceUpdateBar
+            model={bar}
+            busy={sourceActions.busy}
+            onUpdateAll={() => void sourceActions.updateAllFromBar()}
+            onReview={() => void sourceActions.openReview()}
+            onLater={() => setLaterStamp(snapshot.stamp)}
+          />
+        )}
+
         <div className="hwlib__body" ref={bodyRef}>
           <aside className="hwlib__sidebar" style={{ flex: `0 0 ${colWidths.sidebar}px`, width: colWidths.sidebar }}>
             {variant === 'window' && <div className="hwlib__sidebar-search">{renderSearch()}</div>}
@@ -1202,7 +1463,10 @@ export function LibraryDialog({
                   role="tab"
                   aria-selected={category === c.value}
                   className={`hwlib__cat-row${category === c.value ? ' hwlib__cat-row--active' : ''}`}
-                  onClick={() => setCategory(c.value)}
+                  onClick={() => {
+                    setSourceView(null)
+                    setCategory(c.value)
+                  }}
                 >
                   <span>{i18n._(c.label)}</span>
                   <span className="hwlib__cat-count">{categoryCounts[c.value]}</span>
@@ -1215,7 +1479,10 @@ export function LibraryDialog({
               <button
                 type="button"
                 className={`hwlib__collection-row${selectedCollection === null ? ' hwlib__collection-row--active' : ''}`}
-                onClick={() => setSelectedCollection(null)}
+                onClick={() => {
+                  setSourceView(null)
+                  setSelectedCollection(null)
+                }}
               >
                 <Trans>All</Trans>
               </button>
@@ -1225,7 +1492,10 @@ export function LibraryDialog({
                   type="button"
                   className={`hwlib__collection-row${selectedCollection === c.path ? ' hwlib__collection-row--active' : ''}`}
                   style={{ paddingLeft: `${8 + c.depth * 14}px` }}
-                  onClick={() => setSelectedCollection(c.path)}
+                  onClick={() => {
+                    setSourceView(null)
+                    setSelectedCollection(c.path)
+                  }}
                 >
                   {c.label}
                 </button>
@@ -1256,6 +1526,18 @@ export function LibraryDialog({
                 />
               )}
             </div>
+
+            {sources !== undefined && (
+              <SourcesBlock
+                off={sourcesOff}
+                catalogEnabled={sources.sources.catalogEnabled()}
+                statuses={snapshot.statuses}
+                active={sourceView}
+                onOpenCatalog={showCatalog}
+                onOpenSource={(source) => setSourceView({ kind: 'source', source })}
+                onAddSource={() => setShowAddSource(true)}
+              />
+            )}
           </aside>
 
           {/* Finder-style resizable divider (finding #1): pointer-capture
@@ -1272,6 +1554,44 @@ export function LibraryDialog({
               slim bar ABOVE the viewport (finding #2) — shared by both
               variants, so this is the one piece of body structure that
               never differs between them. */}
+          {sources !== undefined && sourceView !== null && sourceView.kind === 'catalog' ? (
+            <div className="hwlib__center">
+              <CatalogView
+                binding={sources}
+                added={addedSources}
+                onLoaded={() => void srcState.refresh()}
+                onPreview={(entry) => setSourceView({ kind: 'preview', entry })}
+                addError={catalogAddError}
+                onAdd={(entry) => {
+                  setCatalogAddError(null)
+                  void sourceActions.addListedSource(entry).then((out) => {
+                    if (!out.ok && out.message !== undefined) setCatalogAddError(out.message.text)
+                  })
+                }}
+                onAddSource={() => setShowAddSource(true)}
+              />
+            </div>
+          ) : sources !== undefined && browseTarget !== null ? (
+            <SourceBrowser
+              binding={sources}
+              target={browseTarget}
+              snapshot={snapshot}
+              actions={sourceActions}
+              libraryVersion={reloadToken}
+              localThumbFor={localThumbFor}
+              view={view}
+              onViewChange={setView}
+              listWidths={listColWidths}
+              onResizeListCol={handleResizeCol}
+              detailWidth={colWidths.detail}
+              native={variant === 'window'}
+              nowMs={nowMs}
+              onResizeDetail={(e) => beginColResize('detail', e)}
+              onOpenSource={(source) => setSourceView({ kind: 'source', source })}
+              onRemoved={() => setSourceView(null)}
+            />
+          ) : (
+          <>
           <div className="hwlib__center">
             <div className="hwlib__center-bar">
               <div className="hwlib__scopes" role="radiogroup" aria-label={t`Scope`}>
@@ -1358,11 +1678,13 @@ export function LibraryDialog({
                 </div>
               ) : loadError !== null ? (
                 <div className="hwlib__empty"><Trans>Couldn&rsquo;t read the library: {loadError}</Trans></div>
-              ) : items.length === 0 ? (
-                <div className="hwlib__empty"><Trans>Save a selection with &ldquo;Save to Library&rdquo; to get started.</Trans></div>
               ) : displayItems.length === 0 ? (
                 <div className="hwlib__empty">
-                  {query !== '' ? t`No items match your search.` : emptyCategoryText(category)}
+                  {query !== ''
+                    ? t`No items match your search.`
+                    : userItemCount === 0
+                      ? t`Save a selection with “Save to Library” to get started.`
+                      : emptyCategoryText(category)}
                 </div>
               ) : view === 'list' ? (
                 <>
@@ -1383,6 +1705,8 @@ export function LibraryDialog({
                         selected={item.file.fileName === selectedFileName}
                         placementCount={placementCountOf(item)}
                         inPalette={inPaletteMap[item.file.fileName] ?? false}
+                        linkState={linkStateOf(item)}
+                        sourceNewer={sourceNewerOf(item)}
                         widths={listColWidths}
                         onSelect={() => {
                           setSelectedFileName(item.file.fileName)
@@ -1405,6 +1729,8 @@ export function LibraryDialog({
                       selected={item.file.fileName === selectedFileName}
                       placementCount={placementCountOf(item)}
                       inPalette={inPaletteMap[item.file.fileName] ?? false}
+                      linkState={linkStateOf(item)}
+                      sourceNewer={sourceNewerOf(item)}
                       defaultActionLabel={defaultActionLabel(item)}
                       onSelect={() => {
                         setSelectedFileName(item.file.fileName)
@@ -1441,6 +1767,8 @@ export function LibraryDialog({
             native={variant === 'window'}
             collections={allCollections}
             placementCount={placementCountOf(selectedItem)}
+            linkState={linkStateOf(selectedItem)}
+            onReview={onReviewUpdates}
             canReveal={canReveal}
             canDownload={canDownload}
             inPalette={selectedItem ? (inPaletteMap[selectedItem.file.fileName] ?? false) : false}
@@ -1455,13 +1783,20 @@ export function LibraryDialog({
             onPrimaryAction={() => selectedItem && runDefaultAction(selectedItem)}
             onSecondaryAction={() => selectedItem && runOtherAction(selectedItem)}
             onOpenAsDocument={() => selectedItem && handleOpenAsDocument(selectedItem)}
+            canEdit={canEdit(selectedItem)}
+            onEdit={() => selectedItem && onEdit?.(selectedItem)}
             onReRenderThumbnail={() => selectedItem && void handleRerenderThumbnail(selectedItem)}
             onReveal={() => selectedItem && void handleReveal(selectedItem)}
             onDownload={() => selectedItem && handleDownload(selectedItem)}
             onRequestDelete={() => selectedItem && void requestDelete(selectedItem)}
             onConfirmDelete={() => selectedItem && void handleDelete(selectedItem)}
             onCancelDelete={() => setDeleteConfirmFor(null)}
+            sourceInfo={sourceInfoOf(selectedItem)}
+            onUpdateFromSource={() => selectedItem && void handleUpdateFromSource(selectedItem)}
+            onUnlinkFromSource={() => selectedItem && void handleUnlinkFromSource(selectedItem)}
           />
+          </>
+          )}
         </div>
 
         <footer className="hwlib__footer">
@@ -1470,7 +1805,14 @@ export function LibraryDialog({
             {selectedItem ? otherActionLabel(selectedItem) : t`Open`} · <kbd><Trans>Esc</Trans></kbd> <Trans>Close</Trans>
           </div>
           <div className="hwlib__footer-path">
-            {!unavailable && (folderPath !== null ? `${folderPath} · ${itemCountLabel(items.length)}` : itemCountLabel(items.length))}
+            {/* While the folder waits for permission again, nothing was read
+                from it: name the folder without a count. */}
+            {!unavailable &&
+              (needsReconnect
+                ? folderPath
+                : folderPath !== null
+                  ? `${folderPath} · ${itemCountLabel(items.length, items.length - userItemCount)}`
+                  : itemCountLabel(items.length, items.length - userItemCount))}
           </div>
         </footer>
 
@@ -1482,7 +1824,15 @@ export function LibraryDialog({
             canReveal={canReveal}
             canDownload={canDownload}
             hasSourceInfo={menuItem.category !== 'model' && menuItem.meta.sourceDoc !== undefined}
+            canEdit={canEdit(menuItem)}
+            fromSource={(() => {
+              const info = sourceInfoOf(menuItem)
+              return info === undefined ? undefined : { name: info.sourceName, canUpdate: info.canUpdate }
+            })()}
+            onUpdateFromSource={() => void handleUpdateFromSource(menuItem)}
+            onUnlinkFromSource={() => void handleUnlinkFromSource(menuItem)}
             onClose={() => setMenuFor(null)}
+            onEdit={() => onEdit?.(menuItem)}
             onOpenAsDocument={() => handleOpenAsDocument(menuItem)}
             onAddToCollection={() => setSelectedFileName(menuItem.file.fileName)}
             onRename={() => setSelectedFileName(menuItem.file.fileName)}
@@ -1496,6 +1846,29 @@ export function LibraryDialog({
             }}
           />
         )}
+
+        {sources !== undefined && showAddSource && (
+          <AddSourceDialog
+            binding={sources}
+            catalogEnabled={sources.sources.catalogEnabled()}
+            onChanged={() => void srcState.refresh()}
+            onClose={() => setShowAddSource(false)}
+            onDone={(source) => {
+              setShowAddSource(false)
+              setSourceView({ kind: 'source', source })
+              void srcState.refresh()
+            }}
+          />
+        )}
+        {sourceActions.confirm !== null && <SourceConfirm confirm={sourceActions.confirm} />}
+        {sourceActions.review !== null && (
+          <SourceUpdateReview
+            review={sourceActions.review}
+            onUpdateSelected={(keys) => void sourceActions.reviewUpdateSelected(keys)}
+            onDecide={(key, decision) => void sourceActions.reviewDecide(key, decision)}
+            onClose={sourceActions.closeReview}
+          />
+        )}
       </div>
   )
 
@@ -1503,6 +1876,7 @@ export function LibraryDialog({
     return (
       <>
         <style>{LIBRARY_CSS}</style>
+        <style>{SOURCES_CSS}</style>
         {panel}
       </>
     )
@@ -1510,6 +1884,7 @@ export function LibraryDialog({
   return (
     <div className="hwlib-overlay" onClick={onClose}>
       <style>{LIBRARY_CSS}</style>
+      <style>{SOURCES_CSS}</style>
       {panel}
     </div>
   )
@@ -1853,7 +2228,7 @@ const LIBRARY_CSS = `
    it uses the LARGER of the two tracks (matching component/model) so a
    thumbnail tile never gets squeezed into a track sized for the smaller
    material swatch. */
-.hwlib__grid-inner--component, .hwlib__grid-inner--model, .hwlib__grid-inner--all {
+.hwlib__grid-inner--component, .hwlib__grid-inner--model, .hwlib__grid-inner--profile, .hwlib__grid-inner--all {
   grid-template-columns: repeat(auto-fill, minmax(132px, 1fr));
 }
 .hwlib__grid-inner--material {

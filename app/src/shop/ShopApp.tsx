@@ -41,7 +41,7 @@ import { MeasurementBox } from '../viewport/MeasurementBox'
 import { CAMERA_HANDOFF_TOOL_NAMES } from '../panels/cameraHandoffTools'
 import { nodeKey, type NodeRef, type SelectMode } from '../panels/treeModel'
 import { tagPathKey } from '../panels/tagModel'
-import { makeFileHost, type OpenPick } from '../io/fileHost'
+import { makeFileHost, UnsupportedFileError, type OpenPick } from '../io/fileHost'
 import { anchorDownload, anchorDownloadAs } from '../io/webFileHost'
 import { stripKnownExtension } from '../io/docFormat'
 import { PrintSheet } from './PrintSheet'
@@ -61,12 +61,16 @@ import { InspectCard } from './InspectCard'
 import { PartsSheet } from './PartsSheet'
 import { PEEK_HEIGHT_PX, type SheetDetent } from './sheetDetents'
 import { isolateHiddenFor } from './isolate'
+import { uiContextJson } from '../api/viewMirror'
 import { writeShellModeOverride, parseRecvParams, type RecvParams } from './shellMode'
 import { installShopTestHarness } from './testHarness'
+import { useShopPluginHost } from './usePluginHost'
+import type { LiveBridgeDeps } from '../api/liveBridge'
 import { HintEngine, largestVisiblePart, testHintsSuppressed, type ActiveHint } from './hints'
 import { HintOverlay } from './HintOverlay'
 import { isArQuickLookCandidate, launchArQuickLook } from './arQuickLook'
 import { seedLocaleLengthUnit } from './localeUnits'
+import { isBetaBuild } from '../buildInfo'
 import { buildPartsSheetSections, totalPartCount } from './partsSheetModel'
 import { DocumentMenu } from './DocumentMenu'
 import { SettingsMenu } from './SettingsMenu'
@@ -102,6 +106,8 @@ import {
   type ShopIconProps,
 } from './icons'
 import type { Snap } from '../tools/types'
+import { useKeymapDispatch } from '../keymap/useKeymap'
+import { isMac } from '../platform'
 import { beginOpenAttempt, clearOpenAttempt, openAttemptFailed } from '../log/failedOpen'
 
 /** `loadHewBytes` for a `.hew` the user opened, keeping the file for a bug
@@ -119,6 +125,10 @@ function loadUserHewBytes(scene: Scene, name: string, bytes: Uint8Array): Return
  *  (design §"Composition") — Draw/Modify tools, Paint, Section Plane, etc.
  *  are all editor-only and unreachable here. */
 type ShopToolName = 'Select' | 'Orbit' | 'Tape Measure'
+
+/** Keymap command id → Shop Mode tool (keymap/defaults.ts ids). */
+// oxlint-disable-next-line lingui/no-unlocalized-strings -- command ids and ToolName identifiers
+const SHOP_TOOL_BY_COMMAND: Readonly<Record<string, ShopToolName>> = { 'tool-select': 'Select', 'tool-orbit': 'Orbit', 'tool-tape-measure': 'Tape Measure' }
 
 /** Long-press duration (ms) before an untouched, unmoved press on a part
  *  triggers isolate — comfortably past the ~300-500ms a deliberate
@@ -258,6 +268,12 @@ export function ShopApp() {
   const orientation = useShopOrientation()
   const isLandscape = orientation === 'landscape'
 
+  // Shop Mode has no MenuBar or WelcomeScreen, so on the beta build the tab
+  // title is the only place that says beta. Non-beta builds never write it.
+  useEffect(() => {
+    if (isBetaBuild()) document.title = t`Hew Beta`
+  }, [t])
+
   const [scene, setScene] = useState<Scene | null>(null)
   const [kernelError, setKernelError] = useState<string | null>(null)
   const sceneRef = useRef<Scene | null>(null)
@@ -327,6 +343,15 @@ export function ShopApp() {
   }, [tapeAnchors])
 
   const [activeContext, setActiveContext] = useState<NodeRef[]>([])
+  // The bus reads Shop's in-context entries from the Scene
+  // (`hew.query.context`'s `fallback`, `context_changed`): mirror them
+  // whenever they change (Shop has no bus connection to notify yet, so
+  // nothing is pumped). Shop has no sessions, so the entries are all of
+  // its context (`userContext.ts` holds the chain rules a bus entry uses).
+  useEffect(() => {
+    if (scene === null) return
+    scene.set_ui_context(uiContextJson(activeContext))
+  }, [scene, activeContext])
   const [selectedIds, setSelectedIds] = useState<NodeRef[]>([])
 
   // Long-press isolate's current target — declared up here (rather than down
@@ -443,6 +468,62 @@ export function ShopApp() {
     })
   }, [pushHidden, hiddenTagPaths, isolatedNode])
 
+  // ---------------------------------------------------------------- plugin host bridge (Preview)
+  // What a plugin host in this window may drive: the scene, the viewport and
+  // the hidden-state hooks. They are written from the same seeds and pushes
+  // this file already uses when hidden state changes (`applyOpenedBytes`,
+  // `pushHidden`), and read the latest sets through refs so a re-seed and a
+  // reconcile in one tick agree. Nothing here is a kernel transaction.
+  // There is no selection or entering target: those view directives are
+  // no-ops in Shop. Isolate and clear_isolation are too, by targets that do
+  // nothing: Shop's own isolate and hidden state (`isolatedNode`, the Parts
+  // sheet's hides) must not be undone or contradicted by a plugin acting on
+  // the viewport behind its back. zoom_to still frames the viewport.
+  const hiddenKeysRef = useRef(hiddenKeys)
+  hiddenKeysRef.current = hiddenKeys
+  const hiddenTagPathsRef = useRef(hiddenTagPaths)
+  hiddenTagPathsRef.current = hiddenTagPaths
+  const isolatedNodeRef = useRef(isolatedNode)
+  isolatedNodeRef.current = isolatedNode
+  const pluginBridge = useMemo<LiveBridgeDeps>(
+    () => ({
+      getScene: () => sceneRef.current,
+      getViewportApi: () => viewportApi.current,
+      isolate: () => undefined,
+      clearIsolation: () => undefined,
+      // With the viewport mounted the bridge refreshes it itself; this is
+      // the renderer's hidden set, pushed again.
+      reconcile: () => pushHidden(hiddenKeysRef.current, hiddenTagPathsRef.current, isolatedNodeRef.current),
+      // A load's re-seed: hidden nodes and tags from the document's own
+      // registries, then pushed.
+      reseedViewState: () => {
+        const scn = sceneRef.current
+        if (scn === null) return
+        const keys = seedHiddenKeysFromRegistry(scn)
+        const tagPaths = seedHiddenTagPathsFromRegistry(scn)
+        hiddenKeysRef.current = keys
+        hiddenTagPathsRef.current = tagPaths
+        setHiddenKeys(keys)
+        setHiddenTagPaths(tagPaths)
+        pushHidden(keys, tagPaths, isolatedNodeRef.current)
+      },
+      // Tag visibility again from the registry, pushed only when it moved.
+      reconcileVisibility: () => {
+        const scn = sceneRef.current
+        if (scn === null) return
+        const keys = hiddenKeysRef.current
+        const current = hiddenTagPathsRef.current
+        const seeded = seedHiddenTagPathsFromRegistry(scn)
+        if (seeded.size === 0 && current.size === 0 && keys.size === 0) return
+        if (seeded.size === current.size && [...seeded].every((p) => current.has(p))) return
+        hiddenTagPathsRef.current = seeded
+        setHiddenTagPaths(seeded)
+        pushHidden(keys, seeded, isolatedNodeRef.current)
+      },
+    }),
+    [pushHidden],
+  )
+
   /** Parts sheet: toggle a tag section's master eye. */
   const toggleHiddenTagPath = useCallback((path: string[]) => {
     setHiddenTagPaths((prev) => {
@@ -530,6 +611,23 @@ export function ShopApp() {
     dismissInspectInstant()
     setInspectPos(null)
   }, [dismissInspectInstant])
+  // Keyboard: the keymap's shortcuts for Shop Mode's three tools (Space and
+  // 1 for Select, O, T, or whatever the person bound them to). Every other
+  // command is editor-only and left alone.
+  useKeymapDispatch({
+    isMac,
+    nativeMenu: false,
+    run: (id) => {
+      const name = SHOP_TOOL_BY_COMMAND[id]
+      if (name === undefined) return
+      activateTool(name)
+      // The key restarts the tool even when it is already active (the
+      // editor's keymap `run` in App.tsx does the same).
+      setToolActivationSeq((s) => s + 1)
+    },
+    allow: (id) => SHOP_TOOL_BY_COMMAND[id] !== undefined,
+    toolCapturesKey: (key) => viewportApi.current?.isCapturingInput?.(key) ?? false,
+  })
   const handleInternalToolChange = useCallback((name: string) => {
     // Defense-in-depth allowlist (see `SHOP_TOOL_NAMES`'s own doc comment) —
     // ignore anything outside the 3-tool registry rather than blind-casting
@@ -870,6 +968,9 @@ export function ShopApp() {
     // above), so hidden-by-default tags/nodes take effect on first render
     // instead of waiting for the user to touch an eye toggle.
     pushHidden(seededHiddenKeys, seededHiddenTagPaths, null)
+    // A plugin host, when one runs, follows the document: this open is its
+    // `document_opened` (Shop never pumps the Scene's events otherwise).
+    pluginHostRef.current.noteOpened(liveScene, name)
     // Shop Mode is web-only (shellMode.ts — the desktop shell never enters
     // it), so unlike App.tsx's equivalent this needs no isTauri check.
     // Fire-and-forget: a lost write must never interrupt the open itself.
@@ -1021,7 +1122,7 @@ export function ShopApp() {
     try {
       // The relay lives next to THIS page — `<origin>/relay/` (io/shareRelay.ts):
       // a self-hosted PWA reads from its own relay, the public one from the
-      // Workers route on app.hew3d.com. Same origin, so no CORS either way.
+      // Workers route on app.hew3d.com (beta.hew3d.com likewise). Same origin, so no CORS either way.
       const response = await fetch(`${phoneRelayBase()}/drop/${params.token}`)
       if (!response.ok) {
         // A 404 here means the token was already consumed, expired (10
@@ -1162,6 +1263,21 @@ export function ShopApp() {
     })
   }, [loadBytesViaHarness])
 
+  // The plugin host, while the plugin loader is on (a Preview feature; the
+  // hook holds nothing of plugins in a production build). Opens are told to
+  // it from `applyOpenedBytes` through `pluginHost.noteOpened`.
+  const docNameRef = useRef<string | null>(null)
+  docNameRef.current = docName
+  const pluginHost = useShopPluginHost({
+    scene,
+    bridge: pluginBridge,
+    toast: showToast,
+    title: () => docNameRef.current ?? '',
+    harness: () => (window as unknown as { __hew_shop_test?: Record<string, unknown> }).__hew_shop_test ?? null,
+  })
+  const pluginHostRef = useRef(pluginHost)
+  pluginHostRef.current = pluginHost
+
   // Open a `.skp` read-only: load the blank document, `open_skp` into it,
   // then hand the standard post-open steps the document's own `.hew`
   // serialization — so "Save a copy (.hew)" and the recents shelf hold real
@@ -1203,6 +1319,10 @@ export function ShopApp() {
     try {
       pick = await fileHostRef.current.openAny()
     } catch (err: unknown) {
+      if (err instanceof UnsupportedFileError) {
+        showToast(t`Hew cannot open this kind of file.`)
+        return
+      }
       const errorText = friendlyErrorText(err)
       showToast(t`Open failed: ${errorText}`)
       return

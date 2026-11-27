@@ -13,7 +13,7 @@
  * behaviour — which ref, which context, which tolerance.
  */
 import { describe, it, expect, vi } from 'vitest'
-import { classifySnapPick, resolveSelectableRef, type ResolveDeps, type SelectScene } from './snapSelection'
+import { classifySnapPick, instanceSketchUnderRay, resolveSelectableRef, type ResolveDeps, type SelectScene } from './snapSelection'
 import { ctxGround, ctxOfPlane, edgeKeysOf, planeOfCtx, widenCurveRef, type PlaneUnitsScene } from './planeUnits'
 import type { Snap } from './types'
 import type { Ray } from '../viewport/math'
@@ -218,6 +218,16 @@ interface SceneStubs {
   edgeEndpoints?: (edge: bigint) => number[] | undefined
   instanceRegion?: { sketch: bigint; region: bigint; depth?: number }
   instanceEdge?: { sketch: bigint; edge: bigint; depth?: number }
+  /** The ranked lines / fills drawn inside components under the ray
+   *  (`pick_instance_sketch_edge` / `_region`), best first; `point` defaults
+   *  to the spot on the down ray at `depth`. Each probe call is counted in
+   *  `placedCalls`. */
+  placedEdge?: PlacedHit | PlacedHit[]
+  placedRegion?: PlacedHit | PlacedHit[]
+  placedCalls?: { count: number }
+  /** The depth of the face along any ray (default: the fixed `face.depth`),
+   *  to model a tilted plane the ray meets at a grazing angle. */
+  faceDepthAt?: (origin: number[], direction: number[]) => number | undefined
   /** Omit plane_units_json / pick_plane_unit entirely (a host with no plane
    *  listing: nothing drawn can ever resolve). */
   noPlanes?: boolean
@@ -226,6 +236,22 @@ interface SceneStubs {
 }
 
 const IDENTITY_POSE = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0]
+
+interface PlacedHit { instance: bigint; sketch: bigint; depth: number; point?: [number, number, number] }
+
+/** An `InstanceSketchHitsJs` double over `hits` (best first). */
+function placedHits(hits: PlacedHit | PlacedHit[] | undefined): unknown {
+  const list = hits === undefined ? [] : Array.isArray(hits) ? hits : [hits]
+  return {
+    len: () => list.length,
+    is_empty: () => list.length === 0,
+    instances: () => BigUint64Array.from(list.map((h) => h.instance)),
+    sketches: () => BigUint64Array.from(list.map((h) => h.sketch)),
+    depths: () => Float64Array.from(list.map((h) => h.depth)),
+    points: () => Float64Array.from(list.flatMap((h) => h.point ?? [0, 0, 5 - h.depth])),
+    free: vi.fn(),
+  }
+}
 
 function fakeScene(s: SceneStubs): SelectScene {
   const zOfCtx = (ctx: string): number => planeOfCtx(ctx)?.point[2] ?? NaN
@@ -277,12 +303,20 @@ function fakeScene(s: SceneStubs): SelectScene {
         depth: () => s.instanceEdge!.depth ?? 5,
         free: vi.fn(),
       },
-    pick_face: () =>
+    pick_instance_sketch_edge: () => {
+      if (s.placedCalls) s.placedCalls.count += 1
+      return placedHits(s.placedEdge)
+    },
+    pick_instance_sketch_region: () => {
+      if (s.placedCalls) s.placedCalls.count += 1
+      return placedHits(s.placedRegion)
+    },
+    pick_face: (ox: number, oy: number, oz: number, dx: number, dy: number, dz: number) =>
       s.face && {
         object: () => s.face!.object,
         face: () => s.face!.face,
         instance: () => s.face!.instance,
-        depth: () => s.face!.depth,
+        depth: () => s.faceDepthAt?.([ox, oy, oz], [dx, dy, dz]) ?? s.face!.depth,
         free: vi.fn(),
       },
   } as unknown as SelectScene
@@ -301,9 +335,21 @@ function deps(
     // The Viewport's resolveObject is context-scoped; the stub tags the object
     // so tests can tell it apart from a sketch ref.
     resolveObject: (object, instance) => ({ kind: 'object', id: object, instance } as unknown as NodeRef),
+    resolveInstance: (instance) => ({ kind: 'instance', id: instance }),
     cameraForward: FORWARD,
     cameraFar: far,
     worldPerPixelAt: () => worldPerPixel,
+    // The drawn-visibility rule, stood in for by "nothing of the fake scene's
+    // nearest face is in front of the point" — the rule itself is covered in
+    // viewport/drawnVisibility.test.ts.
+    drawnPointVisible: (p) => {
+      const face = (scene as unknown as { pick_face: (...a: number[]) => { depth(): number } | undefined })
+        .pick_face(0, 0, 0, 0, 0, -1)
+      if (face === undefined) return true
+      const faceDepth = face.depth()
+      const depth = Math.hypot(p[0], p[1], p[2] - 5) // every test ray starts at (0,0,5)
+      return depth <= faceDepth + Math.max(Math.abs(faceDepth) * 1e-6, 1e-9)
+    },
     ...(imprintEligible ? { imprintEligible } : {}),
   }
 }
@@ -512,6 +558,19 @@ describe('resolveSelectableRef — provenance × context × depth', () => {
     expect(resolveSelectableRef(solidSnap(42n, 7n), DOWN, shaded)).toMatchObject({ kind: 'object', id: 42n })
   })
 
+  it('a definition sketch seen through a dimmed (non-depth-writing) face is selectable', () => {
+    const scene = fakeScene({
+      drawn: { 0: lineThroughOrigin(4, OWNED_42) },
+      instanceEdge: { sketch: 31n, edge: 4n, depth: 9 },
+      face: { object: 42n, instance: 7n, depth: 5 },
+    })
+    // The kernel's face is nearer, but the drawn rule says the frame shows the
+    // sketch through it (the face is dimmed or glass and writes no depth).
+    const seeing = { ...deps(scene, INSTANCE_CTX, 100, WPP, eligible42), drawnPointVisible: () => true }
+    expect(resolveSelectableRef(solidSnap(42n, 7n), DOWN, seeing))
+      .toEqual(draft('draft-edge', INSTANCE_PLANE, K(4)))
+  })
+
   it('the fallback solid pick is bounded by the AXIAL far plane, not the radial distance (FIX 2)', () => {
     // Off-centre ray (cos 0.6 with the camera forward): a VISIBLE solid at
     // RADIAL 150 sits at AXIAL 90 < far 100 → armed (the old radial-vs-far
@@ -703,6 +762,146 @@ describe('resolveSelectableRef — provenance × context × depth', () => {
     const tiedClick = curveSnapAt(11n, 8n, [0, 0, 0], 'center')
     expect(resolveSelectableRef(tiedClick, DOWN, deps(mk([e40, e41]), []))).toEqual(draft('draft-edge', GROUND, K(40)))
     expect(resolveSelectableRef(tiedClick, DOWN, deps(mk([e41, e40]), []))).toEqual(draft('draft-edge', GROUND, K(40)))
+  })
+})
+
+describe('resolveSelectableRef — a line drawn inside a component selects the component', () => {
+  const LINE = { instance: 7n, sketch: 31n, depth: 4 }
+
+  it('at the top level, a line or fill through a placement → that instance, edge before fill', () => {
+    const scene = fakeScene({ placedEdge: LINE })
+    // The snap is the ground under the line: no snap names definition drawing.
+    expect(resolveSelectableRef(bareSnap(), DOWN, deps(scene, []))).toEqual({ kind: 'instance', id: 7n })
+    const fill = fakeScene({ placedRegion: { instance: 8n, sketch: 32n, depth: 4 } })
+    expect(resolveSelectableRef(bareSnap(), DOWN, deps(fill, []))).toEqual({ kind: 'instance', id: 8n })
+    const both = fakeScene({ placedEdge: LINE, placedRegion: { instance: 8n, sketch: 32n, depth: 4 } })
+    expect(resolveSelectableRef(bareSnap(), DOWN, deps(both, []))).toEqual({ kind: 'instance', id: 7n })
+    expect(instanceSketchUnderRay(DOWN, deps(both, []))?.via).toBe('edge')
+    expect(instanceSketchUnderRay(DOWN, deps(fill, []))?.via).toBe('region')
+  })
+
+  it('takes the first RANKED hit that resolves: a nearer out-of-scope placement never masks an in-scope one', () => {
+    const scene = fakeScene({ placedEdge: [{ instance: 9n, sketch: 40n, depth: 3 }, LINE] })
+    const ctx = {
+      ...deps(scene, GROUP_CTX),
+      resolveInstance: (instance: bigint) => (instance === 9n ? null : ({ kind: 'instance', id: instance } as NodeRef)),
+    }
+    expect(resolveSelectableRef(bareSnap(), DOWN, ctx)).toEqual({ kind: 'instance', id: 7n })
+    // A hit that is not drawn (past the far plane) is skipped the same way.
+    const far = fakeScene({ placedEdge: [{ instance: 9n, sketch: 40n, depth: 300 }, LINE] })
+    expect(resolveSelectableRef(bareSnap(), DOWN, deps(far, []))).toEqual({ kind: 'instance', id: 7n })
+    // And none resolving selects nothing.
+    expect(resolveSelectableRef(bareSnap(), DOWN, { ...ctx, resolveInstance: () => null })).toBeNull()
+  })
+
+  it('a solid in front keeps the click; a solid behind does not; a line on the face wins', () => {
+    const front = fakeScene({ placedEdge: LINE, face: { object: 42n, depth: 2 } })
+    expect(resolveSelectableRef(solidSnap(42n), DOWN, deps(front, []))).toMatchObject({ kind: 'object', id: 42n })
+    const behind = fakeScene({ placedEdge: LINE, face: { object: 42n, depth: 6 } })
+    expect(resolveSelectableRef(solidSnap(42n), DOWN, deps(behind, []))).toEqual({ kind: 'instance', id: 7n })
+    const on = fakeScene({ placedEdge: LINE, face: { object: 42n, depth: 4 } })
+    expect(resolveSelectableRef(solidSnap(42n), DOWN, deps(on, []))).toEqual({ kind: 'instance', id: 7n })
+  })
+
+  it('X-ray: the nearest solid face keeps the click too', () => {
+    const scene = fakeScene({ placedEdge: LINE, face: { object: 42n, depth: 2 } })
+    const xray = { ...deps(scene, []), facesOcclude: false }
+    expect(resolveSelectableRef(solidSnap(42n), DOWN, xray)).toMatchObject({ kind: 'object', id: 42n })
+  })
+
+  it('a line lying on a face seen at a grazing angle wins by the face PLANE, not by ray depth', () => {
+    // The face is the plane z = x. The cursor ray (x = 0) meets it at depth 5;
+    // the line's nearest point (1, 0, 1) lies ON the plane though the ray
+    // reaches the face 1 m "earlier" there: a depth comparison at the hit's
+    // depth (5.5) would call the line behind the face.
+    const faceDepthAt = (o: number[]): number => 5 - o[0]
+    const point: [number, number, number] = [1, 0, 1]
+    const scene = fakeScene({
+      placedEdge: { instance: 7n, sketch: 31n, depth: 5.5, point },
+      face: { object: 42n, depth: 5 },
+      faceDepthAt,
+    })
+    const d = { ...deps(scene, []), drawnPointVisible: () => true }
+    expect(resolveSelectableRef(solidSnap(42n), DOWN, d)).toEqual({ kind: 'instance', id: 7n })
+    // The same line BEHIND the plane (z = -1 under z = x at x = 1) is hidden.
+    const behind = fakeScene({
+      placedEdge: { instance: 7n, sketch: 31n, depth: 5.5, point: [1, 0, -1] },
+      face: { object: 42n, depth: 5 },
+      faceDepthAt,
+    })
+    expect(resolveSelectableRef(solidSnap(42n), DOWN, { ...deps(behind, []), drawnPointVisible: () => true }))
+      .toMatchObject({ kind: 'object', id: 42n })
+  })
+
+  it('a free drawing in front keeps the click at the top level', () => {
+    const scene = fakeScene({
+      placedEdge: LINE,
+      drawn: { 0: lineThroughOrigin(4, FREE_21) },
+      edge: { sketch: 11n, edge: 4n, depth: 3 },
+    })
+    expect(resolveSelectableRef(bareSnap(), DOWN, deps(scene, []))).toEqual(draft('draft-edge', GROUND, K(4)))
+  })
+
+  it('a free drawing the cone reports but the pick radius misses does not hide the line', () => {
+    // The kernel's aperture reports the free edge (depth 3, in front), but
+    // it lies a metre from the cursor: far outside the 8 px a click on a
+    // free line needs, so the click cannot take it and the line behind wins.
+    const far: Listing = {
+      units: [{ key: K(950), edges: [{ key: K(4), a: [-1, 1, 0], b: [1, 1, 0], store: FREE_21 }] }],
+      regions: [],
+    }
+    const scene = fakeScene({ placedEdge: LINE, drawn: { 0: far }, edge: { sketch: 11n, edge: 4n, depth: 3 } })
+    expect(resolveSelectableRef(bareSnap(), DOWN, deps(scene, []))).toEqual({ kind: 'instance', id: 7n })
+  })
+
+  it('in a group context the placement resolves through the context (the group above it)', () => {
+    const scene = fakeScene({ placedEdge: LINE })
+    const seen: bigint[] = []
+    const inGroup: ResolveDeps = {
+      ...deps(scene, GROUP_CTX),
+      resolveInstance: (instance) => {
+        seen.push(instance)
+        return { kind: 'group', id: 3n } as unknown as NodeRef
+      },
+    }
+    expect(resolveSelectableRef(bareSnap(), DOWN, inGroup)).toEqual({ kind: 'group', id: 3n })
+    expect(seen).toEqual([7n])
+  })
+
+  it('inside an instance context the probe is skipped altogether (the context\'s own members are picked)', () => {
+    const calls = { count: 0 }
+    const scene = fakeScene({ placedEdge: LINE, placedCalls: calls })
+    expect(resolveSelectableRef(bareSnap(), DOWN, deps(scene, INSTANCE_CTX))).toBeNull()
+    expect(instanceSketchUnderRay(DOWN, deps(scene, INSTANCE_CTX))).toBeNull()
+    expect(calls.count).toBe(0)
+  })
+
+  it('a line hidden behind a face (Shaded) or past the far plane is not taken', () => {
+    const scene = fakeScene({ placedEdge: { ...LINE, depth: 6 }, face: { object: 42n, depth: 5 } })
+    expect(resolveSelectableRef(bareSnap(), DOWN, deps(scene, []))).toMatchObject({ kind: 'object', id: 42n })
+    const far = fakeScene({ placedEdge: { ...LINE, depth: 200 } })
+    expect(resolveSelectableRef(bareSnap(), DOWN, deps(far, []))).toBeNull()
+  })
+
+  it('one resolution per ray: a second ask with the same ray and state does not probe again', () => {
+    const calls = { count: 0 }
+    const scene = fakeScene({ placedEdge: LINE, placedCalls: calls })
+    const d = deps(scene, [])
+    expect(instanceSketchUnderRay(DOWN, d)?.instance).toBe(7n)
+    expect(resolveSelectableRef(bareSnap(), DOWN, d)).toEqual({ kind: 'instance', id: 7n })
+    expect(instanceSketchUnderRay({ origin: [...DOWN.origin], direction: [...DOWN.direction] }, d)?.instance).toBe(7n)
+    expect(calls.count).toBe(1)
+    // Another ray, another context or a changed key resolves afresh.
+    instanceSketchUnderRay({ origin: [1, 0, 5], direction: [0, 0, -1] }, d)
+    expect(calls.count).toBe(2)
+    instanceSketchUnderRay(DOWN, { ...d, memoKey: 'x' })
+    expect(calls.count).toBe(3)
+  })
+
+  it('a host without the picks (or without resolveInstance) resolves as before', () => {
+    const scene = fakeScene({ placedEdge: LINE })
+    const { resolveInstance: _, ...noResolver } = deps(scene, [])
+    expect(resolveSelectableRef(bareSnap(), DOWN, noResolver)).toBeNull()
   })
 })
 

@@ -12,6 +12,6 @@
 # the gate runs on that PR, a release that introduces a lint we trip simply
 # turns the PR red instead of turning main red.
 [toolchain]
-channel = "1.97.1"
+channel = "1.100.0"
 components = ["clippy", "rustfmt"]
 targets = ["wasm32-unknown-unknown"]

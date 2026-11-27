@@ -80,6 +80,7 @@ fn empty_scene(roots: Vec<ImportNode>) -> ImportScene {
         section: None,
         view_style: None,
         extra: Default::default(),
+        geo: None,
     }
 }
 
@@ -131,21 +132,63 @@ fn ingest_degenerate_mesh_is_skipped_not_fatal() {
     assert_eq!(report.skipped[0].name, "bad");
 }
 
+/// A mesh so large its faces have no plane (a cube 1e100 m on a side: each
+/// face's Newell vector overflows its length) is skipped with a reason, as
+/// any mesh that cannot build is, and the document keeps a good mesh beside
+/// it and still saves and reopens. A cube 1e50 m on a side imports.
+#[test]
+fn ingest_skips_a_mesh_too_large_for_its_face_planes() {
+    let scaled = |name: &str, s: f64| {
+        let mut r = box_recipe(name);
+        for p in &mut r.positions {
+            *p = Point3::new(p.x * s, p.y * s, p.z * s);
+        }
+        r
+    };
+    let huge = scaled("huge", 1e100);
+    assert!(huge.check_builds().is_err(), "the check agrees with ingest");
+    let mut doc = Document::new();
+    let scene = empty_scene(vec![
+        ImportNode::Mesh(box_recipe("good")),
+        ImportNode::Mesh(huge),
+        ImportNode::Mesh(scaled("large", 1e50)),
+    ]);
+    let (report, _change) = doc.ingest(scene, vec![]).unwrap();
+    assert_eq!(report.objects_created, 2, "good and large built");
+    assert_eq!(report.watertight, 2);
+    assert_eq!(report.skipped.len(), 1);
+    assert_eq!(report.skipped[0].name, "huge");
+    assert!(
+        report.skipped[0].reason.contains("degenerate"),
+        "a reason a person can read: {}",
+        report.skipped[0].reason
+    );
+    let loaded = Document::load(&doc.save()).expect("the document reopens");
+    assert_eq!(loaded.visible_object_ids().len(), 2);
+}
+
 /// `MeshRecipe::check_builds` answers, without a document, exactly what
 /// `ingest` does with the mesh: a mesh it builds checks `Ok`, and a mesh it
 /// skips checks as the error whose text is the skip's reason — a degenerate
-/// face, and a quad too small for its plane to be found.
+/// face, and a quad too small for its plane to be found (5 nm squares:
+/// twice their area under 1e-12 m² and narrower than `tol::MIN_FACE_WIDTH`).
+/// A box of 0.1 µm squares, which the area floor alone used to refuse, is
+/// 0.1 µm wide and builds now.
 #[test]
 fn check_builds_agrees_with_ingest() {
-    let mut tiny = box_recipe("tiny");
-    for p in &mut tiny.positions {
-        *p = Point3::new(p.x * 1e-7, p.y * 1e-7, p.z * 1e-7);
-    }
+    let scaled = |name: &str, k: f64| {
+        let mut r = box_recipe(name);
+        for p in &mut r.positions {
+            *p = Point3::new(p.x * k, p.y * k, p.z * k);
+        }
+        r
+    };
     for (recipe, builds) in [
         (box_recipe("good"), true),
         (open_box_recipe("open"), true),
         (degenerate_recipe("bad"), false),
-        (tiny, false),
+        (scaled("tiny", 5e-9), false),
+        (scaled("sub-micron", 1e-7), true),
     ] {
         let name = recipe.name.clone();
         let check = recipe.check_builds();
@@ -182,6 +225,7 @@ fn ingest_is_atomic_undo_hides_all() {
                 tags: Vec::new(),
                 hidden: false,
                 key: None,
+                locked: false,
             },
         ],
         guides: Vec::new(),
@@ -191,6 +235,7 @@ fn ingest_is_atomic_undo_hides_all() {
         section: None,
         view_style: None,
         extra: Default::default(),
+        geo: None,
     };
     let (report, _change) = doc.ingest(scene, vec![]).unwrap();
     assert_eq!(report.objects_created, 2);
@@ -285,6 +330,7 @@ fn ingest_instance_shares_one_def() {
         section: None,
         view_style: None,
         extra: Default::default(),
+        geo: None,
     };
     let (report, _) = doc.ingest(scene, vec![]).unwrap();
 
@@ -333,6 +379,7 @@ fn ingest_then_save_load_preserves_names() {
                 tags: Vec::new(),
                 hidden: false,
                 key: None,
+                locked: false,
             },
             ImportNode::Instance {
                 def: 0,
@@ -350,6 +397,7 @@ fn ingest_then_save_load_preserves_names() {
         section: None,
         view_style: None,
         extra: Default::default(),
+        geo: None,
     };
     doc.ingest(scene, vec![]).unwrap();
 
@@ -403,6 +451,7 @@ fn ingest_guides_are_atomic_with_the_import() {
         roots: vec![ImportNode::Mesh(box_recipe("m1"))],
         guides: vec![
             ImportGuide::Line {
+                dash: kernel::GuideDash::default(),
                 origin: Point3::ORIGIN,
                 direction: Vec3::new(0.0, 0.0, 3.0), // non-unit: ingest normalizes
                 tags: Vec::new(),
@@ -413,6 +462,7 @@ fn ingest_guides_are_atomic_with_the_import() {
                 tags: Vec::new(),
             },
             ImportGuide::Line {
+                dash: kernel::GuideDash::default(),
                 origin: Point3::ORIGIN,
                 direction: Vec3::new(0.0, 0.0, 0.0), // degenerate: skipped + reported
                 tags: Vec::new(),
@@ -425,6 +475,7 @@ fn ingest_guides_are_atomic_with_the_import() {
         section: None,
         view_style: None,
         extra: Default::default(),
+        geo: None,
     };
     let (report, change) = doc.ingest(scene, vec![]).unwrap();
 
@@ -489,6 +540,7 @@ fn ingest_instance_own_name_wins_over_def_name() {
         section: None,
         view_style: None,
         extra: Default::default(),
+        geo: None,
     };
     doc.ingest(scene, vec![]).unwrap();
 
@@ -533,6 +585,7 @@ fn ingest_builds_nested_definitions() {
                         key: None,
                     },
                 ],
+                locked: false,
             },
             DefRecipe::from_meshes(Some("Inner".to_string()), vec![box_recipe("inner_body")]),
         ],
@@ -551,6 +604,7 @@ fn ingest_builds_nested_definitions() {
         section: None,
         view_style: None,
         extra: Default::default(),
+        geo: None,
     };
     let (report, _change) = doc.ingest(scene, vec![]).unwrap();
     assert_eq!(report.objects_created, 2);
@@ -597,10 +651,12 @@ fn ingest_refuses_cyclic_definition_recipes() {
             DefRecipe {
                 name: None,
                 children: vec![ImportNode::Mesh(box_recipe("a")), inst(1)],
+                locked: false,
             },
             DefRecipe {
                 name: None,
                 children: vec![ImportNode::Mesh(box_recipe("b")), inst(0)],
+                locked: false,
             },
         ],
         roots: vec![],
@@ -611,6 +667,7 @@ fn ingest_refuses_cyclic_definition_recipes() {
         section: None,
         view_style: None,
         extra: Default::default(),
+        geo: None,
     };
     assert!(matches!(
         doc.ingest(scene, vec![]),
@@ -643,6 +700,7 @@ fn ingest_skips_nested_instances_of_failed_defs() {
                         key: None,
                     },
                 ],
+                locked: false,
             },
             DefRecipe::from_meshes(Some("Broken".to_string()), vec![degenerate_recipe("bad")]),
         ],
@@ -661,6 +719,7 @@ fn ingest_skips_nested_instances_of_failed_defs() {
         section: None,
         view_style: None,
         extra: Default::default(),
+        geo: None,
     };
     let (report, _change) = doc.ingest(scene, vec![]).unwrap();
     assert_eq!(report.skipped.len(), 1);
@@ -689,6 +748,7 @@ fn ingest_refuses_over_wide_definition_recipes() {
         defs.push(DefRecipe {
             name: None,
             children: vec![inst(k - 1), inst(k - 1)],
+            locked: false,
         });
     }
     let scene = ImportScene {
@@ -702,6 +762,7 @@ fn ingest_refuses_over_wide_definition_recipes() {
         section: None,
         view_style: None,
         extra: Default::default(),
+        geo: None,
     };
     let mut doc = Document::new();
     assert!(matches!(
@@ -743,6 +804,7 @@ fn ingest_creates_scenes_from_recipes_keyed_to_the_nodes_it_makes() {
                 tags: vec![],
                 hidden: false,
                 key: Some(7),
+                locked: false,
             },
             ImportNode::Mesh(box_recipe("floor")),
         ],
@@ -755,6 +817,8 @@ fn ingest_creates_scenes_from_recipes_keyed_to_the_nodes_it_makes() {
         scenes: vec![
             ImportSceneRecipe {
                 view_style: None,
+                transition_s: None,
+                delay_s: None,
                 name: "Plan".into(),
                 description: "cut".into(),
                 camera: Some(camera(1.0)),
@@ -766,6 +830,8 @@ fn ingest_creates_scenes_from_recipes_keyed_to_the_nodes_it_makes() {
             },
             ImportSceneRecipe {
                 view_style: None,
+                transition_s: None,
+                delay_s: None,
                 name: "Plan".into(),
                 description: String::new(),
                 camera: None,
@@ -778,6 +844,7 @@ fn ingest_creates_scenes_from_recipes_keyed_to_the_nodes_it_makes() {
         section: Some(section),
         view_style: None,
         extra: Default::default(),
+        geo: None,
     };
 
     let mut doc = Document::new();
@@ -854,6 +921,8 @@ fn ingest_puts_a_file_cameras_target_on_the_model() {
     );
     let recipe = |cam: CameraState, name: &str| ImportSceneRecipe {
         view_style: None,
+        transition_s: None,
+        delay_s: None,
         name: name.into(),
         description: String::new(),
         camera: Some(cam),
@@ -869,6 +938,7 @@ fn ingest_puts_a_file_cameras_target_on_the_model() {
         defs: vec![kernel::DefRecipe {
             name: Some("hidden box".into()),
             children: vec![ImportNode::Mesh(box_recipe("hidden"))],
+            locked: false,
         }],
         roots: vec![
             ImportNode::Mesh(box_recipe("box")),
@@ -891,6 +961,7 @@ fn ingest_puts_a_file_cameras_target_on_the_model() {
         section: None,
         view_style: None,
         extra: Default::default(),
+        geo: None,
     };
     let mut doc = Document::new();
     doc.ingest(scene, vec![]).unwrap();
@@ -945,6 +1016,7 @@ fn ingest_puts_a_file_cameras_target_on_the_model() {
         section: None,
         view_style: None,
         extra: Default::default(),
+        geo: None,
     };
     let mut doc = Document::new();
     doc.ingest(empty, vec![]).unwrap();
@@ -989,10 +1061,12 @@ fn an_import_built_in_steps_is_the_import_built_at_once() {
                         key: None,
                     },
                 ],
+                locked: false,
             },
             DefRecipe {
                 name: Some("leg".into()),
                 children: vec![ImportNode::Mesh(box_recipe("leg"))],
+                locked: false,
             },
         ],
         roots: vec![
@@ -1003,6 +1077,7 @@ fn an_import_built_in_steps_is_the_import_built_at_once() {
                 tags: Vec::new(),
                 hidden: false,
                 key: None,
+                locked: false,
             },
             ImportNode::Instance {
                 def: 0,
@@ -1020,6 +1095,7 @@ fn an_import_built_in_steps_is_the_import_built_at_once() {
         section: None,
         view_style: None,
         extra: Default::default(),
+        geo: None,
     };
     let mut at_once = Document::new();
     let (report_once, _) = at_once.ingest(scene(), vec![]).unwrap();
@@ -1078,10 +1154,166 @@ fn finishing_an_unstepped_import_builds_it_whole() {
         section: None,
         view_style: None,
         extra: Default::default(),
+        geo: None,
     };
     let mut doc = Document::new();
     let job = doc.ingest_begin(scene, vec![]).unwrap();
     let (report, _) = doc.ingest_finish(job);
     assert_eq!(report.objects_created, 2);
     assert_eq!(doc.visible_object_ids().len(), 2);
+}
+
+// ───────────────────────────────────────────────────────────── locks ─────────
+
+/// OW-1: a recipe's locks land on the records `ingest` builds. A lock is a
+/// shape's: an Object's or a Group's own, a definition's for every
+/// placement of it. Undo of the import takes it all away and redo brings
+/// it back locked.
+#[test]
+fn ingest_builds_locked_objects_groups_and_definitions() {
+    use kernel::NodeId;
+    let mut locked_mesh = box_recipe("Pinned");
+    locked_mesh.extra.locked = true;
+    let mut scene = empty_scene(vec![
+        ImportNode::Mesh(locked_mesh),
+        ImportNode::Mesh(box_recipe("Free")),
+        ImportNode::Group {
+            name: "Shed".into(),
+            children: vec![ImportNode::Mesh(box_recipe("Wall"))],
+            tags: Vec::new(),
+            hidden: false,
+            locked: true,
+            key: None,
+        },
+        ImportNode::Instance {
+            def: 0,
+            pose: Transform::IDENTITY,
+            name: None,
+            tags: Vec::new(),
+            hidden: false,
+            key: None,
+        },
+        ImportNode::Instance {
+            def: 0,
+            pose: Transform::translation(kernel::Vec3::new(3.0, 0.0, 0.0)),
+            name: None,
+            tags: Vec::new(),
+            hidden: false,
+            key: None,
+        },
+    ]);
+    scene.defs = vec![DefRecipe {
+        name: Some("Window".into()),
+        children: vec![ImportNode::Mesh(box_recipe("Pane"))],
+        locked: true,
+    }];
+    let mut doc = Document::new();
+    let before = doc.state_hash();
+    let (report, _) = doc.ingest(scene, Vec::new()).unwrap();
+    let def = report.defs[0].unwrap();
+
+    let check = |doc: &Document| {
+        let nodes = doc.top_level_nodes();
+        let named = |n: &NodeId| match *n {
+            NodeId::Object(o) => doc.object_name(o).map(str::to_string),
+            NodeId::Group(g) => doc.group_name(g).map(str::to_string),
+            NodeId::Instance(_) => None,
+        };
+        let by_name = |name: &str| {
+            *nodes
+                .iter()
+                .find(|n| named(n).as_deref() == Some(name))
+                .unwrap()
+        };
+        assert!(doc.node_locked(by_name("Pinned")));
+        assert!(!doc.node_locked(by_name("Free")));
+        let shed = by_name("Shed");
+        assert!(doc.node_locked(shed));
+        // A member of a locked group is frozen by it, not locked itself.
+        let NodeId::Group(g) = shed else {
+            unreachable!()
+        };
+        let wall = doc.group_members(g).unwrap()[0];
+        assert!(!doc.node_locked(wall));
+        assert_eq!(doc.node_frozen(wall), Some(shed));
+        assert!(doc.component_locked(def));
+        let copies: Vec<NodeId> = nodes
+            .iter()
+            .copied()
+            .filter(|n| matches!(n, NodeId::Instance(_)))
+            .collect();
+        assert_eq!(copies.len(), 2);
+        assert!(copies.iter().all(|&c| doc.node_locked(c)));
+    };
+    check(&doc);
+    let after = doc.state_hash();
+    doc.undo().unwrap();
+    assert_eq!(doc.state_hash(), before, "undo takes the import away");
+    doc.redo().unwrap();
+    assert_eq!(
+        doc.state_hash(),
+        after,
+        "redo brings it back, locks and all"
+    );
+    check(&doc);
+}
+
+/// OW-1: a linked set's root member never carries a lock of its own. A
+/// recipe that puts one there (a `.skp` Hew wrote, its set's member group
+/// locked in SketchUp) has it hoisted onto the definition, as the loader
+/// does, and the document passes its invariants.
+#[test]
+fn ingest_hoists_a_linked_sets_root_member_lock_onto_the_set() {
+    use kernel::{AttrDict, AttrValue, ImportAttrTarget, NodeId};
+    let mut member = box_recipe("Leg");
+    member.extra.locked = true;
+    let place = |x: f64| ImportNode::Instance {
+        def: 0,
+        pose: Transform::translation(kernel::Vec3::new(x, 0.0, 0.0)),
+        name: None,
+        tags: Vec::new(),
+        hidden: false,
+        key: None,
+    };
+    let mut scene = empty_scene(vec![place(0.0), place(2.0)]);
+    scene.defs = vec![DefRecipe {
+        name: Some("Leg".into()),
+        children: vec![ImportNode::Mesh(member)],
+        locked: false,
+    }];
+    let mut linked = AttrDict::new();
+    linked
+        .entry(kernel::HEW_ATTR_NS.to_string())
+        .or_default()
+        .insert(kernel::LINKED_ATTR_KEY.to_string(), AttrValue::Bool(true));
+    scene.extra.attrs = vec![(ImportAttrTarget::Def(0), linked)];
+    let mut doc = Document::new();
+    let (report, _) = doc.ingest(scene, Vec::new()).unwrap();
+    let def = report.defs[0].unwrap();
+    assert!(doc.is_linked_set(def));
+    assert!(doc.component_locked(def), "the set is locked");
+    let member = doc.def_member_nodes(def).unwrap()[0];
+    assert!(matches!(member, NodeId::Object(_)), "{member:?}");
+    assert!(
+        !doc.node_locked(member),
+        "the root member's own lock moved onto the set"
+    );
+    for n in doc.top_level_nodes() {
+        assert!(doc.node_locked(n), "every placement of the set is locked");
+    }
+    // The same member in a definition that is not a linked set keeps its
+    // own lock: it is a locked part of a free component.
+    let mut member = box_recipe("Knob");
+    member.extra.locked = true;
+    let mut scene = empty_scene(vec![place(0.0)]);
+    scene.defs = vec![DefRecipe {
+        name: Some("Drawer".into()),
+        children: vec![ImportNode::Mesh(member)],
+        locked: false,
+    }];
+    let mut doc = Document::new();
+    let (report, _) = doc.ingest(scene, Vec::new()).unwrap();
+    let def = report.defs[0].unwrap();
+    assert!(!doc.component_locked(def));
+    assert!(doc.node_locked(doc.def_member_nodes(def).unwrap()[0]));
 }

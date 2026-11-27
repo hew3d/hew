@@ -70,6 +70,7 @@ fn imprint_op(object: &Object, face_sel: usize, shrink: f64) -> KernelOp {
         loop_path,
         restore: None,
         curves: Vec::new(),
+        edge_attrs: Vec::new(),
     }
 }
 

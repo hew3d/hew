@@ -1,6 +1,10 @@
 import { describe, it, expect } from 'vitest'
 import { deriveDockContext, dockVerbsFor, dockChipLabel, isDockVerbEnabled } from './dockLogic'
 import type { NodeRef } from './treeModel'
+import { chipAllowed } from '../preview'
+
+/** What the Preview wall leaves of a list of dock verb ids. */
+const offered = (ids: string[]) => ids.filter((id) => chipAllowed(id))
 
 const obj = (id: bigint): NodeRef => ({ kind: 'object', id })
 const group = (id: bigint): NodeRef => ({ kind: 'group', id })
@@ -8,25 +12,26 @@ const instance = (id: bigint): NodeRef => ({ kind: 'instance', id })
 const sketch = (id: bigint): NodeRef => ({ kind: 'sketch', id })
 
 describe('deriveDockContext', () => {
-  it('is "empty" when nothing is selected and no guide is selected', () => {
-    expect(deriveDockContext([], null)).toBe('empty')
+  it('is "empty" when nothing is selected', () => {
+    expect(deriveDockContext([])).toBe('empty')
   })
 
-  it('is null when a guide is selected, regardless of node selection', () => {
-    expect(deriveDockContext([], 5n)).toBeNull()
-    expect(deriveDockContext([obj(1n)], 5n)).toBeNull()
+  it('is null for guides or annotations alone, and follows the nodes beside them', () => {
+    expect(deriveDockContext([], 2)).toBeNull()
+    expect(deriveDockContext([obj(1n)], 2)).toBe('object')
+    expect(deriveDockContext([obj(1n), obj(2n)], 1)).toBe('multi')
   })
 
   it('is "object" for a single selected Object', () => {
-    expect(deriveDockContext([obj(1n)], null)).toBe('object')
+    expect(deriveDockContext([obj(1n)])).toBe('object')
   })
 
   it('is "group" for a single selected Group', () => {
-    expect(deriveDockContext([group(1n)], null)).toBe('group')
+    expect(deriveDockContext([group(1n)])).toBe('group')
   })
 
   it('is "instance" for a single selected Instance', () => {
-    expect(deriveDockContext([instance(1n)], null)).toBe('instance')
+    expect(deriveDockContext([instance(1n)])).toBe('instance')
   })
 
   // Contract change ("sketches are first-class interactable"): a
@@ -34,22 +39,22 @@ describe('deriveDockContext', () => {
   // dedicated 'sketch' context with its own curated verb set, since sketches
   // gained real Push/Pull/Move/Rotate/Scale/Erase behavior.
   it('is "sketch" for a single selected free-standing sketch', () => {
-    expect(deriveDockContext([sketch(1n)], null)).toBe('sketch')
+    expect(deriveDockContext([sketch(1n)])).toBe('sketch')
   })
 
   it('is "sketch" for a single selected sketch LINE too (same verbs, finer selection)', () => {
     expect(
-      deriveDockContext([{ kind: 'draft-edge', id: 4n, ctx: '{"plane":[0,0,0,0,0,1]}', key: '0000000000000004' }], null),
+      deriveDockContext([{ kind: 'draft-edge', id: 4n, ctx: '{"plane":[0,0,0,0,0,1]}', key: '0000000000000004' }]),
     ).toBe('sketch')
   })
 
   it('is "multi" for more than one selected node, regardless of kind mix', () => {
-    expect(deriveDockContext([obj(1n), obj(2n)], null)).toBe('multi')
-    expect(deriveDockContext([obj(1n), group(2n), instance(3n)], null)).toBe('multi')
+    expect(deriveDockContext([obj(1n), obj(2n)])).toBe('multi')
+    expect(deriveDockContext([obj(1n), group(2n), instance(3n)])).toBe('multi')
   })
 
   it('is "multi" for a sketch mixed into a multi-selection (multi rules unchanged)', () => {
-    expect(deriveDockContext([obj(1n), sketch(2n)], null)).toBe('multi')
+    expect(deriveDockContext([obj(1n), sketch(2n)])).toBe('multi')
   })
 })
 
@@ -71,9 +76,12 @@ describe('dockVerbsFor', () => {
   // Library effort: Save to Library rides along, ungated, when no `gates`
   // arg is passed at all (see dockVerbsFor's early return) — the gates
   // test below covers the hidden-when-unavailable case.
-  it('object: primary Push/Pull, then Move, Paint, Position Texture, Make Component, Save to Library, Erase', () => {
+  // True Curves organization: Fillet (second) and Shell join the row, and
+  // Position Texture leaves it (Paint is the way to it) to cap the row at eight.
+  it('object: primary Push/Pull, then Fillet, Move, Paint, Shell, Make Component, Save to Library, Erase', () => {
     const verbs = dockVerbsFor('object')
-    expect(verbs.map((v) => v.id)).toEqual(['tool-pushpull', 'tool-move', 'tool-paint', 'tool-position-texture', 'edit-make-component', 'save-to-library', 'edit-delete'])
+    expect(verbs.map((v) => v.id)).toEqual(offered(['tool-pushpull', 'tool-fillet', 'tool-move', 'tool-paint', 'tool-shell', 'edit-make-component', 'save-to-library', 'edit-delete']))
+    expect(verbs.map((v) => v.id)).not.toContain('tool-position-texture')
   })
 
   it('group: primary Edit, then Move, Scale, Make Component, Ungroup, Save to Library, Erase', () => {
@@ -86,9 +94,22 @@ describe('dockVerbsFor', () => {
     expect(verbs.map((v) => v.id)).toEqual(['enter-context', 'tool-move', 'tool-scale', 'make-unique', 'explode-instance', 'save-to-library'])
   })
 
-  it('multi: primary Move, then Group, Erase', () => {
+  it('multi: primary Move, then Union, Subtract, Intersect, Group, Erase', () => {
     const verbs = dockVerbsFor('multi')
-    expect(verbs.map((v) => v.id)).toEqual(['tool-move', 'edit-group', 'edit-delete'])
+    expect(verbs.map((v) => v.id)).toEqual(['tool-move', 'edit-union', 'edit-subtract', 'edit-intersect', 'edit-group', 'edit-delete'])
+  })
+
+  it('the booleans follow canBoolean: hidden when false or omitted, shown when true', () => {
+    const booleans = ['edit-union', 'edit-subtract', 'edit-intersect']
+    for (const gates of [
+      { canGroup: true, canMakeComponent: true },
+      { canGroup: true, canMakeComponent: true, canBoolean: false },
+    ]) {
+      expect(dockVerbsFor('multi', gates).map((v) => v.id)).toEqual(['tool-move', 'edit-group', 'edit-delete'])
+    }
+    expect(
+      dockVerbsFor('multi', { canGroup: true, canMakeComponent: true, canBoolean: true }).map((v) => v.id),
+    ).toEqual(['tool-move', ...booleans, 'edit-group', 'edit-delete'])
   })
 
   it('gates hide Group / Make Component when the selection is ineligible', () => {
@@ -99,7 +120,7 @@ describe('dockVerbsFor', () => {
     // Object inside an editing context (canMakeComponent is top-level-only).
     expect(
       dockVerbsFor('object', { canGroup: false, canMakeComponent: false }).map((v) => v.id),
-    ).toEqual(['tool-pushpull', 'tool-move', 'tool-paint', 'tool-position-texture', 'edit-delete'])
+    ).toEqual(offered(['tool-pushpull', 'tool-fillet', 'tool-move', 'tool-paint', 'tool-shell', 'edit-delete']))
     expect(
       dockVerbsFor('group', { canGroup: false, canMakeComponent: false }).map((v) => v.id),
     ).toEqual(['enter-context', 'tool-move', 'tool-scale', 'ungroup', 'edit-delete'])
@@ -130,11 +151,12 @@ describe('dockVerbsFor', () => {
     ).not.toContain('save-to-library')
   })
 
-  it('sketch: primary Push/Pull, then Move, Rotate, Scale, Erase', () => {
+  it('sketch: primary Push/Pull, then Revolve, Loft, Follow Me, Move, Rotate, Erase', () => {
     const verbs = dockVerbsFor('sketch')
-    expect(verbs.map((v) => v.id)).toEqual([
-      'tool-pushpull', 'tool-move', 'tool-rotate', 'tool-scale', 'edit-delete',
-    ])
+    expect(verbs.map((v) => v.id)).toEqual(offered([
+      'tool-pushpull', 'tool-revolve', 'tool-loft', 'tool-follow-me', 'tool-move', 'tool-rotate', 'edit-delete',
+    ]))
+    expect(verbs.map((v) => v.id)).not.toContain('tool-scale')
   })
 
   it('sketch verbs reuse the exact same ids as the other rows (menuActionRef/activeToolId compatibility)', () => {
@@ -148,22 +170,26 @@ describe('dockVerbsFor', () => {
     expect(objectIds.has('tool-pushpull')).toBe(true)
     expect(sketchIds.has('edit-delete')).toBe(true)
     expect(objectIds.has('edit-delete')).toBe(true)
-    expect(sketchIds.has('tool-scale')).toBe(true)
     expect(groupIds.has('tool-scale')).toBe(true)
+    // The True Curves verbs use the tool-menu ids the native menu dispatches.
+    for (const id of offered(['tool-revolve', 'tool-loft', 'tool-follow-me'])) expect(sketchIds.has(id)).toBe(true)
+    for (const id of offered(['tool-fillet', 'tool-shell'])) expect(objectIds.has(id)).toBe(true)
   })
 
-  it('every context stays within the spec cap (originally "4-6 items max, curated"; the Library effort added one more selection-only verb to Object/Group, deliberately raising the ungated ceiling to 7 — gated call sites still cap out at 6 when the library is unavailable)', () => {
+  it('every context stays within the spec cap (originally "4-6 items max, curated"; the Library effort raised the ungated ceiling to 7, and the True Curves organization gives the Object row eight — the other rows stay at seven or fewer)', () => {
     for (const ctx of ['empty', 'object', 'group', 'instance', 'multi', 'sketch'] as const) {
-      expect(dockVerbsFor(ctx).length).toBeLessThanOrEqual(7)
+      expect(dockVerbsFor(ctx).length).toBeLessThanOrEqual(ctx === 'object' ? 8 : 7)
       expect(dockVerbsFor(ctx).length).toBeGreaterThan(0)
     }
   })
 })
 
 describe('isDockVerbEnabled', () => {
-  it('hover-preview (sketch not selected): only Push/Pull is enabled', () => {
+  it('hover-preview (sketch not selected): only Push/Pull, Revolve, and Loft are enabled', () => {
+    // Each of the three starts by clicking a shape, so a click-through works;
+    // Follow Me needs a path first, and Move/Rotate/Erase need a selection.
     const enabled = dockVerbsFor('sketch').filter((v) => isDockVerbEnabled(v, true))
-    expect(enabled.map((v) => v.id)).toEqual(['tool-pushpull'])
+    expect(enabled.map((v) => v.id)).toEqual(offered(['tool-pushpull', 'tool-revolve', 'tool-loft']))
   })
 
   it('with a real selection every verb is enabled, in every context', () => {
@@ -186,3 +212,76 @@ describe('dockChipLabel', () => {
     expect(dockChipLabel('sketch')).toBe('SKETCH')
   })
 })
+
+describe('dock verbs for a linked copy', () => {
+  it('replace Make Unique with the copy actions, and hide Unlink all for a set of one', () => {
+    const plain = dockVerbsFor('instance').map((v) => v.id)
+    expect(plain).toContain('make-unique')
+    expect(plain).not.toContain('edit-unlink')
+
+    const linked = dockVerbsFor('instance', { canGroup: false, canMakeComponent: true, canUnlink: true, canUnlinkAll: true }).map((v) => v.id)
+    expect(linked).toEqual(['enter-context', 'tool-move', 'tool-scale', 'edit-unlink', 'edit-unlink-all', 'edit-make-component', 'explode-instance'])
+
+    const solo = dockVerbsFor('instance', { canGroup: false, canMakeComponent: true, canUnlink: true, canUnlinkAll: false }).map((v) => v.id)
+    expect(solo).not.toContain('edit-unlink-all')
+    expect(solo).toContain('edit-unlink')
+  })
+
+  it('a wrapper left with one copy reads as a plain Object: no Unlink, Make Unique or Explode', () => {
+    const one = dockVerbsFor('instance', { canGroup: false, canMakeComponent: true, canUnlink: false, canUnlinkAll: false, presentedKind: 'object' }).map((v) => v.id)
+    expect(one).toEqual(['enter-context', 'tool-move', 'tool-scale', 'edit-make-component'])
+  })
+
+  it('the chip reads OBJECT or GROUP for a linked copy (never COPIES) and COMPNT otherwise', () => {
+    expect(dockChipLabel('instance', 'object')).toBe('OBJECT')
+    expect(dockChipLabel('instance', 'group')).toBe('GROUP')
+    expect(dockChipLabel('instance')).toBe('COMPNT')
+    expect(dockChipLabel('object', 'object')).toBe('OBJECT')
+  })
+})
+
+describe('dock verbs for a locked selection (OW-1)', () => {
+  const gates = { canGroup: false, canMakeComponent: true, canSaveToLibrary: true }
+
+  it('offers Lock ahead of Erase while something is unlocked, and never without its gate', () => {
+    const ids = dockVerbsFor('object', { ...gates, canLock: true }).map((v) => v.id)
+    expect(ids.indexOf('edit-lock')).toBe(ids.indexOf('edit-delete') - 1)
+    expect(dockVerbsFor('object', gates).map((v) => v.id)).not.toContain('edit-lock')
+    expect(dockVerbsFor('object').map((v) => v.id)).not.toContain('edit-lock')
+  })
+
+  it('an instance row has no Erase: Lock goes at the end', () => {
+    const ids = dockVerbsFor('instance', { ...gates, canLock: true }).map((v) => v.id)
+    expect(ids[ids.length - 1]).toBe('edit-lock')
+  })
+
+  it('a mixed selection (something to lock, something locked) offers Lock', () => {
+    const ids = dockVerbsFor('multi', { canGroup: true, canMakeComponent: false, canLock: true, canUnlock: true }).map((v) => v.id)
+    expect(ids).toContain('edit-lock')
+    expect(ids).not.toContain('edit-unlock-selected')
+  })
+
+  it('a fully locked selection offers Unlock first and only what a lock leaves open', () => {
+    for (const ctx of ['object', 'group'] as const) {
+      const ids = dockVerbsFor(ctx, { ...gates, canUnlock: true }).map((v) => v.id)
+      expect(ids[0]).toBe('edit-unlock-selected')
+      for (const refused of ['tool-pushpull', 'tool-move', 'tool-paint', 'edit-delete', 'edit-make-component', 'ungroup', 'enter-context']) {
+        expect(ids).not.toContain(refused)
+      }
+      expect(ids).toContain('save-to-library')
+    }
+  })
+
+  it('a locked copy keeps Make Unique and Unlink (they work on a locked copy)', () => {
+    const plain = dockVerbsFor('instance', { ...gates, canUnlock: true }).map((v) => v.id)
+    expect(plain).toEqual(['edit-unlock-selected', 'make-unique', 'save-to-library'])
+    const linked = dockVerbsFor('instance', { ...gates, canUnlock: true, canUnlink: true, canUnlinkAll: true }).map((v) => v.id)
+    expect(linked).toEqual(['edit-unlock-selected', 'edit-unlink', 'save-to-library'])
+  })
+
+  it('sketch and empty rows never take a lock verb', () => {
+    expect(dockVerbsFor('sketch', { ...gates, canLock: true }).map((v) => v.id)).not.toContain('edit-lock')
+    expect(dockVerbsFor('empty', { ...gates, canLock: true }).map((v) => v.id)).not.toContain('edit-lock')
+  })
+})
+

@@ -18,6 +18,11 @@ fix has to live in our tree.
   with holes, so this is load-bearing for real models. Marked inline with
   `// HEW PATCH`.
 
+- `src/core/meta.rs` — `Asset::parse_box`: `<created>` and `<modified>` were
+  mandatory, so any file whose `<asset>` omits them failed with
+  `expected <created>`. Some exporters omit both; they are metadata only, so
+  they are now optional and default to an empty `MaybeDateTime::Error`.
+
 ## Manifest changes
 
 - Dropped the optional `nalgebra` dependency (unused; Hew has its own math).

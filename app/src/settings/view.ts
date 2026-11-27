@@ -24,13 +24,13 @@ import { msg } from '@lingui/core/macro'
 import type { MessageDescriptor } from '@lingui/core'
 import { isTauri } from '../io/fileHost'
 
-interface ViewSetting<T> {
+export interface ViewSetting<T> {
   get(): T
   set(next: T): void
   subscribe(cb: (value: T) => void): () => void
 }
 
-function makeSetting<T>(
+export function makeSetting<T>(
   storageKey: string,
   payloadKey: string,
   fallback: T,
@@ -110,7 +110,7 @@ function makeSetting<T>(
 }
 
 /** Parses a persisted/broadcast boolean given as 'true'/'false' or a real boolean. */
-function parseBool(raw: unknown): boolean | undefined {
+export function parseBool(raw: unknown): boolean | undefined {
   if (raw === true || raw === 'true') return true
   if (raw === false || raw === 'false') return false
   return undefined
@@ -233,11 +233,23 @@ function parsePosition(raw: unknown): MeasurementsPosition | undefined {
 }
 
 const measurementsPosition = makeSetting<MeasurementsPosition>(
-  'hew.settings.measurementsPosition', 'measurementsPosition', 'top-right', parsePosition, (v) => v,
+  'hew.settings.measurementsPosition', 'measurementsPosition', 'bottom-right', parsePosition, (v) => v,
 )
 export const getMeasurementsPosition = measurementsPosition.get
 export const setMeasurementsPosition = measurementsPosition.set
 export const subscribeMeasurementsPosition = measurementsPosition.subscribe
+
+// ---------------------------------------------------------------------------
+// Part axes
+// ---------------------------------------------------------------------------
+
+/** View ▸ Part Axes: draw the frame of the selected or edited component. */
+const showPartAxes = makeSetting<boolean>(
+  'hew.settings.showPartAxes', 'showPartAxes', false, parseBool, String,
+)
+export const getShowPartAxes = showPartAxes.get
+export const setShowPartAxes = showPartAxes.set
+export const subscribeShowPartAxes = showPartAxes.subscribe
 
 // ---------------------------------------------------------------------------
 // Outliner sort

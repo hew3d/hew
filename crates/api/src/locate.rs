@@ -77,6 +77,28 @@ fn missed(what: &str) -> CmdError {
     ))
 }
 
+/// [`missed`] for a face or edge locator. When the locator's `path` goes
+/// through a placement, its `at` / `origin` / `dir` are read in the leaf's
+/// own frame (the definition's coordinates, as `hew.query.faces { path }`
+/// and raycast report them), not in world coordinates; the message says so.
+/// A path of one element names an Object with no placement above it, whose
+/// frame is the world's, so it keeps the short wording.
+fn missed_in(what: &str, obj: &serde_json::Map<String, serde_json::Value>) -> CmdError {
+    let through_placement = obj
+        .get("path")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|p| p.len() > 1);
+    if !through_placement {
+        return missed(what);
+    }
+    CmdError::Refusal(Refusal::api(
+        "locator_missed",
+        &format!(
+            "The locator matched no {what}. A path through a placement reads the point or ray in the leaf's own frame (the definition's coordinates), not in world coordinates. Check it against the object's geometry in that frame."
+        ),
+    ))
+}
+
 fn ambiguous(what: &str) -> CmdError {
     CmdError::Refusal(Refusal::api(
         "ambiguous_locator",
@@ -302,9 +324,21 @@ fn resolve_center(ctx: &Ctx, of: &serde_json::Value) -> Result<Point3, CmdError>
             "That face is not a stamped curved wall; it has no analytic center.",
         )));
     };
-    let kernel::SurfaceRef::Cylinder {
-        axis_point, axis, ..
-    } = surface;
+    let (axis_point, axis) = match surface {
+        kernel::SurfaceRef::Cylinder {
+            axis_point, axis, ..
+        } => (axis_point, axis),
+        // A sphere's or torus's center is the claim's own center.
+        kernel::SurfaceRef::Sphere { center, .. } | kernel::SurfaceRef::Torus { center, .. } => {
+            return Ok(center);
+        }
+        kernel::SurfaceRef::Cone { .. } => {
+            return Err(CmdError::Refusal(Refusal::api(
+                "no_such_point",
+                "A cone has no center point; use its apex.",
+            )));
+        }
+    };
     // Project the face's ring centroid onto the cylinder axis.
     let ring: Vec<Point3> = object.loop_positions(f.outer_loop).collect();
     let c = geom::face_centroid(&ring, &[]);
@@ -330,8 +364,62 @@ pub fn face_rings(ctx: &Ctx, face: FaceRef) -> Result<(Vec<Point3>, Vec<Vec<Poin
     Ok((outer, holes))
 }
 
-/// Resolves a face locator (§5.2): `{object, at}`, `{object, ray}`, or
-/// `{"$face": "label#key"}`.
+/// The Object a face or edge locator addresses: `object` (its public id)
+/// or `path` (an occurrence path ending at it, docs/agents/HEW_API.md
+/// §5.2), exactly one. `at` and `ray` stay in the Object's own frame
+/// either way, as `hew.query.raycast` reports them, so both forms reach the
+/// same face; a path only proves the placement. A path ending at a group
+/// or instance refuses `not_an_object`; a path through a definition open
+/// for editing refuses `explode_session_scope`.
+fn locator_object(
+    ctx: &Ctx,
+    obj: &serde_json::Map<String, serde_json::Value>,
+    what: &str,
+) -> Result<ObjectId, CmdError> {
+    match (obj.get("object"), obj.get("path")) {
+        (Some(public), None) => {
+            let public = public.as_str().ok_or_else(|| {
+                CmdError::Params(format!("a {what} locator's \"object\" is an id"))
+            })?;
+            match ctx.resolver().resolve(public) {
+                Some(EntityRef::Object(id)) if ctx.doc.object(id).is_some() => Ok(id),
+                _ => Err(unknown_entity(public)),
+            }
+        }
+        (None, Some(path)) => {
+            let ids: Vec<String> = serde_json::from_value(path.clone()).map_err(|_| {
+                CmdError::Params(format!("a {what} locator's \"path\" is a list of ids"))
+            })?;
+            let occ = resolve_occurrence_path(ctx, &ids)?;
+            let kernel::NodeId::Object(id) = occ.node else {
+                return Err(not_an_object(what));
+            };
+            if ctx.doc.path_on_loan(&occ.path) {
+                return Err(kernel::DocumentError::ExplodeSessionScope.into());
+            }
+            Ok(id)
+        }
+        (Some(_), Some(_)) => Err(CmdError::Params(format!(
+            "a {what} locator takes \"object\" or \"path\", not both"
+        ))),
+        (None, None) => Err(CmdError::Params(format!(
+            "{what} locator needs \"object\" or \"path\""
+        ))),
+    }
+}
+
+/// `not_an_object`: a locator's path ends at a group or instance.
+fn not_an_object(what: &str) -> CmdError {
+    CmdError::Refusal(Refusal::api(
+        "not_an_object",
+        &format!(
+            "A {what} locator's path must end at an object; hew.query.occurrences lists the objects under a group or instance."
+        ),
+    ))
+}
+
+/// Resolves a face locator (§5.2): `{object | path, at}`, `{object | path,
+/// ray}`, or `{"$face": "label#key"}`.
 pub fn resolve_face(ctx: &Ctx, v: &serde_json::Value) -> Result<FaceRef, CmdError> {
     let obj = v
         .as_object()
@@ -375,17 +463,11 @@ pub fn resolve_face(ctx: &Ctx, v: &serde_json::Value) -> Result<FaceRef, CmdErro
         return Ok(FaceRef { object, face });
     }
 
-    let public = obj
-        .get("object")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| CmdError::Params("face locator needs \"object\"".into()))?;
-    let Some(EntityRef::Object(object_id)) = ctx.resolver().resolve(public) else {
-        return Err(unknown_entity(public));
-    };
+    let object_id = locator_object(ctx, obj, "face")?;
     let object = ctx
         .doc
         .object(object_id)
-        .ok_or_else(|| unknown_entity(public))?;
+        .ok_or_else(|| CmdError::Internal("a located object is not live".into()))?;
 
     if let Some(at) = obj.get("at") {
         let p = parse_xyz(at)?;
@@ -409,7 +491,7 @@ pub fn resolve_face(ctx: &Ctx, v: &serde_json::Value) -> Result<FaceRef, CmdErro
         }
         hits.sort_by(|a, b| a.0.total_cmp(&b.0));
         return match hits.as_slice() {
-            [] => Err(missed("face")),
+            [] => Err(missed_in("face", obj)),
             [one] => Ok(FaceRef {
                 object: object_id,
                 face: one.1,
@@ -470,7 +552,7 @@ pub fn resolve_face(ctx: &Ctx, v: &serde_json::Value) -> Result<FaceRef, CmdErro
                 object: object_id,
                 face: fid,
             }),
-            None => Err(missed("face")),
+            None => Err(missed_in("face", obj)),
         };
     }
 
@@ -486,17 +568,11 @@ pub fn resolve_edge(ctx: &Ctx, v: &serde_json::Value) -> Result<EdgeRef, CmdErro
     let obj = v
         .as_object()
         .ok_or_else(|| CmdError::Params("expected an edge locator object".into()))?;
-    let public = obj
-        .get("object")
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| CmdError::Params("edge locator needs \"object\"".into()))?;
-    let Some(EntityRef::Object(object_id)) = ctx.resolver().resolve(public) else {
-        return Err(unknown_entity(public));
-    };
+    let object_id = locator_object(ctx, obj, "edge")?;
     let object = ctx
         .doc
         .object(object_id)
-        .ok_or_else(|| unknown_entity(public))?;
+        .ok_or_else(|| CmdError::Internal("a located object is not live".into()))?;
     let at = obj
         .get("at")
         .ok_or_else(|| CmdError::Params("edge locator needs \"at\"".into()))?;
@@ -529,8 +605,139 @@ pub fn resolve_edge(ctx: &Ctx, v: &serde_json::Value) -> Result<EdgeRef, CmdErro
             edge,
             endpoints,
         }),
-        None => Err(missed("edge")),
+        None => Err(missed_in("edge", obj)),
     }
+}
+
+/// Resolves an edge set (01-conventions §7.1): an array of locators, each
+/// one of
+///
+/// - `{"object": id, "at": [x,y,z]}`: the nearest solid edge
+///   ([`resolve_edge`]);
+/// - `{"object": id, "from": [..], "to": [..]}`: the edge whose endpoints
+///   match within [`geom::API_SURFACE_TOL`], in either order;
+/// - `{"face": <face locator>}`: every sharp edge of that face's outer loop;
+/// - `{"face": <face locator>, "loop_near": [x,y,z]}`: the sharp edges of the
+///   loop (outer or hole) nearest the point;
+/// - `{"object": id, "all": true}`: every sharp edge of the object.
+///
+/// The edges come back in locator order without duplicates. All must lie on
+/// one object, else the `edges_span_objects` refusal. An empty array is a
+/// params error.
+pub fn resolve_edge_set(
+    ctx: &Ctx,
+    locators: &[serde_json::Value],
+) -> Result<(ObjectId, Vec<kernel::EdgeId>), CmdError> {
+    if locators.is_empty() {
+        return Err(CmdError::Params("edges needs at least one locator".into()));
+    }
+    let mut object: Option<ObjectId> = None;
+    let mut out: Vec<kernel::EdgeId> = Vec::new();
+    let mut take = |o: ObjectId, edges: Vec<kernel::EdgeId>| -> Result<(), CmdError> {
+        match object {
+            None => object = Some(o),
+            Some(prev) if prev != o => {
+                return Err(CmdError::Refusal(Refusal::api(
+                    "edges_span_objects",
+                    "Those edges belong to different objects. Round one object at a time.",
+                )));
+            }
+            _ => {}
+        }
+        for e in edges {
+            if !out.contains(&e) {
+                out.push(e);
+            }
+        }
+        Ok(())
+    };
+    for loc in locators {
+        let obj = loc
+            .as_object()
+            .ok_or_else(|| CmdError::Params("an edge locator must be an object".into()))?;
+        if let Some(face_loc) = obj.get("face") {
+            let f = resolve_face(ctx, face_loc)?;
+            let object_ref = ctx
+                .doc
+                .object(f.object)
+                .ok_or_else(|| unknown_entity("object"))?;
+            let face = object_ref
+                .faces()
+                .get(f.face)
+                .ok_or_else(|| unknown_entity("face"))?;
+            let loop_id = match obj.get("loop_near") {
+                None => face.outer_loop,
+                Some(near) => {
+                    let near = parse_xyz(near)?;
+                    let dist = |l| -> f64 {
+                        let ring: Vec<Point3> = object_ref.loop_positions(l).collect();
+                        (0..ring.len())
+                            .map(|i| {
+                                geom::point_segment_distance(
+                                    near,
+                                    ring[i],
+                                    ring[(i + 1) % ring.len()],
+                                )
+                                .0
+                            })
+                            .fold(f64::INFINITY, f64::min)
+                    };
+                    std::iter::once(face.outer_loop)
+                        .chain(face.inner_loops.iter().copied())
+                        .min_by(|&a, &b| dist(a).total_cmp(&dist(b)))
+                        .unwrap_or(face.outer_loop)
+                }
+            };
+            let edges: Vec<kernel::EdgeId> = object_ref
+                .loop_half_edges(loop_id)
+                .map(|h| object_ref.half_edges()[h].edge)
+                .filter(|&e| object_ref.edge_convexity(e).is_some())
+                .collect();
+            take(f.object, edges)?;
+        } else if obj.get("all").and_then(serde_json::Value::as_bool) == Some(true) {
+            let public = obj
+                .get("object")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| CmdError::Params("edge locator needs \"object\"".into()))?;
+            let Some(EntityRef::Object(id)) = ctx.resolver().resolve(public) else {
+                return Err(unknown_entity(public));
+            };
+            let o = ctx.doc.object(id).ok_or_else(|| unknown_entity(public))?;
+            take(id, o.sharp_edges())?;
+        } else if let (Some(from), Some(to)) = (obj.get("from"), obj.get("to")) {
+            let public = obj
+                .get("object")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| CmdError::Params("edge locator needs \"object\"".into()))?;
+            let Some(EntityRef::Object(id)) = ctx.resolver().resolve(public) else {
+                return Err(unknown_entity(public));
+            };
+            let o = ctx.doc.object(id).ok_or_else(|| unknown_entity(public))?;
+            let (a, b) = (parse_xyz(from)?, parse_xyz(to)?);
+            let near = |p: Point3, q: Point3| (p - q).length() <= geom::API_SURFACE_TOL;
+            let found: Vec<kernel::EdgeId> = o
+                .edges()
+                .keys()
+                .filter(|&e| {
+                    o.edge_endpoints(e).is_some_and(|(p, q)| {
+                        (near(p, a) && near(q, b)) || (near(p, b) && near(q, a))
+                    })
+                })
+                .collect();
+            match found.as_slice() {
+                [] => return Err(missed("edge")),
+                [one] => take(id, vec![*one])?,
+                _ => return Err(ambiguous("edge")),
+            }
+        } else {
+            let e = resolve_edge(ctx, loc)?;
+            take(e.object, vec![e.edge])?;
+        }
+    }
+    Ok((
+        object.expect("a non-empty locator list sets the object"),
+        out,
+    ))
 }
 
 /// The endpoints of a live sketch edge, from the sketch's own storage
@@ -733,6 +940,13 @@ pub fn entity_bbox(ctx: &Ctx, entity: &EntityRef) -> Option<(Point3, Point3)> {
                             .map(|v| local.apply_point(v.position)),
                     )
                 })
+                .chain(
+                    // Its drawn lines, as for an instance.
+                    ctx.doc
+                        .expanded_def_sketch_placements(*id)
+                        .into_iter()
+                        .filter_map(|(s, local)| ctx.doc.sketch(s)?.bounds_under(&local)),
+                )
                 .collect();
             merge_boxes(boxes)
         }
@@ -781,7 +995,10 @@ fn instance_bbox(ctx: &Ctx, id: kernel::InstanceId) -> Option<(Point3, Point3)> 
             })
             .map(move |p| composed.apply_point(p))
     });
-    geom::bbox(points)
+    // The lines drawn inside the definition count too: they are drawn
+    // with the instance, and an instance holding only lines has a box.
+    let lines = ctx.doc.instance_sketch_bounds(id);
+    merge_boxes(geom::bbox(points).into_iter().chain(lines).collect())
 }
 
 fn merge_boxes(boxes: Vec<(Point3, Point3)>) -> Option<(Point3, Point3)> {
@@ -792,4 +1009,205 @@ fn merge_boxes(boxes: Vec<(Point3, Point3)>) -> Option<(Point3, Point3)> {
         max = Point3::new(max.x.max(hi.x), max.y.max(hi.y), max.z.max(hi.z));
     }
     Some((min, max))
+}
+
+// ------------------------------------------------------------ occurrences
+
+/// What `hew.doc.export` and `hew.view.line_drawing` draw when given a
+/// `selection`: a placement and its subtree, or a definition at identity.
+/// Defined beside [`kernel::Occurrence`] so the export and render crates,
+/// which stay clear of this one, can take it.
+pub use kernel::RenderRoot;
+
+/// `unknown_occurrence`: a path that leads nowhere.
+pub fn unknown_occurrence() -> CmdError {
+    CmdError::Refusal(Refusal::api(
+        "unknown_occurrence",
+        "That path does not lead to a placed entity; hew.query.occurrences lists the current paths.",
+    ))
+}
+
+/// `unknown_occurrence` for a bare id that names a definition member: it is
+/// placed only through instances, so it needs a path.
+fn member_needs_a_path(id: &str) -> CmdError {
+    CmdError::Refusal(
+        Refusal::api(
+            "unknown_occurrence",
+            "That entity is placed only through instances; hew.query.occurrences lists its paths.",
+        )
+        .with_detail(serde_json::json!({ "id": id })),
+    )
+}
+
+/// A public id naming an object, group, or instance.
+fn node_of(ctx: &Ctx, id: &str) -> Result<kernel::NodeId, CmdError> {
+    match ctx.resolver().resolve(id) {
+        Some(EntityRef::Object(o)) => Ok(kernel::NodeId::Object(o)),
+        Some(EntityRef::Group(g)) => Ok(kernel::NodeId::Group(g)),
+        Some(EntityRef::Instance(i)) => Ok(kernel::NodeId::Instance(i)),
+        _ => Err(unknown_entity(id)),
+    }
+}
+
+/// Whether a node is live anywhere (world or definition).
+fn node_is_live(doc: &kernel::Document, node: kernel::NodeId) -> bool {
+    match node {
+        kernel::NodeId::Object(o) => doc.object(o).is_some(),
+        kernel::NodeId::Group(g) => doc.group_members(g).is_some(),
+        kernel::NodeId::Instance(i) => doc.instance_def(i).is_some(),
+    }
+}
+
+/// A bare node id as a world placement.
+pub fn resolve_world_node(ctx: &Ctx, id: &str) -> Result<kernel::Occurrence, CmdError> {
+    let node = node_of(ctx, id)?;
+    match ctx.doc.occurrence_at(&[], node) {
+        Some(o) => Ok(o),
+        None if node_is_live(ctx.doc, node) => Err(member_needs_a_path(id)),
+        None => Err(unknown_entity(id)),
+    }
+}
+
+/// The `exclude` list of `hew.query.part_frame` / `hew.query.measure`:
+/// public Object ids, each an own member of `occ` (`scope: "own"`). An empty
+/// or absent list is no exclusion. With `solids_only`, every leaf `scope`
+/// selects that is not a closed solid (the health report has a row for it,
+/// the same fact `hew.query.occurrences` reports as `solid: false`) is
+/// added to the result.
+///
+/// # Errors
+/// `-32602` — `exclude` without `scope: "own"`, an id that is not an Object,
+/// or an Object that is not one of the container's own members.
+pub fn resolve_excluded(
+    ctx: &Ctx,
+    occ: &kernel::Occurrence,
+    scope: crate::scope::Scope,
+    ids: Option<&[String]>,
+    solids_only: bool,
+) -> Result<Vec<kernel::ObjectId>, CmdError> {
+    let mut out = Vec::new();
+    if solids_only {
+        let open: std::collections::BTreeSet<kernel::ObjectId> = ctx
+            .doc
+            .health_report(None)
+            .rows
+            .iter()
+            .map(|r| r.object)
+            .collect();
+        for (o, _) in crate::scope::leaves_for(ctx.doc, occ, scope)? {
+            if open.contains(&o) && !out.contains(&o) {
+                out.push(o);
+            }
+        }
+    }
+    let Some(ids) = ids.filter(|ids| !ids.is_empty()) else {
+        return Ok(out);
+    };
+    if scope != crate::scope::Scope::Own {
+        return Err(CmdError::Params(
+            "\"exclude\" needs \"scope\": \"own\"".into(),
+        ));
+    }
+    let own: Vec<kernel::ObjectId> = crate::scope::leaves_for(ctx.doc, occ, scope)?
+        .into_iter()
+        .map(|(o, _)| o)
+        .collect();
+    for id in ids {
+        let Some(EntityRef::Object(o)) = ctx.resolver().resolve(id) else {
+            return Err(CmdError::Params(format!(
+                "\"exclude\" lists Object ids; \"{id}\" is not one"
+            )));
+        };
+        if !own.contains(&o) {
+            return Err(CmdError::Params(format!(
+                "\"{id}\" is not one of this container's own Objects"
+            )));
+        }
+        if !out.contains(&o) {
+            out.push(o);
+        }
+    }
+    Ok(out)
+}
+
+/// An occurrence path, `[instance, …, leaf]` (docs/agents/HEW_API.md §5.2):
+/// every element but the last an instance, the last any node.
+pub fn resolve_occurrence_path(ctx: &Ctx, ids: &[String]) -> Result<kernel::Occurrence, CmdError> {
+    let Some((leaf, instances)) = ids.split_last() else {
+        return Err(CmdError::Params(
+            "an occurrence path names at least one entity".into(),
+        ));
+    };
+    let mut path = Vec::with_capacity(instances.len());
+    for id in instances {
+        match node_of(ctx, id)? {
+            kernel::NodeId::Instance(i) => path.push(i),
+            _ => return Err(unknown_occurrence()),
+        }
+    }
+    let node = node_of(ctx, leaf)?;
+    ctx.doc
+        .occurrence_at(&path, node)
+        .ok_or_else(unknown_occurrence)
+}
+
+/// `{ "path": [ids] }`, the occurrence locator.
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PathLocator {
+    path: Vec<String>,
+}
+
+/// One placement locator: a node's public id (a world node) or
+/// `{ "path": [...] }`.
+pub fn resolve_occurrence_locator(
+    ctx: &Ctx,
+    v: &serde_json::Value,
+) -> Result<kernel::Occurrence, CmdError> {
+    if let Some(id) = v.as_str() {
+        return resolve_world_node(ctx, id);
+    }
+    let p: PathLocator = serde_json::from_value(v.clone()).map_err(|_| {
+        CmdError::Params("expected an entity id or an occurrence locator {\"path\": [...]}".into())
+    })?;
+    resolve_occurrence_path(ctx, &p.path)
+}
+
+/// A `selection` list for export and line drawings: placements, plus
+/// `cmp_` ids for a definition at the identity pose.
+pub fn resolve_render_roots(
+    ctx: &Ctx,
+    selection: &[serde_json::Value],
+) -> Result<Vec<RenderRoot>, CmdError> {
+    if selection.is_empty() {
+        return Err(CmdError::Params(
+            "selection must name at least one entity".into(),
+        ));
+    }
+    let mut out = Vec::with_capacity(selection.len());
+    for v in selection {
+        if let Some(id) = v.as_str()
+            && let Some(EntityRef::Component(c)) = ctx.resolver().resolve(id)
+        {
+            if ctx.doc.def_member_nodes(c).is_none() {
+                return Err(unknown_entity(id));
+            }
+            out.push(RenderRoot::Definition(c));
+            continue;
+        }
+        // A sketch or material id names nothing placed: a params error,
+        // not an unknown entity.
+        if let Some(id) = v.as_str()
+            && matches!(
+                ctx.resolver().resolve(id),
+                Some(EntityRef::Sketch(_) | EntityRef::Material(_))
+            )
+        {
+            return Err(CmdError::Params(
+                "selection takes object, group, instance, or component ids and occurrence paths, not a sketch or material".into(),
+            ));
+        }
+        out.push(RenderRoot::Occurrence(resolve_occurrence_locator(ctx, v)?));
+    }
+    Ok(out)
 }

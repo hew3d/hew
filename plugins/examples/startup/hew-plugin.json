@@ -1,0 +1,31 @@
+{
+  "manifest": 1,
+  "id": "com.example.startup",
+  "name": "Startup",
+  "version": "0.1.0",
+  "description": "Starts with Hew, reads the model once, and reports that it ran at startup.",
+  "api": 1,
+  "main": "dist/background.js",
+  "permissions": ["model.read"],
+  "activation": ["on_startup"],
+  "activationReason": "Reads the model once when Hew starts, to show what a plugin that starts with Hew looks like.",
+  "contributes": {
+    "commands": [
+      {
+        "id": "status",
+        "class": "read_only",
+        "summary": "Says whether the plugin started with Hew, and how many objects it saw then.",
+        "result": {
+          "type": "object",
+          "properties": {
+            "activation": { "type": "string" },
+            "ranAtStartup": { "type": "boolean" },
+            "objectsAtStart": { "type": "integer" }
+          },
+          "required": ["activation", "ranAtStartup", "objectsAtStart"],
+          "additionalProperties": false
+        }
+      }
+    ]
+  }
+}

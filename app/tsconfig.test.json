@@ -12,6 +12,7 @@
     "src/**/*.test.tsx",
     "src/**/*.d.ts",
     "src/test/setup.ts",
+    "src/test/requiresPreview.ts",
     "e2e/**/*.test.ts",
     "playwright.config.ts"
   ],

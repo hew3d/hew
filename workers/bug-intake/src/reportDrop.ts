@@ -26,7 +26,7 @@
 import { DurableObject } from 'cloudflare:workers'
 
 import { ReportStore, type ReportHead, type StartFields, type PutPieceResult, type CommitResult, type AbandonResult } from './reportStore.ts'
-import { INDEX_DO_NAME } from './constants.ts'
+import { expireReport } from './handlers.ts'
 import type { BugIntakeEnv, DurableObjectStorage } from './types.ts'
 
 export class ReportDrop extends DurableObject<BugIntakeEnv> {
@@ -111,10 +111,12 @@ export class ReportDrop extends DurableObject<BugIntakeEnv> {
    *  `deleteAlarm` beats an already-scheduled invocation) should never
    *  resurrect an index row. */
   async alarm(): Promise<void> {
-    const head = await this.store_.head()
-    if (head !== null) {
-      await this.env.REPORT_INDEX.get(this.env.REPORT_INDEX.idFromName(INDEX_DO_NAME)).deleteReport(head.reportId)
-    }
-    await this.store_.destroy()
+    // `bundleExpired`, not `deleteReport`: a committed report someone still
+    // follows keeps its index row with `bundleDeleted = 1` and `sizeBytes =
+    // 0` so the maintainer can still answer it
+    // (docs/design/follow-a-report.md §5.2); every other row is deleted,
+    // exactly as before — and a deleted row takes any admin-only thread
+    // with it (`expireReport`).
+    await this.store_.expire((reportId) => expireReport(this.env, reportId))
   }
 }

@@ -1,0 +1,130 @@
+{
+  "profile": "plugin",
+  "grant": {
+    "ceiling": "core",
+    "permissions": [
+      "model.read"
+    ],
+    "plugin": "com.example.sub",
+    "app": null,
+    "document": "doc_1"
+  },
+  "frames": [
+    {
+      "note": "a plugin hello",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 0,
+        "method": "hew.meta.hello",
+        "params": {
+          "protocol": 1
+        }
+      },
+      "response": {
+        "jsonrpc": "2.0",
+        "id": 0,
+        "result": {
+          "protocol": 1,
+          "app": {
+            "name": "hew",
+            "version": "1.4.0"
+          },
+          "profile": "plugin",
+          "grant": {
+            "ceiling": "core",
+            "permissions": [
+              "model.read"
+            ],
+            "plugin": "com.example.sub",
+            "app": null,
+            "document": "doc_1"
+          },
+          "encoding": "json",
+          "documents": []
+        }
+      }
+    },
+    {
+      "note": "a bare attach binds to the grant's document",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "hew.doc.attach",
+        "params": {}
+      },
+      "response": {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "result": {}
+      }
+    },
+    {
+      "note": "subscribing: model.read receives document_changed; selection_changed needs view and is denied, not refused",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "hew.event.subscribe",
+        "params": {
+          "events": [
+            "document_changed",
+            "selection_changed"
+          ]
+        }
+      },
+      "response": {
+        "jsonrpc": "2.0",
+        "id": 2,
+        "result": {
+          "subscribed": [
+            "document_changed"
+          ],
+          "denied": [
+            "selection_changed"
+          ]
+        }
+      }
+    },
+    {
+      "note": "an unknown event name is invalid params and changes nothing",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 3,
+        "method": "hew.event.subscribe",
+        "params": {
+          "events": [
+            "bogus"
+          ]
+        }
+      },
+      "response": {
+        "jsonrpc": "2.0",
+        "id": 3,
+        "error": {
+          "code": -32602,
+          "message": "unknown event name: bogus"
+        }
+      }
+    },
+    {
+      "note": "unsubscribing answers what is still subscribed",
+      "request": {
+        "jsonrpc": "2.0",
+        "id": 4,
+        "method": "hew.event.unsubscribe",
+        "params": {
+          "events": [
+            "document_changed"
+          ]
+        }
+      },
+      "response": {
+        "jsonrpc": "2.0",
+        "id": 4,
+        "result": {
+          "subscribed": [],
+          "denied": []
+        }
+      }
+    }
+  ]
+}

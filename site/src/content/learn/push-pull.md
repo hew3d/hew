@@ -14,6 +14,8 @@ Push/Pull (`P`) is the tool that moves your model between 2D and 3D. It does thr
 2. Move the cursor — a live ghost preview of the result follows, measured perpendicular to the face. The readout shows the current depth.
 3. Click again to commit, or type an exact depth (any length format, e.g. `18mm`) and press `Enter`.
 
+Before you click, the face Push/Pull will move is tinted and outlined under the cursor: orange when the click pushes or pulls that face, blue when it makes a new object (a free or detached shape, or with the `Ctrl` toggle on, which has no effect while you are editing a component), and nothing at all over a face it will not touch, where a note beside the cursor says why.
+
 You can also press on the face, drag, and let go: letting go commits the push/pull at that depth, and a distance typed right after still redoes it.
 
 Press `Esc` at any point to cancel. Committing with no real distance is refused ("Move more before committing push/pull").
@@ -26,7 +28,7 @@ While dragging, you can rest the cursor on any precise snap point in the scene (
 
 ## From sketch to solid
 
-Push/pulling a closed sketch region creates a brand-new **Object** — a watertight solid. This is the only "create geometry" step in Hew; there is no separate group-making or solid-making command. The outline you drew becomes the solid's base face and leaves the sketch: a sketch is the larval form of a solid, and once it extrudes there is no separate 2D copy lying around. Undo reverses the whole step — the solid disappears and the outline returns, ready to re-extrude.
+Push/pulling a closed sketch region creates a brand-new **Object** — a watertight solid. This is the only "create geometry" step in Hew; there is no separate group-making or solid-making command. The preview ghost is orange when the solid grows, red when it loses material, and blue when a new object appears (every region of a free sketch, pushed either way, and any push with the `Ctrl` toggle on). The outline you drew becomes the solid's base face and leaves the sketch: a sketch is the larval form of a solid, and once it extrudes there is no separate 2D copy lying around. Undo reverses the whole step — the solid disappears and the outline returns, ready to re-extrude. A shape drawn on a face with [Detached](/learn/drawing/#detaching-a-shape) turned on pushes into a new Object, never into the face.
 
 Solids interpenetrate freely in Hew, so a region drawn over a standing solid extrudes into a second solid coinciding with the first — nothing stops you overlapping or stacking solids. Merging two into one is always a separate, explicit step (a boolean union). If you overlapped something by accident, undo, or move one of the solids apart.
 

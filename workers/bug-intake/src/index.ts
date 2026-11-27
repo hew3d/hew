@@ -12,6 +12,7 @@ import type { BugIntakeEnv } from './types.ts'
 
 export { ReportDrop } from './reportDrop.ts'
 export { ReportIndex } from './reportIndex.ts'
+export { ReportThread } from './reportThread.ts'
 
 export default {
   async fetch(request: Request, env: BugIntakeEnv): Promise<Response> {

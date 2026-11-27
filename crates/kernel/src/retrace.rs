@@ -19,8 +19,12 @@
 //!
 //! Its inverse is itself with the arguments swapped: the report carries the
 //! inserted paths as resolved and the removed chains with their circle
-//! claims, and the history records exactly that.
+//! claims, and the history records exactly that. One exception: an inserted
+//! end that met a vertex already there, where that vertex was the joint of
+//! a straight run, is healed away by a plain swapped call. The history's
+//! undo keeps such vertices (the report's `vertex_ends`).
 
+use crate::trig;
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::geom2d::{
@@ -48,6 +52,11 @@ pub struct RetracePath {
     /// One regular-polygon claim per path edge ([`crate::topo::Edge::polygon`]),
     /// or empty.
     pub polygons: Vec<Option<CurveGeom>>,
+    /// One soft mark per path edge ([`crate::topo::Edge::soft`]), or empty
+    /// (none soft). A removed chain records its edges' marks, so the
+    /// swapped call that undoes a removal of soft edges gives them back
+    /// soft.
+    pub soft: Vec<bool>,
 }
 
 /// What [`Object::retrace_face`] changed. (Carries `f64` positions, so
@@ -75,6 +84,12 @@ pub struct FaceRetraceReport {
     /// canonical order (each oriented from its lexicographically smaller
     /// end, sorted by that end). Inserting these is the inverse.
     pub removed: Vec<RetracePath>,
+    /// The inserted paths' ends that met a vertex already there (not a
+    /// point split into an edge, nor a fresh junction), each once. The
+    /// inverse removal keeps them: such a vertex may have been the joint
+    /// of a straight run before the insert, and healing it away would not
+    /// give that run back.
+    pub vertex_ends: Vec<Point3>,
 }
 
 /// Where an inserted path's end meets the region's boundary.
@@ -122,17 +137,23 @@ impl Object {
     /// (map-or-drop). Removed chains' ends left a straight two-edge scar
     /// are healed away, as `merge_faces` does.
     ///
-    /// The inverse is the same call with the arguments swapped:
+    /// The same call with the arguments swapped —
     /// [`FaceRetraceReport::inserted`] removed and
-    /// [`FaceRetraceReport::removed`] inserted.
+    /// [`FaceRetraceReport::removed`] inserted — is the inverse, except for
+    /// an inserted end that met the joint of a straight run already there:
+    /// the swapped call heals that joint away, as it heals any removed
+    /// chain's end left a straight two-edge scar. The history's undo keeps
+    /// those vertices ([`FaceRetraceReport::vertex_ends`]), so it restores
+    /// the face exactly.
     ///
     /// # Errors
     /// All leave the object untouched.
     /// - [`StickyError::UnknownFace`] — stale `face`.
     /// - [`StickyError::PathTooShort`] — nothing to insert or remove, or a
     ///   path or chain of fewer than two points.
-    /// - [`StickyError::CurveClaimOffLoop`] — `curves` neither empty nor
-    ///   one per path edge, or a claimed edge's ends off its circle.
+    /// - [`StickyError::CurveClaimOffLoop`] — `curves`, `polygons` or
+    ///   `soft` neither empty nor one per path edge, or a claimed edge's
+    ///   ends off its circle.
     /// - [`StickyError::UnknownEdge`] — a chain segment that is no edge.
     /// - [`StickyError::FacesNotCoplanar`] — a removed edge between faces
     ///   not coplanar and same-facing with `face`.
@@ -154,13 +175,16 @@ impl Object {
         insert: &[RetracePath],
         remove: &[Vec<Point3>],
     ) -> Result<FaceRetraceReport, StickyError> {
-        self.retrace_face_impl(face, insert, remove, &[], None)
+        self.retrace_face_impl(face, insert, remove, &[], None, &[])
     }
 
     /// [`Object::retrace_face`] with undo's attribute restoration (each
-    /// snapshot lands on the result face holding its point) and the face
+    /// snapshot lands on the result face holding its point), the face
     /// whose handle and attributes a merge keeps (`keep`; `face` when
-    /// `None`).
+    /// `None`), and the vertices a removed chain's end must keep even when
+    /// left a straight two-edge scar (`keep_vertices`, matched within
+    /// [`tol::POINT_MERGE`]; the undo of an insert passes the insert's
+    /// [`FaceRetraceReport::vertex_ends`]).
     pub(crate) fn retrace_face_impl(
         &mut self,
         face: FaceId,
@@ -168,6 +192,7 @@ impl Object {
         remove: &[Vec<Point3>],
         restore: &[FaceAttrsAt],
         keep: Option<FaceId>,
+        keep_vertices: &[Point3],
     ) -> Result<FaceRetraceReport, StickyError> {
         // ---- input shape ----
         let seed = self.faces.get(face).ok_or(StickyError::UnknownFace)?;
@@ -182,6 +207,9 @@ impl Object {
                 return Err(StickyError::CurveClaimOffLoop);
             }
             if !p.polygons.is_empty() && p.polygons.len() != p.path.len() - 1 {
+                return Err(StickyError::CurveClaimOffLoop);
+            }
+            if !p.soft.is_empty() && p.soft.len() != p.path.len() - 1 {
                 return Err(StickyError::CurveClaimOffLoop);
             }
         }
@@ -201,6 +229,7 @@ impl Object {
             let mut path = Vec::with_capacity(chain.len());
             let mut curves = Vec::with_capacity(chain.len() - 1);
             let mut polygons = Vec::with_capacity(chain.len() - 1);
+            let mut soft = Vec::with_capacity(chain.len() - 1);
             for (k, w) in chain.windows(2).enumerate() {
                 let (e, a, b) = self
                     .edge_matching(w[0], w[1])
@@ -227,12 +256,19 @@ impl Object {
                 path.push(b);
                 curves.push(edge.curve);
                 polygons.push(edge.polygon);
+                soft.push(edge.soft);
                 removed_edges.push(e);
+            }
+            // (No mark at all when none is soft, as an inserted path
+            // claiming none gives.)
+            if !soft.contains(&true) {
+                soft.clear();
             }
             removed_paths.push(RetracePath {
                 path,
                 curves,
                 polygons,
+                soft,
             });
         }
         // Canonical: each chain from its lexicographically smaller end,
@@ -242,6 +278,7 @@ impl Object {
                 p.path.reverse();
                 p.curves.reverse();
                 p.polygons.reverse();
+                p.soft.reverse();
             }
         }
         removed_paths.sort_by(|a, b| lex_cmp(a.path[0], b.path[0]));
@@ -520,6 +557,17 @@ impl Object {
             End::Vertex(v) => v,
             End::Edge(_, at) | End::Junction(at) => end_vertex[&bits(at)],
         };
+        let mut vertex_ends: Vec<Point3> = Vec::new();
+        for pair in &ends {
+            for &end in pair {
+                if let End::Vertex(v) = end {
+                    let at = obj.vertices[v].position;
+                    if !vertex_ends.iter().any(|&q| bits(q) == bits(at)) {
+                        vertex_ends.push(at);
+                    }
+                }
+            }
+        }
 
         // 2. Each region half-edge's destination and old face, before the
         //    removal leaves `next` pointers dangling.
@@ -564,12 +612,16 @@ impl Object {
                 if let Some(&g) = insert[pi].polygons.get(k) {
                     obj.edges[e].polygon = g;
                 }
+                if let Some(&soft) = insert[pi].soft.get(k) {
+                    obj.edges[e].soft = soft;
+                }
             }
             new_edges.push(edges);
             inserted.push(RetracePath {
                 path: path.clone(),
                 curves: insert[pi].curves.clone(),
                 polygons: insert[pi].polygons.clone(),
+                soft: insert[pi].soft.clone(),
             });
         }
 
@@ -588,7 +640,7 @@ impl Object {
             let (a, b) = (he.origin, dest[&h]);
             for (at, to, out) in [(a, b, Some(h)), (b, a, None)] {
                 let d = obj.vertices[to].position - obj.vertices[at].position;
-                let angle = d.dot(v).atan2(d.dot(u));
+                let angle = trig::atan2(d.dot(v), d.dot(u));
                 let list = spokes.entry(at).or_default();
                 match list.iter_mut().find(|s| s.1 == he.edge) {
                     Some(s) => {
@@ -733,7 +785,12 @@ impl Object {
         // 7. Faces: each result face takes over a region face it came from.
         let mut reused: BTreeSet<FaceId> = BTreeSet::new();
         let mut result_faces: Vec<FaceId> = Vec::with_capacity(outers.len());
-        let mut assignments: Vec<(FaceId, Option<crate::topo::SurfaceRef>, bool)> = Vec::new();
+        let mut assignments: Vec<(
+            FaceId,
+            Option<crate::topo::SurfaceRef>,
+            Option<crate::topo::BlendTag>,
+            bool,
+        )> = Vec::new();
         for (k, (cycle, _)) in outers.iter().enumerate() {
             let origins: BTreeSet<FaceId> = cycle
                 .iter()
@@ -750,8 +807,16 @@ impl Object {
                 .iter()
                 .all(|&f| obj.faces[f].surface == first_surface);
             let surface = if agree { first_surface } else { None };
+            // The blend tag follows the same rule: kept only when every
+            // origin face agrees on it.
+            let first_blend = obj.faces[survivor].blend;
+            let blend = origins
+                .iter()
+                .all(|&f| obj.faces[f].blend == first_blend)
+                .then_some(first_blend)
+                .flatten();
             let reuse = reused.insert(survivor);
-            assignments.push((survivor, surface, reuse));
+            assignments.push((survivor, surface, blend, reuse));
         }
         // Old loops go; every cycle gets a fresh loop.
         let old_faces: Vec<FaceId> = region.clone();
@@ -763,7 +828,7 @@ impl Object {
             obj.loops.remove(l);
         }
         for (k, (cycle, _)) in outers.iter().enumerate() {
-            let (survivor, surface, reuse) = assignments[k];
+            let (survivor, surface, blend, reuse) = assignments[k];
             let template = &templates[&survivor];
             let fid = if reuse {
                 survivor
@@ -776,6 +841,8 @@ impl Object {
                     back_material: template.back_material,
                     uv_frame: template.uv_frame,
                     surface: template.surface,
+                    blend: template.blend,
+                    attrs: template.attrs,
                 });
                 for shell in obj.shells.values_mut() {
                     if shell.faces.contains(&survivor) {
@@ -808,7 +875,9 @@ impl Object {
             f.material = template.material;
             f.back_material = template.back_material;
             f.uv_frame = template.uv_frame;
+            f.attrs = template.attrs;
             f.surface = surface;
+            f.blend = blend;
             result_faces.push(fid);
         }
         for &f in &old_faces {
@@ -850,7 +919,7 @@ impl Object {
             else {
                 continue;
             };
-            healed.extend(heal_run_endpoints(&mut obj, l, [x, x]));
+            healed.extend(heal_run_endpoints(&mut obj, l, [x, x], keep_vertices));
         }
         repair_dangling_outgoing(&mut obj);
 
@@ -880,6 +949,7 @@ impl Object {
             prior_attrs,
             inserted,
             removed: removed_paths,
+            vertex_ends,
         })
     }
 
@@ -963,7 +1033,7 @@ fn meet_only_at(a: Point3, b: Point3, c: Point3, d: Point3, allowed: Option<Poin
 }
 
 /// A point's exact bits, for "the very same point" comparisons.
-fn bits(p: Point3) -> [u64; 3] {
+pub(crate) fn bits(p: Point3) -> [u64; 3] {
     [p.x.to_bits(), p.y.to_bits(), p.z.to_bits()]
 }
 

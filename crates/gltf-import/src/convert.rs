@@ -135,6 +135,7 @@ pub fn build_scene(
             section: None,
             view_style: None,
             extra: Default::default(),
+            geo: None,
         },
         mat_table.missing,
         warnings,
@@ -198,6 +199,7 @@ impl Ctx<'_> {
                         tags: Vec::new(),
                         hidden: false,
                         key: None,
+                        locked: false,
                     }),
                 }
             }
@@ -222,6 +224,7 @@ impl Ctx<'_> {
                     tags: Vec::new(),
                     hidden: false,
                     key: None,
+                    locked: false,
                 })
             }
             (None, false) => Some(ImportNode::Group {
@@ -230,6 +233,7 @@ impl Ctx<'_> {
                 tags: Vec::new(),
                 hidden: false,
                 key: None,
+                locked: false,
             }),
             (None, true) => None,
         }
@@ -545,7 +549,7 @@ fn extract_raw_mesh(mesh: &Mesh, buffers: &[Option<Vec<u8>>], mat_remap: &[u32])
             None => (0..count as u32).collect(),
         };
 
-        for tri in indices.chunks_exact(3) {
+        for tri in indices.as_chunks::<3>().0 {
             let (a, b, c) = (tri[0] as usize, tri[1] as usize, tri[2] as usize);
             // An index buffer can carry values past the primitive's POSITION
             // count (corrupt or crafted input — the gltf crate validates JSON

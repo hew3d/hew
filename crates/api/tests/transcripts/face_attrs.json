@@ -1,0 +1,494 @@
+{
+  "profile": "core",
+  "grant": {
+    "ceiling": "core",
+    "permissions": [
+      "model.read",
+      "model.write",
+      "attributes.write"
+    ],
+    "plugin": "com.example.cutlist",
+    "app": null,
+    "document": "doc_1"
+  },
+  "frames": [
+    {
+      "note": "the handshake",
+      "request": {
+        "id": 0,
+        "jsonrpc": "2.0",
+        "method": "hew.meta.hello",
+        "params": {
+          "protocol": 1
+        }
+      },
+      "response": "plugin",
+      "compare": "/result/profile"
+    },
+    {
+      "note": "attach binds the connection",
+      "request": {
+        "id": 1,
+        "jsonrpc": "2.0",
+        "method": "hew.doc.attach",
+        "params": {}
+      },
+      "response": {
+        "id": 1,
+        "jsonrpc": "2.0",
+        "result": {}
+      }
+    },
+    {
+      "note": "a box",
+      "request": {
+        "id": 2,
+        "jsonrpc": "2.0",
+        "method": "hew.doc.transact",
+        "params": {
+          "label": "box",
+          "commands": [
+            {
+              "as": "r",
+              "method": "hew.sketch.draw_rect",
+              "params": {
+                "plane": {
+                  "ground": true
+                },
+                "corner_a": [
+                  0.0,
+                  0.0,
+                  0.0
+                ],
+                "corner_b": [
+                  1.0,
+                  1.0,
+                  0.0
+                ]
+              }
+            },
+            {
+              "method": "hew.solid.extrude",
+              "params": {
+                "region": {
+                  "$ref": "r#/region_id"
+                },
+                "distance": 1.0
+              }
+            }
+          ]
+        }
+      },
+      "response": "box",
+      "compare": "/result/label"
+    },
+    {
+      "note": "a dictionary on the top face, under the plugin's own namespace",
+      "request": {
+        "id": 3,
+        "jsonrpc": "2.0",
+        "method": "hew.attr.set",
+        "params": {
+          "target": {
+            "face": {
+              "object": "obj_1",
+              "at": [
+                0.5,
+                0.5,
+                1.0
+              ]
+            }
+          },
+          "ns": "com.example.cutlist",
+          "key": "part",
+          "value": "Top"
+        }
+      },
+      "response": {},
+      "compare": "/result/results/0"
+    },
+    {
+      "note": "the faces query reports it on the top face (index 1)",
+      "request": {
+        "id": 4,
+        "jsonrpc": "2.0",
+        "method": "hew.query.faces",
+        "params": {
+          "object": "obj_1"
+        }
+      },
+      "response": {
+        "com.example.cutlist": {
+          "part": "Top"
+        }
+      },
+      "compare": "/result/faces/1/attrs"
+    },
+    {
+      "note": "and hew.attr.get reads it back through the same locator",
+      "request": {
+        "id": 5,
+        "jsonrpc": "2.0",
+        "method": "hew.attr.get",
+        "params": {
+          "target": {
+            "face": {
+              "object": "obj_1",
+              "at": [
+                0.5,
+                0.5,
+                1.0
+              ]
+            }
+          }
+        }
+      },
+      "response": {
+        "id": 5,
+        "jsonrpc": "2.0",
+        "result": {
+          "com.example.cutlist": {
+            "part": "Top"
+          }
+        }
+      }
+    },
+    {
+      "note": "a dictionary on the top front edge",
+      "request": {
+        "id": 6,
+        "jsonrpc": "2.0",
+        "method": "hew.attr.set",
+        "params": {
+          "target": {
+            "edge": {
+              "object": "obj_1",
+              "at": [
+                0.5,
+                0.0,
+                1.0
+              ]
+            }
+          },
+          "ns": "com.example.cutlist.edges",
+          "key": "band",
+          "value": 0.5
+        }
+      },
+      "response": {},
+      "compare": "/result/results/0"
+    },
+    {
+      "note": "the topology query reports it on that edge (index 8)",
+      "request": {
+        "id": 7,
+        "jsonrpc": "2.0",
+        "method": "hew.query.topology",
+        "params": {
+          "id": "obj_1"
+        }
+      },
+      "response": {
+        "com.example.cutlist.edges": {
+          "band": 0.5
+        }
+      },
+      "compare": "/result/edges/8/attrs"
+    },
+    {
+      "note": "the change set names the object, with the face and edge scopes",
+      "request": {
+        "id": 8,
+        "jsonrpc": "2.0",
+        "method": "hew.query.changes_since",
+        "params": {
+          "generation": 0
+        }
+      },
+      "response": [
+        {
+          "id": "obj_1",
+          "ns": "com.example.cutlist",
+          "scope": "face"
+        },
+        {
+          "id": "obj_1",
+          "ns": "com.example.cutlist.edges",
+          "scope": "edge"
+        }
+      ],
+      "compare": "/result/changes/attrs"
+    },
+    {
+      "note": "push the top up",
+      "request": {
+        "id": 9,
+        "jsonrpc": "2.0",
+        "method": "hew.solid.push_pull",
+        "params": {
+          "face": {
+            "object": "obj_1",
+            "at": [
+              0.5,
+              0.5,
+              1.0
+            ]
+          },
+          "distance": 0.5
+        }
+      },
+      "response": {
+        "id": 9,
+        "jsonrpc": "2.0",
+        "result": {
+          "label": "hew.solid.push_pull",
+          "results": [
+            {
+              "object_id": "obj_1"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "note": "the moved face keeps its dictionary",
+      "request": {
+        "id": 10,
+        "jsonrpc": "2.0",
+        "method": "hew.query.faces",
+        "params": {
+          "object": "obj_1"
+        }
+      },
+      "response": {
+        "com.example.cutlist": {
+          "part": "Top"
+        }
+      },
+      "compare": "/result/faces/1/attrs"
+    },
+    {
+      "note": "a wall the push stretched carries none",
+      "request": {
+        "id": 11,
+        "jsonrpc": "2.0",
+        "method": "hew.query.faces",
+        "params": {
+          "object": "obj_1"
+        }
+      },
+      "response": {},
+      "compare": "/result/faces/2/attrs"
+    },
+    {
+      "note": "a line on the ground",
+      "request": {
+        "id": 12,
+        "jsonrpc": "2.0",
+        "method": "hew.sketch.draw_line",
+        "params": {
+          "plane": {
+            "ground": true
+          },
+          "points": [
+            [
+              3.0,
+              0.0,
+              0.0
+            ],
+            [
+              4.0,
+              0.0,
+              0.0
+            ]
+          ]
+        }
+      },
+      "response": {
+        "id": 12,
+        "jsonrpc": "2.0",
+        "result": {
+          "label": "hew.sketch.draw_line",
+          "results": [
+            {
+              "region_ids": [],
+              "sketch": "skt_2"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "note": "a sketch edge has no edge dictionary",
+      "request": {
+        "id": 13,
+        "jsonrpc": "2.0",
+        "method": "hew.attr.set",
+        "params": {
+          "target": {
+            "edge": {
+              "sketch": "skt_2",
+              "at": [
+                3.5,
+                0.0,
+                0.0
+              ]
+            }
+          },
+          "ns": "com.example.cutlist",
+          "key": "k",
+          "value": 1
+        }
+      },
+      "response": "not_a_solid_edge",
+      "compare": "/error/data/refusal"
+    },
+    {
+      "note": "a plugin writes only under its own namespace",
+      "request": {
+        "id": 14,
+        "jsonrpc": "2.0",
+        "method": "hew.attr.set",
+        "params": {
+          "target": {
+            "face": {
+              "object": "obj_1",
+              "at": [
+                0.5,
+                0.5,
+                1.5
+              ]
+            }
+          },
+          "ns": "org.example.other",
+          "key": "k",
+          "value": 1
+        }
+      },
+      "response": "attr_namespace_not_granted",
+      "compare": "/error/data/refusal"
+    },
+    {
+      "note": "a target object takes face or edge, not both",
+      "request": {
+        "id": 15,
+        "jsonrpc": "2.0",
+        "method": "hew.attr.get",
+        "params": {
+          "target": {
+            "face": {
+              "object": "obj_1",
+              "at": [
+                0.5,
+                0.5,
+                1.5
+              ]
+            },
+            "edge": {
+              "object": "obj_1",
+              "at": [
+                0.5,
+                0.0,
+                1.5
+              ]
+            }
+          }
+        }
+      },
+      "response": -32602,
+      "compare": "/error/code"
+    },
+    {
+      "note": "delete the face's key",
+      "request": {
+        "id": 16,
+        "jsonrpc": "2.0",
+        "method": "hew.attr.delete",
+        "params": {
+          "target": {
+            "face": {
+              "object": "obj_1",
+              "at": [
+                0.5,
+                0.5,
+                1.5
+              ]
+            }
+          },
+          "ns": "com.example.cutlist",
+          "key": "part"
+        }
+      },
+      "compare": "/result/results/0",
+      "response": {}
+    },
+    {
+      "note": "the face holds nothing now",
+      "request": {
+        "id": 17,
+        "jsonrpc": "2.0",
+        "method": "hew.attr.get",
+        "params": {
+          "target": {
+            "face": {
+              "object": "obj_1",
+              "at": [
+                0.5,
+                0.5,
+                1.5
+              ]
+            }
+          }
+        }
+      },
+      "compare": "/result",
+      "response": {}
+    },
+    {
+      "note": "delete the edge's whole namespace",
+      "request": {
+        "id": 18,
+        "jsonrpc": "2.0",
+        "method": "hew.attr.delete",
+        "params": {
+          "target": {
+            "edge": {
+              "object": "obj_1",
+              "at": [
+                0.5,
+                0.0,
+                1.5
+              ]
+            }
+          },
+          "ns": "com.example.cutlist.edges"
+        }
+      },
+      "compare": "/result/results/0",
+      "response": {}
+    },
+    {
+      "note": "deleting it again refuses",
+      "request": {
+        "id": 19,
+        "jsonrpc": "2.0",
+        "method": "hew.attr.delete",
+        "params": {
+          "target": {
+            "edge": {
+              "object": "obj_1",
+              "at": [
+                0.5,
+                0.0,
+                1.5
+              ]
+            }
+          },
+          "ns": "com.example.cutlist.edges"
+        }
+      },
+      "compare": "/error/data/refusal",
+      "response": "unknown_attr"
+    }
+  ]
+}

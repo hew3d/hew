@@ -278,4 +278,18 @@ describe('CommandPalette', () => {
     })
   })
 
+
+  it('Unlock All says nothing is locked, never that it needs a selection', () => {
+    render(<CommandPalette open onClose={vi.fn()} onRun={vi.fn()} initialQuery="unlock all" gates={{ canUnlockAll: false }} />)
+    const row = screen.getByText('Unlock All').closest('[role="option"]') as HTMLElement
+    expect(row).toHaveAttribute('aria-disabled', 'true')
+    expect(row).toHaveTextContent('nothing is locked')
+    expect(row).not.toHaveTextContent('needs a selection')
+  })
+
+  it('other gated entries still say they need a selection', () => {
+    render(<CommandPalette open onClose={vi.fn()} onRun={vi.fn()} initialQuery="unlock selected" gates={{ canUnlock: false }} />)
+    const row = screen.getByText('Unlock Selected').closest('[role="option"]') as HTMLElement
+    expect(row).toHaveTextContent('needs a selection')
+  })
 })

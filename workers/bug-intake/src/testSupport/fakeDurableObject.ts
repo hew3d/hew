@@ -27,6 +27,8 @@ export class FakeDurableObjectStorage implements DurableObjectStorage {
 
   readonly sql = {
     exec: <T = Record<string, unknown>>(query: string, ...bindings: unknown[]): SqlStorageCursor<T> => {
+      // Real Durable Object SQLite refuses more than 100 bound parameters.
+      if (bindings.length > 100) throw new Error(`too many SQL variables (${bindings.length} > 100)`)
       const rows = this.db.prepare(query).all(...bindings.map(toBindable)) as Array<Record<string, unknown>>
       const mapped = rows.map((row) => {
         const out: Record<string, unknown> = {}

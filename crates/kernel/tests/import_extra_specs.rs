@@ -4,6 +4,7 @@
 //! dictionaries, scene display state, and the importer-key report the
 //! `.skp` re-save builds its provenance from.
 
+use kernel::trig;
 use std::collections::BTreeMap;
 
 use kernel::{
@@ -17,7 +18,7 @@ const N: usize = 12;
 
 fn ring(i: usize, z: f64) -> Point3 {
     let t = std::f64::consts::TAU * i as f64 / N as f64;
-    Point3::new(t.cos(), t.sin(), z)
+    Point3::new(trig::cos(t), trig::sin(t), z)
 }
 
 /// A closed 12-sided prism of radius 1 and height 1 about the Z axis: the
@@ -63,6 +64,7 @@ fn scene(roots: Vec<ImportNode>) -> ImportScene {
         section: None,
         view_style: None,
         extra: Default::default(),
+        geo: None,
     }
 }
 
@@ -104,6 +106,8 @@ fn soft_edges_rims_and_surfaces_are_adopted_where_they_hold() {
             surfaces: vec![axis()],
             hidden: false,
             face_back_materials: Vec::new(),
+            imported: false,
+            locked: false,
         }))]),
         Vec::new(),
     )
@@ -151,6 +155,8 @@ fn a_claim_the_geometry_contradicts_is_dropped_not_forced() {
             }],
             hidden: false,
             face_back_materials: Vec::new(),
+            imported: false,
+            locked: false,
         }))]),
         Vec::new(),
     )
@@ -236,6 +242,8 @@ fn sketches_are_built_in_the_import_and_undone_with_it() {
                 kind: SketchCurveKind::Circle,
             }),
         )],
+        filled: Vec::new(),
+        imported: false,
     });
     let mut doc = Document::new();
     let (report, _) = doc.ingest(s, Vec::new()).unwrap();
@@ -270,6 +278,8 @@ fn a_sketch_off_its_plane_is_refused_and_reported() {
         tags: Vec::new(),
         segments: vec![[Point3::ORIGIN, Point3::new(1.0, 0.0, 0.5)]],
         curves: Vec::new(),
+        filled: Vec::new(),
+        imported: false,
     });
     let mut doc = Document::new();
     let (report, _) = doc.ingest(s, Vec::new()).unwrap();
@@ -362,6 +372,8 @@ fn a_scene_keeps_its_display_toggles() {
     };
     s.scenes.push(ImportSceneRecipe {
         view_style: None,
+        transition_s: None,
+        delay_s: None,
         name: "Plan".into(),
         description: String::new(),
         camera: None,
@@ -602,6 +614,7 @@ fn a_hidden_member_is_hidden_in_every_placement() {
         DefRecipe {
             name: Some("Frame".into()),
             children: vec![mesh("post", Vec::new())],
+            locked: false,
         },
         DefRecipe {
             name: Some("Ceiling".into()),
@@ -617,6 +630,7 @@ fn a_hidden_member_is_hidden_in_every_placement() {
                 },
                 mesh("plain", Vec::new()),
             ],
+            locked: false,
         },
     ];
     let place = |x: f64| ImportNode::Instance {
@@ -973,11 +987,13 @@ fn a_tagged_sketch_hides_with_its_tag_and_follows_tag_renames() {
         group: None,
         segments: vec![[Point3::new(x, 0.0, 0.0), Point3::new(x, 1.0, 0.0)]],
         curves: Vec::new(),
+        filled: Vec::new(),
         tags: if x > 0.0 {
             vec![vec!["dimensions".into(), "site".into()]]
         } else {
             Vec::new()
         },
+        imported: false,
     };
     let mut s = scene(vec![]);
     s.tags = vec![ImportTag {
@@ -1074,6 +1090,7 @@ fn a_definition_of_drawing_alone_is_placed_with_its_sketches() {
     s.defs = vec![DefRecipe {
         name: Some("Bare Wire Component".into()),
         children: Vec::new(),
+        locked: false,
     }];
     s.extra.sketches = vec![ImportSketch {
         plane: ground,
@@ -1086,7 +1103,9 @@ fn a_definition_of_drawing_alone_is_placed_with_its_sketches() {
             [Point3::new(0.0, 1.0, 0.0), Point3::new(0.0, 0.0, 0.0)],
         ],
         curves: Vec::new(),
+        filled: Vec::new(),
         tags: Vec::new(),
+        imported: false,
     }];
     let mut doc = Document::new();
     let (report, _) = doc.ingest(s, Vec::new()).unwrap();
@@ -1122,4 +1141,74 @@ fn a_definition_of_drawing_alone_is_placed_with_its_sketches() {
             .values()
             .all(|r| r.faceless)
     );
+}
+
+/// A loop the source filled keeps its face: an import names the outer
+/// rings of the faces its source drew on a sketch's edges
+/// (`ImportSketch::filled`, what a `.skp` Hew wrote holds for each
+/// filled region), and the region each one bounds — matched from any
+/// start, in either direction — is filled, holes and all, while a loop
+/// no ring names stays a loop alone. A ring that bounds nothing changes
+/// nothing, and no edge moves.
+#[test]
+fn a_loop_the_source_filled_keeps_its_face() {
+    let ground = Plane::from_point_normal(Point3::ORIGIN, Vec3::new(0.0, 0.0, 1.0)).unwrap();
+    let p = |x: f64, y: f64| Point3::new(x, y, 0.0);
+    let square =
+        |x0: f64, y0: f64, w: f64| [p(x0, y0), p(x0 + w, y0), p(x0 + w, y0 + w), p(x0, y0 + w)];
+    let loop_of = |c: [Point3; 4]| (0..4).map(move |i| [c[i], c[(i + 1) % 4]]);
+    let (outer, hole, other) = (
+        square(0.0, 0.0, 1.0),
+        square(0.25, 0.25, 0.5),
+        square(3.0, 0.0, 1.0),
+    );
+    let mut s = scene(Vec::new());
+    s.extra.sketches = vec![ImportSketch {
+        plane: ground,
+        def: None,
+        group: None,
+        segments: loop_of(outer)
+            .chain(loop_of(hole))
+            .chain(loop_of(other))
+            .collect(),
+        curves: Vec::new(),
+        filled: vec![
+            // The outer square from another corner, the other way round.
+            vec![outer[2], outer[1], outer[0], outer[3]],
+            hole.to_vec(),
+            // Bounds nothing in the sketch.
+            square(10.0, 10.0, 1.0).to_vec(),
+        ],
+        tags: Vec::new(),
+        imported: false,
+    }];
+    let mut doc = Document::new();
+    let (report, _) = doc.ingest(s, Vec::new()).unwrap();
+    let sk = report.sketches[0].expect("the sketch is built");
+    let sketch = doc.sketch(sk).unwrap();
+    let mut regions: Vec<(usize, bool, f64)> = sketch
+        .regions()
+        .values()
+        .map(|r| {
+            let x0 = r
+                .outer
+                .iter()
+                .map(|&v| sketch.vertices()[v].position.x)
+                .fold(f64::INFINITY, f64::min);
+            (r.holes.len(), !r.faceless, x0)
+        })
+        .collect();
+    regions.sort_by(|a, b| a.2.total_cmp(&b.2));
+    assert_eq!(
+        regions,
+        vec![(1, true, 0.0), (0, true, 0.25), (0, false, 3.0)],
+        "the filled square (with its hole) and the hole's own face are filled; the bare square is not"
+    );
+    assert_eq!(sketch.edges().len(), 12, "no edge added or dropped");
+    assert_eq!(sketch.vertices().len(), 12, "no corner added or dropped");
+    assert_eq!(doc.extrudable_regions(sk).unwrap().len(), 2);
+    // The state survives a save.
+    let loaded = Document::load(&doc.save()).unwrap();
+    let back = loaded.sketch(loaded.sketch_ids()[0]).unwrap();
+    assert_eq!(back.regions().values().filter(|r| !r.faceless).count(), 2);
 }

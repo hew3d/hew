@@ -15,9 +15,9 @@ const TARGETS: &[&str] = &[
 
 fn main() {
     let skp_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../openskp/corpus/third-party/theater-2017.skp");
+        .join("../../../skpwright/corpus/third-party/theater-2017.skp");
     let bytes = std::fs::read(&skp_path).expect("theater skp");
-    let model = openskp::Model::parse(&bytes).expect("parse");
+    let model = skpwright::Model::parse(&bytes).expect("parse");
 
     // Which meshes did ingest reject? (names)
     let out = skp_import::import(&bytes).expect("import");
@@ -27,7 +27,7 @@ fn main() {
 
     let scene = model.scene();
 
-    fn dump(n: &openskp::Node, depth: usize, model: &openskp::Model, skipped: &BTreeSet<&str>) {
+    fn dump(n: &skpwright::Node, depth: usize, model: &skpwright::Model, skipped: &BTreeSet<&str>) {
         let lname = model
             .layer_of(n.layer)
             .map(|l| l.name.as_str())
@@ -57,8 +57,8 @@ fn main() {
     // repetitive, so dedup by definition name.
     let mut seen: BTreeSet<String> = BTreeSet::new();
     fn visit(
-        nodes: &[openskp::Node],
-        model: &openskp::Model,
+        nodes: &[skpwright::Node],
+        model: &skpwright::Model,
         skipped: &BTreeSet<&str>,
         seen: &mut BTreeSet<String>,
     ) {

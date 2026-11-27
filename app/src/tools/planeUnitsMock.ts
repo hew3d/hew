@@ -18,7 +18,7 @@ export interface MockRegion {
   key: number
   outer: P[]
   holes?: P[][]
-  over?: { object: number; face: number | null } | null
+  over?: { object: number; face: number | null; why?: string } | null
   extrude?: { sketch: number; region: number } | null
 }
 

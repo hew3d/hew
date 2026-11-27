@@ -39,7 +39,7 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager};
 
-use crate::live::{ConnPayload, FramePayload, LiveApi, REPLY_TIMEOUT};
+use crate::live::{ConnPayload, FramePayload, LiveApi, ReplyEvent, REPLY_TIMEOUT};
 
 // `crates/api/src/envelope.rs`'s `codes`, mirrored (this crate is its own
 // workspace and has no `api` dependency, only raw JSON-RPC text).
@@ -82,11 +82,15 @@ pub(crate) struct DocState {
     /// window label → unsaved changes, as last reported by the webview
     /// (`set_document_dirty`).
     dirty: HashMap<String, bool>,
+    /// window label → the document's persistent id (`document_id`,
+    /// HEW_FILE_FORMAT.md §2), as last reported by the webview
+    /// (`set_document_id`) after an open or a save; absent = none yet.
+    document_ids: HashMap<String, String>,
 }
 
 impl DocState {
     /// The id for `label`, minted on first sight.
-    fn id_for(&mut self, label: &str) -> String {
+    pub(crate) fn id_for(&mut self, label: &str) -> String {
         if let Some(id) = self.ids.get(label) {
             return id.clone();
         }
@@ -99,6 +103,45 @@ impl DocState {
     pub(crate) fn set_dirty(&mut self, label: &str, dirty: bool) {
         self.dirty.insert(label.to_string(), dirty);
     }
+
+    /// Whether window `label` last reported unsaved changes (false when it
+    /// never reported). The update restart asks these windows first.
+    #[cfg_attr(not(hew_updater), allow(dead_code))]
+    pub(crate) fn is_dirty(&self, label: &str) -> bool {
+        self.dirty.get(label).copied().unwrap_or(false)
+    }
+
+    /// Records (or, with `None`, clears) the persistent id of window
+    /// `label`'s document.
+    pub(crate) fn set_document_id(&mut self, label: &str, id: Option<String>) {
+        match id {
+            Some(id) => {
+                self.document_ids.insert(label.to_string(), id);
+            }
+            None => {
+                self.document_ids.remove(label);
+            }
+        }
+    }
+}
+
+/// `hew://document-id`'s payload: the id this shell gave a window's
+/// document, which every event that window emits names
+/// (docs/agents/HEW_API.md §4.5).
+#[derive(Clone, serde::Serialize)]
+pub(crate) struct DocumentIdPayload {
+    pub(crate) id: String,
+}
+
+/// Tells document window `label` its document's id (minting it if this is
+/// the first time anything asked). The window calls `frontend_ready` once
+/// its listeners are up, which is when this runs.
+pub(crate) fn emit_document_id(app: &AppHandle, label: &str) {
+    let Some(state) = app.try_state::<LiveApi>() else {
+        return;
+    };
+    let id = state.docs.lock().expect("docs mutex").id_for(label);
+    let _ = app.emit_to(label, "hew://document-id", DocumentIdPayload { id });
 }
 
 /// One window as the pure document-list builder sees it.
@@ -125,6 +168,7 @@ pub(crate) fn build_documents(
                 "title": w.title,
                 "path": w.path,
                 "dirty": state.dirty.get(&w.label).copied().unwrap_or(false),
+                "document_id": state.document_ids.get(&w.label),
                 "front": front == Some(w.label.as_str()),
                 "attached": attached == Some(w.label.as_str()),
             });
@@ -149,6 +193,60 @@ const HOST_METHODS: &[&str] = &[
     "hew.doc.close",
     "hew.doc.focus",
 ];
+
+/// The plugin commands the shell answers itself, in a preview build only.
+/// None completes anything that manages a plugin: `hew.plugin.list` and
+/// `hew.plugin.activity` read, `hew.plugin.dev` only asks the page to show
+/// a request (`preview_only::plugins::bus_dev`), and `hew.plugin.reload`
+/// only asks the hosts to reload a developer-folder plugin that is running
+/// (`preview_only::plugin_data::bus_reload`). A production build has no
+/// such entry, so these are forwarded and answered as any unknown method
+/// is.
+#[cfg(hew_preview)]
+const PREVIEW_HOST_METHODS: &[&str] = &[
+    "hew.plugin.list",
+    "hew.plugin.dev",
+    "hew.plugin.activity",
+    "hew.plugin.reload",
+];
+#[cfg(not(hew_preview))]
+const PREVIEW_HOST_METHODS: &[&str] = &[];
+
+/// The envelope members the dispatcher's `api::Request` declares. Its
+/// derived parse refuses a frame that repeats any of them; a parse into a
+/// `Value` keeps the last one instead, so the two would read such a frame
+/// differently.
+const ENVELOPE_MEMBERS: [&str; 5] = ["jsonrpc", "id", "method", "params", "document"];
+
+/// Whether `line` is a JSON object that repeats one of the
+/// [`ENVELOPE_MEMBERS`] at its top level. Anything else (not JSON, not an
+/// object, repeats only of other members) is `false`.
+pub(crate) fn repeats_an_envelope_member(line: &str) -> bool {
+    use serde::de::{Deserializer, IgnoredAny, MapAccess, Visitor};
+
+    struct Repeats;
+    impl<'de> Visitor<'de> for Repeats {
+        type Value = bool;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("a JSON-RPC frame")
+        }
+        fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<bool, A::Error> {
+            // Read to the end: the deserializer checks the object closes.
+            let mut seen = [false; ENVELOPE_MEMBERS.len()];
+            let mut repeats = false;
+            while let Some(key) = map.next_key::<std::borrow::Cow<'de, str>>()? {
+                map.next_value::<IgnoredAny>()?;
+                if let Some(i) = ENVELOPE_MEMBERS.iter().position(|m| *m == key) {
+                    repeats |= seen[i];
+                    seen[i] = true;
+                }
+            }
+            Ok(repeats)
+        }
+    }
+    let mut de = serde_json::Deserializer::from_str(line);
+    de.deserialize_map(Repeats).unwrap_or(false)
+}
 
 /// What to do with one client frame.
 #[derive(Debug, PartialEq)]
@@ -189,9 +287,21 @@ pub(crate) fn classify(line: &str) -> Routed {
 fn classify_skipping(line: &str, skip: Option<&str>) -> Routed {
     let host_methods: Vec<&'static str> = HOST_METHODS
         .iter()
+        .chain(PREVIEW_HOST_METHODS)
         .copied()
         .filter(|m| Some(*m) != skip)
         .collect();
+    // A frame that repeats an envelope member is the dispatcher's to
+    // refuse (its parse error), never the shell's to read last-wins and
+    // answer: forwarded byte for byte, `document` and all.
+    if repeats_an_envelope_member(line) {
+        return Routed::Forward {
+            line: line.to_string(),
+            document: None,
+            needs_reply: true,
+            is_hello: false,
+        };
+    }
     let Ok(mut value) = serde_json::from_str::<Value>(line) else {
         return Routed::Forward {
             line: line.to_string(),
@@ -245,7 +355,18 @@ fn classify_skipping(line: &str, skip: Option<&str>) -> Routed {
                 None => Routed::Drop,
             };
         }
-        if method == "hew.doc.transact" {
+        // A rehearsal (`dry_run`, §6.6) is never the shell's to answer,
+        // whatever it holds: the shell has no way to run a command without
+        // its effect. It is forwarded like any other envelope, and the
+        // document's dispatcher answers it as every host does — the
+        // envelope checks, then `dry_run_host_command` for a Host-served
+        // command, `-32602` for a solitary Kernel-served one. Any
+        // `dry_run` but `false` counts, so a malformed one reaches the
+        // dispatcher's `-32602` instead of running for real here.
+        let rehearsal = params
+            .get("dry_run")
+            .is_some_and(|d| *d != Value::Bool(false));
+        if method == "hew.doc.transact" && !rehearsal {
             let commands = params.get("commands").and_then(Value::as_array);
             if let Some([only]) = commands.map(Vec::as_slice) {
                 let inner = only.get("method").and_then(Value::as_str);
@@ -474,7 +595,7 @@ fn send_and_await(
     line: &str,
     timeout: Duration,
 ) -> Result<String, SendError> {
-    let (tx, rx) = mpsc::channel::<String>();
+    let (tx, rx) = mpsc::channel::<ReplyEvent>();
     let state = app.state::<LiveApi>();
     state
         .pending_replies
@@ -500,14 +621,17 @@ fn send_and_await(
         return Err(SendError::WindowGone);
     }
     // Wait in slices so a window destroyed mid-request is noticed within a
-    // moment rather than after the full timeout: nothing else wakes us.
-    let deadline = Instant::now() + timeout;
+    // moment rather than after the full timeout: nothing else wakes us. A
+    // frame the window queued behind a plugin command restarts the clock
+    // when it is finally dispatched (`ReplyEvent::Started`).
+    let mut deadline = Instant::now() + timeout;
     let outcome = loop {
         let slice = deadline
             .saturating_duration_since(Instant::now())
             .min(Duration::from_millis(250));
         match rx.recv_timeout(slice) {
-            Ok(reply) => break Ok(reply),
+            Ok(ReplyEvent::Started) => deadline = Instant::now() + timeout,
+            Ok(ReplyEvent::Reply(reply)) => break Ok(reply),
             Err(mpsc::RecvTimeoutError::Disconnected) => break Err(SendError::WindowGone),
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 if app.get_webview_window(label).is_none() {
@@ -577,6 +701,7 @@ fn ensure_session(app: &AppHandle, conn: &mut ConnRoute, label: &str) -> Result<
                 conn_id: conn.conn_id,
             },
         );
+        crate::live::clear_window_subscriptions(app, conn.conn_id, label);
     }
     result
 }
@@ -671,10 +796,28 @@ fn attach_session(app: &AppHandle, conn: &mut ConnRoute, label: &str) -> Result<
             "window_not_ready",
             format!("The window refused the attach: {reply}"),
         )),
-        Err(_) => Err(Refused::new(
-            "window_not_ready",
-            "The window did not accept the attach.",
-        )),
+        Err(e) => {
+            if matches!(e, SendError::Timeout) {
+                // The attach may still be waiting in the window (queued
+                // behind a plugin command): end this connection's session
+                // there, so the webview drops it and its late reply can
+                // never answer a later request. The next use opens a fresh
+                // session.
+                let _ = app.emit_to(
+                    label,
+                    "hew://api-connection-close",
+                    ConnPayload {
+                        conn_id: conn.conn_id,
+                    },
+                );
+                conn.opened.remove(label);
+                crate::live::clear_window_subscriptions(app, conn.conn_id, label);
+            }
+            Err(Refused::new(
+                "window_not_ready",
+                "The window did not accept the attach.",
+            ))
+        }
     }
 }
 
@@ -909,15 +1052,21 @@ fn create_window(app: &AppHandle, front: bool) -> Result<String, Refused> {
     #[cfg(not(target_os = "macos"))]
     let was_focused = anchor.is_focused().unwrap_or(false);
     let anchor_label = anchor.label().to_string();
-    let label =
-        tauri::async_runtime::block_on(crate::create_document_window(app, &anchor, None, front))
-            .map_err(|e| {
-                Refused::new(
-                    "window_not_ready",
-                    format!("Could not create a window: {e}"),
-                )
-            })?;
-    if !front {
+    let label = tauri::async_runtime::block_on(crate::create_document_window(
+        app,
+        Some(&anchor),
+        None,
+        front,
+    ))
+    .map_err(|e| {
+        Refused::new(
+            "window_not_ready",
+            format!("Could not create a window: {e}"),
+        )
+    })?;
+    if front {
+        wait_until_focused(app, &label);
+    } else {
         #[cfg(target_os = "macos")]
         crate::order_window_behind(app, &label, &anchor_label);
         #[cfg(not(target_os = "macos"))]
@@ -926,6 +1075,38 @@ fn create_window(app: &AppHandle, front: bool) -> Result<String, Refused> {
         }
     }
     Ok(label)
+}
+
+/// How long a `focus: "front"` request waits for the window system to report
+/// the window focused. Focus changes land asynchronously, so a document list
+/// read straight after `set_focus` still sees the old window in front.
+const FOCUS_SETTLE: Duration = Duration::from_millis(1000);
+
+/// Polls (bounded by [`FOCUS_SETTLE`]) until `label` reports itself focused,
+/// so the next `hew.meta.documents` names it as `front` (KB-5). A window
+/// that never takes focus (the app is in the background) just times out.
+fn wait_until_focused(app: &AppHandle, label: &str) {
+    let deadline = Instant::now() + FOCUS_SETTLE;
+    while Instant::now() < deadline {
+        match app.get_webview_window(label) {
+            Some(w) if !w.is_focused().unwrap_or(false) => {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            _ => return,
+        }
+    }
+}
+
+/// The document entry a close refusal carries. An `unsaved_changes` refusal
+/// is the window's own answer that it has unsaved work, so the entry says
+/// so even when the shell's cached flag (pushed by the webview after a
+/// render) has not caught up (KB-5).
+fn refusal_entry(entry: Value, refusal: &str) -> Value {
+    let mut entry = entry;
+    if refusal == "unsaved_changes" {
+        entry["dirty"] = Value::Bool(true);
+    }
+    entry
 }
 
 fn destroy_window(app: &AppHandle, label: &str) {
@@ -977,6 +1158,7 @@ fn cmd_open_inner(app: &AppHandle, conn: &mut ConnRoute, params: &Value) -> Resu
         record_label(app, &existing, params);
         if front {
             let _ = crate::focus_window_by_label(app, &existing);
+            wait_until_focused(app, &existing);
         }
         return Ok(json!({
             "document": entry_for_label(app, conn, &existing),
@@ -1009,6 +1191,10 @@ fn cmd_open_inner(app: &AppHandle, conn: &mut ConnRoute, params: &Value) -> Resu
         destroy_window(app, &label);
         return Err(e);
     }
+    // The window answered a probe, so its bridge is listening: tell it its
+    // document's id before the load, whose `document_opened` names it (the
+    // window's own `frontend_ready` report can land after the load).
+    emit_document_id(app, &label);
     if let Err(e) = run_op(app, &label, "open", json!({ "path": path })) {
         destroy_window(app, &label);
         return Err(Refused::new(
@@ -1143,7 +1329,7 @@ fn cmd_close_inner(
             return Err(Refused {
                 name,
                 explanation: e.message,
-                detail: json!({ "document": entry }),
+                detail: json!({ "document": refusal_entry(entry, name) }),
             });
         }
     }
@@ -1195,6 +1381,34 @@ fn revert_is_app_side(app: &AppHandle, conn: &ConnRoute, params: &Value) -> bool
 /// on (`app/src/settings/units.ts`'s `LengthFormat` is the third copy).
 const LENGTH_FORMATS: &[&str] = &["m", "cm", "mm", "arch", "frac_in", "dec_in"];
 
+/// The stream releases a SketchUp file is saved in, newest first (the
+/// major number of each release's version string): keep in step with
+/// `crates/api`'s `SKP_STREAM_RELEASES`, which this crate does not depend
+/// on. Adding a release is one number here and there.
+const SKP_STREAM_RELEASES: &[u8] = &[20, 19, 18, 17, 16, 15, 14, 13, 8, 7, 6, 5, 4, 3];
+
+/// The wire name of a stream release: `skp8`, `skp2017`.
+fn stream_format_name(release: u8) -> String {
+    let year = if release >= 13 {
+        2000 + u32::from(release)
+    } else {
+        u32::from(release)
+    };
+    format!("skp{year}")
+}
+
+/// Every name `hew.doc.save`'s `format` takes.
+fn doc_format_names() -> Vec<String> {
+    ["hew".to_string(), "skp".to_string()]
+        .into_iter()
+        .chain(SKP_STREAM_RELEASES.iter().map(|&r| stream_format_name(r)))
+        .collect()
+}
+
+fn is_doc_format(name: &str) -> bool {
+    doc_format_names().iter().any(|n| n == name)
+}
+
 /// `hew.doc.save` in the desktop app: the window saves through its own save
 /// path — the file is written, the unsaved mark cleared, the document bound
 /// to the file (title, recents, "open the same file" focus) exactly as if
@@ -1205,7 +1419,7 @@ fn cmd_save(app: &AppHandle, conn: &mut ConnRoute, params: &Value) -> Result<Val
         o.keys().find(|k| {
             !matches!(
                 k.as_str(),
-                "path" | "document" | "copy" | "format" | "units"
+                "path" | "document" | "copy" | "format" | "units" | "compat"
             )
         })
     }) {
@@ -1224,12 +1438,10 @@ fn cmd_save(app: &AppHandle, conn: &mut ConnRoute, params: &Value) -> Result<Val
     // The same `format` and `units` the headless host takes; the window
     // resolves what they leave open (the document's own container).
     let format = params.get("format").and_then(Value::as_str);
-    if params.get("format").is_some()
-        && !matches!(format, Some("hew") | Some("skp") | Some("skp2017"))
-    {
+    if params.get("format").is_some() && !format.is_some_and(is_doc_format) {
         return Err(Refused::new(
             "invalid_params",
-            "`format` is one of \"hew\", \"skp\", \"skp2017\"",
+            format!("`format` is one of {:?}", doc_format_names()),
         ));
     }
     let units = params.get("units").and_then(Value::as_str);
@@ -1237,6 +1449,16 @@ fn cmd_save(app: &AppHandle, conn: &mut ConnRoute, params: &Value) -> Result<Val
         return Err(Refused::new(
             "invalid_params",
             format!("`units` is one of {LENGTH_FORMATS:?}"),
+        ));
+    }
+    let compat = params.get("compat").and_then(Value::as_bool);
+    if params.get("compat").is_some() && compat.is_none() {
+        return Err(Refused::new("invalid_params", "`compat` is a boolean"));
+    }
+    if compat == Some(true) && !format.is_none_or(|f| f == "skp") {
+        return Err(Refused::new(
+            "invalid_params",
+            "`compat` applies to the 2021-and-later container (format \"skp\")",
         ));
     }
     if let Some(path) = path {
@@ -1300,6 +1522,9 @@ fn cmd_save(app: &AppHandle, conn: &mut ConnRoute, params: &Value) -> Result<Val
     }
     if let Some(u) = units {
         op["units"] = json!(u);
+    }
+    if let Some(c) = compat {
+        op["compat"] = json!(c);
     }
     if let Err(e) = run_op(app, &label, "save", op) {
         return Err(Refused {
@@ -1369,7 +1594,109 @@ fn run_host_command(
         "hew.doc.focus" => cmd_focus(app, conn, params),
         "hew.doc.save" => cmd_save(app, conn, params),
         "hew.doc.revert" => cmd_revert(app, conn, params),
+        #[cfg(hew_preview)]
+        "hew.plugin.list" => cmd_plugin_list(app),
+        #[cfg(hew_preview)]
+        "hew.plugin.dev" => cmd_plugin_dev(app, params),
+        #[cfg(hew_preview)]
+        "hew.plugin.activity" => cmd_plugin_activity(app, params),
+        #[cfg(hew_preview)]
+        "hew.plugin.reload" => cmd_plugin_reload(app, params),
         _ => Err(Refused::new("unimplemented", method.to_string())),
+    }
+}
+
+#[cfg(hew_preview)]
+fn plugin_state(
+    app: &AppHandle,
+) -> Result<tauri::State<'_, crate::preview_only::plugins::PluginState>, Refused> {
+    app.try_state::<crate::preview_only::plugins::PluginState>()
+        .ok_or_else(|| Refused::new("plugins_disabled", "Plugins are not available."))
+}
+
+#[cfg(hew_preview)]
+fn bus_refused(r: crate::preview_only::plugins::BusRefusal) -> Refused {
+    Refused::new(r.name, r.explanation)
+}
+
+/// `hew.plugin.list`: read-only.
+#[cfg(hew_preview)]
+fn cmd_plugin_list(app: &AppHandle) -> Result<Value, Refused> {
+    let state = plugin_state(app)?;
+    let open = |label: &str| app.get_webview_window(label).is_some();
+    crate::preview_only::plugins::bus_list(&state, crate::preview_only::plugins::now_ms(), &open)
+        .map_err(bus_refused)
+}
+
+/// `hew.plugin.dev {path}`: records the request and shows it in every
+/// window; the person takes it from there. Nothing is staged, picked or
+/// read here. Only windows still open count as running a plugin host.
+#[cfg(hew_preview)]
+fn cmd_plugin_dev(app: &AppHandle, params: &Value) -> Result<Value, Refused> {
+    use crate::preview_only::plugins::{self, Ui};
+    let state = plugin_state(app)?;
+    let open = |label: &str| app.get_webview_window(label).is_some();
+    let shown = plugins::bus_dev(&state, params, plugins::now_ms(), &open).map_err(bus_refused)?;
+    if let Some(request) = shown {
+        plugins::app_events(app).dev_request(Some(request));
+    }
+    Ok(json!({ "status": "awaiting_user" }))
+}
+
+/// `hew.plugin.activity {id}`: read-only.
+#[cfg(hew_preview)]
+fn cmd_plugin_activity(app: &AppHandle, params: &Value) -> Result<Value, Refused> {
+    let state = plugin_state(app)?;
+    crate::preview_only::plugin_data::bus_activity(&state, params).map_err(bus_refused)
+}
+
+/// `hew.plugin.reload {id}`: asks every window's host to reload a
+/// developer-folder plugin through the change event they already reload
+/// on. Only windows still open count.
+#[cfg(hew_preview)]
+fn cmd_plugin_reload(app: &AppHandle, params: &Value) -> Result<Value, Refused> {
+    use crate::preview_only::plugins::{self, Ui};
+    let state = plugin_state(app)?;
+    let open = |label: &str| app.get_webview_window(label).is_some();
+    let change =
+        crate::preview_only::plugin_data::bus_reload(&state, params, plugins::now_ms(), &open)
+            .map_err(bus_refused)?;
+    plugins::app_events(app).dev_changed(change);
+    Ok(json!({ "status": "reloading" }))
+}
+
+/// An unsubscribe answered by window `label`'s session applies to the
+/// connection, not to that one session: pass it to the connection's other
+/// attached sessions, so an old window stops sending what was unsubscribed.
+/// Best effort; a session that does not answer is left as it is.
+fn unsubscribe_elsewhere(app: &AppHandle, conn: &ConnRoute, label: &str, line: &str, reply: &str) {
+    let Ok(request) = serde_json::from_str::<Value>(line) else {
+        return;
+    };
+    if request.get("method").and_then(Value::as_str) != Some("hew.event.unsubscribe")
+        || error_code(reply).is_some()
+    {
+        return;
+    }
+    let others: Vec<String> = conn
+        .opened
+        .iter()
+        .filter(|(other, attached)| {
+            **attached && other.as_str() != label && app.get_webview_window(other).is_some()
+        })
+        .map(|(other, _)| other.clone())
+        .collect();
+    for (n, other) in others.into_iter().enumerate() {
+        let frame = json!({
+            "jsonrpc": "2.0",
+            "id": format!("hew-unsub-{n}"),
+            "method": "hew.event.unsubscribe",
+            "params": request.get("params").cloned().unwrap_or_else(|| json!({})),
+        })
+        .to_string();
+        if let Ok(other_reply) = send_and_await(app, &other, conn.conn_id, &frame, PROBE_TIMEOUT) {
+            crate::live::note_subscriptions(app, conn.conn_id, &other, &frame, &other_reply);
+        }
     }
 }
 
@@ -1494,10 +1821,22 @@ pub(crate) fn handle_frame(app: &AppHandle, conn: &mut ConnRoute, line: &str) ->
                         let docs = documents_for(app, conn);
                         Outcome::Reply(patch_hello_documents(&reply, &docs))
                     } else {
+                        crate::live::note_subscriptions(app, conn.conn_id, &label, &line, &reply);
+                        unsubscribe_elsewhere(app, conn, &label, &line, &reply);
                         Outcome::Reply(reply)
                     }
                 }
                 Err(SendError::Timeout) => {
+                    // The connection closes: abort whatever compound the
+                    // window holds for its forward, so the document is
+                    // not left held.
+                    let _ = app.emit_to(
+                        label.as_str(),
+                        "hew://api-abort",
+                        ConnPayload {
+                            conn_id: conn.conn_id,
+                        },
+                    );
                     Outcome::ReplyThenClose(crate::live::synthesize_timeout_reply(&line))
                 }
                 Err(SendError::WindowGone) => {
@@ -1508,6 +1847,7 @@ pub(crate) fn handle_frame(app: &AppHandle, conn: &mut ConnRoute, line: &str) ->
                         .lock()
                         .expect("conn_window mutex")
                         .remove(&conn.conn_id);
+                    crate::live::clear_window_subscriptions(app, conn.conn_id, &label);
                     Outcome::Reply(error_reply(
                         &id,
                         NO_DOCUMENT,
@@ -1575,6 +1915,17 @@ mod tests {
     }
 
     #[test]
+    fn an_unsaved_changes_refusal_reports_the_document_dirty() {
+        let stale = json!({ "id": "doc_1", "dirty": false });
+        assert_eq!(
+            refusal_entry(stale.clone(), "unsaved_changes")["dirty"],
+            true
+        );
+        // Other refusals leave the entry as the shell knew it.
+        assert_eq!(refusal_entry(stale, "window_not_ready")["dirty"], false);
+    }
+
+    #[test]
     fn documents_carry_dirty_path_and_label() {
         let mut state = DocState::default();
         state.set_dirty("main", true);
@@ -1588,6 +1939,22 @@ mod tests {
         assert_eq!(docs[0]["dirty"], true);
         assert_eq!(docs[0]["path"], "/m/house.hew");
         assert_eq!(docs[0]["label"], "scratch-a");
+    }
+
+    #[test]
+    fn documents_carry_the_reported_document_id() {
+        let mut state = DocState::default();
+        let windows = [facts("main", "House", None), facts("main-2", "B", None)];
+        let docs = build_documents(&mut state, &windows, None, None);
+        assert_eq!(docs[0]["document_id"], Value::Null, "none reported yet");
+        let id = "3f2c9107-5ed4-40a8-806b-1ec297405d83";
+        state.set_document_id("main", Some(id.into()));
+        let docs = build_documents(&mut state, &windows, None, None);
+        assert_eq!(docs[0]["document_id"], id);
+        assert_eq!(docs[1]["document_id"], Value::Null);
+        state.set_document_id("main", None);
+        let docs = build_documents(&mut state, &windows, None, None);
+        assert_eq!(docs[0]["document_id"], Value::Null);
     }
 
     #[test]
@@ -1619,7 +1986,7 @@ mod tests {
                 id: json!(1),
                 method: "hew.doc.attach",
                 params: json!({"document":"doc_2"}),
-                wrapped: false
+                wrapped: false,
             }
         );
         let wrapped = classify(
@@ -1631,9 +1998,254 @@ mod tests {
                 id: json!("t"),
                 method: "hew.doc.new",
                 params: json!({"focus":"front"}),
-                wrapped: true
+                wrapped: true,
             }
         );
+    }
+
+    #[test]
+    fn the_plugin_commands_are_the_shells_only_in_a_preview_build() {
+        for method in ["hew.plugin.list", "hew.plugin.dev"] {
+            let bare = classify(&format!(
+                r#"{{"jsonrpc":"2.0","id":1,"method":"{method}","params":{{"path":"/x"}}}}"#
+            ));
+            let wrapped = classify(&format!(
+                r#"{{"jsonrpc":"2.0","id":2,"method":"hew.doc.transact","params":{{"commands":[{{"method":"{method}","params":{{}}}}]}}}}"#
+            ));
+            if cfg!(hew_preview) {
+                assert!(
+                    matches!(bare, Routed::Host { method: m, wrapped: false, .. } if m == method),
+                    "{method}: {bare:?}"
+                );
+                assert!(
+                    matches!(wrapped, Routed::Host { method: m, wrapped: true, .. } if m == method),
+                    "{method}: {wrapped:?}"
+                );
+            } else {
+                // Forwarded as any method the shell does not answer; the
+                // app's dispatcher answers it as it answers an unknown one.
+                assert!(matches!(bare, Routed::Forward { .. }), "{method}");
+                assert!(matches!(wrapped, Routed::Forward { .. }), "{method}");
+            }
+        }
+        assert!(
+            PREVIEW_HOST_METHODS.is_empty() != cfg!(hew_preview),
+            "the plugin commands exist exactly in a preview build"
+        );
+        // A rehearsal is never the shell's, in either build: the
+        // dispatcher refuses it (`dry_run_host_command`, or `preview_only`
+        // in a production build) before anything is recorded or shown.
+        let rehearsal = classify(
+            r#"{"jsonrpc":"2.0","id":3,"method":"hew.doc.transact","params":{"dry_run":true,"commands":[{"method":"hew.plugin.dev","params":{"path":"/x"}}]}}"#,
+        );
+        assert!(matches!(rehearsal, Routed::Forward { .. }), "{rehearsal:?}");
+        let real = classify(
+            r#"{"jsonrpc":"2.0","id":4,"method":"hew.doc.transact","params":{"commands":[{"method":"hew.doc.new","params":{}}]}}"#,
+        );
+        assert!(matches!(real, Routed::Host { .. }), "{real:?}");
+    }
+
+    /// Every command the shell answers, in this build.
+    fn shell_answered() -> Vec<&'static str> {
+        HOST_METHODS
+            .iter()
+            .chain(PREVIEW_HOST_METHODS)
+            .copied()
+            .collect()
+    }
+
+    /// A rehearsal of a command the shell answers (§6.6) never reaches
+    /// `run_host_command`: as the sole command of a dry run, whatever
+    /// the command and whether or not the envelope names a document, it
+    /// is forwarded to the document's dispatcher, which refuses it
+    /// `dry_run_host_command` (`-32602` for `hew.doc.attach`) with
+    /// nothing saved, reverted, opened, closed, focused or attached. The
+    /// envelope's `document` is the forward's target, as for any forward.
+    #[test]
+    fn a_dry_run_of_a_shell_answered_command_is_forwarded_never_answered() {
+        for method in shell_answered() {
+            let command = format!(r#"{{"method":"{method}","params":{{"path":"/m/a.hew"}}}}"#);
+            for (label, line) in [
+                (
+                    "sole",
+                    format!(
+                        r#"{{"jsonrpc":"2.0","id":1,"method":"hew.doc.transact","params":{{"dry_run":true,"commands":[{command}]}}}}"#
+                    ),
+                ),
+                (
+                    "addressed",
+                    format!(
+                        r#"{{"jsonrpc":"2.0","id":2,"method":"hew.doc.transact","params":{{"dry_run":true,"label":"x","commands":[{command}]}},"document":"doc_2"}}"#
+                    ),
+                ),
+                (
+                    "beside an edit",
+                    format!(
+                        r#"{{"jsonrpc":"2.0","id":3,"method":"hew.doc.transact","params":{{"dry_run":true,"commands":[{{"method":"hew.query.scene"}},{command}]}}}}"#
+                    ),
+                ),
+            ] {
+                match classify(&line) {
+                    Routed::Forward {
+                        line: forwarded,
+                        document,
+                        needs_reply,
+                        ..
+                    } => {
+                        assert!(needs_reply, "{method} {label}");
+                        let forwarded: Value = serde_json::from_str(&forwarded).unwrap();
+                        assert_eq!(forwarded["method"], "hew.doc.transact", "{method} {label}");
+                        assert_eq!(forwarded["params"]["dry_run"], true, "{method} {label}");
+                        assert_eq!(
+                            forwarded["params"]["commands"][0]["method"]
+                                .as_str()
+                                .map(|m| m == method || m == "hew.query.scene"),
+                            Some(true),
+                            "{method} {label}"
+                        );
+                        assert_eq!(document.is_some(), label == "addressed", "{method} {label}");
+                        assert!(forwarded.get("document").is_none(), "{method} {label}");
+                    }
+                    other => panic!("{method} {label}: answered by the shell: {other:?}"),
+                }
+            }
+            // A notification rehearsal is forwarded too (the dispatcher
+            // drops it), never dropped as a shell-answered one.
+            let note = format!(
+                r#"{{"jsonrpc":"2.0","method":"hew.doc.transact","params":{{"dry_run":true,"commands":[{command}]}}}}"#
+            );
+            assert!(
+                matches!(
+                    classify(&note),
+                    Routed::Forward {
+                        needs_reply: false,
+                        ..
+                    }
+                ),
+                "{method}"
+            );
+        }
+    }
+
+    /// The dispatcher reads `dry_run` as a boolean and answers any other
+    /// value `-32602`. The shell must not read a malformed one as `false`
+    /// and run the command for real: only an explicit `false` (or none)
+    /// leaves the command the shell's.
+    #[test]
+    fn only_a_dry_run_of_false_leaves_a_shell_answered_command_the_shells() {
+        for method in shell_answered() {
+            for value in [r#"true"#, r#""true""#, "1", "0", "null", "{}", "[]"] {
+                let line = format!(
+                    r#"{{"jsonrpc":"2.0","id":1,"method":"hew.doc.transact","params":{{"dry_run":{value},"commands":[{{"method":"{method}"}}]}}}}"#
+                );
+                assert!(
+                    matches!(classify(&line), Routed::Forward { .. }),
+                    "{method} dry_run {value}"
+                );
+            }
+            for params in [r#""dry_run":false,"#, ""] {
+                let line = format!(
+                    r#"{{"jsonrpc":"2.0","id":1,"method":"hew.doc.transact","params":{{{params}"commands":[{{"method":"{method}"}}]}}}}"#
+                );
+                assert!(
+                    matches!(classify(&line), Routed::Host { method: m, wrapped: true, .. } if m == method),
+                    "{method} {params}"
+                );
+            }
+        }
+    }
+
+    /// The dispatcher refuses a frame that repeats an envelope member
+    /// (its derived parse), where a parse into a `Value` keeps the last
+    /// one. Such a frame is forwarded byte for byte for that refusal and
+    /// never answered by the shell: a rehearsal hidden in the first
+    /// `params` must not become a real save read from the last.
+    #[test]
+    fn a_frame_that_repeats_an_envelope_member_is_forwarded_untouched() {
+        let save = r#"{"method":"hew.doc.save","params":{"path":"/m/a.hew"}}"#;
+        for line in [
+            format!(
+                r#"{{"jsonrpc":"2.0","id":1,"method":"hew.doc.transact","params":{{"dry_run":true,"commands":[{save}]}},"params":{{"commands":[{save}]}}}}"#
+            ),
+            r#"{"jsonrpc":"2.0","id":2,"method":"hew.query.scene","method":"hew.doc.save","params":{"path":"/m/a.hew"}}"#
+            .to_string(),
+            r#"{"jsonrpc":"2.0","id":3,"id":4,"method":"hew.doc.save","params":{"path":"/m/a.hew"}}"#
+            .to_string(),
+            r#"{"jsonrpc":"2.0","jsonrpc":"2.0","id":5,"method":"hew.doc.save","params":{}}"#
+            .to_string(),
+            r#"{"jsonrpc":"2.0","id":6,"method":"hew.doc.close","params":{},"document":"doc_1","document":"doc_2"}"#
+            .to_string(),
+            // A repeat whose name is escaped is still that member.
+            r#"{"jsonrpc":"2.0","id":7,"method":"hew.doc.save","par\u0061ms":{},"params":{}}"#
+            .to_string(),
+        ] {
+            assert!(repeats_an_envelope_member(&line), "{line}");
+            assert_eq!(
+                classify(&line),
+                Routed::Forward {
+                    line: line.clone(),
+                    document: None,
+                    needs_reply: true,
+                    is_hello: false,
+                },
+                "{line}"
+            );
+        }
+        // A repeat inside `params` is read the same way by both sides
+        // (each keeps the last), so it is classified as before: the last
+        // `dry_run` decides.
+        let inner = |first: bool, last: bool| {
+            format!(
+                r#"{{"jsonrpc":"2.0","id":1,"method":"hew.doc.transact","params":{{"dry_run":{first},"dry_run":{last},"commands":[{save}]}}}}"#
+            )
+        };
+        assert!(!repeats_an_envelope_member(&inner(true, false)));
+        assert!(matches!(
+            classify(&inner(false, true)),
+            Routed::Forward { .. }
+        ));
+        assert!(matches!(
+            classify(&inner(true, false)),
+            Routed::Host {
+                method: "hew.doc.save",
+                ..
+            }
+        ));
+        // Repeats of other members, and frames that are not objects, are
+        // not the dispatcher's parse error.
+        assert!(!repeats_an_envelope_member(
+            r#"{"jsonrpc":"2.0","id":1,"method":"hew.query.scene","x":1,"x":2}"#
+        ));
+        assert!(!repeats_an_envelope_member("[1,2]"));
+        assert!(!repeats_an_envelope_member("{not json"));
+        // Control: an ordinary save is still the shell's.
+        assert!(matches!(
+            classify(
+                r#"{"jsonrpc":"2.0","id":9,"method":"hew.doc.save","params":{"path":"/m/a.hew"}}"#
+            ),
+            Routed::Host {
+                method: "hew.doc.save",
+                wrapped: false,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn the_activity_and_reload_commands_are_the_shells_only_in_a_preview_build() {
+        for method in ["hew.plugin.activity", "hew.plugin.reload"] {
+            let bare = classify(&format!(
+                r#"{{"jsonrpc":"2.0","id":1,"method":"{method}","params":{{"id":"com.example.a"}}}}"#
+            ));
+            if cfg!(hew_preview) {
+                assert!(
+                    matches!(bare, Routed::Host { method: m, .. } if m == method),
+                    "{method}: {bare:?}"
+                );
+            } else {
+                assert!(matches!(bare, Routed::Forward { .. }), "{method}");
+            }
+        }
     }
 
     #[test]
@@ -1650,7 +2262,7 @@ mod tests {
                 id: json!(1),
                 method: "hew.doc.close",
                 params: json!({"discard":true,"document":"doc_2"}),
-                wrapped: false
+                wrapped: false,
             }
         );
         let wrapped = classify(
@@ -1662,7 +2274,7 @@ mod tests {
                 id: json!(2),
                 method: "hew.doc.focus",
                 params: json!({"document":"doc_3"}),
-                wrapped: true
+                wrapped: true,
             }
         );
         // An explicit param wins over the envelope.

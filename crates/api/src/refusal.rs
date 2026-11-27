@@ -33,20 +33,62 @@ pub struct Refusal {
     /// Plain-language explanation — the UI's copy where mirrored,
     /// otherwise the kernel's own terse sentence.
     pub explanation: String,
+    /// The locked node a `locked_node` refusal names, still in kernel
+    /// terms: [`Refusal::with_document`] turns it into the public id in
+    /// `detail.node`, once the document it lives in is at hand. Boxed: a
+    /// refusal travels inside every transaction error, so it stays small.
+    pub(crate) locked_cause: Option<Box<kernel::NodeId>>,
 }
 
 impl Refusal {
     /// Builds the refusal for a kernel [`DocumentError`].
     pub fn from_document_error(e: &DocumentError) -> Refusal {
         let code = variant_code(e);
-        let explanation = ui_copy(&code)
+        // The indirect lock has copy of its own (docs/agents/HEW_API.md
+        // §7, Lock): the shape is also used inside something locked.
+        let copy_code = match e {
+            DocumentError::LockedNode {
+                via_shared_shape: true,
+                ..
+            } => LOCKED_VIA_SHARED_SHAPE,
+            _ => code.as_str(),
+        };
+        let explanation = ui_copy(copy_code)
             .map(str::to_string)
             .unwrap_or_else(|| e.to_string());
+        let locked_cause = match e {
+            DocumentError::LockedNode { node, .. } => Some(Box::new(*node)),
+            _ => None,
+        };
         Refusal {
             name: snake_case(&code),
-            detail: serde_json::json!({}),
+            detail: refusal_detail(e),
             explanation,
+            locked_cause,
         }
+    }
+
+    /// Resolves what a refusal names in kernel terms against `doc`, the
+    /// document it was refused in: a `locked_node` refusal's cause becomes
+    /// its public id in `detail.node`. Run where a command's refusal meets
+    /// the dispatcher (the document is untouched by a refusal, and a
+    /// transaction's abort keeps every stable id), so every path a client
+    /// sees carries it.
+    pub fn with_document(mut self, doc: &kernel::Document) -> Refusal {
+        if let Some(node) = self.locked_cause.take() {
+            let entity = match *node {
+                kernel::NodeId::Object(o) => kernel::EntityRef::Object(o),
+                kernel::NodeId::Group(g) => kernel::EntityRef::Group(g),
+                kernel::NodeId::Instance(i) => kernel::EntityRef::Instance(i),
+            };
+            if let (Some(sid), Some(map)) = (doc.sid_of(&entity), self.detail.as_object_mut()) {
+                map.insert(
+                    "node".to_string(),
+                    serde_json::Value::String(crate::ids::public_id(&entity, sid)),
+                );
+            }
+        }
+        self
     }
 
     /// A refusal minted by the API layer itself (not a kernel error).
@@ -55,6 +97,7 @@ impl Refusal {
             name: name.to_string(),
             detail: serde_json::json!({}),
             explanation: explanation.to_string(),
+            locked_cause: None,
         }
     }
 
@@ -75,6 +118,72 @@ impl Refusal {
         })
     }
 }
+
+/// The structured payload of a refusal that carries numbers the caller can
+/// act on (01-conventions §3): a limit, a maximum, a location. `{}` for the
+/// rest.
+///
+/// `operand_face_not_flat` names the face: `operand` is `"a"` or `"b"`
+/// (the first or second operand of the pairwise boolean that refused, or
+/// the 1-based place of a later one, as a string) and `face` is the
+/// kernel's key for the face in that operand, an opaque hex string like
+/// the key part of a region or edge id. A solid face has no public id
+/// (§5.2), so the key is for reports and logs, not for addressing it.
+fn refusal_detail(e: &DocumentError) -> serde_json::Value {
+    use kernel::{BlendError, ShapeError};
+    use slotmap::Key as _;
+    let point = |p: kernel::Point3| serde_json::json!([p.x, p.y, p.z]);
+    match e {
+        DocumentError::Shape(ShapeError::SelfIntersecting { limit: Some(l) }) => {
+            serde_json::json!({ "limit": l })
+        }
+        DocumentError::Shape(ShapeError::SmoothTooDense { faces, cap }) => {
+            serde_json::json!({ "faces": faces, "cap": cap })
+        }
+        DocumentError::Shape(ShapeError::WallTooThick { at })
+        | DocumentError::Shape(ShapeError::UnsupportedShellCorner { at })
+        | DocumentError::Blend(BlendError::UnsupportedVertex { at })
+        | DocumentError::Blend(BlendError::BlendFacesFlush { at })
+        | DocumentError::Blend(BlendError::Obstructed { at }) => {
+            serde_json::json!({ "at": point(*at) })
+        }
+        DocumentError::Blend(BlendError::RadiusTooLarge { max, limited_by }) => {
+            serde_json::json!({ "max": max, "limited_by": limited_by.name() })
+        }
+        DocumentError::Sketch(kernel::SketchError::CornerRadiusTooLarge { max }) => {
+            serde_json::json!({ "max": max })
+        }
+        DocumentError::Blend(BlendError::ProfileTooWide { needed, available }) => {
+            serde_json::json!({ "needed": needed, "available": available })
+        }
+        DocumentError::Boolean(kernel::BooleanError::NonPlanarInput { at })
+        | DocumentError::Boolean(kernel::BooleanError::DegenerateInput { at }) => {
+            serde_json::json!({ "at": point(*at) })
+        }
+        DocumentError::Boolean(kernel::BooleanError::OperandFaceNotFlat { which, face }) => {
+            let operand = match which {
+                kernel::Operand::A => "a".to_string(),
+                kernel::Operand::B => "b".to_string(),
+                kernel::Operand::Nth(n) => n.to_string(),
+            };
+            serde_json::json!({
+                "operand": operand,
+                "face": format!("{:x}", face.data().as_ffi()),
+            })
+        }
+        // `node` (the locked node's public id) is added by
+        // `Refusal::with_document`, which has the document.
+        DocumentError::LockedNode {
+            via_shared_shape, ..
+        } => serde_json::json!({ "via_shared_shape": via_shared_shape }),
+        _ => serde_json::json!({}),
+    }
+}
+
+/// The copy-table key of the indirect lock's explanation
+/// (`app/src/kernelErrors.ts`): not a kernel variant, a second sentence
+/// for [`DocumentError::LockedNode`] when `via_shared_shape` is set.
+const LOCKED_VIA_SHARED_SHAPE: &str = "LockedNodeViaSharedShape";
 
 /// The error's variant code: the leading alphanumeric run of its `Debug`
 /// form — the innermost variant name for delegating variants is NOT
@@ -97,6 +206,8 @@ fn variant_code(e: &DocumentError) -> String {
         DocumentError::Op(kernel::KernelOpError::Sticky(inner)) => format!("{inner:?}"),
         DocumentError::InvalidAxesFrame(inner) => format!("{inner:?}"),
         DocumentError::Repair(inner) => format!("{inner:?}"),
+        DocumentError::Shape(inner) => format!("{inner:?}"),
+        DocumentError::Blend(inner) => format!("{inner:?}"),
         other => format!("{other:?}"),
     };
     debug
@@ -124,8 +235,10 @@ pub fn snake_case(pascal: &str) -> String {
 /// UI copy for a kernel error code — delegates to the generated table
 /// (see the module doc comment above). Codes the UI table has none for
 /// fall back to the kernel `Display` text.
+/// In a production build, copy that would point at a Preview feature is
+/// replaced by the app's production wording ([`crate::preview::production_copy`]).
 fn ui_copy(code: &str) -> Option<&'static str> {
-    refusal_copy_gen::ui_copy(code)
+    crate::preview::production_copy(code).or_else(|| refusal_copy_gen::ui_copy(code))
 }
 
 /// The inverse of [`snake_case`]: `push_pull_obstructed` →
@@ -158,6 +271,13 @@ pub fn explanation_for(refusal_name: &str) -> Option<&'static str> {
     ui_copy(&pascal_case(refusal_name))
 }
 
+/// [`explanation_for`] as the published reference states it: the UI table's
+/// copy whatever the build, so the generated API reference is the same in a
+/// preview and a production build.
+pub fn reference_explanation_for(refusal_name: &str) -> Option<&'static str> {
+    refusal_copy_gen::ui_copy(&pascal_case(refusal_name))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -167,6 +287,55 @@ mod tests {
         let r = Refusal::from_document_error(&DocumentError::NothingToUndo);
         assert_eq!(r.name, "nothing_to_undo");
         assert_eq!(r.explanation, "Nothing to undo.");
+    }
+
+    /// A lock's refusal (OW-1): `locked_node`, its detail saying whether
+    /// the lock reaches the edit only through a shared shape (with copy of
+    /// its own, offering Make Unique), and the locked node's public id
+    /// once the document is at hand.
+    #[test]
+    fn a_locked_node_refusal_names_the_node_and_the_indirect_case() {
+        let mut doc = kernel::Document::new();
+        let s = doc.add_sketch(
+            kernel::Plane::from_point_normal(
+                kernel::Point3::new(0.0, 0.0, 0.0),
+                kernel::Vec3::new(0.0, 0.0, 1.0),
+            )
+            .unwrap(),
+        );
+        let sk = doc.sketch_mut(s).unwrap();
+        let c = [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)];
+        for i in 0..4 {
+            let (a, b) = (c[i], c[(i + 1) % 4]);
+            sk.add_segment(
+                kernel::Point3::new(a.0, a.1, 0.0),
+                kernel::Point3::new(b.0, b.1, 0.0),
+            )
+            .unwrap();
+        }
+        let region = doc.extrudable_regions(s).unwrap()[0];
+        let (o, _) = doc.extrude_region(s, region, 1.0).unwrap();
+        let node = kernel::NodeId::Object(o);
+        let id = crate::ids::public_id(
+            &kernel::EntityRef::Object(o),
+            doc.sid_of(&kernel::EntityRef::Object(o)).unwrap(),
+        );
+        for via in [false, true] {
+            let r = Refusal::from_document_error(&DocumentError::LockedNode {
+                node,
+                via_shared_shape: via,
+            })
+            .with_document(&doc);
+            assert_eq!(r.name, "locked_node");
+            assert_eq!(r.detail["via_shared_shape"], via);
+            assert_eq!(r.detail["node"], id.as_str());
+            let copy = if via {
+                "This shape is also used inside a locked group. Make this copy unique to change it."
+            } else {
+                "Locked. Unlock it to change it."
+            };
+            assert_eq!(r.explanation, copy);
+        }
     }
 
     #[test]
@@ -204,6 +373,29 @@ mod tests {
             assert!(
                 ui_copy(code).is_some(),
                 "expected generated UI copy for {code}"
+            );
+        }
+    }
+
+    /// The import-boolean refusals name the offending face's position.
+    #[test]
+    fn import_boolean_refusals_carry_the_face_position() {
+        let at = kernel::Point3::new(1.0, 2.0, 3.0);
+        for (e, name) in [
+            (
+                kernel::BooleanError::NonPlanarInput { at },
+                "non_planar_input",
+            ),
+            (
+                kernel::BooleanError::DegenerateInput { at },
+                "degenerate_input",
+            ),
+        ] {
+            let e = DocumentError::Boolean(e);
+            assert_eq!(snake_case(&variant_code(&e)), name);
+            assert_eq!(
+                refusal_detail(&e),
+                serde_json::json!({ "at": [1.0, 2.0, 3.0] })
             );
         }
     }

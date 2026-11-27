@@ -1,8 +1,15 @@
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
+
+// Pin the platform: the keys shown depend on it, and this suite may run on a Mac.
+vi.mock('../platform', async (orig) => ({ ...(await orig<typeof import('../platform')>()), isMac: false }))
+vi.mock('../io/fileHost', async (orig) => ({ ...(await orig<typeof import('../io/fileHost')>()), isTauri: false }))
+
 import { paletteEntries, paletteShortcut, PALETTE_EXCLUDED_ACTION_IDS } from './registry'
 import { TOOLS } from '../tools/toolRegistry'
+import { requiresPreview } from '../test/requiresPreview'
+import { actionOffered } from '../curveActions'
 
 describe('paletteEntries', () => {
   const entries = paletteEntries()
@@ -14,7 +21,10 @@ describe('paletteEntries', () => {
 
   it('includes every tool, not just the rail-visible subset', () => {
     const toolLabels = entries.filter((e) => e.group === 'Tools').map((e) => e.label)
-    expect(toolLabels.sort()).toEqual([...TOOLS].sort())
+    // Deform is one tool with four palette entries, one per mode; Loft also
+    // answers to Skin; Chamfer is the Fillet tool's second entry.
+    const expected = TOOLS.flatMap((t) => (t === 'Deform' ? ['Twist', 'Bend', 'Taper', 'Bend to Path'] : t === 'Loft' ? ['Loft', 'Skin'] : [t]))
+    expect(toolLabels.sort()).toEqual([...expected, ...(actionOffered('tool-chamfer') ? ['Chamfer'] : [])].sort())
   })
 
   it('every entry has a non-empty label and description', () => {
@@ -27,6 +37,12 @@ describe('paletteEntries', () => {
   it('includes core File/Edit actions', () => {
     const ids = entries.map((e) => e.id)
     expect(ids).toEqual(expect.arrayContaining(['new', 'open', 'save', 'save-as', 'undo', 'redo']))
+  })
+
+  it('offers Home beside Iso as a standard view, with no default key', () => {
+    const ids = entries.map((e) => e.id)
+    expect(ids.indexOf('view-home')).toBe(ids.indexOf('view-iso') + 1)
+    expect(paletteShortcut(entries.find((e) => e.id === 'view-home')!)).toBe('')
   })
 
   it('includes the Edit object commands (booleans, group/component verbs)', () => {
@@ -44,6 +60,34 @@ describe('paletteEntries', () => {
         'edit-intersect',
       ]),
     )
+  })
+})
+
+describe('palette search words', () => {
+  it("Fillet answers to SketchUp's RoundCorner words", (ctx) => {
+    requiresPreview(ctx, 'fillet', 'loft', 'revolve', 'deform', 'path-array', 'shell', 'project', 'smooth', 'soften')
+    const fillet = paletteEntries().find((e) => e.id === 'tool-fillet')
+    expect(fillet?.synonyms).toEqual(expect.arrayContaining(['round corner', 'roundcorner', 'fredocorner']))
+  })
+
+  it("every Deform mode answers to FredoScale's name", (ctx) => {
+    requiresPreview(ctx, 'deform')
+    for (const id of ['tool-deform-twist', 'tool-deform-bend', 'tool-deform-taper']) {
+      expect(paletteEntries().find((e) => e.id === id)?.synonyms).toContain('fredoscale')
+    }
+  })
+
+  it('Soften Edges… is gated on a directly selected solid, the Smooth levels and Bake on any selection', (ctx) => {
+    requiresPreview(ctx, 'smooth', 'soften')
+    const gate = (id: string) => paletteEntries().find((e) => e.id === id)?.gate
+    expect(gate('soften-edges')).toBe('canSoften')
+    for (const id of ['smooth-off', 'smooth-1', 'smooth-2', 'smooth-3', 'bake-smooth']) expect(gate(id)).toBe('selection')
+  })
+
+  it('every Object-menu Smooth action is in the palette (Smooth levels, Bake, Soften Edges)', (ctx) => {
+    requiresPreview(ctx, 'smooth', 'soften')
+    const ids = paletteEntries().map((e) => e.id)
+    expect(ids).toEqual(expect.arrayContaining(['smooth-off', 'smooth-1', 'smooth-2', 'smooth-3', 'bake-smooth', 'soften-edges']))
   })
 })
 
@@ -83,8 +127,9 @@ describe('palette completeness against the menuActionRef switch', () => {
   })
 
   it('every dispatchable action is in the palette or explicitly excused', () => {
+    // An action the Preview wall withholds is not in a production palette.
     const missing = [...switchCaseIds].filter(
-      (id) => !registryIds.has(id) && !excusedIds.has(id),
+      (id) => actionOffered(id) && !registryIds.has(id) && !excusedIds.has(id),
     )
     expect(missing, 'register these ids in palette/registry.ts (or excuse them in PALETTE_EXCLUDED_ACTION_IDS with a reason)').toEqual([])
   })
@@ -109,19 +154,18 @@ describe('paletteShortcut', () => {
   const entries = paletteEntries()
   const rectangle = entries.find((e) => e.id === 'tool-rectangle')!
   const saveAction = entries.find((e) => e.id === 'save')!
+  const zoomExtents = entries.find((e) => e.id === 'zoom-extents')!
 
-  it('returns the mac shortcut for a tool entry when isMac', () => {
-    // Unified bare-letter scheme — same key the rail shows and App.tsx
-    // dispatches on macOS (the native menu's ⌘K remains a secondary accel).
-    expect(paletteShortcut(rectangle, true)).toBe('R')
+  // The test environment is neither macOS nor the desktop shell.
+  it('shows a tool entry\'s key from the keymap', () => {
+    expect(paletteShortcut(rectangle)).toBe('R')
   })
 
-  it('returns the Windows/Linux/Web shortcut for a tool entry when !isMac', () => {
-    expect(paletteShortcut(rectangle, false)).toBe('R')
+  it('shows an action entry\'s key too', () => {
+    expect(paletteShortcut(saveAction)).toBe('Ctrl+S')
   })
 
-  it('returns "" for a non-tool action entry', () => {
-    expect(paletteShortcut(saveAction, true)).toBe('')
-    expect(paletteShortcut(saveAction, false)).toBe('')
+  it('is empty for a command with no key', () => {
+    expect(paletteShortcut(zoomExtents)).toBe('')
   })
 })

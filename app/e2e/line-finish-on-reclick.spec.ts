@@ -34,7 +34,9 @@ async function setup(page: Page) {
     // ground beside it where the ground chain is drawn.
     t.drawRectangle([2, 0, 0], [2.2, 0.2, 0])
   })
-  await page.getByRole('button', { name: 'Iso', exact: true }).click()
+  await page.getByRole('button', { name: 'Camera' }).click()
+  await page.getByText('Standard Views', { exact: true }).hover()
+  await page.getByText('Iso', { exact: true }).first().click()
   await page.getByRole('button', { name: 'Camera' }).click()
   await page.getByText('Zoom Extents', { exact: true }).click()
   await page.evaluate(() => new Promise<void>((r) => requestAnimationFrame(() => requestAnimationFrame(() => r()))))

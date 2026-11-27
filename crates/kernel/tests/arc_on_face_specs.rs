@@ -6,12 +6,13 @@
 //! does from a ground sketch — and the arc survives moves, dissolves, undo,
 //! and push-through.
 
+use kernel::trig;
 use kernel::{
     CurveGeom, Document, FaceId, KernelOp, Object, Plane, Point3, StickyError, SurfaceRef,
     Transform, Vec3, tol,
 };
 
-mod face_arrangement_support;
+use crate::face_arrangement_support;
 use face_arrangement_support::{delete_unit_at, draw_loop_curves, move_unit_at, units_on};
 
 // ---------------------------------------------------------------- helpers
@@ -60,7 +61,7 @@ fn arc(cx: f64, cy: f64, r: f64, a0: f64, a1: f64, n: usize) -> Vec<Point3> {
     (0..=n)
         .map(|i| {
             let a = a0 + (a1 - a0) * i as f64 / n as f64;
-            Point3::new(cx + r * a.cos(), cy + r * a.sin(), 1.0)
+            Point3::new(cx + r * trig::cos(a), cy + r * trig::sin(a), 1.0)
         })
         .collect()
 }
@@ -418,6 +419,7 @@ fn dissolving_a_segment_and_undoing_restores_its_arc() {
             loop_path: pts,
             restore: None,
             curves,
+            edge_attrs: Vec::new(),
         },
     )
     .unwrap();
@@ -485,7 +487,7 @@ fn a_floor_density_circle_stays_a_facet_ring_through_a_similarity() {
     let ring: Vec<Point3> = (0..24)
         .map(|i| {
             let a = std::f64::consts::TAU * i as f64 / 24.0;
-            Point3::new(0.5 + 0.3 * a.cos(), 0.5 + 0.3 * a.sin(), 1.0)
+            Point3::new(0.5 + 0.3 * trig::cos(a), 0.5 + 0.3 * trig::sin(a), 1.0)
         })
         .collect();
     let disk = obj

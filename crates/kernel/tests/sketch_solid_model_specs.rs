@@ -152,6 +152,7 @@ fn z9_a_copy_claims_nothing() {
     doc.duplicate_node(
         NodeId::Object(solid),
         &Transform::translation(Vec3::new(3.0, 0.0, 0.0)),
+        kernel::LinkPolicy::Independent,
     )
     .expect("duplicate the solid");
 
@@ -576,6 +577,7 @@ fn z7_push_through_results_claim_nothing() {
                 ],
                 restore: None,
                 curves: Vec::new(),
+                edge_attrs: Vec::new(),
             },
         )
         .expect("imprint")

@@ -129,11 +129,25 @@ describe('chunkBytes', () => {
 const BASE = resolveAllowedOrigins({} as DropEnv)
 
 describe('resolveAllowedOrigins', () => {
-  test('is exactly the three base origins when EXTRA_ALLOWED_ORIGINS is unset', () => {
+  test('is exactly the four base origins when EXTRA_ALLOWED_ORIGINS is unset', () => {
     assert.deepEqual(
       [...resolveAllowedOrigins({} as DropEnv)].sort(),
-      ['https://app.hew3d.com', 'https://tauri.localhost', 'tauri://localhost'].sort(),
+      [
+        'https://app.hew3d.com',
+        'https://beta.hew3d.com',
+        'https://tauri.localhost',
+        'tauri://localhost',
+      ].sort(),
     )
+  })
+
+  test('allows the beta host and refuses lookalikes of it', () => {
+    assert.ok(BASE.has('https://beta.hew3d.com'))
+    assert.ok(!BASE.has('https://beta.hew3d.com.evil.example'))
+    assert.ok(!BASE.has('http://beta.hew3d.com'))
+    assert.equal(corsHeaders('https://beta.hew3d.com', BASE)['access-control-allow-origin'], 'https://beta.hew3d.com')
+    assert.deepEqual(corsHeaders('https://beta.hew3d.com.evil.example', BASE), {})
+    assert.deepEqual(corsHeaders('http://beta.hew3d.com', BASE), {})
   })
 
   test('merges a comma-separated EXTRA_ALLOWED_ORIGINS, trimming blanks', () => {

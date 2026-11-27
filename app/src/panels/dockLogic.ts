@@ -21,8 +21,9 @@
 
 import { i18n, type MessageDescriptor } from '@lingui/core'
 import { msg, t } from '@lingui/core/macro'
+import { actionAllowed, chipAllowed } from '../preview'
 import type { ToolName } from '../tools/toolIcons'
-import { toolLabel } from '../tools/toolRegistry'
+import { TOOL_REGISTRY, toolLabel } from '../tools/toolRegistry'
 import { isSketchScopedKind, type NodeRef } from './treeModel'
 
 export type DockContext = 'empty' | 'object' | 'group' | 'instance' | 'multi' | 'sketch'
@@ -44,14 +45,14 @@ export function dockVerbLabel(verb: DockVerb): string {
 }
 
 /**
- * Derive the dock's context from the current selection. `selectedGuide`
- * non-null means a construction guide is selected (mutually exclusive with
- * `selectedIds` elsewhere in App.tsx) — returns null (no dock) since the
- * spec has no defined verb set for it and inventing one is out of scope here.
+ * Derive the dock's context from the current selection: its nodes, and
+ * `others`, how many guides and annotations it also holds. A selection of
+ * guides and annotations alone returns null (no dock), since the spec has
+ * no verb set for them; alongside nodes they are left out and the dock acts
+ * on the nodes, as every node-only command does.
  */
-export function deriveDockContext(selectedIds: NodeRef[], selectedGuide: bigint | null): DockContext | null {
-  if (selectedGuide !== null) return null
-  if (selectedIds.length === 0) return 'empty'
+export function deriveDockContext(selectedIds: NodeRef[], others = 0): DockContext | null {
+  if (selectedIds.length === 0) return others > 0 ? null : 'empty'
   if (selectedIds.length > 1) return 'multi'
   const kind = selectedIds[0].kind
   // Sketch-scoped selections (a whole sketch, or any drawn shape, curve,
@@ -62,23 +63,12 @@ export function deriveDockContext(selectedIds: NodeRef[], selectedGuide: bigint 
   return kind
 }
 
-/* oxlint-disable lingui/no-unlocalized-strings -- tool registry names are identifiers; the display label is resolved with toolLabel() */
-const TOOL_VERB_NAME: Record<string, ToolName> = {
-  'tool-rectangle': 'Rectangle',
-  'tool-line': 'Line',
-  'tool-circle': 'Circle',
-  'tool-arc': 'Arc',
-  'tool-pushpull': 'Push/Pull',
-  'tool-move': 'Move',
-  'tool-paint': 'Paint',
-  'tool-position-texture': 'Position Texture',
-  'tool-scale': 'Scale',
-  'tool-rotate': 'Rotate',
-}
-/* oxlint-enable lingui/no-unlocalized-strings */
+/** Tool command id -> registry tool, from the registry itself (the dock
+ *  lists commands by id; the label and icon come from the tool). */
+const TOOL_VERB_NAME: ReadonlyMap<string, ToolName> = new Map(TOOL_REGISTRY.map((t) => [t.actionId, t.name]))
 
 function toolVerb(id: string): DockVerb {
-  return { id, toolName: TOOL_VERB_NAME[id] }
+  return { id, toolName: TOOL_VERB_NAME.get(id) }
 }
 
 const EMPTY_VERBS: DockVerb[] = [
@@ -94,19 +84,20 @@ const EMPTY_VERBS: DockVerb[] = [
 
 /** Spec's Face row (Push/Pull primary, then Offset · Move · Paint · Erase) is
  * the nearest analog for Hew's Object context — Offset is skipped because Hew
- * has no Offset tool (align only where the verb already exists). Make
+ * has no Offset tool (align only where the verb already exists). Fillet is
+ * second (the most-wanted True Curves tool: with an object selected it arms
+ * every sharp edge at once) and Shell is the other verb that takes a whole
+ * solid (docs/design/true-curves-ui-organization.md section 5). Make
  * Component rides along (gated by `DockGates.canMakeComponent`) so turning a
  * plain object into a reusable definition is one click, not a menu dive. */
 const OBJECT_VERBS: DockVerb[] = [
   toolVerb('tool-pushpull'),
+  toolVerb('tool-fillet'),
   toolVerb('tool-move'),
+  // Paint is the way to Position Texture (the tool stays in the Tools menu and
+  // the palette): the row is kept to nine chips with Lock.
   toolVerb('tool-paint'),
-  // Position Texture (paint-tool design §3): shown unconditionally, same
-  // posture as Paint — the dock has no per-face gate (no face-level
-  // selection model, see this module's doc comment), so the TOOL itself
-  // toasts on a click that misses a textured face rather than the dock
-  // hiding/disabling the verb.
-  toolVerb('tool-position-texture'),
+  toolVerb('tool-shell'),
   { id: 'edit-make-component', label: msg`Make Component` },
   // Library effort: saves the selection as a reusable `.hew` item (gated by
   // DockGates.canSaveToLibrary — hidden outright on a platform with no
@@ -146,25 +137,58 @@ const INSTANCE_VERBS: DockVerb[] = [
   { id: 'save-to-library', label: msg`Save to Library` },
 ]
 
-/** Group (gated by `DockGates.canGroup`) is the natural next step after
- * sweeping up several things — the same `edit-group` action as Object ▸ Group. */
+/** A placement of a linked set (copies made by Move, Paste, ...): the copy
+ * actions replace Make Unique, and Make component is the one way out. */
+const LINKED_COPY_VERBS: DockVerb[] = [
+  { id: 'enter-context', label: msg`Edit` },
+  toolVerb('tool-move'),
+  toolVerb('tool-scale'),
+  { id: 'edit-unlink', label: msg`Unlink` },
+  { id: 'edit-unlink-all', label: msg`Unlink all` },
+  { id: 'edit-make-component', label: msg`Make component` },
+  { id: 'explode-instance', label: msg`Explode` },
+  { id: 'save-to-library', label: msg`Save to Library` },
+]
+
+/** A linked wrapper left with one copy: it reads as the plain Object or Group
+ * it wraps, so no Unlink and none of a component's Make Unique or Explode. */
+const SINGLE_WRAPPER_VERBS: DockVerb[] = [
+  { id: 'enter-context', label: msg`Edit` },
+  toolVerb('tool-move'),
+  toolVerb('tool-scale'),
+  { id: 'edit-make-component', label: msg`Make component` },
+  { id: 'save-to-library', label: msg`Save to Library` },
+]
+
+/** Move first (it works on any mix), then the three booleans (gated by
+ * `DockGates.canBoolean` — the Object menu's gate, so they appear only for a
+ * selection the kernel will take), then Group (gated by `DockGates.canGroup`)
+ * — the natural next step after sweeping up several things, the same
+ * `edit-group` action as Object ▸ Group. */
 const MULTI_VERBS: DockVerb[] = [
   toolVerb('tool-move'),
+  { id: 'edit-union', label: msg`Union` },
+  { id: 'edit-subtract', label: msg`Subtract` },
+  { id: 'edit-intersect', label: msg`Intersect` },
   { id: 'edit-group', label: msg`Group` },
   { id: 'edit-delete', label: msg`Erase` },
 ]
 
 /** A free-standing (not-yet-extruded) sketch's row: Push/Pull primary (it's
- * the verb that turns the sketch into a real Object), then the transform
- * trio Move/Rotate/Scale (MoveTool/RotateTool/ScaleTool all already handle
- * `NodeRef.kind === 'sketch'` — "sketches are first-class interactable"),
- * then Erase. Same verb ids as the other rows so `menuActionRef` dispatch
- * and `activeToolId` highlighting need no special-casing for this context. */
+ * the verb that turns the sketch into a real Object), then the other verbs
+ * that turn a drawing into a solid — Revolve and Loft — and Follow Me, the
+ * one SketchUp users expect. Move/Rotate follow (MoveTool/RotateTool both
+ * already handle `NodeRef.kind === 'sketch'` — "sketches are first-class
+ * interactable"); Scale stays one key away. Erase is last. Same verb ids as
+ * the other rows so `menuActionRef` dispatch and `activeToolId` highlighting
+ * need no special-casing for this context. */
 const SKETCH_VERBS: DockVerb[] = [
   toolVerb('tool-pushpull'),
+  toolVerb('tool-revolve'),
+  toolVerb('tool-loft'),
+  toolVerb('tool-follow-me'),
   toolVerb('tool-move'),
   toolVerb('tool-rotate'),
-  toolVerb('tool-scale'),
   { id: 'edit-delete', label: msg`Erase` },
 ]
 
@@ -172,13 +196,14 @@ const SKETCH_VERBS: DockVerb[] = [
  * Whether a verb is actually usable given how the dock arrived at its
  * context. When the dock shows the sketch row only because the cursor is
  * HOVERING a sketch region (nothing is selected — `hoverPreviewOnly`), the
- * only verb that genuinely acts on the hovered region from a click-through
- * is Push/Pull; Move/Rotate/Scale/Erase all need the sketch to actually be
- * selected first, so they render disabled in the preview. With a real
- * selection (hoverPreviewOnly = false) every verb is enabled.
+ * verbs that genuinely act on the hovered region from a click-through are
+ * Push/Pull, Revolve, and Loft (each starts by clicking a shape); Follow Me
+ * needs a path first, and Move/Rotate/Erase need the sketch to actually be
+ * selected, so they render disabled in the preview. With a real selection
+ * (hoverPreviewOnly = false) every verb is enabled.
  */
 export function isDockVerbEnabled(verb: DockVerb, hoverPreviewOnly: boolean): boolean {
-  return !hoverPreviewOnly || verb.id === 'tool-pushpull'
+  return !hoverPreviewOnly || verb.id === 'tool-pushpull' || verb.id === 'tool-revolve' || verb.id === 'tool-loft'
 }
 
 /**
@@ -193,13 +218,37 @@ export interface DockGates {
   canGroup: boolean
   /** ≥1 sibling object/group/instance, top level (Object ▸ Make Component). */
   canMakeComponent: boolean
+  /** The selection is a valid boolean operand set (Object ▸ Union / Subtract /
+   * Intersect). Optional so call sites that predate the multi row's boolean
+   * chips keep compiling; omitted is treated as false (hidden). */
+  canBoolean?: boolean
   /** Whether the platform has a working library backend
    * (`libraryStore().available()`) — hides Save to Library when false.
    * Optional (unlike the two gates above) so call sites that predate the
    * Library effort keep compiling unchanged; omitted is treated as false
    * (hidden), matching the dock's "an inapplicable verb is noise" rule. */
   canSaveToLibrary?: boolean
+  /** The selection is one placement of a linked set: the dock offers the
+   * copy actions in place of Make Unique. Optional like `canSaveToLibrary`. */
+  canUnlink?: boolean
+  /** More than one placement shares the set (Unlink all makes sense). */
+  canUnlinkAll?: boolean
+  /** What the linked set is, for the chip: an Object or a Group, never "copies". */
+  linkedKind?: 'object' | 'group' | null
+  /** What a placement of a linked wrapper reads as, a set of one included: the chip says OBJECT or GROUP, never COMPNT. */
+  presentedKind?: 'object' | 'group' | null
+  /** Something unlocked is selected: the dock offers Lock. Optional like the
+   * gates above; omitted is treated as false (hidden). */
+  canLock?: boolean
+  /** Something locked is selected: the dock offers Unlock. When it is ALL
+   * that is selected (nothing left to lock), the row shrinks to Unlock and
+   * the verbs a lock leaves open, since the rest would only be refused. */
+  canUnlock?: boolean
 }
+
+/** The verbs a fully locked selection can still use: copying it out and the
+ * way off a shared shape (Make Unique works on a locked copy). */
+const OPEN_ON_LOCKED: ReadonlySet<string> = new Set(['make-unique', 'edit-unlink', 'save-to-library'])
 
 /** The curated, ordered verb list for a context — first item is primary.
  * `gates` (when given) filters out the structural verbs that don't apply to
@@ -210,23 +259,45 @@ export function dockVerbsFor(context: DockContext, gates?: DockGates): DockVerb[
       case 'empty': return EMPTY_VERBS
       case 'object': return OBJECT_VERBS
       case 'group': return GROUP_VERBS
-      case 'instance': return INSTANCE_VERBS
+      case 'instance':
+        if (gates?.canUnlink === true) return LINKED_COPY_VERBS
+        return gates?.presentedKind != null ? SINGLE_WRAPPER_VERBS : INSTANCE_VERBS
       case 'multi': return MULTI_VERBS
       case 'sketch': return SKETCH_VERBS
     }
   })()
-  if (gates === undefined) return verbs
-  return verbs.filter((v) => {
+  // The Preview wall: a chip (or the command it runs) this build withholds is
+  // not offered, gates or no gates.
+  const offered = verbs.filter((v) => chipAllowed(v.id) && actionAllowed(v.id))
+  if (gates === undefined) return offered
+  // One lock slot: Lock while anything selected can still be locked, else
+  // Unlock. A selection that is all locked keeps only what a lock leaves open.
+  const allLocked = gates.canUnlock === true && gates.canLock !== true
+  const lockVerb: DockVerb | null = gates.canLock === true
+    ? { id: 'edit-lock', label: msg`Lock` }
+    : gates.canUnlock === true
+      ? { id: 'edit-unlock-selected', label: msg`Unlock` }
+      : null
+  const gated = offered.filter((v) => {
     if (v.id === 'edit-group') return gates.canGroup
     if (v.id === 'edit-make-component') return gates.canMakeComponent
+    if (v.id === 'edit-union' || v.id === 'edit-subtract' || v.id === 'edit-intersect') return gates.canBoolean ?? false
     if (v.id === 'save-to-library') return gates.canSaveToLibrary ?? false
+    if (v.id === 'edit-unlink-all') return gates.canUnlinkAll ?? false
     return true
   })
+  if (lockVerb === null || context === 'empty' || context === 'sketch') return gated
+  if (allLocked) return [lockVerb, ...gated.filter((v) => OPEN_ON_LOCKED.has(v.id))]
+  // Ahead of Erase (destructive-verb-last), else at the end of the row.
+  const at = gated.findIndex((v) => v.id === 'edit-delete')
+  return at < 0 ? [...gated, lockVerb] : [...gated.slice(0, at), lockVerb, ...gated.slice(at)]
 }
 
 /** Display label for the context chip (`FACE`/`EDGE`/`COMPNT` in the spec's
  * literal terms — Hew's rescoped equivalents below). */
-export function dockChipLabel(context: DockContext): string {
+export function dockChipLabel(context: DockContext, linkedKind: 'object' | 'group' | null = null): string {
+  // A placement of a linked set reads as the Object (or Group) it is.
+  if (context === 'instance' && linkedKind !== null) context = linkedKind
   switch (context) {
     case 'empty': return t({ comment: 'Short uppercase chip on the contextual dock naming what is selected', message: 'DRAW' })
     case 'object': return t({ comment: 'Short uppercase chip on the contextual dock naming what is selected', message: 'OBJECT' })

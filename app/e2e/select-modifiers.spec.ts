@@ -269,7 +269,7 @@ test('Edit menu: Select None and Invert Selection, plus the Ctrl+Shift+A binding
   await modClick(page, await pagePoint(page, aFront), {})
   expect(await selIds(page)).toEqual([a])
   await page.waitForTimeout(100)
-  await page.keyboard.press('Control+Shift+A')
+  await page.keyboard.press('ControlOrMeta+Shift+A')
   expect(await selIds(page)).toEqual([])
 })
 

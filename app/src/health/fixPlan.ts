@@ -14,19 +14,22 @@
  * the person ticked or unticked it under "Choose for each item". Leaving an
  * item writes nothing. Command order: split shapes first (close the seams
  * between the pieces, then delete or keep the inside walls), then openings
- * (close every opening), then flat panels (add thickness). Curved sheets and
- * "can't be closed" items never produce a command.
+ * (close every opening), then Mend (items that need mending and have
+ * something to mend), then flat panels (add thickness). Curved sheets and
+ * items with nothing to mend never produce a command.
  */
 import { i18n } from '@lingui/core'
 import { classifyRow, openReason, rowClass, rowDisplayName, rowPlacements, splitFamilySet, type HealthReport, type HealthRow } from './healthReport'
 import {
   capOp,
   deleteFacesOp,
+  rejoinSolidOp,
   thickenOp,
   type BatchOp,
   type BatchOptions,
 } from './healthBatch'
-import { SPLIT_PIECE_LEFT, WIZARD, rowDetail, type KindKey, type WizardScope } from './healthCopy'
+import { MEND, SPLIT_PIECE_LEFT, WIZARD, rowDetail, scopeIsPicked, type KindKey, type WizardScope } from './healthCopy'
+import { DEFAULT_MEND_PLAN, hasMendWork, mendCandidate, hasWarpedHoles, mendOp, type MendCensus } from './mend'
 import { defaultThicknessText, parseThickness, type ThickenSide } from './thickenSettings'
 
 export { classifyRow }
@@ -44,6 +47,9 @@ export interface FixItem {
   copies: number
   /** Index into `HealthReport.families` for a split shape. */
   family: number | null
+  /** What Mend would do to a "needs mending" item; null when it has
+   *  nothing to mend (or the census could not be read). */
+  mend: MendCensus | null
 }
 
 /** The wizard's pages, in order (the overview and the ready/done pages aside). */
@@ -62,7 +68,7 @@ export interface FixPlan {
 }
 
 /** Build the plan from a report. */
-export function buildPlan(report: HealthReport): FixPlan {
+export function buildPlan(report: HealthReport, census?: (row: HealthRow) => MendCensus | null): FixPlan {
   const items: Record<KindKey, FixItem[]> = { openings: [], split: [], flatPanels: [], curvedSheets: [], closerLook: [] }
   const families = new Map<number, HealthRow[]>()
   // A split shape needs a piece besides its walls; a family left with only
@@ -74,6 +80,8 @@ export function buildPlan(report: HealthReport): FixPlan {
   }
   let fix = 0
   for (const row of report.rows) {
+    // A closed object listed only for its zero-area faces is not something to make solid.
+    if (row.verdict.kind === 'solid') continue
     if (rowClass(row) === 'open') fix += 1
     const kind = classifyRow(row, row.family !== null && live.has(row.family))
     if (kind === 'split') {
@@ -82,6 +90,10 @@ export function buildPlan(report: HealthReport): FixPlan {
       else list.push(row)
       continue
     }
+    const found =
+      kind === 'closerLook' && census !== undefined && (mendCandidate(row, false) || hasWarpedHoles(row))
+        ? census(row)
+        : null
     items[kind].push({
       key: row.object.toString(),
       kind,
@@ -89,6 +101,7 @@ export function buildPlan(report: HealthReport): FixPlan {
       name: rowDisplayName(row),
       copies: rowPlacements(row),
       family: null,
+      mend: found !== null && hasMendWork(found, DEFAULT_MEND_PLAN) ? found : null,
     })
   }
   for (const [family, rows] of [...families.entries()].sort((a, b) => a[0] - b[0])) {
@@ -99,6 +112,7 @@ export function buildPlan(report: HealthReport): FixPlan {
       name: rowDisplayName(rows[0]),
       copies: Math.max(...rows.map(rowPlacements)),
       family,
+      mend: null,
     })
   }
   const objects = report.counts.objects
@@ -119,8 +133,10 @@ export function pagesWithItems(plan: FixPlan): KindKey[] {
 /** The person's choice on every page. */
 export interface FixChoices {
   openings: 'close' | 'leave'
-  split: 'rejoin' | 'keepWalls' | 'leave'
+  split: 'rejoin' | 'rejoinSolid' | 'keepWalls' | 'leave'
   flatPanels: 'keep' | 'thicken'
+  /** "Needs mending": Mend what has something to mend, or leave it. */
+  mend: 'mend' | 'leave'
   thickness: { text: string; side: ThickenSide }
   /**
    * "Choose for each item": item key → make it solid (true) or leave it
@@ -136,9 +152,10 @@ export interface FixChoices {
  */
 export function defaultChoices(scope: WizardScope = 'model'): FixChoices {
   return {
-    openings: scope === 'selection' ? 'close' : 'leave',
+    openings: scopeIsPicked(scope) ? 'close' : 'leave',
     split: 'rejoin',
     flatPanels: 'keep',
+    mend: 'mend',
     thickness: { text: defaultThicknessText(), side: 'front' },
     perItem: new Map(),
   }
@@ -153,15 +170,17 @@ export function pageActs(kind: KindKey, choices: FixChoices): boolean {
       return choices.split !== 'leave'
     case 'flatPanels':
       return choices.flatPanels === 'thicken'
-    case 'curvedSheets':
     case 'closerLook':
+      return choices.mend === 'mend'
+    case 'curvedSheets':
       return false
   }
 }
 
 /** Whether `item` will be made solid: its own tick, else its page's choice. */
 export function itemActs(item: FixItem, choices: FixChoices): boolean {
-  if (item.kind === 'curvedSheets' || item.kind === 'closerLook') return false
+  if (item.kind === 'curvedSheets') return false
+  if (item.kind === 'closerLook' && item.mend === null) return false
   return choices.perItem.get(item.key) ?? pageActs(item.kind, choices)
 }
 
@@ -200,7 +219,12 @@ const CHOOSABLE: KindKey[] = ['openings', 'split', 'flatPanels']
 
 /** How many items the person's choices leave as they are (openings, split shapes, flat panels). */
 export function leftByChoice(plan: FixPlan, choices: FixChoices): number {
-  return CHOOSABLE.reduce((n, kind) => n + plan.items[kind].length - acting(plan, choices, kind).length, 0)
+  const mendable = plan.items.closerLook.filter((i) => i.mend !== null)
+  return (
+    CHOOSABLE.reduce((n, kind) => n + plan.items[kind].length - acting(plan, choices, kind).length, 0) +
+    mendable.length -
+    acting(plan, choices, 'closerLook').length
+  )
 }
 
 /** How many listed items stay as they are, by choice or because Hew can't make them solid. */
@@ -239,6 +263,12 @@ export function planCommands(plan: FixPlan, choices: FixChoices): FixCommands {
   const keepWalls = choices.split === 'keepWalls'
   const walls: BatchOp[] = []
   for (const item of acting(plan, choices, 'split')) {
+    // One solid: a single command carries the whole family; the kernel caps
+    // the seams, removes the walls, and unions in one step.
+    if (choices.split === 'rejoinSolid') {
+      ops.push(rejoinSolidOp(item.rows))
+      continue
+    }
     // A split shape's pieces are every member that is not a flat wall; each
     // closes only where it meets another piece, so openings the shape was
     // drawn with stay open.
@@ -259,9 +289,14 @@ export function planCommands(plan: FixPlan, choices: FixChoices): FixCommands {
       }
     }
   }
+  // Rejoins are addressed by family index, and one that runs may shift the
+  // indices after it: run the highest index first so the rest still point at
+  // their own shapes.
+  if (choices.split === 'rejoinSolid') ops.sort((a, b) => (b.params?.family as number) - (a.params?.family as number))
   ops.push(...walls)
 
   for (const item of acting(plan, choices, 'openings')) ops.push(capOp(item.rows[0]))
+  for (const item of acting(plan, choices, 'closerLook')) ops.push(mendOp(item.rows[0], DEFAULT_MEND_PLAN))
 
   // oxlint-disable-next-line lingui/no-unlocalized-strings -- KindKey identifiers, not copy
   const panels = acting(plan, choices, 'flatPanels')
@@ -293,8 +328,16 @@ export function readySentences(plan: FixPlan, choices: FixChoices): string[] {
   const openings = acting(plan, choices, 'openings')
   // oxlint-disable-next-line lingui/no-unlocalized-strings -- KindKey identifiers, not copy
   const panels = acting(plan, choices, 'flatPanels')
-  if (split.length > 0) out.push(WIZARD.ready.rejoin(split.length, choices.split === 'keepWalls'))
+  if (split.length > 0) {
+    out.push(
+      choices.split === 'rejoinSolid'
+        ? WIZARD.ready.rejoinSolid(split.length)
+        : WIZARD.ready.rejoin(split.length, choices.split === 'keepWalls'),
+    )
+  }
   if (openings.length > 0) out.push(WIZARD.ready.close(openings.length))
+  const mending = acting(plan, choices, 'closerLook')
+  if (mending.length > 0) out.push(MEND.readyLine(mending.length))
   if (panels.length > 0) out.push(WIZARD.ready.thicken(panels.length, choices.thickness.text.trim()))
   if (out.length === 0) return [WIZARD.ready.nothing]
   const left = leftTotal(plan, choices)

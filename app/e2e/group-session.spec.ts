@@ -158,7 +158,7 @@ test('group session: double-click in, draw a circle on a member face, Push/Pull 
   // posture, no bake/pose involved (unlike a component session).
   expect(await page.evaluate((id) => window.__hew_test!.getObjectBounds(id), setup.box))
     .toEqual([0, 0, 0, 2, 1, 1])
-  const hashAfterOpen = await page.evaluate(() => window.__hew_test!.getStateHash())
+  const hashAfterOpen = await page.evaluate(() => window.__hew_test!.getModelStateHash())
 
   // ---- 2. Draw a circle on the TOP member face — a real two-click Circle
   // tool gesture (center, then a rim point), the same pattern
@@ -166,7 +166,7 @@ test('group session: double-click in, draw a circle on a member face, Push/Pull 
   await page.keyboard.press('c')
   await clickWorld(page, ctx, 1, 0.5, 1) // center
   await clickWorld(page, ctx, 1.3, 0.5, 1) // rim point (radius 0.3)
-  const hashAfterCircle = await page.evaluate(() => window.__hew_test!.getStateHash())
+  const hashAfterCircle = await page.evaluate(() => window.__hew_test!.getModelStateHash())
   expect(hashAfterCircle).not.toBe(hashAfterOpen)
 
   // ---- 3. Push/Pull the circle's imprinted sub-face DOWN, clean through
@@ -179,7 +179,7 @@ test('group session: double-click in, draw a circle on a member face, Push/Pull 
   // genuinely top-level for the session's duration.
   await page.keyboard.press('p')
   await dragWorld(page, ctx, [1, 0.5, 1], [1, 0.5, -0.5])
-  const hashAfterThroughCut = await page.evaluate(() => window.__hew_test!.getStateHash())
+  const hashAfterThroughCut = await page.evaluate(() => window.__hew_test!.getModelStateHash())
   expect(hashAfterThroughCut).not.toBe(hashAfterCircle)
   // The through-cut consumed the original object and minted a fresh one in
   // its place — still exactly one live world object (a hole punched clean

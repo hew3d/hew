@@ -1,0 +1,158 @@
+[
+  {
+    "note": "whitespace runs become one space; ends trimmed",
+    "in": "  a \t\n b  ",
+    "max": 64,
+    "out": "a b"
+  },
+  {
+    "note": "U+0085 is whitespace, not removed",
+    "in": "a\u0085b",
+    "max": 64,
+    "out": "a b"
+  },
+  {
+    "note": "no-break and ideographic spaces are whitespace",
+    "in": "a\u00a0\u3000b",
+    "max": 64,
+    "out": "a b"
+  },
+  {
+    "note": "line and paragraph separators are whitespace",
+    "in": "a\u2028\u2029b",
+    "max": 64,
+    "out": "a b"
+  },
+  {
+    "note": "leading and trailing whitespace vanish",
+    "in": "\u0085x\u0085",
+    "max": 64,
+    "out": "x"
+  },
+  {
+    "note": "other control characters are removed",
+    "in": "a\u0007b\u001bc\u007fd",
+    "max": 64,
+    "out": "abcd"
+  },
+  {
+    "note": "bidi controls are removed",
+    "in": "x\u202ey\u2066z\u2069",
+    "max": 64,
+    "out": "xyz"
+  },
+  {
+    "note": "zero-width characters are removed",
+    "in": "\u200b\u200c\u200d\ufeff",
+    "max": 64,
+    "out": ""
+  },
+  {
+    "note": "soft hyphen is removed",
+    "in": "a\u00adb",
+    "max": 64,
+    "out": "ab"
+  },
+  {
+    "note": "braille blank is removed",
+    "in": "a\u2800b",
+    "max": 64,
+    "out": "ab"
+  },
+  {
+    "note": "Hangul fillers are removed",
+    "in": "a\u3164b\u115fc\u1160d\uffa0e",
+    "max": 64,
+    "out": "abcde"
+  },
+  {
+    "note": "Arabic, Syriac and Mongolian format characters are removed",
+    "in": "\u0600\u0605a\u061c\u06dd\u070f\u08e2\u180eb",
+    "max": 64,
+    "out": "ab"
+  },
+  {
+    "note": "variation selectors are removed",
+    "in": "a\ufe0fb\ufe00",
+    "max": 64,
+    "out": "ab"
+  },
+  {
+    "note": "tag characters are removed",
+    "in": "flag\udb40\udc67\udb40\udc7f",
+    "max": 64,
+    "out": "flag"
+  },
+  {
+    "note": "musical formatting characters are removed",
+    "in": "\ud834\udd73x",
+    "max": 64,
+    "out": "x"
+  },
+  {
+    "note": "at most two combining marks in a row",
+    "in": "e\u0301\u0302\u0303\u0304",
+    "max": 64,
+    "out": "e\u0301\u0302"
+  },
+  {
+    "note": "a removed character does not end a run of marks",
+    "in": "e\u0301\u200b\u0302\u0303",
+    "max": 64,
+    "out": "e\u0301\u0302"
+  },
+  {
+    "note": "whitespace ends a run of marks",
+    "in": "e\u0301\u0302 \u0303\u0304\u0305",
+    "max": 64,
+    "out": "e\u0301\u0302 \u0303\u0304"
+  },
+  {
+    "note": "every combining range counts toward one run",
+    "in": "a\u1ab0\u1dc0\u20d0\ufe20",
+    "max": 64,
+    "out": "a\u1ab0\u1dc0"
+  },
+  {
+    "note": "a leading mark is kept",
+    "in": "\u0300abc",
+    "max": 64,
+    "out": "\u0300abc"
+  },
+  {
+    "note": "other text is kept",
+    "in": "\u65e5\u672c\u8a9e\u306e\u540d\u524d",
+    "max": 64,
+    "out": "\u65e5\u672c\u8a9e\u306e\u540d\u524d"
+  },
+  {
+    "note": "at the cap nothing is cut",
+    "in": "abcde",
+    "max": 5,
+    "out": "abcde"
+  },
+  {
+    "note": "over the cap: max - 1 characters and an ellipsis",
+    "in": "abcdefghij",
+    "max": 5,
+    "out": "abcd\u2026"
+  },
+  {
+    "note": "a trailing space before the ellipsis is trimmed",
+    "in": "abc def",
+    "max": 5,
+    "out": "abc\u2026"
+  },
+  {
+    "note": "the cap counts characters, not bytes",
+    "in": "\u00e9\u00e9\u00e9\u00e9\u00e9\u00e9",
+    "max": 3,
+    "out": "\u00e9\u00e9\u2026"
+  },
+  {
+    "note": "a cap of 0 gives nothing",
+    "in": "abc",
+    "max": 0,
+    "out": ""
+  }
+]

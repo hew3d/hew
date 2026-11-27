@@ -1,0 +1,79 @@
+{
+  "title": "A 100 x 60 x 40 mm box",
+  "from": "The plainest case: every edge straight, every corner three edges at right angles.",
+  "build": [
+    {
+      "method": "hew.sketch.draw_rect",
+      "as": "base",
+      "params": {"plane": {"ground": true}, "corner_a": [0, 0, 0], "corner_b": ["100mm", "60mm", 0]}
+    },
+    {
+      "method": "hew.solid.extrude",
+      "as": "box",
+      "params": {"region": {"$ref": "base#/region_id"}, "distance": "40mm"}
+    }
+  ],
+  "cases": [
+    {
+      "id": "one-edge-round",
+      "note": "One top edge, along x. Limited by the shorter neighbor, the 40 mm wall.",
+      "method": "hew.solid.fillet",
+      "params": {"edges": [{"object": {"$ref": "box#/object_id"}, "at": ["50mm", 0, "40mm"]}]},
+      "sizes": ["0.1mm", "1mm", "5mm", "20mm", "39mm", "45mm", "70mm"],
+      "fits_to": "39mm",
+      "never_above": "40mm",
+      "volume": "less"
+    },
+    {
+      "id": "one-edge-chamfer",
+      "method": "hew.solid.chamfer",
+      "params": {"edges": [{"object": {"$ref": "box#/object_id"}, "at": ["50mm", 0, "40mm"]}]},
+      "sizes": ["0.1mm", "1mm", "5mm", "20mm", "39mm", "45mm", "70mm"],
+      "fits_to": "39mm",
+      "never_above": "40mm",
+      "volume": "less"
+    },
+    {
+      "id": "top-loop-round",
+      "note": "The four top edges as one loop, with four two-edge corners.",
+      "method": "hew.solid.fillet",
+      "params": {
+        "edges": [{"face": {"object": {"$ref": "box#/object_id"}, "at": ["50mm", "30mm", "40mm"]}}]
+      },
+      "sizes": ["0.1mm", "1mm", "5mm", "20mm", "29mm", "35mm"],
+      "fits_to": "29mm",
+      "never_above": "30mm",
+      "volume": "less"
+    },
+    {
+      "id": "top-loop-chamfer",
+      "method": "hew.solid.chamfer",
+      "params": {
+        "edges": [{"face": {"object": {"$ref": "box#/object_id"}, "at": ["50mm", "30mm", "40mm"]}}]
+      },
+      "sizes": ["0.1mm", "1mm", "5mm", "20mm", "29mm", "35mm"],
+      "fits_to": "29mm",
+      "never_above": "30mm",
+      "volume": "less"
+    },
+    {
+      "id": "all-edges-round",
+      "note": "All twelve edges: eight three-edge corners. Half the shortest side is the limit.",
+      "method": "hew.solid.fillet",
+      "params": {"edges": [{"object": {"$ref": "box#/object_id"}, "all": true}]},
+      "sizes": ["0.1mm", "1mm", "5mm", "10mm", "19mm", "25mm"],
+      "fits_to": "19mm",
+      "never_above": "20mm",
+      "volume": "less"
+    },
+    {
+      "id": "all-edges-chamfer",
+      "method": "hew.solid.chamfer",
+      "params": {"edges": [{"object": {"$ref": "box#/object_id"}, "all": true}]},
+      "sizes": ["0.1mm", "1mm", "5mm", "10mm", "19mm", "25mm"],
+      "fits_to": "19mm",
+      "never_above": "20mm",
+      "volume": "less"
+    }
+  ]
+}

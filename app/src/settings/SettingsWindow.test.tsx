@@ -14,6 +14,7 @@
 import { render, screen, fireEvent } from '@testing-library/react'
 import { describe, expect, it, beforeEach, afterEach, vi } from 'vitest'
 import { SettingsWindow } from './SettingsWindow'
+import { previewBuild } from '../preview'
 import { UnitsPane } from './UnitsPane'
 import { DebugPane } from './DebugPane'
 import { setLengthUnit, getLengthUnit, getPrecision, setPrecision } from './units'
@@ -32,7 +33,11 @@ describe('SettingsWindow', () => {
   it('shows the toolbar tab strip with one tab per pane', () => {
     render(<SettingsWindow />)
     const tabs = screen.getAllByRole('tab')
-    expect(tabs.map((t) => t.textContent)).toEqual(['Units', 'View', 'Theme', 'Language', 'Folders', 'Advanced', 'Debug'])
+    // The Preview tab exists in a preview build only (unit tests run as one).
+    expect(tabs.map((t) => t.textContent)).toEqual([
+      'Units', 'View', 'Controls', 'Editing', 'Theme', 'Language', 'Folders', 'Advanced', 'Debug',
+      ...(previewBuild ? ['Preview'] : []),
+    ])
   })
 
   it('shows the Units pane by default (Units tab selected)', () => {
@@ -40,6 +45,17 @@ describe('SettingsWindow', () => {
     expect(screen.getByRole('tab', { name: 'Units' })).toHaveAttribute('aria-selected', 'true')
     // Units pane content: the System row label.
     expect(screen.getByText('System')).toBeInTheDocument()
+  })
+
+  it('the_editing_tab_has_the_copies_are_linked_checkbox', () => {
+    render(<SettingsWindow />)
+    fireEvent.click(screen.getByRole('tab', { name: 'Editing' }))
+    const box = screen.getByRole('checkbox', { name: 'Copies are linked' })
+    expect(box).toBeChecked()
+    fireEvent.click(box)
+    expect(box).not.toBeChecked()
+    expect(screen.getByText(/you can still choose a linked copy each time/)).toBeInTheDocument()
+    fireEvent.click(box)
   })
 
   it('switches to the Debug pane when the Debug tab is clicked', () => {

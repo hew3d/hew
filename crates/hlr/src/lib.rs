@@ -614,7 +614,9 @@ pub fn line_drawing(
                 c: pos(t[2] as usize),
             });
         }
-        // Silhouettes: soft edges whose two facets face opposite ways. Edge
+        // Silhouettes: soft and tangent edges whose two facets face opposite
+        // ways (a tangent fillet rail is treated exactly like a soft seam).
+        // Edge
         // key = exact f32 endpoint bits (shared vertices come from the same
         // kernel point, so they match bit-for-bit) in DEFINITION space,
         // before posing.
@@ -622,7 +624,7 @@ pub fn line_drawing(
         // kernel-class determinism lint holds here too.
         let mut adjacency: std::collections::BTreeMap<[u32; 6], Vec<(usize, bool)>> =
             std::collections::BTreeMap::new();
-        if !m.soft_edge_positions.is_empty() {
+        if !m.soft_edge_positions.is_empty() || !m.tangent_edge_positions.is_empty() {
             let raw = |i: usize| -> [u32; 3] {
                 [
                     m.positions[i * 3].to_bits(),
@@ -652,7 +654,7 @@ pub fn line_drawing(
                 }
             }
         }
-        for seg in m.edge_positions.chunks_exact(6) {
+        for seg in m.edge_positions.as_chunks::<6>().0 {
             let a = item
                 .pose
                 .apply_point(Point3::new(seg[0] as f64, seg[1] as f64, seg[2] as f64));
@@ -666,7 +668,13 @@ pub fn line_drawing(
                 sid: item.sid,
             });
         }
-        for seg in m.soft_edge_positions.chunks_exact(6) {
+        for seg in m
+            .soft_edge_positions
+            .as_chunks::<6>()
+            .0
+            .iter()
+            .chain(m.tangent_edge_positions.as_chunks::<6>().0.iter())
+        {
             let ka = [seg[0].to_bits(), seg[1].to_bits(), seg[2].to_bits()];
             let kb = [seg[3].to_bits(), seg[4].to_bits(), seg[5].to_bits()];
             let kind = match adjacency.get(&edge_key(ka, kb)) {

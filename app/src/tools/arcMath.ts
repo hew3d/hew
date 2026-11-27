@@ -155,6 +155,18 @@ export function arcSegmentCount(sweep: number, radius: number): number {
 }
 
 /**
+ * Facets across an arc of sweep `phi` radians at `radius` — the drawing
+ * rule written as `arcSegments(radius, phi)`, the port-for-port twin of the
+ * kernel API's `arc_segments`: `max(2, ceil(segmentsPerTurn(radius) · |phi| / 2π))`.
+ * The Fillet tool uses it for the default facet count of a round, with
+ * `phi = π − θ` for an edge of dihedral θ. `arcMath.test.ts` pins the same
+ * table as the Rust side.
+ */
+export function arcSegments(radius: number, phi: number): number {
+  return arcSegmentCount(phi, radius)
+}
+
+/**
  * Faceted polyline for the arc a→b with signed sagitta `s`, in 2D plane
  * coordinates. Returns `arcSegmentCount(sweep) + 1` points; the first point
  * IS `a` and the last IS `b` (exact copies — no float drift at the joints).

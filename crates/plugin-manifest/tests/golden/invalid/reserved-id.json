@@ -1,0 +1,8 @@
+{
+  "manifest": 1,
+  "id": "hew.cutlist",
+  "name": "Minimal",
+  "version": "1.0.0",
+  "api": 1,
+  "main": "main.js"
+}

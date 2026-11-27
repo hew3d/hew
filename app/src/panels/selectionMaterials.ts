@@ -7,9 +7,11 @@
  * over a selection:
  *   - an Object contributes its own;
  *   - a Group contributes the union over its members, recursively;
- *   - a component instance contributes the union over its definition's
- *     expanded leaf Objects (nested member instances and member groups
- *     already descended by `instance_expanded_members`).
+ *   - a component instance contributes the materials its placements pass
+ *     down (its own, and a nested placement's own — what unpainted member
+ *     faces show, `instance_expanded_inherited`), then the union over its
+ *     definition's expanded leaf Objects (nested member instances and
+ *     member groups already descended by `instance_expanded_members`).
  * First-seen order, each material once. A Sketch or other kind adds nothing.
  *
  * Hidden contents count: Object Info describes the object, not what is
@@ -20,17 +22,21 @@
 import type { Scene as WasmScene } from '../wasm/loader'
 import { nodeRefFromJs, type NodeRef } from './treeModel'
 
+/** `u64::MAX`, the kernel's "no material" sentinel. */
+const NO_MATERIAL = 0xffff_ffff_ffff_ffffn
+
 export function selectionMaterials(scene: WasmScene, nodes: readonly NodeRef[]): bigint[] {
   const seen = new Set<bigint>()
   const out: bigint[] = []
   const visitedGroups = new Set<bigint>()
-  const addObject = (id: bigint) => {
-    for (const m of scene.object_materials(id)) {
-      if (!seen.has(m)) {
-        seen.add(m)
-        out.push(m)
-      }
+  const add = (m: bigint) => {
+    if (!seen.has(m)) {
+      seen.add(m)
+      out.push(m)
     }
+  }
+  const addObject = (id: bigint) => {
+    for (const m of scene.object_materials(id)) add(m)
   }
   const walk = (node: NodeRef) => {
     if (node.kind === 'object') {
@@ -40,6 +46,9 @@ export function selectionMaterials(scene: WasmScene, nodes: readonly NodeRef[]):
       visitedGroups.add(node.id)
       for (const child of scene.group_members(node.id)) walk(nodeRefFromJs(child))
     } else if (node.kind === 'instance') {
+      for (const m of scene.instance_expanded_inherited(node.id)) {
+        if (m !== NO_MATERIAL) add(m)
+      }
       for (const o of scene.instance_expanded_members(node.id)) addObject(o)
     }
   }
