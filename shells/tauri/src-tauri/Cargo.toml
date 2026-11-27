@@ -107,9 +107,9 @@ webkit2gtk = { version = "=2.0.2", features = ["v2_40"] }
 # IFileSaveDialog + IFileDialogCustomize + its event sink. Already in the
 # tree through tauri/wry at this version; listing it makes the shell API
 # callable from this crate.
-windows = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Com", "Win32_UI_Shell", "Win32_UI_Shell_Common"] }
-webview2-com = "0.38.2"
-windows-core = "0.61"
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_System_Com", "Win32_UI_Shell", "Win32_UI_Shell_Common"] }
+webview2-com = "0.39.1"
+windows-core = "0.62"
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     # hew --version/--help print to the parent console (AttachConsole).

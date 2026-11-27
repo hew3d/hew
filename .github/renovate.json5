@@ -214,8 +214,13 @@
     // copy of any of them splits the tree: `windows`/`windows-core`/
     // `webview2-com` would give src/print.rs types from a different
     // generation than tauri's, and `gtk` 0.19 cannot coexist with the pinned
-    // `webkit2gtk` (two crates claiming `links = "gdk-3"`). Hold them until
-    // tauri itself moves; the 'tauri' group above carries that bump.
+    // `webkit2gtk` (two crates claiming `links = "gdk-3"`). So Renovate does
+    // not propose them, not even when tauri moves: the 'tauri' group above
+    // does not match them. Any change that moves tauri or wry in the shell's
+    // Cargo.lock has to check these against the versions tauri and wry
+    // resolve to, and move them by hand in the same change. The
+    // pull-request gate builds the shell on Linux only, so a green run does
+    // not show that the Windows pins still match.
     {
       matchPackageNames: ['windows', 'windows-core', 'webview2-com', 'gtk', 'webkit2gtk'],
       matchManagers: ['cargo'],
