@@ -27,7 +27,7 @@ use http_body_util::BodyExt;
 use subtle::ConstantTimeEq;
 use tower_http::timeout::TimeoutLayer;
 
-use crate::store::{Store, is_valid_token};
+use crate::store::{Store, charge, is_valid_token};
 
 /// The relay contract version reported by the identity route. Bumped only
 /// for an incompatible change; the Worker reports the same number.
@@ -295,12 +295,6 @@ fn relay_full() -> Response {
     response
 }
 
-/// `PUT /drop`. Order matters and matches the Worker: auth first (an
-/// unauthorized upload costs a header read, nothing more), then the declared
-/// `Content-Length` against the per-drop cap (413) and the remaining total
-/// cap (503) — both BEFORE the body is read — then the body itself, capped
-/// while streaming so an oversized or lying upload never buffers past
-/// `max_bytes`, then the same two checks against the real length.
 /// Holds this upload's claim on the store's global byte budget while its
 /// body streams in. Dropped (releasing the claim) on any early return —
 /// oversize, bad frame, empty body — and defused with `mem::forget` only on
@@ -313,33 +307,37 @@ struct Reservation<'a> {
 }
 
 impl Reservation<'_> {
-    /// Grow geometrically, reserving the capacity before the allocation.
-    /// No Content-Length-controlled allocation, and no uncharged Vec slack.
-    fn grow(&mut self, buf: &mut Vec<u8>, required: usize, max_bytes: usize) -> bool {
+    /// Grow geometrically, up to `limit` (the declared length, else the
+    /// per-drop cap), reserving the buffer's charge before the allocation.
+    /// Nothing is allocated from a declared length alone, and the held charge
+    /// always covers the buffer's real capacity.
+    fn grow(&mut self, buf: &mut Vec<u8>, required: usize, limit: usize) -> bool {
         if required <= buf.capacity() {
             return true;
         }
         let target = required
             .checked_next_power_of_two()
-            .unwrap_or(max_bytes)
-            .min(max_bytes);
-        let additional = target - buf.capacity();
-        if !self.store.reserve(additional) {
+            .unwrap_or(limit)
+            .min(limit)
+            .max(required);
+        if !self.hold(charge(target)) {
             return false;
         }
-        self.held += additional;
         if buf.try_reserve_exact(target - buf.len()).is_err() {
             return false;
         }
         // reserve_exact may provide more capacity than requested. Account
         // that too, or refuse the upload and release the entire buffer.
-        let excess = buf.capacity().saturating_sub(target);
-        if excess > 0 {
-            if !self.store.reserve(excess) {
-                return false;
-            }
-            self.held += excess;
+        self.hold(charge(buf.capacity()))
+    }
+
+    /// Raise the claim to `wanted` bytes. `false` leaves it unchanged.
+    fn hold(&mut self, wanted: usize) -> bool {
+        let additional = wanted.saturating_sub(self.held);
+        if !self.store.reserve(additional) {
+            return false;
         }
+        self.held += additional;
         true
     }
 }
@@ -349,10 +347,19 @@ impl Drop for Reservation<'_> {
         if self.held > 0 {
             self.store.release(self.held);
         }
-        self.store.release_upload();
     }
 }
 
+/// `PUT /drop`. Order matters and matches the Worker: auth first (an
+/// unauthorized upload costs a header read, nothing more), then the declared
+/// `Content-Length` against the per-drop cap (413) and the remaining total
+/// cap (503) — both BEFORE the body is read — then the body itself, capped
+/// while streaming so an oversized or lying upload never buffers past
+/// `max_bytes`, then the same two checks against the real length.
+///
+/// Nothing is claimed from the store until body data arrives: a request that
+/// is only headers, whatever length it declares, takes no budget from anyone
+/// else.
 async fn put(state: &AppState, req: Request) -> (Response, usize) {
     if !upload_authorized(req.headers(), state.upload_key.as_deref()) {
         let response = json(
@@ -375,20 +382,17 @@ async fn put(state: &AppState, req: Request) -> (Response, usize) {
             );
             return (reject_early(response, req.into_body(), state.max_bytes), 0);
         }
-        if declared > state.store.remaining() as u64 {
+        // `declared <= max_bytes`, so it fits a usize. A declared length of
+        // zero costs nothing and falls through to `400 empty body` even on a
+        // full relay (the desktop's upload-key probe relies on that answer).
+        if charge(declared as usize) > state.store.remaining() {
             return (
                 reject_early(relay_full(), req.into_body(), state.max_bytes),
                 0,
             );
         }
     }
-
-    if !state.store.begin_upload() {
-        return (
-            reject_early(relay_full(), req.into_body(), state.max_bytes),
-            0,
-        );
-    }
+    let limit = declared.map_or(state.max_bytes, |declared| declared as usize);
 
     // Read the body frame by frame, capping while streaming: an oversized
     // (or lying-length / chunked) upload never buffers past `max_bytes`,
@@ -431,7 +435,7 @@ async fn put(state: &AppState, req: Request) -> (Response, usize) {
                     }
                     // Claim the capacity (including spare growth room) before
                     // allocating it. Concurrent uploads share the same budget.
-                    if !reservation.grow(&mut buf, required, state.max_bytes) {
+                    if !reservation.grow(&mut buf, required, limit) {
                         return (reject_early(relay_full(), body, state.max_bytes), 0);
                     }
                     buf.extend_from_slice(data);
@@ -562,11 +566,76 @@ async fn handle(State(state): State<Arc<AppState>>, req: Request) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::MIN_DROP_CHARGE;
+    use hyper::body::Frame;
+    use std::collections::VecDeque;
+    use std::convert::Infallible;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
     use tower::ServiceExt;
+
+    /// The test relay's byte budget is four minimum charges.
+    const U: usize = MIN_DROP_CHARGE;
+
+    /// A body that yields `frames` one at a time with no size hint, like a
+    /// chunked upload, then ends — or, if `stall`, never does.
+    struct Frames {
+        frames: VecDeque<Bytes>,
+        stall: bool,
+    }
+
+    impl hyper::body::Body for Frames {
+        type Data = Bytes;
+        type Error = Infallible;
+
+        fn poll_frame(
+            mut self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+        ) -> Poll<Option<Result<Frame<Bytes>, Infallible>>> {
+            match self.frames.pop_front() {
+                Some(data) => Poll::Ready(Some(Ok(Frame::data(data)))),
+                None if self.stall => Poll::Pending,
+                None => Poll::Ready(None),
+            }
+        }
+    }
+
+    /// Starts a PUT whose body sends `frames` and then goes quiet, and lets
+    /// the handler run until it is waiting for more.
+    async fn stalled_put(
+        app: &Router,
+        declared: Option<usize>,
+        frames: Vec<Vec<u8>>,
+    ) -> tokio::task::JoinHandle<Response> {
+        let mut req = Request::builder().method(Method::PUT).uri("/drop");
+        if let Some(declared) = declared {
+            req = req.header(CONTENT_LENGTH, declared);
+        }
+        let body = Body::new(Frames {
+            frames: frames.into_iter().map(Bytes::from).collect(),
+            stall: true,
+        });
+        let app = app.clone();
+        let req = req.body(body).unwrap();
+        let task = tokio::spawn(async move { app.oneshot(req).await.unwrap() });
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        task
+    }
+
+    fn sized_state(max_bytes: usize, total: usize) -> Arc<AppState> {
+        Arc::new(AppState {
+            store: Arc::new(Store::new(total, Duration::from_secs(60))),
+            max_bytes,
+            allowed_origins: HashSet::new(),
+            upload_key: None,
+        })
+    }
 
     fn state(upload_key: Option<&str>) -> Arc<AppState> {
         Arc::new(AppState {
-            store: Arc::new(Store::new(64, Duration::from_secs(60))),
+            store: Arc::new(Store::new(4 * U, Duration::from_secs(60))),
             max_bytes: 16,
             allowed_origins: HashSet::from(["https://app.hew3d.com".to_owned()]),
             upload_key: upload_key.map(str::to_owned),
@@ -727,7 +796,7 @@ mod tests {
 
     #[tokio::test]
     async fn full_relay_is_503_with_retry_after() {
-        // Cap 64, max 16 → four full drops fill it.
+        // Each small drop costs the minimum charge, so four fill it.
         let app = router(state(None));
         let mut tokens = vec![];
         for _ in 0..4 {
@@ -779,7 +848,7 @@ mod tests {
         )
         .await;
         assert_eq!(res.status(), StatusCode::OK);
-        assert_eq!(state.store.remaining(), 63);
+        assert_eq!(state.store.remaining(), 3 * U);
     }
 
     #[tokio::test]
@@ -790,52 +859,154 @@ mod tests {
         let token = body_json(res).await["token"].as_str().unwrap().to_owned();
         let res = send(&app, Method::GET, &format!("/drop/{token}"), vec![], &[]).await;
         assert_eq!(res.status(), StatusCode::OK);
-        assert_eq!(state.store.remaining(), 48);
-        for _ in 0..1023 {
-            assert!(state.store.begin_upload());
-        }
-        assert!(!state.store.begin_upload());
+        assert_eq!(state.store.remaining(), 3 * U);
         let mut body = res.into_body();
         let bytes = body.frame().await.unwrap().unwrap().into_data().unwrap();
         let retained = bytes.clone();
         drop(body);
         drop(bytes);
         assert_eq!(retained.as_ref(), &[7; 16]);
-        assert_eq!(state.store.remaining(), 48);
+        assert_eq!(state.store.remaining(), 3 * U);
         drop(retained);
-        assert_eq!(state.store.remaining(), 64);
-        assert!(state.store.begin_upload());
+        assert_eq!(state.store.remaining(), 4 * U);
     }
 
     #[tokio::test]
-    async fn rejected_empty_uploads_release_their_metadata_slots() {
+    async fn uploads_without_body_data_hold_nothing() {
         let state = state(None);
         let app = router(Arc::clone(&state));
-        for _ in 0..1025 {
+        let mut waiting = Vec::new();
+        for i in 0..1100 {
+            // With and without a declared length.
+            let declared = (i % 2 == 0).then_some(16);
+            waiting.push(stalled_put(&app, declared, vec![]).await);
+        }
+        assert!(waiting.iter().all(|task| !task.is_finished()));
+        assert_eq!(state.store.remaining(), 4 * U);
+        let res = send(&app, Method::PUT, "/drop", vec![1], &[]).await;
+        assert_eq!(res.status(), StatusCode::OK);
+        for task in waiting {
+            task.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn a_partial_upload_is_charged_the_minimum_until_it_is_abandoned() {
+        let state = state(None);
+        let app = router(Arc::clone(&state));
+        let task = stalled_put(&app, Some(16), vec![vec![1]]).await;
+        assert_eq!(state.store.remaining(), 3 * U);
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert_eq!(state.store.remaining(), 4 * U);
+    }
+
+    #[tokio::test]
+    async fn empty_uploads_cost_nothing_even_on_a_full_relay() {
+        let state = state(None);
+        let app = router(Arc::clone(&state));
+        for _ in 0..8 {
             let res = send(&app, Method::PUT, "/drop", vec![], &[]).await;
             assert_eq!(res.status(), StatusCode::BAD_REQUEST);
         }
+        assert_eq!(state.store.remaining(), 4 * U);
+        assert!(state.store.reserve(4 * U));
+        // The desktop's upload-key probe expects this answer.
+        let res = send(
+            &app,
+            Method::PUT,
+            "/drop",
+            vec![],
+            &[("content-length", "0")],
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn tiny_uploads_are_charged_the_minimum() {
+        let state = state(None);
+        let app = router(Arc::clone(&state));
+        for _ in 0..4 {
+            let res = send(&app, Method::PUT, "/drop", vec![1], &[]).await;
+            assert_eq!(res.status(), StatusCode::OK);
+        }
+        assert_eq!(state.store.remaining(), 0);
         let res = send(&app, Method::PUT, "/drop", vec![1], &[]).await;
-        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[test]
     fn buffer_growth_reserves_spare_capacity_and_abort_releases_it() {
-        let state = state(None);
-        assert!(state.store.begin_upload());
+        let state = sized_state(16 * U, 16 * U);
         {
             let mut reservation = Reservation {
                 store: &state.store,
                 held: 0,
             };
             let mut buf = Vec::new();
-            assert!(reservation.grow(&mut buf, 3, 16));
-            buf.extend_from_slice(&[1, 2, 3]);
-            assert_eq!(state.store.remaining(), 60);
-            assert!(reservation.grow(&mut buf, 5, 16));
-            assert_eq!(state.store.remaining(), 56);
+            assert!(reservation.grow(&mut buf, 3 * U, 16 * U));
+            buf.resize(3 * U, 0);
+            assert_eq!(state.store.remaining(), 12 * U);
+            assert!(reservation.grow(&mut buf, 5 * U, 16 * U));
+            assert_eq!(state.store.remaining(), 8 * U);
         }
-        assert_eq!(state.store.remaining(), 64);
+        assert_eq!(state.store.remaining(), 16 * U);
+    }
+
+    /// 17 KiB documents against a 32 KiB per-drop cap and a 256 KiB budget:
+    /// the shape of 17 MiB documents on a default relay.
+    const KIB: usize = 1024;
+
+    #[tokio::test]
+    async fn an_upload_in_flight_never_holds_more_than_it_declared() {
+        let state = sized_state(32 * KIB, 256 * KIB);
+        let app = router(Arc::clone(&state));
+        // Fifteen of them, all one byte short of complete at once.
+        let mut waiting = Vec::new();
+        for _ in 0..15 {
+            let frames = vec![vec![0; 9 * KIB], vec![0; 8 * KIB - 1]];
+            waiting.push(stalled_put(&app, Some(17 * KIB), frames).await);
+        }
+        assert!(waiting.iter().all(|task| !task.is_finished()));
+        // 256 KiB less 15 * 17 KiB.
+        assert_eq!(state.store.remaining(), KIB);
+        for task in waiting {
+            task.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn stored_documents_are_charged_what_they_hold() {
+        let state = sized_state(32 * KIB, 256 * KIB);
+        let app = router(Arc::clone(&state));
+        // No declared length, so the buffer grows to 32 KiB before the end.
+        for n in 1..=14 {
+            let body = Body::new(Frames {
+                frames: [9, 8].map(|k| Bytes::from(vec![0; k * KIB])).into(),
+                stall: false,
+            });
+            let req = Request::builder()
+                .method(Method::PUT)
+                .uri("/drop")
+                .body(body)
+                .unwrap();
+            let res = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(res.status(), StatusCode::OK, "document {n}");
+            assert_eq!(state.store.remaining(), (256 - n * 17) * KIB);
+        }
+        // The fifteenth declares its length, as the desktop does, and fits
+        // in the 18 KiB left.
+        let res = send(
+            &app,
+            Method::PUT,
+            "/drop",
+            vec![0; 17 * KIB],
+            &[("content-length", &(17 * KIB).to_string())],
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(state.store.remaining(), KIB);
     }
 
     #[tokio::test]

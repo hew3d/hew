@@ -31,6 +31,7 @@
 #![allow(clippy::disallowed_types)]
 
 mod http;
+mod server;
 mod store;
 
 use std::collections::HashSet;
@@ -40,13 +41,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use clap::Parser;
-use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
-use hyper_util::server::conn::auto::Builder as ConnBuilder;
 use hyper_util::server::graceful::GracefulShutdown;
-use hyper_util::service::TowerToHyperService;
 
 use crate::http::AppState;
-use crate::store::Store;
+use crate::server::{Limits, spawn_connection};
+use crate::store::{MIN_DROP_CHARGE, Store};
 
 /// Per-drop cap, matching the Worker's `MAX_BYTES`.
 const DEFAULT_MAX_BYTES: usize = 32 * 1024 * 1024;
@@ -54,11 +53,6 @@ const DEFAULT_MAX_BYTES: usize = 32 * 1024 * 1024;
 const DEFAULT_MAX_TOTAL_BYTES: usize = 256 * 1024 * 1024;
 /// Matching the Worker's `TTL_MS`.
 const DEFAULT_TTL_SECS: u64 = 600;
-/// How long a connection may sit between the TCP accept (or the previous
-/// response, on keep-alive) and a complete request head. This is the
-/// slow-loris guard; the request-body/handler budget is `http.rs`'s
-/// `REQUEST_TIMEOUT`, which only starts once the head has been parsed.
-const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(15);
 /// How long graceful shutdown waits for in-flight requests before exiting.
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(10);
 
@@ -111,7 +105,8 @@ struct Config {
     #[arg(long, env = "HEW_RELAY_MAX_BYTES", default_value_t = DEFAULT_MAX_BYTES)]
     max_bytes: usize,
 
-    /// Total memory cap across all live drops, in bytes. A PUT that would
+    /// Memory budget for uploads in flight, live drops and responses being
+    /// sent, in bytes; each is charged at least 4 KiB. A PUT that would
     /// exceed it is refused with 503 {"error":"relay full"} + Retry-After —
     /// fail closed, never swap.
     #[arg(long, env = "HEW_RELAY_MAX_TOTAL_BYTES", default_value_t = DEFAULT_MAX_TOTAL_BYTES)]
@@ -131,6 +126,12 @@ impl Config {
             return Err(format!(
                 "--max-total-bytes ({}) must be at least --max-bytes ({}); otherwise no maximum-size drop could ever be stored",
                 self.max_total_bytes, self.max_bytes
+            ));
+        }
+        if self.max_total_bytes < MIN_DROP_CHARGE {
+            return Err(format!(
+                "--max-total-bytes ({}) must be at least {MIN_DROP_CHARGE}, the least one drop is charged",
+                self.max_total_bytes
             ));
         }
         if self.ttl_secs == 0 {
@@ -247,12 +248,8 @@ async fn main() {
         "hew-relay ready"
     );
 
-    // Accept loop over hyper-util rather than `axum::serve`: the latter
-    // installs no timer on the connection builder, which silently disables
-    // hyper's `header_read_timeout` — so a client could hold a socket open
-    // forever having sent half a request line. Each connection gets a timer
-    // and the header timeout here; the router's own TimeoutLayer bounds the
-    // rest of the request once the head is in.
+    // The accept loop is hand-rolled: `server::spawn_connection` sets each
+    // connection's limits.
     let router = http::router(Arc::clone(&state));
     let graceful = GracefulShutdown::new();
     let mut shutdown = pin!(shutdown_signal());
@@ -268,25 +265,7 @@ async fn main() {
                         continue;
                     }
                 };
-                let service = TowerToHyperService::new(router.clone());
-                let mut builder = ConnBuilder::new(TokioExecutor::new());
-                builder
-                    .http1()
-                    .timer(TokioTimer::new())
-                    .header_read_timeout(HEADER_READ_TIMEOUT);
-                builder.http2().timer(TokioTimer::new());
-                let conn = graceful.watch(
-                    builder
-                        .serve_connection(TokioIo::new(stream), service)
-                        .into_owned(),
-                );
-                tokio::spawn(async move {
-                    if let Err(err) = conn.await {
-                        // Client went away mid-request, malformed HTTP, the
-                        // header timeout — none of it is actionable here.
-                        tracing::debug!(error = %err, "connection ended with error");
-                    }
-                });
+                spawn_connection(stream, router.clone(), Limits::default(), &graceful);
             }
             _ = &mut shutdown => break,
         }
@@ -361,6 +340,11 @@ mod tests {
         );
         assert!(
             Config::parse_from(["hew-relay", "--max-bytes", "10", "--max-total-bytes", "5"])
+                .validate()
+                .is_err()
+        );
+        assert!(
+            Config::parse_from(["hew-relay", "--max-bytes", "10", "--max-total-bytes", "100"])
                 .validate()
                 .is_err()
         );
