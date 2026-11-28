@@ -579,16 +579,167 @@ fn load_window_state(app: &tauri::AppHandle) -> Option<WindowState> {
     serde_json::from_str(&text).ok()
 }
 
-/// Write `text` to `path` atomically (temp file + rename), so a crash
-/// mid-write can never leave a half-written file — the reader sees either
-/// the old content or the new, never a torn one.
+/// Whose file [`write_atomic_with`] is replacing.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WriteKind {
+    /// The app's own state (window geometry, recovery snapshots). A new
+    /// file is the owner's alone, and the replacement is atomic or nothing.
+    Private,
+    /// A file the user saves. A new one gets the permissions any new file
+    /// gets, and an existing one is still saved when its directory refuses
+    /// a temp file.
+    Document,
+}
+
+/// Write the app's own state beside the destination, then replace it in one
+/// rename. A unique create-new temp file keeps concurrent writers from
+/// sharing scratch space.
 fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    let tmp = path.with_extension(match path.extension().and_then(|e| e.to_str()) {
-        Some(ext) => format!("{ext}.tmp"),
-        None => "tmp".to_string(),
-    });
-    std::fs::write(&tmp, bytes)?;
-    std::fs::rename(&tmp, path)
+    use std::io::Write;
+    write_atomic_with(path, WriteKind::Private, open_temp, |file| {
+        file.write_all(bytes)
+    })
+}
+
+/// Save a user's file, atomically wherever its directory allows that.
+fn write_document(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    write_atomic_with(path, WriteKind::Document, open_temp, |file| {
+        file.write_all(bytes)
+    })
+}
+
+fn open_temp(options: &std::fs::OpenOptions, temp: &Path) -> std::io::Result<std::fs::File> {
+    options.open(temp)
+}
+
+/// How much of the destination's name a temp file name repeats. File systems
+/// cap one name at 255 bytes or units, some at fewer (eCryptfs: about 143),
+/// so a long name has to be cut to leave room for the suffix.
+const TEMP_STEM_MAX_BYTES: usize = 100;
+
+/// The scratch name for replacing `name`. The process id and sequence number
+/// make it unique, so the stem is only there to say what it belongs to: a
+/// name that is not Unicode is converted lossily, and a long one is cut on a
+/// character boundary, which keeps the result valid for file systems that
+/// refuse malformed UTF-8.
+fn temp_file_name(name: &std::ffi::OsStr, pid: u32, seq: u64) -> String {
+    let name = name.to_string_lossy();
+    let mut end = name.len().min(TEMP_STEM_MAX_BYTES);
+    while !name.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}.{pid}.{seq}.tmp", &name[..end])
+}
+
+fn write_atomic_with(
+    path: &Path,
+    kind: WriteKind,
+    mut open_temp: impl FnMut(&std::fs::OpenOptions, &Path) -> std::io::Result<std::fs::File>,
+    write: impl FnOnce(&mut std::fs::File) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    use std::io::{Error, ErrorKind};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
+    let permissions = match std::fs::metadata(path) {
+        Ok(meta) => {
+            if !meta.is_file() {
+                return Err(Error::new(
+                    ErrorKind::InvalidInput,
+                    "destination is not a regular file",
+                ));
+            }
+            if meta.permissions().readonly() {
+                return Err(Error::new(
+                    ErrorKind::PermissionDenied,
+                    "destination is read-only",
+                ));
+            }
+            // A writable parent directory can permit rename over a file
+            // that this user cannot write directly (for example, another
+            // user's 0644 file). Match std::fs::write's access check without
+            // opening with truncate, before creating the replacement temp.
+            drop(std::fs::OpenOptions::new().write(true).open(path)?);
+            Some(meta.permissions())
+        }
+        Err(e) if e.kind() == ErrorKind::NotFound => {
+            match std::fs::symlink_metadata(path) {
+                // A dangling symlink is an existing path. Fail rather than
+                // replacing the link itself; also fail if the path appeared
+                // between the two metadata calls.
+                Ok(_) => return Err(e),
+                Err(e) if e.kind() == ErrorKind::NotFound => None,
+                Err(e) => return Err(e),
+            }
+        }
+        Err(e) => return Err(e),
+    };
+    let name = path
+        .file_name()
+        .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "destination has no file name"))?;
+    let mut writer = Some(write);
+    loop {
+        let temp = path.with_file_name(temp_file_name(
+            name,
+            std::process::id(),
+            NEXT_TEMP.fetch_add(1, Ordering::Relaxed),
+        ));
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            // A private existing document must never be copied into a temp
+            // that is readable under the process's usual 022 umask; its own
+            // mode is applied once the bytes are in. A new document asks
+            // for the ordinary 0666 and lets the OS apply the umask, which
+            // cannot be read without racing the process's other threads.
+            let new_document = kind == WriteKind::Document && permissions.is_none();
+            options.mode(if new_document { 0o666 } else { 0o600 });
+        }
+        let mut file = match open_temp(&options, &temp) {
+            Ok(file) => file,
+            Err(e) if e.kind() == ErrorKind::AlreadyExists => continue,
+            // A writable file in a directory that takes no new entries can
+            // still be saved, only not atomically: a write that fails part
+            // way leaves a partial file. Any other failure to create the
+            // temp file, a full disk above all, leaves the old file alone.
+            Err(e)
+                if kind == WriteKind::Document
+                    && permissions.is_some()
+                    && matches!(
+                        e.kind(),
+                        ErrorKind::PermissionDenied | ErrorKind::ReadOnlyFilesystem
+                    ) =>
+            {
+                let mut file = std::fs::OpenOptions::new()
+                    .write(true)
+                    .truncate(true)
+                    .open(path)?;
+                writer.take().expect("writer called once")(&mut file)?;
+                return file.sync_all();
+            }
+            Err(e) => return Err(e),
+        };
+        let write_result = (|| {
+            writer.take().expect("writer called once")(&mut file)?;
+            if let Some(permissions) = permissions {
+                file.set_permissions(permissions)?;
+            }
+            file.sync_all()
+        })();
+        drop(file);
+        let result = write_result.and_then(|()| {
+            // std::fs::rename replaces an existing file on Unix and Windows;
+            // the temp lives in the same directory, hence on the same volume.
+            std::fs::rename(&temp, path)
+        });
+        if result.is_err() {
+            let _ = std::fs::remove_file(&temp);
+        }
+        return result;
+    }
 }
 
 /// Minimum interval between unforced window-state writes; Moved/Resized fire
@@ -2358,18 +2509,18 @@ fn list_allowed(app: &tauri::AppHandle, dir: &Path) -> bool {
             .is_some_and(|p| approved.read_dirs.contains(p))
 }
 
-/// Whether `path` may be written: approved for write via a save dialog, an
-/// open pick (Save writes back to the opened file), a file association,
-/// drag-drop, or the recents list.
-fn write_allowed(app: &tauri::AppHandle, path: &Path) -> bool {
-    let Some(canon) = canonical_or_synthesized(path) else {
-        return false;
-    };
+/// Return the approved canonical write target. Resolving it once also keeps
+/// Save through a symlink aimed at its original target: renaming over the
+/// symlink itself would change the link rather than the document it opened.
+/// Approval comes from a save dialog, open pick, file association, drag-drop,
+/// or the recents list.
+fn write_allowed_target(app: &tauri::AppHandle, path: &Path) -> Option<PathBuf> {
+    let canon = canonical_or_synthesized(path)?;
     let state = app.state::<Mutex<ApprovedPaths>>();
     let Ok(approved) = state.lock() else {
-        return false;
+        return None;
     };
-    approved.write_files.contains(&canon)
+    approved.write_files.contains(&canon).then_some(canon)
 }
 
 /// Read a user-approved file and return its raw bytes.
@@ -2392,10 +2543,9 @@ fn read_file(app: tauri::AppHandle, path: String) -> Result<tauri::ipc::Response
 /// Write raw bytes to a user-approved file, creating or overwriting it.
 #[tauri::command]
 fn write_file(app: tauri::AppHandle, path: String, contents: Vec<u8>) -> Result<(), String> {
-    if !write_allowed(&app, Path::new(&path)) {
-        return Err(format!("write_file: {path:?} is not a user-approved path"));
-    }
-    std::fs::write(&path, &contents).map_err(|e| format!("write_file failed for {path:?}: {e}"))
+    let target = write_allowed_target(&app, Path::new(&path))
+        .ok_or_else(|| format!("write_file: {path:?} is not a user-approved path"))?;
+    write_document(&target, &contents).map_err(|e| format!("write_file failed for {path:?}: {e}"))
 }
 
 /// Percent-decode (the inverse of JS's `encodeURIComponent`) a string carried
@@ -2438,7 +2588,7 @@ fn percent_decode(s: &str) -> Result<String, String> {
 /// `relay_client.rs::relay_put`, the same pattern), so the destination path
 /// can't ride along as a normal argument — it comes in the `path` request
 /// header instead, percent-encoded by the caller. Gated by the exact same
-/// `write_allowed` approval check `write_file` uses, not a looser one: this
+/// `write_allowed_target` approval check `write_file` uses, not a looser one: this
 /// is still arbitrary-file-write from the webview's perspective if that
 /// check were skipped or reimplemented more permissively.
 #[tauri::command]
@@ -2458,12 +2608,9 @@ fn write_file_bytes(app: tauri::AppHandle, request: tauri::ipc::Request<'_>) -> 
         }
     };
 
-    if !write_allowed(&app, Path::new(&path)) {
-        return Err(format!(
-            "write_file_bytes: {path:?} is not a user-approved path"
-        ));
-    }
-    std::fs::write(&path, bytes).map_err(|e| format!("write_file_bytes failed for {path:?}: {e}"))
+    let target = write_allowed_target(&app, Path::new(&path))
+        .ok_or_else(|| format!("write_file_bytes: {path:?} is not a user-approved path"))?;
+    write_document(&target, bytes).map_err(|e| format!("write_file_bytes failed for {path:?}: {e}"))
 }
 
 /// List the direct children of a user-approved directory, returning their
@@ -5820,6 +5967,98 @@ mod tests {
     use super::*;
 
     #[test]
+    fn atomic_save_keeps_original_and_cleans_temp_after_partial_write_failure() {
+        use std::io::{Error, Write};
+        #[cfg(unix)]
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!(
+            "hew-atomic-save-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("document.hew");
+        std::fs::write(&path, b"original document").unwrap();
+        #[cfg(unix)]
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let result = write_atomic_with(&path, WriteKind::Document, open_temp, |file| {
+            file.write_all(b"partial")?;
+            #[cfg(unix)]
+            assert_eq!(file.metadata()?.permissions().mode() & 0o777, 0o600);
+            Err(Error::other("injected write failure"))
+        });
+
+        assert!(result.is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"original document");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_save_through_symlink_replaces_approved_target() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+
+        let dir = std::env::temp_dir().join(format!(
+            "hew-atomic-link-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        let target = dir.join("model.hew");
+        let link = dir.join("shortcut.hew");
+        std::fs::write(&target, b"old").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o640)).unwrap();
+        symlink(&target, &link).unwrap();
+
+        let approved_target = canonical_or_synthesized(&link).unwrap();
+        assert_eq!(approved_target, std::fs::canonicalize(&target).unwrap());
+        write_document(&approved_target, b"new").unwrap();
+
+        assert_eq!(std::fs::read_link(&link).unwrap(), target);
+        assert_eq!(std::fs::read(&target).unwrap(), b"new");
+        assert_eq!(
+            std::fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 2);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn atomic_save_does_not_replace_dangling_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let dir = std::env::temp_dir().join(format!(
+            "hew-atomic-dangling-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        let target = dir.join("missing.hew");
+        let link = dir.join("shortcut.hew");
+        symlink(&target, &link).unwrap();
+
+        assert!(write_document(&link, b"new").is_err());
+        assert_eq!(std::fs::read_link(&link).unwrap(), target);
+        assert!(!target.exists());
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn version_and_help_flags_answer_without_starting_the_app() {
         let v = |a: &[&str]| cli_flag_output(&a.iter().map(|s| s.to_string()).collect::<Vec<_>>());
         for flag in ["-V", "--version"] {
@@ -5882,12 +6121,190 @@ mod tests {
         assert_eq!(paths.len(), 1);
     }
 
+    /// An empty scratch directory for one save test.
+    fn save_test_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "hew-save-{tag}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&dir).unwrap();
+        dir
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn new_document_gets_the_permissions_of_any_new_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = save_test_dir("new-mode");
+        // A plain create shows what the umask in force leaves of 0666,
+        // without touching the process-wide umask.
+        let plain = dir.join("plain");
+        std::fs::write(&plain, b"x").unwrap();
+        let document = dir.join("model.hew");
+        write_document(&document, b"model").unwrap();
+
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o7777;
+        assert_eq!(mode(&document), mode(&plain));
+        assert_eq!(std::fs::read(&document).unwrap(), b"model");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn new_private_state_file_is_closed_to_other_users() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = save_test_dir("private-mode");
+        let snapshot = dir.join("recovery.hew");
+        write_atomic(&snapshot, b"snapshot").unwrap();
+        write_atomic(&snapshot, b"snapshot again").unwrap();
+
+        let mode = std::fs::metadata(&snapshot).unwrap().permissions().mode();
+        assert_eq!(mode & 0o077, 0);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn writable_document_in_a_read_only_directory_still_saves() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let dir = save_test_dir("read-only-dir");
+        let path = dir.join("model.hew");
+        std::fs::write(&path, b"a longer original document").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+        let inode = std::fs::metadata(&path).unwrap().ino();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+        // Directory modes do not bind a privileged user, who therefore gets
+        // the atomic path; the injected-error test below still applies.
+        let probe = dir.join("probe");
+        let enforced = std::fs::File::create(&probe).is_err();
+
+        let saved = write_document(&path, b"new");
+        let private = write_atomic(&path, b"state");
+
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        if enforced {
+            saved.unwrap();
+            // The app's own state keeps the atomic-or-nothing rule.
+            assert_eq!(
+                private.unwrap_err().kind(),
+                std::io::ErrorKind::PermissionDenied
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), b"new");
+            let meta = std::fs::metadata(&path).unwrap();
+            assert_eq!(meta.ino(), inode);
+            assert_eq!(meta.permissions().mode() & 0o777, 0o640);
+            assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn only_a_refused_temp_file_lets_a_document_be_rewritten_in_place() {
+        use std::io::{Error, ErrorKind, Write};
+
+        let dir = save_test_dir("temp-errors");
+        let path = dir.join("model.hew");
+        let save = |path: &Path, kind: WriteKind, error: ErrorKind| {
+            write_atomic_with(
+                path,
+                kind,
+                |_, _| Err(Error::from(error)),
+                |file| file.write_all(b"new"),
+            )
+        };
+        for error in [ErrorKind::PermissionDenied, ErrorKind::ReadOnlyFilesystem] {
+            std::fs::write(&path, b"original document").unwrap();
+            save(&path, WriteKind::Document, error).unwrap();
+            assert_eq!(std::fs::read(&path).unwrap(), b"new");
+
+            std::fs::write(&path, b"original document").unwrap();
+            let refused = save(&path, WriteKind::Private, error).unwrap_err();
+            assert_eq!(refused.kind(), error);
+            assert_eq!(std::fs::read(&path).unwrap(), b"original document");
+
+            // With no file to rewrite, the error stands.
+            let absent = dir.join("absent.hew");
+            let refused = save(&absent, WriteKind::Document, error).unwrap_err();
+            assert_eq!(refused.kind(), error);
+            assert!(!absent.exists());
+        }
+        for error in [
+            ErrorKind::StorageFull,
+            ErrorKind::QuotaExceeded,
+            ErrorKind::InvalidFilename,
+            ErrorKind::Other,
+        ] {
+            let failed = save(&path, WriteKind::Document, error).unwrap_err();
+            assert_eq!(failed.kind(), error);
+            assert_eq!(std::fs::read(&path).unwrap(), b"original document");
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn documents_with_names_near_the_length_limit_save() {
+        let dir = save_test_dir("long-name");
+        let names = [
+            format!("{}.hew", "a".repeat(241)),
+            format!("{}.hew", "a".repeat(251)),
+            // Three-byte characters, so the cut falls inside one.
+            format!("{}.hew", "\u{3042}".repeat(83)),
+        ];
+        for name in &names {
+            let path = dir.join(name);
+            write_document(&path, b"first").unwrap();
+            write_document(&path, b"second").unwrap();
+            assert_eq!(std::fs::read(&path).unwrap(), b"second");
+        }
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), names.len());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    // Linux only: macOS file systems refuse names that are not UTF-8.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn document_with_a_long_non_utf8_name_saves() {
+        use std::os::unix::ffi::OsStrExt;
+
+        let dir = save_test_dir("non-utf8-name");
+        let path = dir.join(std::ffi::OsStr::from_bytes(&[0xff; 250]));
+        write_document(&path, b"first").unwrap();
+        write_document(&path, b"second").unwrap();
+
+        assert_eq!(std::fs::read(&path).unwrap(), b"second");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn temp_file_names_are_short_unique_and_cut_between_characters() {
+        let name = |n: &str, seq| temp_file_name(std::ffi::OsStr::new(n), 42, seq);
+        assert_eq!(name("model.hew", 7), "model.hew.42.7.tmp");
+
+        let long = "\u{3042}".repeat(83);
+        assert_eq!(
+            name(&long, 7),
+            format!("{}.42.7.tmp", "\u{3042}".repeat(33))
+        );
+        assert_ne!(name(&long, 7), name(&long, 8));
+        let widest = temp_file_name(std::ffi::OsStr::new(&"a".repeat(255)), u32::MAX, u64::MAX);
+        assert!(widest.len() < 143, "{widest}");
+    }
+
     // `write_file_bytes` itself needs a live `AppHandle` for its
     // `write_allowed` check, which a plain `#[test]` can't construct (see
     // the library_* tests below for the same limitation) — `percent_decode`
     // is the part of it that's pure and worth pinning directly. The
-    // approval gate itself is exactly `write_file`'s own `write_allowed`
-    // call, unchanged and untouched by this addition.
+    // approval gate itself is exactly `write_file`'s own
+    // `write_allowed_target` call.
     #[test]
     fn percent_decode_round_trips_encodeuricomponent_output() {
         let cases = [
