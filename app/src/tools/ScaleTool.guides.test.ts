@@ -143,15 +143,23 @@ describe('ScaleTool — guides carried with the selection', () => {
     expect(t.scene.history_bracket_abort).not.toHaveBeenCalled()
   })
 
-  it('guides alone are refused: nothing to scale, nothing picked', () => {
+  it('guides alone are refused: a click on nothing says there is nothing to scale', () => {
     const t = makeTool([], [7n, 8n])
-    const acquire = vi.fn(() => [OBJ])
-    t.tool.setSelectionAcquirer(acquire)
+    t.tool.setSelectionAcquirer(() => null)
     expect(t.tool.statusHint()).toMatch(/Guides can't be scaled on their own/)
     t.tool.onPointerDown(snapAt(TOP), rayAt(TOP))
     expect(t.onToast).toHaveBeenCalledWith('Nothing to scale')
-    expect(acquire).not.toHaveBeenCalled()
     expect(t.scene.transform_mixed_selection).not.toHaveBeenCalled()
     expect(t.onCommit).not.toHaveBeenCalled()
+  })
+
+  it('with guides alone selected, a click on an object picks it instead of the guides', () => {
+    const t = makeTool([], [7n, 8n])
+    t.tool.setSelectionAcquirer(() => [OBJ])
+    t.tool.onPointerDown(snapAt(TOP), rayAt(TOP))
+    expect(t.onToast).not.toHaveBeenCalled()
+    doubleHeight(t.tool)
+    expect(t.onCommit).toHaveBeenCalledWith([OBJ], [])
+    expect(t.scene.transform_mixed_selection).not.toHaveBeenCalled()
   })
 })
