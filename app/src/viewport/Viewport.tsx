@@ -13355,6 +13355,7 @@ export default function Viewport({
     const activeTool = toolControllerRef.current?.activeTool
     if (activeTool !== undefined && 'setGuideTarget' in activeTool) {
       (activeTool as { setGuideTarget(guide: bigint | null): void }).setGuideTarget(guideTarget)
+      reportToolHintRef.current?.()
     }
     refreshAcquireHoverRef.current?.()
     scheduleRenderRef.current()
@@ -13366,6 +13367,7 @@ export default function Viewport({
     const activeTool = toolControllerRef.current?.activeTool
     if (activeTool !== undefined && 'setCarriedGuides' in activeTool) {
       (activeTool as { setCarriedGuides(guides: readonly bigint[]): void }).setCarriedGuides(guidesCarried)
+      reportToolHintRef.current?.()
     }
     refreshAcquireHoverRef.current?.()
     scheduleRenderRef.current()
@@ -13378,6 +13380,7 @@ export default function Viewport({
     const activeTool = toolControllerRef.current?.activeTool
     if (activeTool !== undefined && 'setSelectedGuides' in activeTool) {
       (activeTool as { setSelectedGuides(guides: readonly bigint[]): void }).setSelectedGuides(selectedGuides)
+      reportToolHintRef.current?.()
     }
     scheduleRenderRef.current()
   }, [selectedGuides])

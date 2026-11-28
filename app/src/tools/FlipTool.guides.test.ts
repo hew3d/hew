@@ -154,21 +154,36 @@ describe('FlipTool — guides carried with the selection', () => {
     expect(pointAt(scene, guides[0])[0]).toBeCloseTo(9, 9)
   })
 
-  it('guides alone are refused: nothing to flip, nothing picked', () => {
+  it('guides alone are refused: a click on nothing says there is nothing to flip', () => {
     const scene = new Scene()
     lBoard(scene)
     const g = scene.add_guide_point(8, 1, 0)
     const before = scene.state_hash()
     const { tool, onCommit, onToast, preview } = makeTool(scene, [], [g])
-    const acquire = vi.fn(() => null)
-    tool.setSelectionAcquirer(acquire)
+    tool.setSelectionAcquirer(() => null)
     expect(tool.statusHint()).toMatch(/Guides can't be flipped on their own/)
     expect(preview.getObjectByName('FlipGizmo')).toBeUndefined()
     tool.onPointerDown(ground(3, 0.5), redRay(1.5, 0.3))
     expect(onToast).toHaveBeenCalledWith('Nothing to flip')
-    expect(acquire).not.toHaveBeenCalled()
     expect(onCommit).not.toHaveBeenCalled()
     expect(scene.state_hash()).toBe(before)
+  })
+
+  it('with guides alone selected, a click on an object picks it instead of the guides', () => {
+    const scene = new Scene()
+    const b = lBoard(scene)
+    const g = scene.add_guide_point(8, 1, 0)
+    const before = scene.state_hash()
+    const { tool, onCommit, onToast, preview } = makeTool(scene, [], [g])
+    tool.setSelectionAcquirer(() => [obj(b)])
+    tool.onPointerDown(ground(3, 0.5), redRay(1.5, 0.3))
+    expect(onToast).not.toHaveBeenCalled()
+    expect(preview.getObjectByName('FlipGizmo')).toBeDefined()
+    expect(scene.state_hash()).toBe(before)
+    // The pick replaced the selection: the next flip leaves the guide alone.
+    tool.onPointerDown(ground(0, 0), redRay(1.5, 0.3))
+    expect(onCommit).toHaveBeenCalledWith([obj(b)], false, [])
+    expect(pointAt(scene, g)).toEqual([8, 1, 0])
   })
 
   it('inside a component the member and the guide flip in place in one step', () => {
