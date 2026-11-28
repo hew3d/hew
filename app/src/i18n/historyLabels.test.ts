@@ -27,6 +27,8 @@ describe('historyLabel (English must match the kernel renderer)', () => {
     expect(historyLabel(k('transform', { verb: 'rotate', noun: 'object', count: 3 }), 'x')).toBe('Rotate 3 objects')
     expect(historyLabel(k('transform', { verb: 'scale', noun: 'item', count: 2 }), 'x')).toBe('Scale 2 items')
     expect(historyLabel(k('transform', { verb: 'move', noun: 'sketch', count: 2 }), 'x')).toBe('Move 2 sketches')
+    expect(historyLabel(k('transform', { verb: 'move', noun: 'guide', count: 2 }), 'x')).toBe('Move 2 guides')
+    expect(historyLabel(k('transform', { verb: 'rotate', noun: 'guide', count: 1 }), 'x')).toBe('Rotate 1 guide')
     expect(historyLabel(k('close-openings', { count: 1 }), 'x')).toBe('Close an opening')
     expect(historyLabel(k('close-openings', { count: 4 }), 'x')).toBe('Close 4 openings')
     expect(historyLabel(k('delete-faces', { count: 1 }), 'x')).toBe('Delete 1 face')

@@ -159,4 +159,19 @@ describe('copyOwnersAndDrawing copying guides', () => {
     expect(copies.some((n) => n.kind === 'object')).toBe(true)
     expect(out.guides).toHaveLength(1)
   })
+
+  it('inside a component copies a member and a guide in one step, the guide staying after the close', () => {
+    const scene = new Scene()
+    const box = makeBox(scene)
+    const instance = scene.make_component(Uint8Array.of(0), BigUint64Array.of(box))
+    scene.open_explode_session(instance)
+    const member = scene.explode_session_objects()![0]!
+    const guide = scene.add_guide_line(0, 2, 0, 0, 0, 1)
+    const out = { guides: [] as string[] }
+    expectOneStep(scene, () => {
+      copyOwnersAndDrawing(ws(scene), [{ kind: 'object', id: member }], [], [shift(2)], mixedCopy(scene, [member], [guide], out), true)
+    })
+    scene.close_innermost_session()
+    expect(scene.guide_geometry(BigInt(out.guides[0]))?.[0]).toBeCloseTo(2)
+  })
 })

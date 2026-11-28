@@ -66,8 +66,7 @@ jobs:
     needs: changed
     if: needs.changed.outputs.build == 'true'
     runs-on: windows-latest
-    # Generous: a run that times out saves no cache, so the next one would
-    # start cold again.
+    # Generous: every run compiles the Rust code from scratch.
     timeout-minutes: 180
     defaults:
       run:
@@ -76,13 +75,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Rust cache
-        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-        with:
-          workspaces: |
-            .
-            shells/tauri/src-tauri
-
+      # There is deliberately no Rust build cache. A Windows one is large,
+      # the repository's cache space is shared with ci.yml, and nothing
+      # waits on this run.
+      #
       # On Windows the install script compiles wasm-pack, which is slow, so
       # the exe is cached as release.yml caches it.
       - name: Cache wasm-pack
