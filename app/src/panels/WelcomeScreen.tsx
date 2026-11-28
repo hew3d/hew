@@ -21,7 +21,7 @@
 import { i18n } from '@lingui/core'
 import { t } from '@lingui/core/macro'
 import { Trans, useLingui } from '@lingui/react/macro'
-import { useEffect, useCallback, type MouseEvent } from 'react'
+import { useCallback, useLayoutEffect, type MouseEvent } from 'react'
 import { isTauri } from '../io/fileHost'
 import type { RecentEntry } from '../io/recents'
 import { formatRelativeTime } from '../io/relativeTime'
@@ -432,7 +432,8 @@ export function WelcomeScreen({
     [onClose],
   )
 
-  useEffect(() => {
+  // A layout effect, so Escape works as soon as the screen is shown.
+  useLayoutEffect(() => {
     document.addEventListener('keydown', handleKeyDown)
     return () => document.removeEventListener('keydown', handleKeyDown)
   }, [handleKeyDown])

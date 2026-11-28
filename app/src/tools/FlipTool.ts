@@ -420,18 +420,17 @@ export class FlipTool implements Tool {
   }
 
   onPointerDown(snap: Snap | null, ray: Ray): void {
-    if (this.selection.length === 0 && this.selectedGuides.length > 0) {
-      // Guides alone: no solid or drawing to center the mirror on.
-      this.onToast(t`Nothing to flip`)
-      return
-    }
     if (this.selection.length === 0) {
       const acquired = this.acquireSelection !== null ? this.acquireSelection(ray) : null
       if (acquired !== null && acquired.length > 0) {
         // The acquirer selects what was picked in the host; the flip waits
         // for the next click.
         this.selection = acquired
+        this.selectedGuides = []
         this._showGizmo()
+      } else if (this.selectedGuides.length > 0) {
+        // Guides alone: no solid or drawing to center the mirror on.
+        this.onToast(t`Nothing to flip`)
       } else {
         this.onToast(t`Click an object to flip it`)
       }
