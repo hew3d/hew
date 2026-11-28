@@ -693,6 +693,14 @@ export default function App() {
   const [inferenceStore] = useState(createInferenceStore)
   const setInferenceInfo = inferenceStore.set
   const [toasts, setToasts] = useState<Toast[]>([])
+  // Pending auto-dismiss timers for toasts. A timer drops itself from the
+  // set when it fires; unmount clears whatever is still pending so no
+  // dismiss runs after the app is gone.
+  const toastTimersRef = useRef(new Set<ReturnType<typeof setTimeout>>())
+  useEffect(() => () => {
+    for (const timer of toastTimersRef.current) clearTimeout(timer)
+    toastTimersRef.current.clear()
+  }, [])
   /** Per-object watertight map (bigint key) */
   const [watertightMap, setWatertightMap] = useState<Map<bigint, boolean>>(new Map())
   /** Tool driven from toolbar clicks */
@@ -2456,6 +2464,13 @@ export default function App() {
     return path.slice(0, trimIndex)
   }, [])
 
+  /** A change the kernel's undo history does not hold, which its saved mark
+   *  therefore cannot show: the document is unsaved for `reason`. */
+  const markUnsaved = useCallback((reason: string): void => {
+    setDocSession((s) => markNonUndoableDirty(s, reason, Date.now()))
+    armAutosaveTick()
+  }, [armAutosaveTick])
+
   // Bump the tree's revision; trim stale context path entries; mark dirty.
   /** Drop dead or hidden entries from the selection (see
    *  pruneDeadSelection). Runs after every document change, and after a tag
@@ -2644,6 +2659,15 @@ export default function App() {
     snapshotEntry: () => snapshotEntryRef.current(),
     setPathDepth: (depth) => setPathDepthRef.current(depth),
     contextDepth: () => prevSessionStackRef.current.length + activeContextRef.current.length,
+    markUnrecordedWrite: (write) =>
+      markUnsaved(
+        {
+          materials: NON_UNDOABLE_REASON.materialsAdded,
+          tags: NON_UNDOABLE_REASON.tagsAdded,
+          scenes: NON_UNDOABLE_REASON.scenesEdited,
+          libraryMetadata: NON_UNDOABLE_REASON.libraryMetadata,
+        }[write],
+      ),
   }
   useEffect(() => {
     if (!(import.meta.env.DEV || import.meta.env.VITE_HEW_TEST === '1')) return
@@ -2770,9 +2794,11 @@ export default function App() {
       { id, message, code, isError, emphasis, actions, persistent },
     ])
     if (persistent) return
-    setTimeout(() => {
+    const timer = setTimeout(() => {
+      toastTimersRef.current.delete(timer)
       setToasts((prev) => prev.filter((t) => t.id !== id))
     }, actions !== undefined ? ACTION_TOAST_MS : emphasis ? 7000 : 4000)
+    toastTimersRef.current.add(timer)
   }, [])
   const handleToastRef = useRef(handleToast)
   handleToastRef.current = handleToast
@@ -6484,13 +6510,37 @@ export default function App() {
     })
   }, [state, openLibraryItemForEdit])
 
+  /** `Scene.insert_item_palette`, marking the document unsaved when the
+   *  palette grew. Materials it already held are reused and change nothing.
+   *  Throws what the kernel throws. */
+  const insertPaletteItem = useCallback(
+    (scene: Scene, bytes: Uint8Array): BigUint64Array => {
+      const before = scene.material_ids().length
+      const ids = scene.insert_item_palette(bytes)
+      // A palette write pushes no undo entry.
+      if (scene.material_ids().length > before) markUnsaved(NON_UNDOABLE_REASON.libraryMaterials)
+      return ids
+    },
+    [markUnsaved],
+  )
+
+  /** MaterialPalette's "Add color" and "Add texture": the new material
+   *  becomes current, and the document is unsaved. */
+  const handleMaterialAdded = useCallback(
+    (id: bigint): void => {
+      setCurrentMaterialId(id)
+      markUnsaved(NON_UNDOABLE_REASON.materialsAdded)
+    },
+    [markUnsaved],
+  )
+
   const onLibraryPaintWith = useCallback(
     (_item: LibraryItem, bytes: Uint8Array) => {
       const scene = sceneRef.current
       if (scene === null) return
       let ids: BigUint64Array
       try {
-        ids = scene.insert_item_palette(bytes)
+        ids = insertPaletteItem(scene, bytes)
       } catch (err) {
         const code = parseKernelErrorCode(err)
         const rawMsg = err instanceof Error ? err.message : String(err)
@@ -6503,16 +6553,15 @@ export default function App() {
       // The material-registry write itself pushes no undo entry
       // (conformance's `material_and_tag_registry_writes_add_no_undo_entry`),
       // so `handleDocumentChanged`'s `at_saved_mark()` read alone can't see
-      // it — an explicit non-undoable reason, same as Scenes.
+      // it: `insertPaletteItem` records a non-undoable reason, as for Scenes.
       handleDocumentChanged()
-      setDocSession((s) => markNonUndoableDirty(s, NON_UNDOABLE_REASON.libraryMaterials, Date.now()))
       setDocRev((r) => r + 1)
       if (ids.length === 0) return
       setCurrentMaterialId(ids[0])
       setActiveTool('Paint')
       setShowLibrary(false)
     },
-    [handleToast, handleDocumentChanged],
+    [handleToast, handleDocumentChanged, insertPaletteItem],
   )
 
   const onLibraryAddToPalette = useCallback(
@@ -6521,22 +6570,18 @@ export default function App() {
       if (scene === null) return
       let ids: BigUint64Array
       try {
-        ids = scene.insert_item_palette(bytes)
+        ids = insertPaletteItem(scene, bytes)
       } catch (err) {
         const code = parseKernelErrorCode(err)
         const rawMsg = err instanceof Error ? err.message : String(err)
         handleToast(kernelErrorMessage(code ?? 'Unknown', rawMsg), code ?? undefined)
         return
       }
-      // Dirty for the same reason as Paint-with-this (adversarial review
-      // S10): the palette rides the document, and the same non-undoable
-      // registry write applies.
       handleDocumentChanged()
-      setDocSession((s) => markNonUndoableDirty(s, NON_UNDOABLE_REASON.libraryMaterials, Date.now()))
       setDocRev((r) => r + 1)
       if (ids.length > 0) handleToast(t`Added "${ph({ name: item.displayName })}" to palette.`)
     },
-    [handleToast, handleDocumentChanged],
+    [handleToast, handleDocumentChanged, insertPaletteItem],
   )
 
   /** Library ▸ Use on a profile: arm the Fillet tool with it. */
@@ -7421,7 +7466,7 @@ export default function App() {
           if (scene === null) return
           let ids: BigUint64Array
           try {
-            ids = scene.insert_item_palette(bytes)
+            ids = insertPaletteItem(scene, bytes)
           } catch (err) {
             const code = parseKernelErrorCode(err)
             const rawMsg = err instanceof Error ? err.message : String(err)
@@ -10202,7 +10247,7 @@ export default function App() {
               currentMaterialId={currentMaterialId}
               revealNonce={materialRevealNonce}
               onSelectMaterial={handleSelectMaterial}
-              onMaterialCreated={setCurrentMaterialId}
+              onMaterialCreated={handleMaterialAdded}
               onDocumentChanged={handleDocumentChanged}
               onAlphaCommitted={() => viewportApi.current?.syncMaterialOpacity()}
               onSaveToLibrary={handleSaveMaterialToLibrary}

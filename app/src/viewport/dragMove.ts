@@ -44,3 +44,17 @@ export function dragMoveTargets(
   }
   return [pressed]
 }
+
+/**
+ * The guides a drag starting on `pressed` carries along: the selection's
+ * carried guides when the drag takes the whole selection
+ * (`dragMoveTargets`), else none.
+ */
+export function dragMoveGuides(
+  pressed: NodeRef,
+  selection: readonly NodeRef[],
+  guides: readonly bigint[],
+): bigint[] {
+  const pressedKey = nodeKey(pressed)
+  return selection.some((n) => nodeKey(n) === pressedKey) ? [...guides] : []
+}

@@ -50,7 +50,11 @@
 //! nothing), and a mixed Delete that takes nodes, guides, and annotations in
 //! one call. A mixed Delete is one undo step that undo then redo reproduce
 //! exactly; salted with a stale guide handle it refuses with the document
-//! and its history untouched.
+//! and its history untouched. A mixed transform (a move, a rotation, a
+//! scale or a reflection) and a mixed copy array (independent or linked)
+//! carry the listed guides with the listed nodes, each as one undo step
+//! that undo then redo reproduce exactly, and each refused whole, with
+//! nothing changed, when salted with a stale guide handle.
 //!
 //! Locks join in too (OW-1): Lock and Unlock any live node (definition
 //! members included), Unlock All, linked copies and joins over locked
@@ -68,9 +72,10 @@
 
 use kernel::{
     Anchor, Document, EntityRef, GuideId, InstanceId, KernelOp, LibraryProvenance, LibraryUpdate,
-    NodeId, ObjectId, Plane, Point3, Transform, Vec3,
+    LinkPolicy, NodeId, ObjectId, Plane, Point3, Transform, Vec3,
 };
 use proptest::prelude::*;
+use std::num::NonZeroU32;
 
 use crate::lock_oracle;
 
@@ -280,6 +285,32 @@ enum Op {
         set: usize,
         sel: usize,
     },
+    /// One `transform_mixed_selection` over up to two nodes and two guides
+    /// (`mask` picks which) through a move, a rotation, a scale or a
+    /// reflection (`how`), salted with a stale guide handle when `stale`.
+    TransformMixed {
+        a: usize,
+        b: usize,
+        g: usize,
+        h: usize,
+        mask: u8,
+        how: u8,
+        stale: bool,
+    },
+    /// One `duplicate_mixed_array` over up to two nodes and two guides
+    /// (`mask` picks which), `count` copies along a lattice step,
+    /// independent or linked, salted with a stale guide handle when
+    /// `stale`.
+    CopyMixed {
+        a: usize,
+        b: usize,
+        g: usize,
+        h: usize,
+        mask: u8,
+        count: u32,
+        linked: bool,
+        stale: bool,
+    },
 }
 
 fn arb_op() -> impl Strategy<Value = Op> {
@@ -340,7 +371,96 @@ fn arb_op() -> impl Strategy<Value = Op> {
         2 => (sel(), sel()).prop_map(|(sel, face)| Op::FrozenFaceDraft { sel, face }),
         1 => Just(Op::UnlockAll),
         1 => (sel(), sel()).prop_map(|(set, sel)| Op::JoinLinked { set, sel }),
+        3 => (
+            (sel(), sel(), sel(), sel()),
+            1u8..16,
+            0u8..4,
+            proptest::bool::weighted(0.15),
+        )
+            .prop_map(|((a, b, g, h), mask, how, stale)| Op::TransformMixed {
+                a,
+                b,
+                g,
+                h,
+                mask,
+                how,
+                stale,
+            }),
+        2 => (
+            (sel(), sel(), sel(), sel()),
+            1u8..16,
+            1u32..4,
+            any::<bool>(),
+            proptest::bool::weighted(0.15),
+        )
+            .prop_map(|((a, b, g, h), mask, count, linked, stale)| Op::CopyMixed {
+                a,
+                b,
+                g,
+                h,
+                mask,
+                count,
+                linked,
+                stale,
+            }),
     ]
+}
+
+/// The nodes and guides a mixed op lists: bits 0 and 1 of `mask` pick a
+/// node each, bits 2 and 3 a guide each; a pick listed twice is dropped (a
+/// selection is a set). Only nodes the document calls live are picked (a
+/// definition member is not a world node and is refused), so every handle
+/// is live but the one `stale` adds: the null guide key, never live.
+fn mixed_pick(
+    doc: &Document,
+    nodes: &[NodeId],
+    (a, b, g, h): (usize, usize, usize, usize),
+    mask: u8,
+    stale: bool,
+) -> (Vec<NodeId>, Vec<GuideId>) {
+    let guides = doc.guide_ids();
+    let world: Vec<NodeId> = nodes
+        .iter()
+        .copied()
+        .filter(|&n| doc.node_is_live(n))
+        .collect();
+    let mut sel_nodes: Vec<NodeId> = Vec::new();
+    let mut sel_guides: Vec<GuideId> = Vec::new();
+    for (bit, at) in [(1, a), (2, b)] {
+        if mask & bit != 0
+            && let Some(n) = pick(&world, at)
+            && !sel_nodes.contains(&n)
+        {
+            sel_nodes.push(n);
+        }
+    }
+    for (bit, at) in [(4, g), (8, h)] {
+        if mask & bit != 0
+            && let Some(x) = pick(&guides, at)
+            && !sel_guides.contains(&x)
+        {
+            sel_guides.push(x);
+        }
+    }
+    if stale {
+        sel_guides.push(GuideId::default());
+    }
+    (sel_nodes, sel_guides)
+}
+
+/// Whether one of `nodes` sits inside a group another of them is (at any
+/// depth): the listing a linked copy refuses `DuplicateMember`.
+fn nests(doc: &Document, nodes: &[NodeId]) -> bool {
+    nodes.iter().any(|&n| {
+        let mut up = doc.node_parent(n);
+        while let Some(g) = up {
+            if nodes.contains(&NodeId::Group(g)) {
+                return true;
+            }
+            up = doc.node_parent(NodeId::Group(g));
+        }
+        false
+    })
 }
 
 /// The drawing lattice: the boxes' corners (x = 3i, 3i + 1; y = 0, 1;
@@ -1247,6 +1367,136 @@ fn apply(doc: &mut Document, op: &Op) -> Result<(), String> {
             let before = doc.state_hash();
             if doc.join_linked(set, joiner, pose).is_err() && doc.state_hash() != before {
                 return Err("a refused join changed the document".to_string());
+            }
+        }
+        Op::TransformMixed {
+            a,
+            b,
+            g,
+            h,
+            mask,
+            how,
+            stale,
+        } => {
+            let (sel_nodes, sel_guides) = mixed_pick(doc, &nodes, (a, b, g, h), mask, stale);
+            if sel_nodes.is_empty() && sel_guides.is_empty() {
+                return Ok(());
+            }
+            let t = match how {
+                0 => Transform::translation(Vec3::new(0.5, -1.5, 0.25)),
+                1 => Transform::rotation(Vec3::new(0.0, 0.0, 1.0), 0.75)
+                    .expect("unit axis")
+                    .then(&Transform::translation(Vec3::new(1.0, 0.0, 0.0))),
+                2 => Transform::scale(Vec3::new(2.0, 0.5, 1.0)),
+                _ => Transform::reflection(Point3::new(1.5, 0.0, 0.0), Vec3::new(1.0, 0.0, 0.0))
+                    .expect("unit normal"),
+            };
+            let before = (doc.state_hash(), doc.history_generation());
+            match doc.transform_mixed_selection(&sel_nodes, &[], &sel_guides, &t) {
+                Ok(_) if stale => {
+                    return Err("a transform with a stale guide was not refused".to_string());
+                }
+                Ok(_) => {
+                    if doc.history_generation() == before.1 {
+                        return Err("a mixed transform recorded no undo step".to_string());
+                    }
+                    return undo_redo_exact(doc, before.0, "mixed transform");
+                }
+                Err(_) if (doc.state_hash(), doc.history_generation()) != before => {
+                    return Err("a refused mixed transform changed the document".to_string());
+                }
+                Err(kernel::DocumentError::LockedNode { .. }) => {
+                    // A lock on a listed node (or on what holds it) refuses
+                    // the whole batch, and it changed nothing (checked
+                    // above).
+                }
+                Err(kernel::DocumentError::ExplodeSessionScope)
+                    if !doc.session_stack().is_empty() =>
+                {
+                    // An open session refuses geometry from outside it (the
+                    // close would fold it into the open definition).
+                }
+                Err(kernel::DocumentError::EmptySelection) if sel_guides.is_empty() => {
+                    // Nodes that flatten to nothing visible (a group whose
+                    // members were all deleted) and no guide beside them.
+                }
+                Err(e) => {
+                    // Every handle here is live (a stale guide is the only
+                    // deliberate bad one), so any other refusal is a defect.
+                    if !stale {
+                        return Err(format!(
+                            "a mixed transform of live items was refused: {e:?}"
+                        ));
+                    }
+                }
+            }
+        }
+        Op::CopyMixed {
+            a,
+            b,
+            g,
+            h,
+            mask,
+            count,
+            linked,
+            stale,
+        } => {
+            let (sel_nodes, sel_guides) = mixed_pick(doc, &nodes, (a, b, g, h), mask, stale);
+            if sel_nodes.is_empty() && sel_guides.is_empty() {
+                return Ok(());
+            }
+            let policy = if linked {
+                LinkPolicy::Linked
+            } else {
+                LinkPolicy::Independent
+            };
+            let count = NonZeroU32::new(count).expect("count is at least one");
+            let step = Transform::translation(Vec3::new(0.0, 2.5, 0.0));
+            let before = (doc.state_hash(), doc.history_generation());
+            let guides_before = doc.guide_ids().len();
+            match doc.duplicate_mixed_array(&sel_nodes, &sel_guides, &step, count, policy) {
+                Ok(_) if stale => {
+                    return Err("a copy with a stale guide was not refused".to_string());
+                }
+                Ok((_, copies, _)) => {
+                    if doc.history_generation() == before.1 {
+                        return Err("a mixed copy recorded no undo step".to_string());
+                    }
+                    let expected = sel_guides.len() * count.get() as usize;
+                    if copies.len() != expected || doc.guide_ids().len() != guides_before + expected
+                    {
+                        return Err(format!(
+                            "{} guide copies made, {expected} expected",
+                            copies.len()
+                        ));
+                    }
+                    return undo_redo_exact(doc, before.0, "mixed copy");
+                }
+                Err(_) if (doc.state_hash(), doc.history_generation()) != before => {
+                    return Err("a refused mixed copy changed the document".to_string());
+                }
+                Err(kernel::DocumentError::LockedNode { .. }) => {
+                    // A lock on a listed node (or on what holds it) refuses
+                    // the whole batch, and it changed nothing (checked
+                    // above).
+                }
+                Err(kernel::DocumentError::ExplodeSessionScope)
+                    if !doc.session_stack().is_empty() =>
+                {
+                    // An open session refuses geometry from outside it (the
+                    // close would fold it into the open definition).
+                }
+                Err(kernel::DocumentError::DuplicateMember) if linked && nests(doc, &sel_nodes) => {
+                    // A linked copy of a node beside the group that holds it
+                    // would place the node twice.
+                }
+                Err(e) => {
+                    // Every handle here is live (a stale guide is the only
+                    // deliberate bad one), so any other refusal is a defect.
+                    if !stale {
+                        return Err(format!("a mixed copy of live items was refused: {e:?}"));
+                    }
+                }
             }
         }
         Op::CopySketch { sel, step } => {

@@ -1867,6 +1867,19 @@ fn linked_result_json(roots: &[NodeId], change: &kernel::DocChange) -> String {
     serde_json::json!({ "nodes": nodes, "linked": linked }).to_string()
 }
 
+/// [`linked_result_json`] with the guide copies of a mixed copy beside it:
+/// `{"nodes":[...],"linked":[...],"guides":["<ffi>",...]}` (decimal-string
+/// handles, guides in the kernel's placement-major order).
+fn mixed_copy_json(roots: &[NodeId], guides: &[GuideId], change: &kernel::DocChange) -> String {
+    let mut value: serde_json::Value =
+        serde_json::from_str(&linked_result_json(roots, change)).expect("our own JSON");
+    value["guides"] = guides
+        .iter()
+        .map(|g| serde_json::Value::String(g.data().as_ffi().to_string()))
+        .collect();
+    value.to_string()
+}
+
 /// The flip arguments checked at the trust boundary: parallel node lists,
 /// finite numbers in every slot (the unused `about` too), and an
 /// `about_kind` of 0 (center), 1 (origin), or 2 (the point `about`).
@@ -6839,7 +6852,8 @@ impl Scene {
         linked: bool,
     ) -> Result<Vec<NodeJs>, ApiError> {
         self.ensure_not_busy()?;
-        let (roots, _) = self.duplicate_selection_array_core(kinds, ids, affine, count, linked)?;
+        let (roots, _, _) =
+            self.duplicate_selection_array_core(kinds, ids, &[], affine, count, linked, false)?;
         Ok(roots.into_iter().map(node_js).collect())
     }
 
@@ -6857,21 +6871,55 @@ impl Scene {
         count: u32,
     ) -> Result<String, ApiError> {
         self.ensure_not_busy()?;
-        let (roots, change) =
-            self.duplicate_selection_array_core(kinds, ids, affine, count, true)?;
+        let (roots, _, change) =
+            self.duplicate_selection_array_core(kinds, ids, &[], affine, count, true, false)?;
         Ok(linked_result_json(&roots, &change))
     }
 
-    /// The shared body of the two array-copy entry points: validates at the
-    /// trust boundary, runs the kernel op, reconciles, and records.
+    /// [`Scene::duplicate_selection_array`] for a selection that also holds
+    /// construction guides: every listed guide is copied `count` times along
+    /// `affine` with the nodes, in the same ONE undo step —
+    /// [`kernel::Document::duplicate_mixed_array`]. Guide copies are always
+    /// independent; `linked` decides only how the nodes are copied.
+    /// `kinds`/`ids` may be empty when guides are listed. Returns
+    /// [`Scene::duplicate_selection_array_linked`]'s JSON with the guide
+    /// copies beside it, in placement-major order:
+    /// `{"nodes":[...],"linked":[...],"guides":["<ffi>",...]}`.
+    ///
+    /// # Errors
+    /// As [`Scene::duplicate_selection_array`], plus `UnknownGuide`,
+    /// `DuplicateMember` (a guide listed twice) and `DegenerateGuide`. The
+    /// whole copy refuses with the document untouched.
+    pub fn duplicate_mixed_selection_array(
+        &mut self,
+        kinds: &[u8],
+        ids: &[u64],
+        guides: &[u64],
+        affine: &[f64],
+        count: u32,
+        linked: bool,
+    ) -> Result<String, ApiError> {
+        self.ensure_not_busy()?;
+        let (roots, copies, change) =
+            self.duplicate_selection_array_core(kinds, ids, guides, affine, count, linked, true)?;
+        Ok(mixed_copy_json(&roots, &copies, &change))
+    }
+
+    /// The shared body of the array-copy entry points: validates at the
+    /// trust boundary, runs the kernel op, reconciles, and records — the
+    /// mixed variant when `mixed`, so the plain entry points keep their
+    /// recorded shape.
+    #[allow(clippy::too_many_arguments)]
     fn duplicate_selection_array_core(
         &mut self,
         kinds: &[u8],
         ids: &[u64],
+        guides: &[u64],
         affine: &[f64],
         count: u32,
         linked: bool,
-    ) -> Result<(Vec<NodeId>, kernel::DocChange), ApiError> {
+        mixed: bool,
+    ) -> Result<(Vec<NodeId>, Vec<GuideId>, kernel::DocChange), ApiError> {
         self.ensure_not_busy()?;
         if kinds.len() != ids.len() {
             return Err(ApiError(
@@ -6909,19 +6957,38 @@ impl Scene {
         } else {
             kernel::LinkPolicy::Independent
         };
-        let (roots, change) = self
-            .doc
-            .duplicate_nodes_array(&nodes, &t, count_nz, policy)
-            .map_err(doc_err)?;
+        let (roots, copies, change) = if mixed {
+            let guide_ids: Vec<GuideId> = guides.iter().map(|&g| guide_id(g)).collect();
+            self.doc
+                .duplicate_mixed_array(&nodes, &guide_ids, &t, count_nz, policy)
+                .map_err(doc_err)?
+        } else {
+            let (roots, change) = self
+                .doc
+                .duplicate_nodes_array(&nodes, &t, count_nz, policy)
+                .map_err(doc_err)?;
+            (roots, Vec::new(), change)
+        };
         self.reconcile(&change);
-        recording::record(recording::RecordedCall::DuplicateSelectionArray {
-            kinds: kinds.to_vec(),
-            ids: ids.to_vec(),
-            affine: *rows,
-            count,
-            linked,
+        recording::record(if mixed {
+            recording::RecordedCall::DuplicateMixedSelectionArray {
+                kinds: kinds.to_vec(),
+                ids: ids.to_vec(),
+                guides: guides.to_vec(),
+                affine: *rows,
+                count,
+                linked,
+            }
+        } else {
+            recording::RecordedCall::DuplicateSelectionArray {
+                kinds: kinds.to_vec(),
+                ids: ids.to_vec(),
+                affine: *rows,
+                count,
+                linked,
+            }
         });
-        Ok((roots, change))
+        Ok((roots, copies, change))
     }
 
     /// Copies the nodes to every placement in `affines` (row-major 3x4,
@@ -6951,7 +7018,8 @@ impl Scene {
         linked: bool,
     ) -> Result<Vec<NodeJs>, ApiError> {
         self.ensure_not_busy()?;
-        let (roots, _) = self.duplicate_selection_placements_core(kinds, ids, affines, linked)?;
+        let (roots, _, _) =
+            self.duplicate_selection_placements_core(kinds, ids, &[], affines, linked, false)?;
         Ok(roots.into_iter().map(node_js).collect())
     }
 
@@ -6965,19 +7033,47 @@ impl Scene {
         affines: &[f64],
     ) -> Result<String, ApiError> {
         self.ensure_not_busy()?;
-        let (roots, change) =
-            self.duplicate_selection_placements_core(kinds, ids, affines, true)?;
+        let (roots, _, change) =
+            self.duplicate_selection_placements_core(kinds, ids, &[], affines, true, false)?;
         Ok(linked_result_json(&roots, &change))
     }
 
-    /// The shared body of the two placement entry points.
+    /// [`Scene::duplicate_selection_placements`] for a selection that also
+    /// holds construction guides: every listed guide is copied once per
+    /// placement with the nodes, in the same ONE undo step —
+    /// [`kernel::Document::duplicate_mixed_placements`]. Guide copies are
+    /// always independent. `kinds`/`ids` may be empty when guides are
+    /// listed. Returns [`Scene::duplicate_mixed_selection_array`]'s JSON.
+    ///
+    /// # Errors
+    /// As [`Scene::duplicate_selection_placements`], plus `UnknownGuide`,
+    /// `DuplicateMember` (a guide listed twice) and `DegenerateGuide`. The
+    /// whole copy refuses with the document untouched.
+    pub fn duplicate_mixed_selection_placements(
+        &mut self,
+        kinds: &[u8],
+        ids: &[u64],
+        guides: &[u64],
+        affines: &[f64],
+        linked: bool,
+    ) -> Result<String, ApiError> {
+        self.ensure_not_busy()?;
+        let (roots, copies, change) =
+            self.duplicate_selection_placements_core(kinds, ids, guides, affines, linked, true)?;
+        Ok(mixed_copy_json(&roots, &copies, &change))
+    }
+
+    /// The shared body of the placement entry points; records the mixed
+    /// variant when `mixed`.
     fn duplicate_selection_placements_core(
         &mut self,
         kinds: &[u8],
         ids: &[u64],
+        guides: &[u64],
         affines: &[f64],
         linked: bool,
-    ) -> Result<(Vec<NodeId>, kernel::DocChange), ApiError> {
+        mixed: bool,
+    ) -> Result<(Vec<NodeId>, Vec<GuideId>, kernel::DocChange), ApiError> {
         self.ensure_not_busy()?;
         if kinds.len() != ids.len() {
             return Err(ApiError(
@@ -7015,18 +7111,36 @@ impl Scene {
         } else {
             kernel::LinkPolicy::Independent
         };
-        let (roots, change) = self
-            .doc
-            .duplicate_nodes_placements(&nodes, &placements, policy)
-            .map_err(doc_err)?;
+        let (roots, copies, change) = if mixed {
+            let guide_ids: Vec<GuideId> = guides.iter().map(|&g| guide_id(g)).collect();
+            self.doc
+                .duplicate_mixed_placements(&nodes, &guide_ids, &placements, policy)
+                .map_err(doc_err)?
+        } else {
+            let (roots, change) = self
+                .doc
+                .duplicate_nodes_placements(&nodes, &placements, policy)
+                .map_err(doc_err)?;
+            (roots, Vec::new(), change)
+        };
         self.reconcile(&change);
-        recording::record(recording::RecordedCall::DuplicateSelectionPlacements {
-            kinds: kinds.to_vec(),
-            ids: ids.to_vec(),
-            affines: affines.to_vec(),
-            linked,
+        recording::record(if mixed {
+            recording::RecordedCall::DuplicateMixedSelectionPlacements {
+                kinds: kinds.to_vec(),
+                ids: ids.to_vec(),
+                guides: guides.to_vec(),
+                affines: affines.to_vec(),
+                linked,
+            }
+        } else {
+            recording::RecordedCall::DuplicateSelectionPlacements {
+                kinds: kinds.to_vec(),
+                ids: ids.to_vec(),
+                affines: affines.to_vec(),
+                linked,
+            }
         });
-        Ok((roots, change))
+        Ok((roots, copies, change))
     }
 
     /// The mirror Flip applies, as 12 floats (row-major 3x4): the
@@ -7159,6 +7273,102 @@ impl Scene {
             copy,
         });
         Ok(roots.into_iter().map(node_js).collect())
+    }
+
+    /// [`Scene::flip_selection`] for a selection that also holds
+    /// construction guides, in the same ONE undo step. The mirror plane
+    /// comes from the nodes and sketches alone, exactly as
+    /// [`Scene::flip_matrix`] names it: guides never count toward the
+    /// center. `copy` 0 reflects every listed guide in place
+    /// ([`kernel::Document::flip_mixed`]); 1 and 2 give each guide one
+    /// independent mirrored copy beside the nodes' copy
+    /// ([`kernel::Document::flip_mixed_copy`]). Returns
+    /// [`Scene::duplicate_mixed_selection_array`]'s JSON: the listed nodes
+    /// and no guides for an in-place flip, the new nodes and the guide
+    /// copies for a copy.
+    ///
+    /// # Errors
+    /// As [`Scene::flip_selection`] (`EmptySelection` when only guides are
+    /// listed: there is nothing to center the mirror on), plus
+    /// `UnknownGuide`, `DuplicateMember` (a guide listed twice, copy modes)
+    /// and `DegenerateGuide`. On error the document is untouched.
+    #[allow(clippy::too_many_arguments)]
+    pub fn flip_mixed_selection(
+        &mut self,
+        kinds: &[u8],
+        ids: &[u64],
+        sketch_ids: &[u64],
+        guides: &[u64],
+        nx: f64,
+        ny: f64,
+        nz: f64,
+        about_kind: u8,
+        ax: f64,
+        ay: f64,
+        az: f64,
+        copy: u8,
+    ) -> Result<String, ApiError> {
+        self.ensure_not_busy()?;
+        let (nodes, sketches, normal, about) = flip_args(
+            kinds,
+            ids,
+            sketch_ids,
+            [nx, ny, nz],
+            about_kind,
+            [ax, ay, az],
+        )?;
+        let guide_ids: Vec<GuideId> = guides.iter().map(|&g| guide_id(g)).collect();
+        let (roots, copies, change) = match copy {
+            0 => {
+                let change = self
+                    .doc
+                    .flip_mixed(&nodes, &sketches, &guide_ids, normal, about)
+                    .map_err(doc_err)?;
+                (nodes, Vec::new(), change)
+            }
+            1 | 2 => {
+                // As `flip_selection`: the sketches count toward the
+                // center, and any point of the mirror plane names it.
+                let m = self
+                    .doc
+                    .flip_matrix(&nodes, &sketches, normal, about)
+                    .map_err(doc_err)?;
+                let a = m.to_affine();
+                let on_plane = kernel::Point3::new(a[3] * 0.5, a[7] * 0.5, a[11] * 0.5);
+                let policy = if copy == 1 {
+                    kernel::LinkPolicy::Linked
+                } else {
+                    kernel::LinkPolicy::Independent
+                };
+                self.doc
+                    .flip_mixed_copy(
+                        &nodes,
+                        &guide_ids,
+                        normal,
+                        kernel::FlipAbout::Point(on_plane),
+                        policy,
+                    )
+                    .map_err(doc_err)?
+            }
+            _ => {
+                return Err(ApiError::new(
+                    "BadFlip",
+                    "copy must be 0 (flip), 1 (linked copy), or 2 (independent copy)",
+                ));
+            }
+        };
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::FlipMixedSelection {
+            kinds: kinds.to_vec(),
+            ids: ids.to_vec(),
+            sketch_ids: sketch_ids.to_vec(),
+            guides: guides.to_vec(),
+            normal: [nx, ny, nz],
+            about_kind,
+            about: [ax, ay, az],
+            copy,
+        });
+        Ok(mixed_copy_json(&roots, &copies, &change))
     }
 
     /// The ceiling [`Scene::duplicate_selection_array`] enforces on `count`
@@ -7468,6 +7678,60 @@ impl Scene {
             kinds: kinds.to_vec(),
             ids: ids.to_vec(),
             sketches: sketches.to_vec(),
+            affine: *rows,
+        });
+        Ok(())
+    }
+
+    /// [`Scene::transform_selection`] for a selection that also holds
+    /// construction guides: every listed guide is carried through `affine`
+    /// with the nodes and sketches, as [`Scene::transform_guide`] carries
+    /// one, in the same ONE undo step —
+    /// [`kernel::Document::transform_mixed_selection`]. `kinds`/`ids` and
+    /// `sketches` may be empty when guides are listed. Annotations are never
+    /// listed: one anchored to a moving node already follows it.
+    ///
+    /// # Errors
+    /// As [`Scene::transform_selection`], plus:
+    /// - `UnknownGuide` — a listed guide is stale, deleted, or foreign.
+    /// - `DegenerateGuide` — a guide's posed geometry is not a guide.
+    ///
+    /// The whole batch refuses with the document untouched.
+    pub fn transform_mixed_selection(
+        &mut self,
+        kinds: &[u8],
+        ids: &[u64],
+        sketches: &[u64],
+        guides: &[u64],
+        affine: &[f64],
+    ) -> Result<(), ApiError> {
+        self.ensure_not_busy()?;
+        if kinds.len() != ids.len() {
+            return Err(ApiError(
+                "BadNodeList: kinds and ids must be the same length".to_string(),
+            ));
+        }
+        let nodes = kinds
+            .iter()
+            .zip(ids)
+            .map(|(&k, &i)| node_id(k, i))
+            .collect::<Result<Vec<_>, _>>()?;
+        let sketch_ids: Vec<_> = sketches.iter().map(|&s| sketch_id(s)).collect();
+        let guide_ids: Vec<GuideId> = guides.iter().map(|&g| guide_id(g)).collect();
+        let rows: &[f64; 12] = affine.try_into().map_err(|_| {
+            ApiError("BadAffine: transform must be 12 floats (row-major 3x4)".to_string())
+        })?;
+        let t = Transform::from_affine(rows);
+        let change = self
+            .doc
+            .transform_mixed_selection(&nodes, &sketch_ids, &guide_ids, &t)
+            .map_err(doc_err)?;
+        self.reconcile(&change);
+        recording::record(recording::RecordedCall::TransformMixedSelection {
+            kinds: kinds.to_vec(),
+            ids: ids.to_vec(),
+            sketches: sketches.to_vec(),
+            guides: guides.to_vec(),
             affine: *rows,
         });
         Ok(())
@@ -16056,6 +16320,63 @@ impl Scene {
                 CutSelection { kinds, ids } => {
                     self.cut_selection(&kinds, &ids)?;
                 }
+                TransformMixedSelection {
+                    kinds,
+                    ids,
+                    sketches,
+                    guides,
+                    affine,
+                } => {
+                    self.transform_mixed_selection(&kinds, &ids, &sketches, &guides, &affine)?;
+                }
+                DuplicateMixedSelectionArray {
+                    kinds,
+                    ids,
+                    guides,
+                    affine,
+                    count,
+                    linked,
+                } => {
+                    self.duplicate_mixed_selection_array(
+                        &kinds, &ids, &guides, &affine, count, linked,
+                    )?;
+                }
+                DuplicateMixedSelectionPlacements {
+                    kinds,
+                    ids,
+                    guides,
+                    affines,
+                    linked,
+                } => {
+                    self.duplicate_mixed_selection_placements(
+                        &kinds, &ids, &guides, &affines, linked,
+                    )?;
+                }
+                FlipMixedSelection {
+                    kinds,
+                    ids,
+                    sketch_ids,
+                    guides,
+                    normal,
+                    about_kind,
+                    about,
+                    copy,
+                } => {
+                    self.flip_mixed_selection(
+                        &kinds,
+                        &ids,
+                        &sketch_ids,
+                        &guides,
+                        normal[0],
+                        normal[1],
+                        normal[2],
+                        about_kind,
+                        about[0],
+                        about[1],
+                        about[2],
+                        copy,
+                    )?;
+                }
                 Shell { object, spec } => {
                     self.shell(object, &spec)?;
                 }
@@ -19149,6 +19470,213 @@ mod tests {
         assert!(
             json.contains("\"method\":\"delete_selection\",\"kinds\":[0],\"ids\":["),
             "a node-only delete keeps its recorded shape: {json}"
+        );
+
+        let mut replayed = Scene::new();
+        let final_hash = replayed.replay(&json).unwrap();
+        assert_eq!(
+            final_hash, golden,
+            "replay reproduces the golden state_hash"
+        );
+        assert_eq!(replayed.save(), scene.save(), "byte-identical document");
+    }
+
+    /// A row-major 3x4 translation, as the app passes one.
+    fn shift(x: f64, y: f64, z: f64) -> [f64; 12] {
+        [
+            1.0, 0.0, 0.0, x, //
+            0.0, 1.0, 0.0, y, //
+            0.0, 0.0, 1.0, z,
+        ]
+    }
+
+    /// The decimal-string handles under `key` in a mixed copy's JSON.
+    fn handles(json: &str, key: &str) -> Vec<String> {
+        let v: serde_json::Value = serde_json::from_str(json).unwrap();
+        v[key]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|h| match h {
+                serde_json::Value::String(s) => s.clone(),
+                other => other["id"].as_str().unwrap().to_string(),
+            })
+            .collect()
+    }
+
+    /// `transform_mixed_selection` carries the guides with the nodes in ONE
+    /// undo step, takes guides alone, and refuses a stale guide typed with
+    /// nothing applied.
+    #[test]
+    fn transform_mixed_selection_is_one_undo_step() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        let g = scene.add_guide_point(5.0, 0.0, 0.0).unwrap();
+        let before = scene.state_hash();
+
+        scene
+            .transform_mixed_selection(&[0], &[o], &[], &[g], &shift(0.0, 2.0, 0.0))
+            .unwrap();
+        assert_eq!(scene.guide_geometry(g), Some(vec![5.0, 2.0, 0.0]));
+        scene.scene_undo().unwrap();
+        assert_eq!(scene.state_hash(), before, "one undo restores both");
+
+        scene
+            .transform_mixed_selection(&[], &[], &[], &[g], &shift(1.0, 0.0, 0.0))
+            .unwrap();
+        assert_eq!(scene.guide_geometry(g), Some(vec![6.0, 0.0, 0.0]));
+        scene.scene_undo().unwrap();
+
+        let hash = scene.state_hash();
+        let err = scene
+            .transform_mixed_selection(&[0], &[o], &[], &[g, u64::MAX], &shift(1.0, 0.0, 0.0))
+            .unwrap_err();
+        assert!(err.0.starts_with("UnknownGuide"), "got {}", err.0);
+        assert_eq!(scene.state_hash(), hash, "nothing applied");
+        let err = scene
+            .transform_mixed_selection(&[], &[], &[], &[], &shift(1.0, 0.0, 0.0))
+            .unwrap_err();
+        assert!(err.0.starts_with("EmptySelection"), "got {}", err.0);
+    }
+
+    /// The mixed copies return the nodes, the wraps and the guide copies as
+    /// JSON, in one undo step; the guide copies are placement-major.
+    #[test]
+    fn duplicate_mixed_selection_returns_guide_copies() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        let g = scene.add_guide_point(5.0, 0.0, 0.0).unwrap();
+        let before = scene.state_hash();
+
+        let json = scene
+            .duplicate_mixed_selection_array(&[0], &[o], &[g], &shift(0.0, 2.0, 0.0), 2, false)
+            .unwrap();
+        assert_eq!(handles(&json, "nodes").len(), 2);
+        let copies = handles(&json, "guides");
+        assert_eq!(copies.len(), 2);
+        let geometry =
+            |scene: &Scene, h: &str| scene.guide_geometry(h.parse::<u64>().unwrap()).unwrap();
+        assert_eq!(geometry(&scene, &copies[0]), vec![5.0, 2.0, 0.0]);
+        assert_eq!(geometry(&scene, &copies[1]), vec![5.0, 4.0, 0.0]);
+        scene.scene_undo().unwrap();
+        assert_eq!(scene.state_hash(), before, "one undo hides every copy");
+
+        let mut grid = shift(3.0, 0.0, 0.0).to_vec();
+        grid.extend(shift(0.0, 3.0, 0.0));
+        let json = scene
+            .duplicate_mixed_selection_placements(&[0], &[o], &[g], &grid, true)
+            .unwrap();
+        assert_eq!(handles(&json, "nodes").len(), 2);
+        let linked: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            linked["linked"].as_array().unwrap().len(),
+            1,
+            "the node was wrapped"
+        );
+        let copies = handles(&json, "guides");
+        assert_eq!(geometry(&scene, &copies[0]), vec![8.0, 0.0, 0.0]);
+        assert_eq!(geometry(&scene, &copies[1]), vec![5.0, 3.0, 0.0]);
+        scene.scene_undo().unwrap();
+        assert_eq!(scene.state_hash(), before);
+
+        let err = scene
+            .duplicate_mixed_selection_array(&[0], &[o], &[g, g], &shift(0.0, 2.0, 0.0), 1, false)
+            .unwrap_err();
+        assert!(err.0.starts_with("DuplicateMember"), "got {}", err.0);
+        assert_eq!(scene.state_hash(), before, "nothing applied");
+    }
+
+    /// `flip_mixed_selection` mirrors the guides across the nodes' center,
+    /// or copies them mirrored, and refuses guides alone.
+    #[test]
+    fn flip_mixed_selection_mirrors_guides_across_the_nodes() {
+        let mut scene = Scene::new();
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        let g = scene.add_guide_point(5.0, 0.0, 0.0).unwrap();
+        let before = scene.state_hash();
+        let flip = |scene: &mut Scene, kinds: &[u8], ids: &[u64], copy: u8| {
+            scene.flip_mixed_selection(kinds, ids, &[], &[g], 1.0, 0.0, 0.0, 0, 0.0, 0.0, 0.0, copy)
+        };
+
+        // The unit square spans x in [0, 1]: the mirror is x = 0.5.
+        let json = flip(&mut scene, &[0], &[o], 0).unwrap();
+        assert_eq!(handles(&json, "nodes").len(), 1);
+        assert!(handles(&json, "guides").is_empty());
+        assert_eq!(scene.guide_geometry(g), Some(vec![-4.0, 0.0, 0.0]));
+        scene.scene_undo().unwrap();
+        assert_eq!(scene.state_hash(), before);
+
+        let json = flip(&mut scene, &[0], &[o], 2).unwrap();
+        let copies = handles(&json, "guides");
+        assert_eq!(copies.len(), 1);
+        assert_eq!(
+            scene.guide_geometry(copies[0].parse().unwrap()),
+            Some(vec![-4.0, 0.0, 0.0])
+        );
+        assert_eq!(scene.guide_geometry(g), Some(vec![5.0, 0.0, 0.0]));
+        scene.scene_undo().unwrap();
+
+        let err = flip(&mut scene, &[], &[], 0).unwrap_err();
+        assert!(err.0.starts_with("EmptySelection"), "got {}", err.0);
+        assert_eq!(scene.state_hash(), before, "nothing applied");
+    }
+
+    /// The mixed transforms and copies are part of the replay contract under
+    /// their own methods; the node-only calls keep their recorded shapes.
+    #[test]
+    fn mixed_transforms_record_and_replay() {
+        recording::reset();
+        let mut scene = Scene::new();
+        scene.start_recording();
+
+        let (s, r) = ground_unit_square(&mut scene);
+        let o = scene.extrude_region(s, r, 1.0).unwrap();
+        let g = scene.add_guide_line(5.0, 0.0, 0.0, 0.0, 1.0, 0.0).unwrap();
+        scene
+            .transform_mixed_selection(&[0], &[o], &[], &[g], &shift(0.0, 1.0, 0.0))
+            .unwrap();
+        scene
+            .duplicate_mixed_selection_array(&[0], &[o], &[g], &shift(3.0, 0.0, 0.0), 2, false)
+            .unwrap();
+        scene
+            .duplicate_mixed_selection_placements(&[0], &[o], &[g], &shift(0.0, 4.0, 0.0), false)
+            .unwrap();
+        scene
+            .flip_mixed_selection(&[0], &[o], &[], &[g], 1.0, 0.0, 0.0, 0, 0.0, 0.0, 0.0, 2)
+            .unwrap();
+        scene.scene_undo().unwrap();
+        scene.scene_redo().unwrap();
+        scene
+            .transform_selection(&[0], &[o], &[], &shift(0.0, 0.0, 1.0))
+            .unwrap();
+        scene
+            .duplicate_selection_array(&[0], &[o], &shift(9.0, 0.0, 0.0), 1, false)
+            .unwrap();
+
+        scene.stop_recording();
+        let golden = scene.state_hash();
+        let json = scene.take_recording();
+        for method in [
+            "transform_mixed_selection",
+            "duplicate_mixed_selection_array",
+            "duplicate_mixed_selection_placements",
+            "flip_mixed_selection",
+        ] {
+            assert!(
+                json.contains(&format!("\"method\":\"{method}\"")),
+                "{method} is recorded: {json}"
+            );
+        }
+        assert!(
+            json.contains("\"method\":\"transform_selection\",\"kinds\":[0],\"ids\":["),
+            "a node-only transform keeps its recorded shape: {json}"
+        );
+        assert!(
+            json.contains("\"method\":\"duplicate_selection_array\",\"kinds\":[0],\"ids\":["),
+            "a node-only copy keeps its recorded shape: {json}"
         );
 
         let mut replayed = Scene::new();

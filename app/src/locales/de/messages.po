@@ -4824,6 +4824,18 @@ msgstr "Hilfspunkt"
 msgid "Guides"
 msgstr "Hilfslinien"
 
+#: src/tools/FlipTool.ts
+msgid "Guides can't be flipped on their own. Select an object or a drawing with them."
+msgstr "Hilfslinien lassen sich nicht allein spiegeln. Wählen Sie ein Objekt oder eine Zeichnung mit ihnen aus."
+
+#: src/tools/ScaleTool.ts
+msgid "Guides can't be scaled on their own. Select an object or a drawing with them."
+msgstr "Hilfslinien lassen sich nicht allein skalieren. Wählen Sie ein Objekt oder eine Zeichnung mit ihnen aus."
+
+#: src/tools/MoveTool.ts
+msgid "Guides copy along one direction only — type a single count."
+msgstr "Hilfslinien werden nur in einer Richtung kopiert – geben Sie eine einzelne Anzahl ein."
+
 #. One-letter label for the height of a part
 #. One-letter label for the height of a part
 #. One-letter label for the height of a part
@@ -6399,6 +6411,10 @@ msgid "Materials"
 msgstr "Materialien"
 
 #: src/io/documentSession.ts
+msgid "Materials added"
+msgstr ""
+
+#: src/io/documentSession.ts
 msgid "Materials added from the Library"
 msgstr "Aus der Bibliothek hinzugefügte Materialien"
 
@@ -7182,6 +7198,7 @@ msgstr "Nichts zu exportieren – das Modell hat keine Volumenkörper."
 msgid "Nothing to export — the model has nothing visible."
 msgstr "Nichts zu exportieren – im Modell ist nichts sichtbar."
 
+#: src/tools/FlipTool.ts
 #: src/viewport/Viewport.tsx
 msgid "Nothing to flip"
 msgstr "Nichts zu spiegeln"
@@ -7210,6 +7227,10 @@ msgstr "Nichts zu wiederholen."
 #: src/App.tsx
 msgid "Nothing to revert: the document is already at its saved state."
 msgstr "Nichts zurückzusetzen: Das Dokument ist bereits im gespeicherten Zustand."
+
+#: src/tools/ScaleTool.ts
+msgid "Nothing to scale"
+msgstr "Nichts zu skalieren"
 
 #: src/App.tsx
 msgid "Nothing to share yet — the document is empty"
@@ -10480,6 +10501,10 @@ msgstr "Tag: {tagLabel}"
 #: src/panels/ObjectInfoPanel.tsx
 msgid "Tags"
 msgstr "Tags"
+
+#: src/io/documentSession.ts
+msgid "Tags added"
+msgstr ""
 
 #: src/viewport/InferenceTooltip.tsx
 msgid "Tangent"
