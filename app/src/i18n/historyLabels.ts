@@ -195,6 +195,8 @@ export function historyKindLabel(k: HistoryKind): string | null {
           return plural(n, { one: `${verb} # instance`, other: `${verb} # instances` })
         case 'item':
           return plural(n, { one: `${verb} # item`, other: `${verb} # items` })
+        case 'guide':
+          return plural(n, { one: `${verb} # guide`, other: `${verb} # guides` })
         default:
           return plural(n, { one: `${verb} # object`, other: `${verb} # objects` })
       }

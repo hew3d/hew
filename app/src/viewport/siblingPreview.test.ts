@@ -208,6 +208,53 @@ describe('SiblingPreviewMirror', () => {
     expect(new THREE.Vector3().setFromMatrixPosition(clone.matrixWorld).toArray()).toEqual([1, 9, 3])
   })
 
+  it('follows a ghost driven through an unmarked wrapper (a node ghost grouped with guide ghosts)', () => {
+    const { source, root, mirror } = setup()
+    const wrapper = new THREE.Group()
+    const ghost = markSessionGhost(new THREE.Group())
+    ghost.position.set(1, 0, 0)
+    wrapper.add(ghost, new THREE.LineSegments(new THREE.BufferGeometry()))
+    source.add(wrapper)
+    mirror.sync()
+    // The guide ghost beside it stands for nothing in the definition.
+    expect((root.children[0] as THREE.Group).children).toHaveLength(1)
+    const clone = firstClone(root, 1)
+    const world = (): number[] => {
+      root.updateMatrixWorld(true)
+      return new THREE.Vector3(0, 0, 0).applyMatrix4(clone.matrixWorld).toArray()
+    }
+    expect(world()).toEqual([1, 7, 0])
+
+    // The tool moves only the wrapper.
+    wrapper.position.set(3, 0, 0)
+    mirror.sync()
+    expect(mirror.lastWork).toBe('retarget')
+    expect(firstClone(root, 1)).toBe(clone)
+    expect(world()).toEqual([4, 7, 0])
+
+    // A mirror reflection on the wrapper (the Flip ghost) carries across too.
+    wrapper.position.set(0, 0, 0)
+    wrapper.applyMatrix4(new THREE.Matrix4().makeScale(-1, 1, 1))
+    mirror.sync()
+    expect(world()[0]).toBeCloseTo(-1)
+    expect(world()[1]).toBeCloseTo(7)
+  })
+
+  it('the bounds box of a too-big ghost follows its wrapper', () => {
+    const { source, root, mirror } = setup({ nodeBudget: 50 })
+    const wrapper = new THREE.Group()
+    wrapper.add(bigGhost(20))
+    wrapper.position.set(0, 0, 5)
+    source.add(wrapper)
+    mirror.sync()
+    expect(mirror.lastWork).toBe('proxy')
+    const box = (root.children[0] as THREE.Group).children[0]
+    expect(box.position.z).toBeCloseTo(5)
+    wrapper.position.set(0, 0, 8)
+    mirror.sync()
+    expect((root.children[0] as THREE.Group).children[0].position.z).toBeCloseTo(8)
+  })
+
   it('a child swapped in place under the same root (same count) is picked up: the clone draws the new geometry', () => {
     const { source, root, mirror } = setup()
     const ghost = markSessionGhost(new THREE.Group())
