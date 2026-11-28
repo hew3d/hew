@@ -870,7 +870,7 @@ describe('ScaleTool — retype after an arranging drawn-shape scale', () => {
     t.tool.onPointerMove(makeSnap({ x: dragged[0], y: dragged[1], z: dragged[2] }), rayAt(dragged))
     t.tool.onPointerDown(makeSnap({ x: dragged[0], y: dragged[1], z: dragged[2] }), rayAt(dragged))
     expect(scene.transform_sketch_islands).toHaveBeenCalledTimes(1)
-    expect(t.onCommit).toHaveBeenLastCalledWith([di(99n)])
+    expect(t.onCommit).toHaveBeenLastCalledWith([di(99n)], [])
 
     for (const ch of '3') t.tool.onKey({ key: ch } as KeyboardEvent)
     t.tool.onKey({ key: 'Enter' } as KeyboardEvent)
@@ -878,7 +878,7 @@ describe('ScaleTool — retype after an arranging drawn-shape scale', () => {
     expect(scene.transform_sketch_islands).toHaveBeenCalledTimes(2)
     expect([...(scene.transform_sketch_islands.mock.calls[1][1] as BigUint64Array)]).toEqual([40n])
     expect((scene.transform_sketch_islands.mock.calls[1][2] as Float64Array)[10]).toBeCloseTo(3, 9)
-    expect(t.onCommit).toHaveBeenLastCalledWith([di(99n)])
+    expect(t.onCommit).toHaveBeenLastCalledWith([di(99n)], [])
   })
 
   it('an in-plane scale of a drawn unit drafts it over ALL its edge keys, and the gizmo is built from the unit\'s own geometry', () => {

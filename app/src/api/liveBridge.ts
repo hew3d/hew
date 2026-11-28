@@ -197,21 +197,87 @@ export interface LiveBridgeDeps {
   /** How many crumbs the window has open: session frames plus in-context
    * entries. `exit_context` pops to one fewer. */
   contextDepth?: () => number
+  /** A dispatch wrote something undo history does not hold, so the document
+   * is unsaved whatever the kernel's saved mark says
+   * (`watchUnrecordedWrites`). Optional; App.tsx wires it. */
+  markUnrecordedWrite?: (write: UnrecordedWrite) => void
 }
 
 /** Whether a successful reply added a Library material item to the
  * palette: `hew.library.insert`'s result carries a `materials` list only
- * for a material item, bare or as one entry of a transaction's results. */
+ * for a material item, bare or as one entry of a transaction's results.
+ * An item whose materials the palette already held added none. */
 export function addedLibraryMaterials(reply: string): boolean {
   try {
     const result = (JSON.parse(reply) as { result?: { results?: unknown } }).result
     if (result === undefined || result === null) return false
     const entries = Array.isArray(result.results) ? result.results : [result]
-    return entries.some(
-      (e) => typeof e === 'object' && e !== null && Array.isArray((e as { materials?: unknown }).materials),
-    )
+    return entries.some((e) => {
+      if (typeof e !== 'object' || e === null) return false
+      const { materials, materials_added: added } = e as { materials?: unknown; materials_added?: unknown }
+      return Array.isArray(materials) && typeof added === 'number' && added > 0
+    })
   } catch {
     return false
+  }
+}
+
+/** What a command can write into the saved document without an undo entry,
+ * besides a Library material item (`addedLibraryMaterials`). The kernel's
+ * saved mark cannot see any of these. */
+export type UnrecordedWrite = 'materials' | 'tags' | 'scenes' | 'libraryMetadata'
+
+/** The commands that record no undo entry whenever they change a Scene
+ * (docs/agents/HEW_API.md §6.4). `hew.scenes.apply` is not one of them: like
+ * a click on a Scene's row, it changes only what is on view. */
+const SCENE_EDITS: ReadonlySet<string> = new Set(
+  ['add', 'update', 'rename', 'describe', 'remove', 'reorder'].map((verb) => `hew.scenes.${verb}`),
+)
+
+/** The commands a request frame runs: the bare call, or each command of a
+ * `hew.doc.transact`. Malformed input reads as none. */
+function frameCommands(frame: string): { method?: unknown; params?: unknown }[] {
+  try {
+    const request = JSON.parse(frame) as { method?: unknown; params?: { commands?: unknown } } | null
+    if (request?.method !== 'hew.doc.transact') return request === null ? [] : [request]
+    const commands = request.params?.commands
+    return Array.isArray(commands) ? commands.filter((c) => typeof c === 'object' && c !== null) : []
+  } catch {
+    return []
+  }
+}
+
+/**
+ * Called before `frame` is dispatched. Hands back the tail to run with its
+ * reply (never a dry run's), which reports to `deps.markUnrecordedWrite`
+ * each kind of write the dispatch made that undo history does not hold. A
+ * refusal reports nothing: it left the document as it was.
+ *
+ * Judged apart from whether the command "mutates": `hew.library.save` is
+ * read-only to the registry, yet links the saved parts to their new item.
+ * A tag counts only when it is new to the registry. Showing or hiding a tag
+ * the document already has is view state, as it is in the Tags panel.
+ */
+export function watchUnrecordedWrites(scene: Scene, frame: string): (deps: LiveBridgeDeps, reply: string) => void {
+  const commands = frameCommands(frame)
+  const mayRegisterTag = commands.some((c) => c.method === 'hew.tag.create' || c.method === 'hew.tag.set_visible')
+  const tagsBefore = mayRegisterTag ? new Set(scene.tag_meta_paths()) : undefined
+  return (deps, reply) => {
+    if (!replySucceeded(reply)) return
+    const writes = new Set<UnrecordedWrite>()
+    for (const { method, params } of commands) {
+      if (typeof method !== 'string') continue
+      if (method === 'hew.material.create') writes.add('materials')
+      else if (SCENE_EDITS.has(method)) writes.add('scenes')
+      else if (method === 'hew.library.save') {
+        // Only parts of the model are linked; saving a material, a profile
+        // or the whole model leaves the document as it was.
+        const selection = (params as { selection?: unknown } | undefined)?.selection
+        if (Array.isArray(selection) && selection.length > 0) writes.add('libraryMetadata')
+      }
+    }
+    if (tagsBefore !== undefined && scene.tag_meta_paths().some((path) => !tagsBefore.has(path))) writes.add('tags')
+    for (const write of writes) deps.markUnrecordedWrite?.(write)
   }
 }
 
@@ -869,6 +935,7 @@ export function dispatchFrameNow(
 ): string | undefined {
   scene.set_display_units(getLengthUnit())
   pushGestureArmed(deps, scene)
+  const noteUnrecorded = watchUnrecordedWrites(scene, frame)
   const result = parseDispatch(scene.api_dispatch(wasmId, frame))
   if (result.kind === 'none') return undefined
   const reply =
@@ -881,6 +948,7 @@ export function dispatchFrameNow(
   const declined = isEnter
     ? afterEnterDispatch(deps, scene, reply, mutatedNow)
     : afterDispatch(deps, scene, reply, mutatedNow())
+  if (result.kind === 'reply' && result.dryRun !== true) noteUnrecorded(deps, reply)
   pumpEvents(scene)
   return declined === undefined ? reply : (enterRefusedReply(frame, declined) ?? reply)
 }
@@ -1287,6 +1355,7 @@ export function installLiveBridge(deps: LiveBridgeDeps): () => void {
     }
     const method = frameMethod(frame)
     beforeDispatch(deps, scene, method)
+    const noteUnrecorded = watchUnrecordedWrites(scene, frame)
     const result = parseDispatch(scene.api_dispatch(wasmId, frame))
     if (result.kind === 'none') return // a notification: no reply, per §4.1
     let reply: string
@@ -1333,6 +1402,7 @@ export function installLiveBridge(deps: LiveBridgeDeps): () => void {
     // Scene activation, the selection, hide and show, isolation, framing),
     // in the order its commands ran.
     afterDispatch(deps, scene, reply, mutated)
+    if (result.kind === 'reply' && result.dryRun !== true) noteUnrecorded(deps, reply)
     // What the dispatch changed reaches subscribers after its reply.
     pump(scene)
   }

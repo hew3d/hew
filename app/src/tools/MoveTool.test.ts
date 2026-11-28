@@ -455,7 +455,7 @@ describe('MoveTool — durable Alt copy toggle', () => {
     expect(count).toBe(1)
     expect(scene.transform_selection).not.toHaveBeenCalled()
     // The fresh clone becomes the committed selection.
-    expect(onCommit).toHaveBeenCalledWith([{ kind: 'object', id: 100n }])
+    expect(onCommit).toHaveBeenCalledWith([{ kind: 'object', id: 100n }], [])
   })
 
   it('typed exact distance commits a plain MOVE after toggling back off', () => {
@@ -601,7 +601,7 @@ describe('MoveTool — drawn-shape copy (playtest: "you can\'t Copy a Sketch")',
     expect(t.scene.transform_sketch).not.toHaveBeenCalled()
     expect(t.scene.duplicate_selection_array).not.toHaveBeenCalled()
     // The new unit becomes the committed selection (found by geometry).
-    expect(t.onCommit).toHaveBeenCalledWith([di(77n)])
+    expect(t.onCommit).toHaveBeenCalledWith([di(77n)], [])
     expect(t.onToast).not.toHaveBeenCalled()
   })
 
@@ -672,7 +672,7 @@ describe('MoveTool — drawn-shape copy (playtest: "you can\'t Copy a Sketch")',
     expect(t.onCommit).toHaveBeenCalledWith([
       di(77n),
       { kind: 'object', id: 100n },
-    ])
+    ], [])
     // The drawn and object halves are ONE undo step (a history bracket).
     expect(t.scene.undo_depth()).toBe(1)
     expect(t.brackets.labels).toEqual(['Copy'])
@@ -1129,7 +1129,7 @@ describe('MoveTool — auto-select on click', () => {
     expect(Array.from(kinds as Uint8Array)).toEqual([0]) // one object
     expect(Array.from(ids as BigUint64Array)).toEqual([7n])
     expect((affine as Float64Array)[3]).toBeCloseTo(2) // tx = 2
-    expect(onCommit).toHaveBeenCalledWith([{ kind: 'object', id: 7n }])
+    expect(onCommit).toHaveBeenCalledWith([{ kind: 'object', id: 7n }], [])
     expect(tool.capturingInput()).toBe(false) // reset to idle after commit
   })
 
@@ -1328,7 +1328,7 @@ describe('MoveTool — retype after an arranging drawn-shape move', () => {
     beginGestureLockedX(t.tool)
     typeKeys(t.tool, '2')
     t.tool.onKey(makeKeyEvent('Enter'))
-    expect(t.onCommit).toHaveBeenLastCalledWith([di(99n)])
+    expect(t.onCommit).toHaveBeenLastCalledWith([di(99n)], [])
 
     typeKeys(t.tool, '3')
     t.tool.onKey(makeKeyEvent('Enter'))
@@ -1339,7 +1339,7 @@ describe('MoveTool — retype after an arranging drawn-shape move', () => {
     expect([...(scene.draft_transform_edges.mock.calls[1][1] as BigUint64Array)]).toEqual([10n])
     expect(translationOf(scene.draft_transform_edges.mock.calls[1][2] as Float64Array)).toEqual([3, 0, 0])
     // The visible selection after the retype is the re-resolved unit again.
-    expect(t.onCommit).toHaveBeenLastCalledWith([di(99n)])
+    expect(t.onCommit).toHaveBeenLastCalledWith([di(99n)], [])
   })
 })
 
@@ -2066,7 +2066,7 @@ describe('MoveTool — a click-taken selection lasts only for the gesture (Sketc
     t.tool.onKey(makeKeyEvent('Alt'))
     moveTwoAlongX(t.tool)
     expect(release).not.toHaveBeenCalled()
-    expect(t.onCommit).toHaveBeenLastCalledWith([{ kind: 'object', id: expect.any(BigInt) }])
+    expect(t.onCommit).toHaveBeenLastCalledWith([{ kind: 'object', id: expect.any(BigInt) }], [])
   })
 
   it('a retyped distance re-lands with nothing selected; once something else is selected, it is left alone', () => {

@@ -593,6 +593,12 @@ function sketchSegments(wasmScene: WasmScene, sketch: bigint): [V3, V3][] {
  * any pose, unlike a scalar distance — no non-uniform-scale refusal here).
  * Drawn shapes inside an instance carry the instance in their context, so
  * their drafts conjugate the same way.
+ *
+ * `guides` are construction guides carried with the selection: outside a
+ * component they join the nodes in the one `transform_mixed_selection` call;
+ * inside one (guides belong to the document, never to a definition) they
+ * take their own call with the world affine, in the same history bracket.
+ * Their handles survive the move, so the returned refs name nodes only.
  */
 export function commitSelectionTransform(
   wasmScene: WasmScene,
@@ -600,9 +606,10 @@ export function commitSelectionTransform(
   affineF64: Float64Array,
   activeInstance?: bigint | null,
   label = t({ context: 'tool', message: 'Move' }),
+  guides: readonly bigint[] = [],
 ): NodeRef[] {
   try {
-    return commitSelectionTransformInner(wasmScene, selection, affineF64, activeInstance, label)
+    return commitSelectionTransformInner(wasmScene, selection, affineF64, activeInstance, label, guides)
   } catch (err) {
     // A failed commit rolled back: its held reports name nothing that exists.
     resetSketchTransformReports()
@@ -616,6 +623,7 @@ function commitSelectionTransformInner(
   affineF64: Float64Array,
   activeInstance: bigint | null | undefined,
   label: string,
+  guides: readonly bigint[],
 ): NodeRef[] {
   resetSketchTransformReports()
   const committed: NodeRef[] = [...selection]
@@ -662,10 +670,11 @@ function commitSelectionTransformInner(
   }
   // History entries this gesture would record unbracketed.
   const hasPost = post.sketches.length > 0 || post.islands.length > 0
+  const hasGuides = guides.length > 0
   const mainSteps =
     activeInstance != null
-      ? (ids.length > 0 || sketches.length > 0 || islands.length > 0 ? 1 : 0) + (hasPost ? 1 : 0)
-      : islands.length + (kinds.length > 0 || sketches.length > 0 ? 1 : 0) + post.islands.length + (post.sketches.length > 0 ? 1 : 0)
+      ? (ids.length > 0 || sketches.length > 0 || islands.length > 0 ? 1 : 0) + (hasPost ? 1 : 0) + (hasGuides ? 1 : 0)
+      : islands.length + (kinds.length > 0 || sketches.length > 0 || hasGuides ? 1 : 0) + post.islands.length + (post.sketches.length > 0 ? 1 : 0)
   const steps = pureDrafts.length + 2 * redraws.size + mainSteps
 
   const found = new Map<DraftGroup, NodeRef[]>()
@@ -716,13 +725,30 @@ function commitSelectionTransformInner(
           )
         }
         if (ids.length > 0 || sketches.length > 0 || islands.length > 0) defMove(ids, sketches, islands)
+        if (hasGuides) {
+          wasmScene.transform_mixed_selection(
+            new Uint8Array(0),
+            new BigUint64Array(0),
+            new BigUint64Array(0),
+            new BigUint64Array(guides),
+            affineF64,
+          )
+        }
       } else {
         for (const group of islands) {
           noteSketchTransformReport(
             wasmScene.transform_sketch_islands(group.sketch, new BigUint64Array(group.islands), affineF64),
           )
         }
-        if (kinds.length > 0 || sketches.length > 0) {
+        if (hasGuides) {
+          wasmScene.transform_mixed_selection(
+            new Uint8Array(kinds),
+            new BigUint64Array(ids),
+            new BigUint64Array(sketches),
+            new BigUint64Array(guides),
+            affineF64,
+          )
+        } else if (kinds.length > 0 || sketches.length > 0) {
           wasmScene.transform_selection(
             new Uint8Array(kinds),
             new BigUint64Array(ids),
@@ -840,6 +866,9 @@ function draftRefOfSketchIsland(wasmScene: WasmScene, sketch: bigint, island: bi
  * on their faces rides with the copies; then a MIXED shape (part of it rides
  * with an owner, the rest is drawn) draws its captured non-riding edges again
  * at every rep, circles kept as circles under a similarity.
+ *
+ * `copiesGuides` says `copyOwners` also copies construction guides (one
+ * mixed kernel call), so it runs even when no owner is listed.
  */
 export function copyOwnersAndDrawing(
   wasmScene: WasmScene,
@@ -847,9 +876,10 @@ export function copyOwnersAndDrawing(
   drawn: readonly NodeRef[],
   affines: readonly Float64Array[],
   copyOwners: () => NodeRef[],
+  copiesGuides = false,
 ): NodeRef[] {
   try {
-    return copyOwnersAndDrawingInner(wasmScene, owners, drawn, affines, copyOwners)
+    return copyOwnersAndDrawingInner(wasmScene, owners, drawn, affines, copyOwners, copiesGuides)
   } catch (err) {
     resetSketchTransformReports() // the failed copy rolled back
     throw err
@@ -862,10 +892,12 @@ function copyOwnersAndDrawingInner(
   drawn: readonly NodeRef[],
   affines: readonly Float64Array[],
   copyOwners: () => NodeRef[],
+  copiesGuides: boolean,
 ): NodeRef[] {
   resetSketchTransformReports()
-  if (drawn.length === 0) return owners.length > 0 ? copyOwners() : []
-  if (owners.length === 0) return duplicateSketchSelectionByAffineArray(wasmScene, drawn, affines)
+  const owning = owners.length > 0 || copiesGuides
+  if (drawn.length === 0) return owning ? copyOwners() : []
+  if (!owning) return duplicateSketchSelectionByAffineArray(wasmScene, drawn, affines)
   return inHistoryBracket(wasmScene, t`Copy`, () => {
     const plan = planCopy(wasmScene, [...owners, ...drawn], affines)
     const whole = copyWholeDrawing(wasmScene, plan, affines)

@@ -29,13 +29,17 @@ function parseNode(n: WireNode): NodeRef {
   return nodeRefFromJs({ kind: n.kind, id: BigInt(n.id) })
 }
 
-/** Parse `duplicate_selection_array_linked`'s JSON (handles are decimal strings). */
-export function parseLinkedResult(json: string): { nodes: NodeRef[]; linked: LinkedWrapRef[] } {
+/** Parse `duplicate_selection_array_linked`'s JSON (handles are decimal
+ *  strings). The mixed copy calls add the guide copies (`guides`); the
+ *  others list none. */
+export function parseLinkedResult(json: string): { nodes: NodeRef[]; linked: LinkedWrapRef[]; guides: bigint[] } {
   const raw = JSON.parse(json) as {
     nodes: WireNode[]
     linked: { source: WireNode; instance: string; definition: string }[]
+    guides?: string[]
   }
   return {
+    guides: (raw.guides ?? []).map((g) => BigInt(g)),
     nodes: raw.nodes.map(parseNode),
     linked: raw.linked.map((w) => ({
       source: parseNode(w.source),

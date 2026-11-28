@@ -86,6 +86,12 @@ export const NON_UNDOABLE_REASON = {
   get libraryMaterials() {
     return t`Materials added from the Library`
   },
+  get materialsAdded() {
+    return t`Materials added`
+  },
+  get tagsAdded() {
+    return t`Tags added`
+  },
   get libraryMetadata() {
     return t`Library metadata`
   },

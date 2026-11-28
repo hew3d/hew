@@ -515,7 +515,7 @@ describe('RotateTool — gesture', () => {
     tool.onPointerMove(makeSnap({ x: 0, y: 1, z: 0 }), rayThrough(0, 1)) // sweep 90°
     tool.onPointerDown(makeSnap({ x: 0, y: 1, z: 0 }), rayThrough(0, 1)) // commit
     expect(wasmScene.transform_selection).toHaveBeenCalledTimes(1)
-    expect(onCommit).toHaveBeenCalledWith([{ kind: 'object', id: 5n }])
+    expect(onCommit).toHaveBeenCalledWith([{ kind: 'object', id: 5n }], [])
   })
 
   it('commits a rotation from a full three-click gesture (pivot → reference → sweep)', () => {
@@ -922,7 +922,7 @@ describe('RotateTool — durable Alt copy toggle', () => {
     expect(count).toBe(1)
     expect(wasmScene.transform_selection).not.toHaveBeenCalled()
     // The fresh clone becomes the committed selection.
-    expect(onCommit).toHaveBeenCalledWith([{ kind: 'object', id: 100n }])
+    expect(onCommit).toHaveBeenCalledWith([{ kind: 'object', id: 100n }], [])
   })
 
   it('a full gesture commits a plain ROTATE (transform_selection) after toggling back off', () => {
@@ -1055,7 +1055,7 @@ describe('RotateTool — drawn-shape copy (Move\'s "you can\'t Copy a Sketch" en
     expect(t.wasmScene.transform_selection).not.toHaveBeenCalled()
     expect(t.wasmScene.duplicate_selection_array).not.toHaveBeenCalled()
     // The copy (found by geometry) becomes the committed selection.
-    expect(t.onCommit).toHaveBeenCalledWith([di(78n)])
+    expect(t.onCommit).toHaveBeenCalledWith([di(78n)], [])
     expect(t.onToast).not.toHaveBeenCalled()
   })
 
@@ -1086,7 +1086,7 @@ describe('RotateTool — drawn-shape copy (Move\'s "you can\'t Copy a Sketch" en
     expect(t.wasmScene.transform_selection).not.toHaveBeenCalled()
     expect(t.wasmScene.duplicate_selection_array).not.toHaveBeenCalled()
     // The replayed unit becomes the committed selection.
-    expect(t.onCommit).toHaveBeenCalledWith([di(78n)])
+    expect(t.onCommit).toHaveBeenCalledWith([di(78n)], [])
     expect(t.onToast).not.toHaveBeenCalled()
   })
 
@@ -1105,7 +1105,7 @@ describe('RotateTool — drawn-shape copy (Move\'s "you can\'t Copy a Sketch" en
     expect(c[0]).toBeCloseTo(0, 9)
     expect(c[1]).toBeCloseTo(2, 9)
     expect(t.wasmScene.sketch_begin_curve_with).not.toHaveBeenCalled()
-    expect(t.onCommit).toHaveBeenCalledWith([di(78n)])
+    expect(t.onCommit).toHaveBeenCalledWith([di(78n)], [])
   })
 
   it('an in-plane copy of a WHOLE drawn-circle sketch keeps curve identity: rotated center, same radius', () => {
@@ -1125,7 +1125,7 @@ describe('RotateTool — drawn-shape copy (Move\'s "you can\'t Copy a Sketch" en
     expect(cz).toBeCloseTo(0, 9)
     expect(radius).toBe(1) // untouched — not recomputed, just carried through
     expect(t.wasmScene.sketch_begin_curve).not.toHaveBeenCalled() // it has geom — not an identity-only chain
-    expect(t.onCommit).toHaveBeenCalledWith([di(78n)])
+    expect(t.onCommit).toHaveBeenCalledWith([di(78n)], [])
   })
 
   /** Pivot at the origin, lock Y (an in-plane axis), sweep toward +Z. */
@@ -1149,7 +1149,7 @@ describe('RotateTool — drawn-shape copy (Move\'s "you can\'t Copy a Sketch" en
     expect(sketch).toBe(3n)
     expect(Array.from(islands as BigUint64Array)).toEqual([40n])
     expect(t.wasmScene.sketch_add_segment).not.toHaveBeenCalled() // never a same-sketch replay
-    expect(t.onCommit).toHaveBeenCalledWith([di(77n)])
+    expect(t.onCommit).toHaveBeenCalledWith([di(77n)], [])
   })
 
   it('an out-of-plane rotation of a WHOLE sketch still lands a new sketch', () => {
@@ -1161,7 +1161,7 @@ describe('RotateTool — drawn-shape copy (Move\'s "you can\'t Copy a Sketch" en
     expect(sketch).toBe(3n)
     expect(Array.from(islands as BigUint64Array)).toEqual([40n, 41n])
     expect(t.wasmScene.sketch_add_segment).not.toHaveBeenCalled()
-    expect(t.onCommit).toHaveBeenCalledWith([di(77n)])
+    expect(t.onCommit).toHaveBeenCalledWith([di(77n)], [])
   })
 
   /** Pivot at the origin, lock X (in-plane), sweep +Y to −Y: 180°. */
@@ -1283,7 +1283,7 @@ describe('RotateTool — drawn-shape copy (Move\'s "you can\'t Copy a Sketch" en
     expect(t.onCommit).toHaveBeenCalledWith([
       di(78n),
       { kind: 'object', id: 100n },
-    ])
+    ], [])
 
     typeKeys(t.tool, 'x3')
     t.tool.onKey(makeKeyEvent('Enter'))
@@ -1649,7 +1649,7 @@ describe('RotateTool — retype after an arranging drawn-shape rotation', () => 
 
     runNinetyDegreeGesture(t.tool)
     expect(scene.draft_transform_edges).toHaveBeenCalledTimes(1)
-    expect(t.onCommit).toHaveBeenLastCalledWith([di(99n)])
+    expect(t.onCommit).toHaveBeenLastCalledWith([di(99n)], [])
 
     typeKeys(t.tool, '45')
     t.tool.onKey(makeKeyEvent('Enter'))
@@ -1659,7 +1659,7 @@ describe('RotateTool — retype after an arranging drawn-shape rotation', () => 
     expect([...(scene.draft_transform_edges.mock.calls[0][1] as BigUint64Array)]).toEqual([10n])
     expect([...(scene.draft_transform_edges.mock.calls[1][1] as BigUint64Array)]).toEqual([10n])
     expect(thetaOfZAffine(scene.draft_transform_edges.mock.calls[1][2] as Float64Array)).toBeCloseTo(Math.PI / 4, 6)
-    expect(t.onCommit).toHaveBeenLastCalledWith([di(99n)])
+    expect(t.onCommit).toHaveBeenLastCalledWith([di(99n)], [])
   })
 })
 
