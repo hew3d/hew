@@ -6489,6 +6489,10 @@ msgid "Materials"
 msgstr ""
 
 #: src/io/documentSession.ts
+msgid "Materials added"
+msgstr ""
+
+#: src/io/documentSession.ts
 msgid "Materials added from the Library"
 msgstr ""
 
@@ -10683,6 +10687,10 @@ msgstr ""
 #: src/panels/MenuBar.tsx
 #: src/panels/ObjectInfoPanel.tsx
 msgid "Tags"
+msgstr ""
+
+#: src/io/documentSession.ts
+msgid "Tags added"
 msgstr ""
 
 #: src/viewport/InferenceTooltip.tsx

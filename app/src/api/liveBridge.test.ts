@@ -53,7 +53,15 @@ vi.mock('@tauri-apps/api/webviewWindow', () => ({
 const emitMock = vi.fn(() => Promise.resolve())
 vi.mock('@tauri-apps/api/event', () => ({ emit: emitMock }))
 
-import { ENTER_REFUSAL_COPY, dispatchFrameNow, installLiveBridge, shouldRefreshAfterDispatch, type LiveBridgeDeps } from './liveBridge'
+import {
+  ENTER_REFUSAL_COPY,
+  addedLibraryMaterials,
+  dispatchFrameNow,
+  installLiveBridge,
+  shouldRefreshAfterDispatch,
+  watchUnrecordedWrites,
+  type LiveBridgeDeps,
+} from './liveBridge'
 import type { Scene } from '../wasm/loader'
 import type { ViewportApi } from '../viewport/Viewport'
 import { getLengthUnit, setLengthUnit, subscribe as subscribeLengthUnit } from '../settings/units'
@@ -1925,5 +1933,64 @@ describe('the explanations a refused entry carries', () => {
     expect(ENTER_REFUSAL_COPY.locked_node_indirect).toBe(kernelErrorMessage('LockedNodeViaSharedShape', ''))
     const rust = readFileSync(resolve(process.cwd(), '../crates/api/src/commands/view.rs'), 'utf8')
     expect(rust).toContain(`"gesture_in_progress",\n            "${ENTER_REFUSAL_COPY.gesture_in_progress}"`)
+  })
+})
+
+describe('watchUnrecordedWrites', () => {
+  const frame = (method: string, params: unknown = {}): string => JSON.stringify({ jsonrpc: '2.0', id: 1, method, params })
+  const transact = (...commands: [string, unknown?][]): string =>
+    frame('hew.doc.transact', { commands: commands.map(([method, params]) => ({ method, params: params ?? {} })) })
+  const ok = '{"jsonrpc":"2.0","id":1,"result":{}}'
+  const refused = '{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"refused"}}'
+
+  /** What one dispatch reports, with the tag registry before and after it. */
+  const reported = (request: string, reply = ok, before: string[] = [], after = before): string[] => {
+    let tags = before
+    const scene = { tag_meta_paths: () => tags } as unknown as Scene
+    const markUnrecordedWrite = vi.fn<(write: string) => void>()
+    const tail = watchUnrecordedWrites(scene, request)
+    tags = after
+    tail({ markUnrecordedWrite } as unknown as LiveBridgeDeps, reply)
+    return markUnrecordedWrite.mock.calls.map(([write]) => write)
+  }
+
+  it('reports a created material, bare or inside a transaction', () => {
+    expect(reported(frame('hew.material.create'))).toEqual(['materials'])
+    // The envelope's undo entry would not take the material back with it.
+    expect(reported(transact(['hew.sketch.draw_rect'], ['hew.material.create']))).toEqual(['materials'])
+  })
+
+  it('reports a tag only when the registry gained one', () => {
+    for (const method of ['hew.tag.create', 'hew.tag.set_visible']) {
+      expect(reported(frame(method), ok, [], ['Structure'])).toEqual(['tags'])
+      expect(reported(frame(method), ok, ['Structure'])).toEqual([])
+    }
+  })
+
+  it('reports each Scene edit, and not an applied or listed Scene', () => {
+    for (const verb of ['add', 'update', 'rename', 'describe', 'remove', 'reorder']) {
+      expect(reported(frame(`hew.scenes.${verb}`)), verb).toEqual(['scenes'])
+    }
+    expect(reported(frame('hew.scenes.apply'))).toEqual([])
+    expect(reported(frame('hew.scenes.list'))).toEqual([])
+  })
+
+  it('reports a Library save that links parts of the model', () => {
+    expect(reported(frame('hew.library.save', { name: 'Leg', selection: ['obj_1'] }))).toEqual(['libraryMetadata'])
+    expect(reported(frame('hew.library.save', { name: 'Oak', material: 'mat_1' }))).toEqual([])
+    expect(reported(frame('hew.library.save', { name: 'All' }))).toEqual([])
+    expect(reported(frame('hew.library.save', { name: 'All', selection: [] }))).toEqual([])
+  })
+
+  it('reports nothing for a refusal or an undoable command', () => {
+    expect(reported(frame('hew.material.create'), refused)).toEqual([])
+    expect(reported(transact(['hew.material.create'], ['hew.scenes.add']), refused)).toEqual([])
+    expect(reported(frame('hew.material.set_opacity'))).toEqual([])
+    expect(reported('not json')).toEqual([])
+  })
+
+  it('does not count a Library material item the palette already held', () => {
+    const reply = '{"jsonrpc":"2.0","id":1,"result":{"roots":[],"materials":["mat_4"],"materials_added":0}}'
+    expect(addedLibraryMaterials(reply)).toBe(false)
   })
 })
