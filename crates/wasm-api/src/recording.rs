@@ -1277,6 +1277,60 @@ pub enum RecordedCall {
     /// without making a linked set's last copy plain. Additive variant
     /// (the [`RecordedCall::SketchBeginCurveWith`] posture).
     CutSelection { kinds: Vec<u8>, ids: Vec<u64> },
+    /// `transform_mixed_selection(kinds, ids, sketches, guides, affine)` —
+    /// a selection that also holds construction guides moved, rotated or
+    /// scaled as ONE undo step. Additive variant, beside
+    /// [`RecordedCall::TransformSelection`] rather than a change to its
+    /// shape: a recording that never transforms a guide with a selection
+    /// replays on older builds unchanged; one that does fails to parse
+    /// there — loudly, never silently divergent.
+    TransformMixedSelection {
+        kinds: Vec<u8>,
+        ids: Vec<u64>,
+        sketches: Vec<u64>,
+        guides: Vec<u64>,
+        affine: [f64; 12],
+    },
+    /// `duplicate_mixed_selection_array(kinds, ids, guides, affine, count,
+    /// linked)` — [`RecordedCall::DuplicateSelectionArray`] with the
+    /// selection's guides copied too, one undo step. Additive variant (the
+    /// [`RecordedCall::TransformMixedSelection`] posture).
+    DuplicateMixedSelectionArray {
+        kinds: Vec<u8>,
+        ids: Vec<u64>,
+        guides: Vec<u64>,
+        affine: [f64; 12],
+        count: u32,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        linked: bool,
+    },
+    /// `duplicate_mixed_selection_placements(kinds, ids, guides, affines,
+    /// linked)` — [`RecordedCall::DuplicateSelectionPlacements`] with the
+    /// selection's guides copied too, one undo step. Additive variant (the
+    /// [`RecordedCall::TransformMixedSelection`] posture).
+    DuplicateMixedSelectionPlacements {
+        kinds: Vec<u8>,
+        ids: Vec<u64>,
+        guides: Vec<u64>,
+        affines: Vec<f64>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        linked: bool,
+    },
+    /// `flip_mixed_selection(kinds, ids, sketch_ids, guides, normal,
+    /// about_kind, about, copy)` — [`RecordedCall::FlipSelection`] with the
+    /// selection's guides reflected (or, as a copy, copied mirrored) too,
+    /// one undo step. Additive variant (the
+    /// [`RecordedCall::TransformMixedSelection`] posture).
+    FlipMixedSelection {
+        kinds: Vec<u8>,
+        ids: Vec<u64>,
+        sketch_ids: Vec<u64>,
+        guides: Vec<u64>,
+        normal: [f64; 3],
+        about_kind: u8,
+        about: [f64; 3],
+        copy: u8,
+    },
     /// `reparent_nodes(kinds, ids, group)` — the Outliner drag-and-drop
     /// "Add to Group"/"Move to top level" (v1.1-cycle.md grouping lane):
     /// every listed node moved as ONE undo step, `DeleteSelection`'s

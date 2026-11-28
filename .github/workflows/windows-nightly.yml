@@ -1,0 +1,149 @@
+# Nightly Windows build of the desktop app.
+#
+# ci.yml compiles the desktop shell on Linux only, and the Windows build is
+# otherwise compiled when a release is tagged. This run notices a break in
+# the Windows-only code or dependencies within a day, and adds no time to
+# pushes or pull requests: nothing waits on its result.
+#
+# It runs the gate's desktop lane (fmt, clippy and tests, in the production
+# and preview builds), then bundles an unsigned preview installer and keeps
+# it for a week. It does not run the gate's Rust or web lanes, and it
+# creates no release.
+#
+# A scheduled run builds only when the branch has moved since this
+# workflow's last successful run, so a commit that fails is built again
+# each night until a build succeeds, and a late or dropped schedule loses
+# nothing. A manual run always builds.
+#
+# Every action is pinned to a commit SHA, as in ci.yml.
+
+name: Windows nightly
+
+on:
+  schedule:
+    # 08:00 UTC daily, ahead of the 09:00 WebKit run.
+    - cron: '0 8 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-nightly-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # Costs seconds on Linux, so a quiet day takes no Windows runner.
+  changed:
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+    outputs:
+      build: ${{ steps.compare.outputs.build }}
+    steps:
+      # A run that skips the build also counts as successful. Its commit is
+      # the one last built, so the comparison stays true.
+      - name: Compare with the last successful run
+        id: compare
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_EVENT_NAME" != schedule ]; then
+            echo "build=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          last="$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/windows-nightly.yml/runs?branch=$GITHUB_REF_NAME&status=success&per_page=1" \
+            --jq '.workflow_runs[0].head_sha // ""')"
+          if [ "$last" = "$GITHUB_SHA" ]; then
+            echo "::notice::$GITHUB_SHA already built successfully; nothing to do."
+            echo "build=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "build=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  windows:
+    needs: changed
+    if: needs.changed.outputs.build == 'true'
+    runs-on: windows-latest
+    # Generous: a run that times out saves no cache, so the next one would
+    # start cold again.
+    timeout-minutes: 180
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: |
+            .
+            shells/tauri/src-tauri
+
+      # On Windows the install script compiles wasm-pack, which is slow, so
+      # the exe is cached as release.yml caches it.
+      - name: Cache wasm-pack
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cargo/bin/wasm-pack.exe
+          key: wasm-pack-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('scripts/install-wasm-pack.sh') }}
+
+      - name: Install wasm-pack (pinned)
+        run: scripts/install-wasm-pack.sh
+
+      - name: Set up JS toolchain
+        uses: ./.github/actions/setup-js
+
+      # The desktop lane compiles app/dist into the shell. As in ci.yml, it
+      # gets a production build of the app, on the unoptimized test kernel.
+      - name: Build the web app for the desktop gate
+        env:
+          HEW_UNOPTIMIZED_WASM: '1'
+        run: |
+          scripts/wasm-flavors.sh build production web --no-opt
+          scripts/wasm-flavors.sh use production
+          pnpm --dir app build
+
+      - name: Desktop gate
+        run: scripts/verify.sh tauri
+
+      # The package script stages the hew-cli sidecar and applies the
+      # preview policy. The app and its kernel are rebuilt, optimized, in
+      # the preview flavor. A preview build has no updater, so it needs no
+      # signing key.
+      #
+      # As in release.yml, the version is stamped, so that the installer's
+      # name, the app and hew-cli never read as the release they follow.
+      # The app's identifier is a release's, so installing a nightly
+      # replaces an installed Hew.
+      - name: Build the preview installer
+        env:
+          HEW_PREVIEW: '1'
+        run: |
+          set -euo pipefail
+          base="$(node -p "require('./shells/tauri/src-tauri/tauri.conf.json').version")"
+          version="$base-nightly.$GITHUB_RUN_NUMBER"
+          printf '{"version": "%s"}\n' "$version" > "$RUNNER_TEMP/nightly-version.json"
+          HEW_RELEASE_VERSION="$version" pnpm --dir shells/tauri build \
+            --bundles nsis --config "$RUNNER_TEMP/nightly-version.json"
+
+      - name: Check the installer's flavor and policy
+        run: |
+          set -euo pipefail
+          have="$(node scripts/wasm-flavor-of.mjs app/src/wasm/pkg)"
+          if [ "$have" != 1 ]; then
+            echo "::error::The bundled kernel reports preview_build=$have; the nightly installer is a preview build."
+            exit 1
+          fi
+          node scripts/check-desktop-binary.mjs --want preview
+
+      - name: Upload the installer
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: hew-windows-x64-preview-${{ github.sha }}
+          path: shells/tauri/src-tauri/target/release/bundle/nsis/*-setup.exe
+          retention-days: 7
+          if-no-files-found: error
