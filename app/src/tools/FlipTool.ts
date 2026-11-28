@@ -24,6 +24,13 @@
  *
  * Every flip is one undo step, labeled "Flip". Objects and drawing bake the
  * mirror; component instances take a mirrored pose (`flip_selection`).
+ *
+ * Construction guides selected with the nodes (`setSelectedGuides`) mirror
+ * with them in the same step (`flip_mixed_selection`), and a mirrored copy
+ * copies them beside the nodes' copies, every copy joining the new
+ * selection. The gizmo and its planes come from the nodes alone; guides
+ * with no node beside them are refused, as there is nothing to center the
+ * mirror on.
  */
 
 import { t } from '@lingui/core/macro'
@@ -53,6 +60,8 @@ import { isMac, COPY_MODIFIER_LABEL } from '../platform'
 import type { NodeRef } from '../panels/treeModel'
 import { isDraftKind, isSketchScopedKind, nodeKindToNumber, nodeRefFromJs } from '../panels/treeModel'
 import { worldBoundsForSelection, unionBounds, type Bounds } from '../panels/objectBounds'
+import { parseLinkedResult } from '../viewport/linkedWraps'
+import { withGuidePreviews } from './guidePreview'
 
 type V3 = [number, number, number]
 
@@ -64,9 +73,14 @@ export type FlipPlane = { kind: 'axis'; axis: 0 | 1 | 2 } | { kind: 'face'; poin
 export type FlipCopy = 'none' | 'linked' | 'independent'
 
 /** Called after a flip lands: the nodes to select (the flipped nodes or the
- *  copies), and whether the whole scene needs rebuilding (a linked copy
- *  wraps its loose originals, which removes world nodes). */
-export type OnFlipCommit = (nodes: NodeRef[], fullRefresh: boolean) => void
+ *  copies), whether the whole scene needs rebuilding (a linked copy wraps
+ *  its loose originals, which removes world nodes), and the carried guides
+ *  to select with them (the flipped guides or their copies). */
+export type OnFlipCommit = (nodes: NodeRef[], fullRefresh: boolean, guides: readonly bigint[]) => void
+
+/** What a flip landed on: the nodes to select, and the carried guides (the
+ *  flipped ones, or their copies). */
+export type FlipResult = { nodes: NodeRef[]; guides: bigint[] }
 export type OnToast = (message: string, code?: string) => void
 
 /** Square opacity at rest and under the cursor. */
@@ -148,15 +162,19 @@ export function planePointNormal(plane: FlipPlane, center: V3): { point: V3; nor
 /**
  * Mirror `selection` across the plane through `point` with normal `normal`,
  * as ONE undo step labeled "Flip": in place (`copy` 'none') or as a linked
- * or independent mirrored copy. Returns the nodes to select afterwards (the
- * flipped nodes, re-found where drawing moved, or the copies).
+ * or independent mirrored copy, carrying `guides` the same way. Returns the
+ * nodes to select afterwards (the flipped nodes, re-found where drawing
+ * moved, or the copies) and the guides (the flipped ones, or their copies).
  *
  * The solids go through `flip_selection`; drawing in the selection moves or
  * copies through the same paths Move and Rotate use, with the matrix
  * `flip_matrix` reports, so a board and the lines drawn beside it mirror
  * together. Inside an open component the members flip through the component
- * (`commitSelectionTransform`). Kernel refusals throw, with the document
- * unchanged.
+ * (`commitSelectionTransform`). Carried guides take the mixed calls:
+ * `flip_mixed_selection` beside solids, or the flip matrix through
+ * `commitSelectionTransform` and `duplicate_mixed_selection_array` beside
+ * drawing alone. The mirror plane never depends on them. Kernel refusals
+ * throw, with the document unchanged.
  */
 export function runFlip(
   wasmScene: WasmScene,
@@ -165,7 +183,8 @@ export function runFlip(
   normal: V3,
   copy: FlipCopy,
   activeInstance: bigint | null = null,
-): NodeRef[] {
+  guides: readonly bigint[] = [],
+): FlipResult {
   const label = t({ context: 'undo verb', message: 'Flip' })
   // A copy lands in the world; members of an open component do not.
   // oxlint-disable-next-line lingui/no-unlocalized-strings -- kernel error code identifier, mapped to copy by kernelErrors
@@ -186,34 +205,60 @@ export function runFlip(
       wasmScene
         .flip_selection(kinds, ids, new BigUint64Array(0), normal[0], normal[1], normal[2], 2, point[0], point[1], point[2], mode)
         .map(nodeRefFromJs)
+    const guideIds = new BigUint64Array(guides)
+    const flipMixed = (mode: number): string =>
+      wasmScene.flip_mixed_selection(
+        kinds, ids, new BigUint64Array(0), guideIds, normal[0], normal[1], normal[2], 2, point[0], point[1], point[2], mode,
+      )
     if (copy === 'none') {
       if (activeInstance !== null || drawn.length > 0) {
-        return commitSelectionTransform(wasmScene, nodes, matrix, activeInstance, label)
+        return { nodes: commitSelectionTransform(wasmScene, nodes, matrix, activeInstance, label, guides), guides: [...guides] }
       }
-      flip(0)
-      return nodes
+      if (guides.length > 0) flipMixed(0)
+      else flip(0)
+      return { nodes, guides: [...guides] }
     }
     const mode = copy === 'linked' ? 1 : 2
-    return copyOwnersAndDrawing(wasmScene, owners, drawn, [matrix], () => flip(mode))
+    let guideCopies: bigint[] = []
+    const copies = copyOwnersAndDrawing(
+      wasmScene,
+      owners,
+      drawn,
+      [matrix],
+      () => {
+        if (guides.length === 0) return flip(mode)
+        // Beside drawing alone there is no solid to center a kernel flip
+        // on: the guides take the flip matrix the drawing takes.
+        const result = parseLinkedResult(
+          owners.length > 0 ? flipMixed(mode) : wasmScene.duplicate_mixed_selection_array(kinds, ids, guideIds, matrix, 1, false),
+        )
+        guideCopies = result.guides
+        return result.nodes
+      },
+      guides.length > 0,
+    )
+    return { nodes: copies, guides: guideCopies }
   })
 }
 
 /**
  * Object ▸ Flip Along: mirror `nodes` in place across the plane through
- * their bounding box center whose normal is world axis `axis`. Returns the
- * flipped nodes, or `null` when nothing in `nodes` has geometry to flip
- * (the caller says so). Kernel refusals throw, document unchanged.
+ * their bounding box center whose normal is world axis `axis`, `guides`
+ * with them. Returns what was flipped, or `null` when nothing in `nodes`
+ * has geometry to flip (the caller says so). Kernel refusals throw,
+ * document unchanged.
  */
 export function flipAlongAxis(
   wasmScene: WasmScene,
   nodes: readonly NodeRef[],
   axis: 0 | 1 | 2,
   activeInstance: bigint | null = null,
-): NodeRef[] | null {
+  guides: readonly bigint[] = [],
+): FlipResult | null {
   const box = flipSelectionBounds(wasmScene, nodes, activeInstance)
   if (box === null) return null
   const { point, normal } = planePointNormal({ kind: 'axis', axis }, centerOf(box))
-  return runFlip(wasmScene, nodes, point, normal, 'none', activeInstance)
+  return runFlip(wasmScene, nodes, point, normal, 'none', activeInstance, guides)
 }
 
 function localMatrix(point: V3, normal: V3): Float64Array {
@@ -230,7 +275,11 @@ export class FlipTool implements Tool {
   readonly name = 'Flip'
 
   statusHint(): string {
-    if (this.selection.length === 0) return t`Click what you want to flip.`
+    if (this.selection.length === 0) {
+      return this.selectedGuides.length > 0
+        ? t`Guides can't be flipped on their own. Select an object or a drawing with them.`
+        : t`Click what you want to flip.`
+    }
     const kind =
       this.copyState === 'off'
         ? null
@@ -313,6 +362,14 @@ export class FlipTool implements Tool {
     if (this.selection.length > 0) this._showGizmo()
   }
 
+  /** The selected construction guides, pushed by the Viewport like
+   *  `setSelection`: carried with the nodes through the flip. */
+  private selectedGuides: bigint[] = []
+  setSelectedGuides(guides: readonly bigint[]): void {
+    this.selectedGuides = [...guides]
+    this._clearHover()
+  }
+
   setSelection(nodes: NodeRef[]): void {
     this.selection = nodes
     this._clearHover()
@@ -363,6 +420,11 @@ export class FlipTool implements Tool {
   }
 
   onPointerDown(snap: Snap | null, ray: Ray): void {
+    if (this.selection.length === 0 && this.selectedGuides.length > 0) {
+      // Guides alone: no solid or drawing to center the mirror on.
+      this.onToast(t`Nothing to flip`)
+      return
+    }
     if (this.selection.length === 0) {
       const acquired = this.acquireSelection !== null ? this.acquireSelection(ray) : null
       if (acquired !== null && acquired.length > 0) {
@@ -401,7 +463,7 @@ export class FlipTool implements Tool {
     clearPreview(this.preview)
     this.gizmoGroup = null
     this.squares = []
-    let committed: NodeRef[]
+    let committed: FlipResult
     // An in-place flip leaves locked items behind (OW-1); a mirrored copy
     // only reads them, so it takes everything selected.
     const flipNodes = copy === 'none' ? leaveBehind(this.wasmScene, this.selection, this.onToast, { descendants: true }) : this.selection
@@ -410,7 +472,7 @@ export class FlipTool implements Tool {
       return false
     }
     try {
-      committed = runFlip(this.wasmScene, flipNodes, point, normal, copy, this._activeInstance)
+      committed = runFlip(this.wasmScene, flipNodes, point, normal, copy, this._activeInstance, this.selectedGuides)
     } catch (err) {
       const code = parseKernelErrorCode(err)
       const rawMsg = err instanceof Error ? err.message : String(err)
@@ -418,8 +480,9 @@ export class FlipTool implements Tool {
       this._showGizmo()
       return false
     }
-    this.selection = committed
-    this.onCommit(committed, copy === 'linked')
+    this.selection = committed.nodes
+    this.selectedGuides = committed.guides
+    this.onCommit(committed.nodes, copy === 'linked', committed.guides)
     this._showGizmo()
     return true
   }
@@ -594,12 +657,10 @@ export class FlipTool implements Tool {
     const { point, normal } = planePointNormal(plane, this.center)
     const m = reflectionAffine(point, normal)
     if (m === null) return null
-    const ghost = buildSelectionPreview(
+    const ghost = withGuidePreviews(
       this.wasmScene,
-      this.objectsGroup,
-      this.instanceGroupGetter,
-      this.selection,
-      this._activeInstance,
+      buildSelectionPreview(this.wasmScene, this.objectsGroup, this.instanceGroupGetter, this.selection, this._activeInstance),
+      this.selectedGuides,
     )
     if (ghost === null) return null
     ghost.name = 'FlipGhost'

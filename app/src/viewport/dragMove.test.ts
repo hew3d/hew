@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { DRAG_MOVE_THRESHOLD_PX, exceedsDragThreshold, dragMoveTargets } from './dragMove'
+import { DRAG_MOVE_THRESHOLD_PX, exceedsDragThreshold, dragMoveGuides, dragMoveTargets } from './dragMove'
 import type { NodeRef } from '../panels/treeModel'
 import { ctxGround, draftRef } from '../tools/planeUnits'
 
@@ -52,5 +52,16 @@ describe('dragMoveTargets (what a drag moves)', () => {
     const out = dragMoveTargets(obj(1n), selection)
     expect(out).not.toBe(selection)
     expect(out).toEqual(selection)
+  })
+})
+
+describe('dragMoveGuides (the guides a drag carries)', () => {
+  it('a drag on a selected node takes the whole selection, its carried guides included', () => {
+    expect(dragMoveGuides(obj(1n), [obj(1n), group(3n)], [7n, 8n])).toEqual([7n, 8n])
+  })
+
+  it('a drag on an unselected node moves that node alone, no guide', () => {
+    expect(dragMoveGuides(obj(2n), [obj(1n)], [7n])).toEqual([])
+    expect(dragMoveGuides(obj(2n), [], [7n])).toEqual([])
   })
 })

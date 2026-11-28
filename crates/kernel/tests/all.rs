@@ -117,6 +117,7 @@ mod logical_edge_reference_specs;
 mod make_solid_faces_specs;
 mod make_unique_by_path_specs;
 mod mend_specs;
+mod mixed_transform_specs;
 mod nested_component_specs;
 mod nested_serialize_specs;
 mod object_measure;
