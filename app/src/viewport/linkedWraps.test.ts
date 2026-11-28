@@ -19,6 +19,13 @@ describe('linkedWraps', () => {
     expect(r.linked).toEqual([
       { source: { kind: 'object', id: 4294967297n }, instance: 8589934593n, definition: 12884901889n },
     ])
+    expect(r.guides).toEqual([]) // the plain linked calls list no guides
+  })
+
+  it('parseLinkedResult_reads_the_mixed_calls_guide_copies', () => {
+    const r = parseLinkedResult(JSON.stringify({ nodes: [], linked: [], guides: ['18446744073709551615', '5'] }))
+    expect(r.guides).toEqual([18446744073709551615n, 5n])
+    expect(r.nodes).toEqual([])
   })
 
   it('mapSelection_replaces_a_wrapped_source_with_its_instance', () => {

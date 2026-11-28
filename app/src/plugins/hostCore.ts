@@ -58,6 +58,7 @@ import {
   afterAbort,
   afterDispatch,
   afterEnterDispatch,
+  watchUnrecordedWrites,
   isEnterFrame,
   beforeDispatch,
   enterRefusedReply,
@@ -902,6 +903,7 @@ export function createPluginHost(
     const mayPushCamera = realmOf === undefined || [...realmOf.installed.grant, ...realmOf.installed.optional_granted].includes('documents.save')
     const method = frameMethod(frame)
     beforeDispatch(env.bridge, scene, method, mayPushCamera)
+    const noteUnrecorded = watchUnrecordedWrites(scene, frame)
     const raw = stamp === undefined ? scene.api_dispatch(conn, frame) : scene.api_dispatch_in_forward(conn, BigInt(stamp), frame)
     const result = parseDispatch(raw)
     if (result.kind === 'reply') {
@@ -910,6 +912,7 @@ export function createPluginHost(
         isEnterFrame(frame) && replySucceeded(result.frame)
           ? afterEnterDispatch(env.bridge, scene, result.frame, mutatedNow)
           : afterDispatch(env.bridge, scene, result.frame, mutatedNow())
+      if (result.dryRun !== true) noteUnrecorded(env.bridge, result.frame)
       pumpEvents(scene)
       // A window that declined an entry the kernel accepted answers the refusal.
       if (declined !== undefined) return { ...result, frame: enterRefusedReply(frame, declined) ?? result.frame }
