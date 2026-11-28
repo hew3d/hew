@@ -80,6 +80,7 @@ function fakeScene() {
     set_ui_gesture_armed: vi.fn(),
     set_host_document_id: vi.fn(),
     api_method_mutates: vi.fn((m: string) => m === 'hew.tag.create'),
+    tag_meta_paths: vi.fn((): string[] => []),
     take_pending_view_directives: vi.fn(() => '[]'),
     emitted,
     /** Queues an event the next drain sends to every connection
