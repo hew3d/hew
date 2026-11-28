@@ -2356,7 +2356,8 @@ impl Object {
 
         // --- vertices ---
         let vertex_count = r.read_u32()? as usize;
-        let mut positions = Vec::with_capacity(vertex_count);
+        r.require_items(vertex_count, 24)?;
+        let mut positions = r.allocate_vec(vertex_count)?;
         for _ in 0..vertex_count {
             let x = r.read_f64()?;
             let y = r.read_f64()?;
@@ -2367,14 +2368,17 @@ impl Object {
         // --- faces ---
         use crate::build::FaceSpec;
         let face_count = r.read_u32()? as usize;
-        let mut face_specs: Vec<FaceSpec> = Vec::with_capacity(face_count);
+        // Even v1 needs a material id, an outer count, three indices and a
+        // hole count per face. Later versions only add fields to that minimum.
+        r.require_items(face_count, 24)?;
+        let mut face_specs: Vec<FaceSpec> = r.allocate_vec(face_count)?;
         // v9 per-edge dictionaries, parallel to `face_specs`: `(outer,
         // per-hole)`, empty lists when the face's edges carry none.
         type FaceDicts = (
             Vec<Option<crate::attr::AttrDict>>,
             Vec<Vec<Option<crate::attr::AttrDict>>>,
         );
-        let mut edge_dicts: Vec<FaceDicts> = Vec::with_capacity(face_count);
+        let mut edge_dicts: Vec<FaceDicts> = r.allocate_vec(face_count)?;
         // v5 per-face edge-curve claims, parallel to `face_specs` (in the same
         // face order `from_faces_with_holes` rebuilds them, so a positional zip
         // stamps them back after the build). `(outer_edge_curves, per-hole
@@ -2386,13 +2390,13 @@ impl Object {
             Vec<Option<crate::sketch::CurveGeom>>,
             Vec<Vec<Option<crate::sketch::CurveGeom>>>,
         );
-        let mut edge_soft: Vec<FaceFlags> = Vec::new();
-        let mut edge_curves: Vec<FaceCurves> = Vec::with_capacity(face_count);
-        let mut edge_polys: Vec<FaceCurves> = Vec::with_capacity(face_count);
-        let mut backs: Vec<crate::material::FaceMaterial> = Vec::with_capacity(face_count);
+        let mut edge_soft: Vec<FaceFlags> = r.allocate_vec(face_count)?;
+        let mut edge_curves: Vec<FaceCurves> = r.allocate_vec(face_count)?;
+        let mut edge_polys: Vec<FaceCurves> = r.allocate_vec(face_count)?;
+        let mut backs: Vec<crate::material::FaceMaterial> = r.allocate_vec(face_count)?;
         // v10 per-face crease flags and blend tags, parallel to `face_specs`.
-        let mut edge_crease: Vec<FaceFlags> = Vec::with_capacity(face_count);
-        let mut blends: Vec<Option<crate::topo::BlendTag>> = Vec::with_capacity(face_count);
+        let mut edge_crease: Vec<FaceFlags> = r.allocate_vec(face_count)?;
+        let mut blends: Vec<Option<crate::topo::BlendTag>> = r.allocate_vec(face_count)?;
 
         for _ in 0..face_count {
             let mat_raw = r.read_u32()?;
@@ -2501,7 +2505,8 @@ impl Object {
                     what: "outer_count < 3 (degenerate face)",
                 });
             }
-            let mut outer = Vec::with_capacity(outer_count);
+            r.require_items(outer_count, 4)?;
+            let mut outer = r.allocate_vec(outer_count)?;
             for _ in 0..outer_count {
                 let vi = r.read_u32()? as usize;
                 if vi >= vertex_count {
@@ -2517,7 +2522,8 @@ impl Object {
             // (HEW_FILE_FORMAT.md): the plane of a pre-v11 face, and of a v11
             // face that does not store one; its winding is the side a stored
             // plane must face.
-            let outer_pts: Vec<Point3> = outer.iter().map(|&i| positions[i]).collect();
+            let mut outer_pts: Vec<Point3> = r.allocate_vec(outer.len())?;
+            outer_pts.extend(outer.iter().map(|&i| positions[i]));
             let refit = outer_ring_plane(&outer_pts, planarity_tol > crate::tol::PLANE_DIST)
                 .map_err(|_| DecodeError::Corrupt {
                     offset: r.pos,
@@ -2525,7 +2531,9 @@ impl Object {
                 })?;
 
             let hole_count = r.read_u32()? as usize;
-            let mut holes = Vec::with_capacity(hole_count);
+            // Each hole needs its own count and at least three indices.
+            r.require_items(hole_count, 16)?;
+            let mut holes = r.allocate_vec(hole_count)?;
             for _ in 0..hole_count {
                 let hole_vc = r.read_u32()? as usize;
                 if hole_vc < 3 {
@@ -2534,7 +2542,8 @@ impl Object {
                         what: "hole_vertex_count < 3 (degenerate hole)",
                     });
                 }
-                let mut hole = Vec::with_capacity(hole_vc);
+                r.require_items(hole_vc, 4)?;
+                let mut hole = r.allocate_vec(hole_vc)?;
                 for _ in 0..hole_vc {
                     let vi = r.read_u32()? as usize;
                     if vi >= vertex_count {
@@ -2603,13 +2612,15 @@ impl Object {
                             }),
                         }
                     };
-                    let mut os = Vec::with_capacity(outer.len());
+                    r.require_items(outer.len(), 1)?;
+                    let mut os = r.allocate_vec(outer.len())?;
                     for _ in 0..outer.len() {
                         os.push(read_flag(&mut r)?);
                     }
-                    let mut hs = Vec::with_capacity(holes.len());
+                    let mut hs = r.allocate_vec(holes.len())?;
                     for hole in &holes {
-                        let mut this = Vec::with_capacity(hole.len());
+                        r.require_items(hole.len(), 1)?;
+                        let mut this = r.allocate_vec(hole.len())?;
                         for _ in 0..hole.len() {
                             this.push(read_flag(&mut r)?);
                         }
@@ -2664,13 +2675,15 @@ impl Object {
                             }),
                         }
                     };
-                    let mut oc = Vec::with_capacity(outer.len());
+                    r.require_items(outer.len(), 1)?;
+                    let mut oc = r.allocate_vec(outer.len())?;
                     for _ in 0..outer.len() {
                         oc.push(read_edge(&mut r)?);
                     }
-                    let mut hc = Vec::with_capacity(holes.len());
+                    let mut hc = r.allocate_vec(holes.len())?;
                     for hole in &holes {
-                        let mut this = Vec::with_capacity(hole.len());
+                        r.require_items(hole.len(), 1)?;
+                        let mut this = r.allocate_vec(hole.len())?;
                         for _ in 0..hole.len() {
                             this.push(read_edge(&mut r)?);
                         }
@@ -2722,13 +2735,17 @@ impl Object {
                 let dicts: FaceDicts = match any {
                     0 => (Vec::new(), Vec::new()),
                     1 => {
-                        let mut oa = Vec::with_capacity(outer.len());
+                        // An absent entry is its one flag byte, so each edge
+                        // needs at least one byte of what remains.
+                        r.require_items(outer.len(), 1)?;
+                        let mut oa = r.allocate_vec(outer.len())?;
                         for _ in 0..outer.len() {
                             oa.push(read_attr_dict(&mut r)?);
                         }
-                        let mut ha = Vec::with_capacity(holes.len());
+                        let mut ha = r.allocate_vec(holes.len())?;
                         for hole in &holes {
-                            let mut this = Vec::with_capacity(hole.len());
+                            r.require_items(hole.len(), 1)?;
+                            let mut this = r.allocate_vec(hole.len())?;
                             for _ in 0..hole.len() {
                                 this.push(read_attr_dict(&mut r)?);
                             }
@@ -2766,13 +2783,15 @@ impl Object {
                             }),
                         }
                     };
-                    let mut os = Vec::with_capacity(outer.len());
+                    r.require_items(outer.len(), 1)?;
+                    let mut os = r.allocate_vec(outer.len())?;
                     for _ in 0..outer.len() {
                         os.push(read_flag(&mut r)?);
                     }
-                    let mut hs = Vec::with_capacity(holes.len());
+                    let mut hs = r.allocate_vec(holes.len())?;
                     for hole in &holes {
-                        let mut this = Vec::with_capacity(hole.len());
+                        r.require_items(hole.len(), 1)?;
+                        let mut this = r.allocate_vec(hole.len())?;
                         for _ in 0..hole.len() {
                             this.push(read_flag(&mut r)?);
                         }
@@ -7663,6 +7682,26 @@ impl<'a> ByteReader<'a> {
         ByteReader { data, pos: 0 }
     }
 
+    /// Refuse impossible counts before allocating. Division avoids overflowing
+    /// a multiplication of the untrusted count, including on wasm32.
+    fn require_items(&self, count: usize, minimum_item_bytes: usize) -> Result<(), DecodeError> {
+        if count > (self.data.len() - self.pos) / minimum_item_bytes {
+            return Err(DecodeError::Truncated);
+        }
+        Ok(())
+    }
+
+    fn allocate_vec<T>(&self, capacity: usize) -> Result<Vec<T>, DecodeError> {
+        let mut values = Vec::new();
+        values
+            .try_reserve_exact(capacity)
+            .map_err(|_| DecodeError::Corrupt {
+                offset: self.pos,
+                what: "geometry collection allocation failed",
+            })?;
+        Ok(values)
+    }
+
     fn read_bytes<const N: usize>(&mut self) -> Result<[u8; N], DecodeError> {
         if self.pos + N > self.data.len() {
             return Err(DecodeError::Truncated);
@@ -7699,6 +7738,21 @@ impl<'a> ByteReader<'a> {
     fn read_f64(&mut self) -> Result<f64, DecodeError> {
         let bytes = self.read_bytes::<8>()?;
         Ok(f64::from_le_bytes(bytes))
+    }
+}
+
+#[cfg(test)]
+mod geometry_allocation_tests {
+    use super::{ByteReader, DecodeError};
+
+    #[test]
+    fn allocation_capacity_overflow_returns_a_typed_error() {
+        // This overflows the layout before an allocator is called, so the
+        // error path is exercised without requesting an enormous allocation.
+        assert!(matches!(
+            ByteReader::new(&[]).allocate_vec::<u64>(usize::MAX),
+            Err(DecodeError::Corrupt { .. })
+        ));
     }
 }
 
@@ -8150,13 +8204,15 @@ fn read_claim_block(
                 }),
             }
         };
-    let mut oc = Vec::with_capacity(outer_len);
+    r.require_items(outer_len, 1)?;
+    let mut oc = r.allocate_vec(outer_len)?;
     for _ in 0..outer_len {
         oc.push(read_edge(r)?);
     }
-    let mut hc = Vec::with_capacity(holes.len());
+    let mut hc = r.allocate_vec(holes.len())?;
     for hole in holes {
-        let mut this = Vec::with_capacity(hole.len());
+        r.require_items(hole.len(), 1)?;
+        let mut this = r.allocate_vec(hole.len())?;
         for _ in 0..hole.len() {
             this.push(read_edge(r)?);
         }
