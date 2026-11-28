@@ -2167,6 +2167,10 @@ msgstr "Hier geändert"
 msgid "Changed here and in the Library"
 msgstr "Hier und in der Bibliothek geändert"
 
+#: src/io/documentSession.ts
+msgid "Changed while saving"
+msgstr ""
+
 #: src/App.tsx
 #: src/i18n/nativeMenu.ts
 #: src/panels/MenuBar.tsx

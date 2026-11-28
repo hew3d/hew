@@ -270,6 +270,38 @@ vi.mock('@tauri-apps/api/webviewWindow', () => ({
   }),
 }))
 
+// library/itemFiles — passthrough, except that a test can queue a gate to
+// hold one `withoutRemoteNoteIfAny` call: the step a Save waits on between
+// serializing the document and writing it.
+const noteStripGates = vi.hoisted(() => [] as Promise<void>[])
+// The same passthrough can answer an item's summary, which otherwise needs
+// the real kernel module (Save to Library reads it before its stamp).
+const itemSummary = vi.hoisted(() => ({ value: null as null | Record<string, unknown> }))
+vi.mock('./library/itemFiles', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./library/itemFiles')>()
+  return {
+    ...actual,
+    readItemSummary: async (bytes: Uint8Array) =>
+      (itemSummary.value as Awaited<ReturnType<typeof actual.readItemSummary>> | null) ?? actual.readItemSummary(bytes),
+    withoutRemoteNoteIfAny: async (bytes: Uint8Array) => {
+      const gate = noteStripGates.shift()
+      if (gate !== undefined) await gate
+      return actual.withoutRemoteNoteIfAny(bytes)
+    },
+  }
+})
+
+// io/libraryStore — passthrough, except that a test can stand in a Library
+// that is available (jsdom has no storage for the real one).
+const libraryStandIn = vi.hoisted(() => ({ store: null as null | Record<string, unknown> }))
+vi.mock('./io/libraryStore', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./io/libraryStore')>()
+  return {
+    ...actual,
+    libraryStore: () => (libraryStandIn.store as ReturnType<typeof actual.libraryStore> | null) ?? actual.libraryStore(),
+  }
+})
+
 // io/savePanel — the desktop's native save panel. Off by default (every
 // other test here runs the browser path); the native-panel block below
 // switches it on and answers for the panel.
@@ -329,7 +361,7 @@ import { getTrayLayout, setTrayLayout, DEFAULT_TRAY_LAYOUT } from './settings/tr
 import { setShowWelcome } from './settings/welcomeScreen'
 import * as LogStore from './log/LogStore'
 import { resetStlImportUnitForTest } from './settings/stlImportUnit'
-import { makeFileHost, type DocFormat, type FileHost } from './io/fileHost'
+import { makeFileHost, type DocFormat, type FileHost, type FileRef } from './io/fileHost'
 import * as savePanel from './io/savePanel'
 import { isPristineDocument, sameSessionStackIdentity, AUTOSAVE_INTERVAL_MS } from './App'
 import type { DocSessionState } from './io/documentSession'
@@ -4413,6 +4445,7 @@ describe('App — confirmDiscard: Save-then-continue (File ▸ New)', () => {
 
   it('a successful Save in the dialog lets File ▸ New proceed', async () => {
     await dirtyTheDocument()
+    mockScene.mark_saved.mockImplementationOnce(() => { mockScene.at_saved_mark = () => true })
     vi.mocked(fakeFileHost.saveAs).mockResolvedValue({ name: 'house.hew', format: 'hew', handle: '/tmp/house.hew' })
 
     triggerNew()
@@ -4611,6 +4644,31 @@ describe('App — recovery snapshot clearing on clean', () => {
     resolveWrite()
     await waitFor(() => expect(recoveryState.clear).toHaveBeenCalled())
   })
+
+  it('does not clear recovery when a new edit lands while an older clear awaits a write', async () => {
+    let resolveWrite!: () => void
+    recoveryState.write.mockImplementationOnce(() => new Promise<void>((resolve) => { resolveWrite = resolve }))
+    await renderAndLoad()
+    const harness = (window as unknown as {
+      __hew_test: { addNodeTag: (kind: string, id: string, path: string[]) => void; undo: () => void }
+    }).__hew_test
+
+    act(() => harness.addNodeTag('object', '1', ['before']))
+    await act(async () => { await vi.advanceTimersByTimeAsync(12_000) })
+    expect(recoveryState.write).toHaveBeenCalledOnce()
+
+    mockScene.at_saved_mark = () => true
+    ;(mockScene as Record<string, unknown>).scene_undo = () => ({ free: () => {} })
+    act(() => harness.undo()) // starts clearRecoverySnapshot, awaiting the first write
+    mockScene.at_saved_mark = () => false
+    act(() => harness.addNodeTag('object', '1', ['after']))
+
+    resolveWrite()
+    await act(async () => { await Promise.resolve() })
+    expect(recoveryState.clear).not.toHaveBeenCalled()
+    await act(async () => { await vi.advanceTimersByTimeAsync(12_000) })
+    expect(recoveryState.write).toHaveBeenCalledTimes(2)
+  })
 })
 
 describe('App — v1.1 assets lane: viewport resync + current-material reset after delete/purge', () => {
@@ -4786,6 +4844,638 @@ describe('App — the native save panel chooses the format', () => {
     // Bound to the file it wrote (the mock's saved mark never clears the
     // dirty dot; documentSession.test.ts covers that).
     await waitFor(() => expect(document.title).toMatch(/m\.skp — Hew$/))
+  })
+
+  it('keeps an edit made during Save As dirty at the same undo depth and retains recovery', async () => {
+    let finishWrite!: (ref: FileRef) => void
+    vi.mocked(fakeFileHost.writeTo!).mockImplementationOnce(() => new Promise((resolve) => { finishWrite = resolve }))
+    vi.mocked(savePanel.pickSaveTarget).mockResolvedValue({ path: '/tmp/m.hew', format: 'hew', options: {} })
+    await renderAndLoad()
+    const harness = (window as unknown as {
+      __hew_test: { addNodeTag: (kind: string, id: string, path: string[]) => void }
+    }).__hew_test
+
+    fileMenu('Save As…')
+    await waitFor(() => expect(fakeFileHost.writeTo).toHaveBeenCalledOnce())
+    // The mock keeps undo_depth at zero. This change must still invalidate
+    // the bytes captured before the host write began.
+    act(() => harness.addNodeTag('object', '1', ['after-capture']))
+    finishWrite({ name: 'm.hew', format: 'hew', handle: '/tmp/m.hew' })
+
+    await waitFor(() => expect(document.title).toMatch(/m\.hew — Hew$/))
+    expect(document.title.startsWith('•')).toBe(true)
+    expect(mockScene.mark_saved).not.toHaveBeenCalled()
+    expect(recoveryState.clear).not.toHaveBeenCalled()
+  })
+
+  it('reports a changed-during-save conflict to the live API after the file write lands', async () => {
+    let finishWrite!: (ref: FileRef) => void
+    vi.mocked(fakeFileHost.save).mockImplementationOnce(() => new Promise((resolve) => { finishWrite = resolve }))
+    await renderAndLoad()
+    await waitFor(() => expect(liveBridge.runOp).not.toBeNull())
+    const result = liveBridge.runOp!('save', { path: '/tmp/live.hew' })
+    await waitFor(() => expect(fakeFileHost.save).toHaveBeenCalledOnce())
+    const harness = (window as unknown as {
+      __hew_test: { addNodeTag: (kind: string, id: string, path: string[]) => void }
+    }).__hew_test
+    act(() => harness.addNodeTag('object', '1', ['during-save']))
+    finishWrite({ name: 'live.hew', format: 'hew', handle: '/tmp/live.hew' })
+
+    expect(await result).toEqual({
+      ok: false,
+      refusal: 'save_failed',
+      message: 'the file was written, but it is already out of date: the document changed during the save; save again',
+    })
+    expect(mockScene.mark_saved).not.toHaveBeenCalled()
+    expect(recoveryState.clear).not.toHaveBeenCalled()
+  })
+
+  it('writes a newer Save only after an older Save has finished', async () => {
+    const originalSave = mockScene.save
+    const originalAtSavedMark = mockScene.at_saved_mark
+    let currentBytes = new Uint8Array([1])
+    const finishWrites: Array<(ref: FileRef) => void> = []
+    const written: number[] = []
+    mockScene.save = () => currentBytes
+    vi.mocked(fakeFileHost.save).mockImplementation((bytes) => new Promise((resolve) => {
+      finishWrites.push((ref) => { written.push(bytes[0]); resolve(ref) })
+    }))
+    try {
+      await renderAndLoad()
+      await waitFor(() => expect(liveBridge.runOp).not.toBeNull())
+      const first = liveBridge.runOp!('save', { path: '/tmp/model.hew' })
+      await waitFor(() => expect(finishWrites).toHaveLength(1))
+
+      const harness = (window as unknown as {
+        __hew_test: { addNodeTag: (kind: string, id: string, path: string[]) => void }
+      }).__hew_test
+      currentBytes = new Uint8Array([2])
+      act(() => harness.addNodeTag('object', '1', ['newer']))
+      const second = liveBridge.runOp!('save', { path: '/tmp/model.hew' })
+      await act(async () => { await Promise.resolve() })
+      const callsBeforeFirstFinished = finishWrites.length
+
+      finishWrites[0]({ name: 'model.hew', format: 'hew', handle: '/tmp/model.hew' })
+      await waitFor(() => expect(finishWrites).toHaveLength(2))
+      mockScene.mark_saved.mockImplementationOnce(() => { mockScene.at_saved_mark = () => true })
+      finishWrites[1]({ name: 'model.hew', format: 'hew', handle: '/tmp/model.hew' })
+      expect(await first).toMatchObject({ ok: false, refusal: 'save_failed' })
+      expect(await second).toEqual({ ok: true })
+      expect(callsBeforeFirstFinished).toBe(1)
+      expect(written).toEqual([1, 2])
+    } finally {
+      mockScene.save = originalSave
+      mockScene.at_saved_mark = originalAtSavedMark
+    }
+  })
+
+  it('does not bind an old save result after New replaces the document in the same Scene', async () => {
+    let finishWrite!: (ref: FileRef) => void
+    vi.mocked(fakeFileHost.save).mockImplementationOnce(() => new Promise((resolve) => { finishWrite = resolve }))
+    await renderAndLoad()
+    await waitFor(() => expect(liveBridge.runOp).not.toBeNull())
+    const result = liveBridge.runOp!('save', { path: '/tmp/old.hew' })
+    await waitFor(() => expect(fakeFileHost.save).toHaveBeenCalledOnce())
+
+    fileMenu('New')
+    await waitFor(() => expect(mockScene.load).toHaveBeenCalledOnce())
+    finishWrite({ name: 'old.hew', format: 'hew', handle: '/tmp/old.hew' })
+
+    expect(await result).toEqual({
+      ok: false,
+      refusal: 'save_failed',
+      message: 'the file was written, but it is already out of date: another document replaced this one in the window during the save',
+    })
+    expect(document.title).not.toMatch(/old\.hew/)
+    expect(mockScene.mark_saved).not.toHaveBeenCalled()
+  })
+
+  describe('what a Save may mark as saved', () => {
+    const stale = {
+      ok: false,
+      refusal: 'save_failed',
+      message: 'the file was written, but it is already out of date: the document changed during the save; save again',
+    }
+    const LIVE_REF: FileRef = { name: 'live.hew', format: 'hew', handle: '/tmp/live.hew' }
+    const m = mockScene as Record<string, unknown>
+    const KEYS = [
+      'object_ids', 'node_locked', 'set_nodes_locked', 'undo_depth', 'busy', 'save',
+      'at_saved_mark', 'scene_undo', 'note_document_event', 'document_id', 'ensure_document_id',
+      'skp_source', 'commit_skp_save', 'extract_item', 'stamp_library_source',
+    ]
+    let prior: [string, unknown][] = []
+
+    beforeEach(() => {
+      prior = KEYS.map((k) => [k, m[k]])
+      // As in the kernel: a mark that is taken reads back as clean.
+      mockScene.mark_saved.mockImplementation(() => { mockScene.at_saved_mark = () => true })
+    })
+
+    afterEach(() => {
+      vi.useRealTimers()
+      noteStripGates.length = 0
+      itemSummary.value = null
+      libraryStandIn.store = null
+      tauriMode.on = false
+      tauriCore.invoke.mockReset().mockResolvedValue(undefined)
+      mockScene.mark_saved.mockReset()
+      for (const [k, v] of prior) {
+        if (v === undefined) delete m[k]
+        else m[k] = v
+      }
+    })
+
+    const harness = () => (window as unknown as {
+      __hew_test: {
+        addNodeTag: (kind: string, id: string, path: string[]) => void
+        undo: () => void
+        selectNodes: (nodes: { kind: string; id: string }[]) => void
+        load: (bytes: number[]) => void
+      }
+    }).__hew_test
+    const edit = () => act(() => harness().addNodeTag('object', '1', ['edit']))
+
+    /** A live Save whose host write waits for `finish`. */
+    async function pendingSave(ref: FileRef = LIVE_REF) {
+      const calls = vi.mocked(fakeFileHost.save).mock.calls.length
+      let finishWrite!: (ref: FileRef) => void
+      vi.mocked(fakeFileHost.save).mockImplementationOnce(() => new Promise((resolve) => { finishWrite = resolve }))
+      await waitFor(() => expect(liveBridge.runOp).not.toBeNull())
+      let result!: ReturnType<NonNullable<typeof liveBridge.runOp>>
+      await act(async () => { result = liveBridge.runOp!('save', { path: ref.handle as string }) })
+      await waitFor(() => expect(fakeFileHost.save).toHaveBeenCalledTimes(calls + 1))
+      return { result, finish: () => finishWrite(ref) }
+    }
+
+    /** Bind the window to `/tmp/live.hew`, saved and clean. */
+    async function savedDocument() {
+      await renderAndLoad()
+      const save = await pendingSave()
+      await act(async () => {
+        save.finish()
+        expect(await save.result).toEqual({ ok: true })
+      })
+      await waitFor(() => expect(document.title).toBe('live.hew — Hew'))
+    }
+    /** From here on the document reads off its saved mark. */
+    const leaveSavedMark = () => { mockScene.at_saved_mark = () => false }
+    /** An undo that lands on the kernel's saved mark. */
+    function undoToMark() {
+      mockScene.at_saved_mark = () => true
+      m.scene_undo = () => ({ free: () => {} })
+      act(() => harness().undo())
+    }
+    const tick = () => act(async () => { await vi.advanceTimersByTimeAsync(AUTOSAVE_INTERVAL_MS) })
+    const snapshotPaths = () => recoveryState.write.mock.calls.map(([, meta]) => (meta as { path: string | null }).path)
+    const afterSavedEvent = (then: () => void) => {
+      let done = false
+      m.note_document_event = vi.fn((kind: string) => {
+        if (kind !== 'saved' || done) return
+        done = true
+        then()
+      })
+    }
+    const staleReplaced = {
+      ...stale,
+      message: 'the file was written, but it is already out of date: another document replaced this one in the window during the save',
+    }
+
+    function lockableObject(locked: boolean) {
+      m.object_ids = () => new BigUint64Array([1n])
+      m.node_locked = () => locked
+      m.set_nodes_locked = vi.fn()
+    }
+
+    it('marks the document saved when nothing changed', async () => {
+      await renderAndLoad()
+      const save = await pendingSave()
+      save.finish()
+
+      expect(await save.result).toEqual({ ok: true })
+      expect(mockScene.mark_saved).toHaveBeenCalledOnce()
+    })
+
+    it('stays unsaved after Edit ▸ Unlock ▸ All while the write is pending', async () => {
+      lockableObject(true)
+      await renderAndLoad()
+      const save = await pendingSave()
+      // The undo depth stays at zero: only the change generation can see this.
+      fireEvent.click(screen.getByRole('button', { name: /^edit$/i }))
+      fireEvent.mouseEnter(menubar().getByText('Unlock'))
+      fireEvent.mouseDown(menubar().getByText('All'))
+      expect(m.set_nodes_locked).toHaveBeenCalledOnce()
+      save.finish()
+
+      expect(await save.result).toEqual(stale)
+      expect(mockScene.mark_saved).not.toHaveBeenCalled()
+      await waitFor(() => expect(document.title).toMatch(/live\.hew/))
+      expect(document.title.startsWith('•')).toBe(true)
+    })
+
+    it('stays unsaved after Object Info’s Locked box changes while the write is pending', async () => {
+      lockableObject(false)
+      await renderAndLoad()
+      act(() => harness().selectNodes([{ kind: 'object', id: '1' }]))
+      const box = await screen.findByRole('checkbox', { name: /locked/i })
+      const save = await pendingSave()
+      fireEvent.click(box)
+      expect(m.set_nodes_locked).toHaveBeenCalledOnce()
+      save.finish()
+
+      expect(await save.result).toEqual(stale)
+      expect(mockScene.mark_saved).not.toHaveBeenCalled()
+    })
+
+    it('stays unsaved when the undo depth moved without any change being reported', async () => {
+      let depth = 0
+      m.undo_depth = () => depth
+      await renderAndLoad()
+      const save = await pendingSave()
+      depth = 1
+      save.finish()
+
+      expect(await save.result).toEqual(stale)
+      expect(mockScene.mark_saved).not.toHaveBeenCalled()
+      expect(recoveryState.clear).not.toHaveBeenCalled()
+    })
+
+    it.each(['a failed recovery write', 'a busy document'])(
+      'is not made out of date by an autosave retrying after %s',
+      async (cause) => {
+        let busy = false
+        m.busy = () => busy
+        await renderAndLoad()
+        vi.useFakeTimers({ shouldAdvanceTime: true })
+        edit()
+        const save = await pendingSave()
+        if (cause === 'a busy document') busy = true
+        else recoveryState.write.mockRejectedValueOnce(new Error('write failed'))
+        await act(async () => { await vi.advanceTimersByTimeAsync(AUTOSAVE_INTERVAL_MS) })
+        expect(recoveryState.write).toHaveBeenCalledTimes(cause === 'a busy document' ? 0 : 1)
+        busy = false
+        save.finish()
+
+        expect(await save.result).toEqual({ ok: true })
+        expect(mockScene.mark_saved).toHaveBeenCalledOnce()
+      },
+    )
+
+    it('still clears recovery when the autosave write it waits on fails', async () => {
+      let failWrite!: (err: Error) => void
+      recoveryState.write.mockImplementationOnce(() => new Promise<void>((_, reject) => { failWrite = reject }))
+      await renderAndLoad()
+      vi.useFakeTimers({ shouldAdvanceTime: true })
+      edit()
+      await act(async () => { await vi.advanceTimersByTimeAsync(AUTOSAVE_INTERVAL_MS) })
+      expect(recoveryState.write).toHaveBeenCalledOnce()
+      const save = await pendingSave()
+      // Flushed here, so every clear the save causes is already waiting on
+      // the write when it fails.
+      await act(async () => {
+        save.finish()
+        expect(await save.result).toEqual({ ok: true })
+      })
+      expect(recoveryState.clear).not.toHaveBeenCalled()
+      await act(async () => { failWrite(new Error('write failed')) })
+
+      await waitFor(() => expect(recoveryState.clear).toHaveBeenCalled())
+    })
+
+    it('keeps the autosave of an edit made right after the saved mark', async () => {
+      await renderAndLoad()
+      vi.useFakeTimers({ shouldAdvanceTime: true })
+      const save = await pendingSave()
+      // The first call after the mark that a test can reach: an edit here is
+      // newer than the file.
+      m.note_document_event = vi.fn((kind: string) => {
+        if (kind !== 'saved') return
+        mockScene.at_saved_mark = () => false
+        harness().addNodeTag('object', '1', ['after-mark'])
+      })
+      await act(async () => {
+        save.finish()
+        await save.result
+      })
+      await act(async () => { await vi.advanceTimersByTimeAsync(AUTOSAVE_INTERVAL_MS) })
+
+      expect(recoveryState.write).toHaveBeenCalledOnce()
+    })
+
+    it('stays unsaved after an edit made between serializing and writing', async () => {
+      let release!: () => void
+      await renderAndLoad()
+      await waitFor(() => expect(liveBridge.runOp).not.toBeNull())
+      vi.mocked(fakeFileHost.save).mockResolvedValue(LIVE_REF)
+      noteStripGates.push(new Promise<void>((resolve) => { release = resolve }))
+      let result!: ReturnType<NonNullable<typeof liveBridge.runOp>>
+      await act(async () => { result = liveBridge.runOp!('save', { path: '/tmp/live.hew' }) })
+      expect(fakeFileHost.save).not.toHaveBeenCalled()
+      edit()
+      release()
+
+      expect(await result).toEqual(stale)
+      expect(mockScene.mark_saved).not.toHaveBeenCalled()
+    })
+
+    it('writes in capture order when the older Save is slower to serialize', async () => {
+      let release!: () => void
+      let current = new Uint8Array([1])
+      const writes: number[] = []
+      await renderAndLoad()
+      await waitFor(() => expect(liveBridge.runOp).not.toBeNull())
+      m.save = () => current
+      vi.mocked(fakeFileHost.save).mockImplementation(async (bytes) => {
+        writes.push(bytes[0])
+        return LIVE_REF
+      })
+      noteStripGates.push(new Promise<void>((resolve) => { release = resolve }))
+      let first!: ReturnType<NonNullable<typeof liveBridge.runOp>>
+      let second!: ReturnType<NonNullable<typeof liveBridge.runOp>>
+      await act(async () => { first = liveBridge.runOp!('save', { path: '/tmp/live.hew' }) })
+      current = new Uint8Array([2])
+      edit()
+      await act(async () => { second = liveBridge.runOp!('save', { path: '/tmp/live.hew' }) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 20)) })
+      release()
+      await act(async () => { await Promise.all([first, second]) })
+
+      expect(writes).toEqual([1, 2])
+    })
+
+    it('rewrites the recovery snapshot under the new file after a stale landing', async () => {
+      await renderAndLoad()
+      vi.useFakeTimers({ shouldAdvanceTime: true })
+      const save = await pendingSave()
+      edit()
+      await tick()
+      expect(snapshotPaths()).toEqual([null])
+      await act(async () => {
+        save.finish()
+        await save.result
+      })
+      await tick()
+
+      expect(snapshotPaths()).toEqual([null, '/tmp/live.hew'])
+    })
+
+    it('is not disarmed by an autosave still writing the old binding when a stale save lands', async () => {
+      let finishSnapshot!: () => void
+      await renderAndLoad()
+      vi.useFakeTimers({ shouldAdvanceTime: true })
+      const save = await pendingSave()
+      edit()
+      recoveryState.write.mockImplementationOnce(() => new Promise<void>((resolve) => { finishSnapshot = resolve }))
+      await tick()
+      await act(async () => {
+        save.finish()
+        await save.result
+      })
+      await act(async () => { finishSnapshot() })
+      await tick()
+
+      expect(snapshotPaths()).toEqual([null, '/tmp/live.hew'])
+    })
+
+    it('rewrites the .skp recovery source for the new file after a stale landing', async () => {
+      const before = new Uint8Array([1])
+      const after = new Uint8Array([2])
+      let source = before
+      m.skp_source = () => source
+      m.commit_skp_save = () => { source = after }
+      await renderAndLoad()
+      vi.useFakeTimers({ shouldAdvanceTime: true })
+      const save = await pendingSave({ name: 'live.skp', format: 'skp2026', handle: '/tmp/live.skp' })
+      edit()
+      await tick()
+      await act(async () => {
+        save.finish()
+        await save.result
+      })
+      await tick()
+
+      expect(recoveryState.writeSource.mock.calls.at(-1)?.[0]).toBe(after)
+    })
+
+    it('stays unsaved after a stale landing even when undo reaches the old saved mark', async () => {
+      await savedDocument()
+      leaveSavedMark()
+      edit()
+      const save = await pendingSave()
+      edit()
+      await act(async () => {
+        save.finish()
+        await save.result
+      })
+      undoToMark()
+
+      expect(document.title).toBe('• live.hew — Hew')
+      // The next save that lands whole clears the reason.
+      const again = await pendingSave()
+      await act(async () => {
+        again.finish()
+        expect(await again.result).toEqual({ ok: true })
+      })
+      expect(document.title).toBe('live.hew — Hew')
+    })
+
+    it('stays unsaved after a stale Library write-through, even at the old saved mark', async () => {
+      tauriMode.on = true
+      const none = async () => []
+      libraryStandIn.store = {
+        available: () => true,
+        list: none,
+        write: async () => {},
+        read: async () => new Uint8Array(),
+        nameForPath: async () => null,
+        folderInfo: async () => ({ path: null, kind: 'folder' }),
+        readThumbnail: async () => null,
+        writeThumbnail: async () => {},
+        readSources: async () => null,
+        readSourceCache: async () => null,
+        editingNames: none,
+        capabilities: () => ({ canReveal: false, canChooseFolder: false, canDownload: false }),
+        subscribe: () => () => {},
+        subscribeSources: () => () => {},
+      }
+      m.object_ids = () => new BigUint64Array([1n])
+      m.extract_item = () => new Uint8Array([5])
+      m.stamp_library_source = vi.fn()
+      await savedDocument()
+      itemSummary.value = { doc_attrs: {} }
+      let finishWrite!: (ref: FileRef) => void
+      vi.mocked(fakeFileHost.save).mockImplementationOnce(() => new Promise((resolve) => { finishWrite = resolve }))
+      const calls = vi.mocked(fakeFileHost.save).mock.calls.length
+      act(() => harness().selectNodes([{ kind: 'object', id: '1' }]))
+      fireEvent.click(await screen.findByRole('button', { name: /save to library/i }))
+      const name = await screen.findByRole('textbox', { name: /item name/i })
+      fireEvent.keyDown(name, { key: 'Enter' })
+      await waitFor(() => expect(fakeFileHost.save).toHaveBeenCalledTimes(calls + 1))
+      leaveSavedMark()
+      edit()
+      await act(async () => { finishWrite(LIVE_REF) })
+      undoToMark()
+
+      expect(document.title).toBe('• live.hew — Hew')
+    })
+
+    it('does not answer ok when an edit lands after the mark but before the save returns', async () => {
+      await renderAndLoad()
+      const save = await pendingSave()
+      afterSavedEvent(() => { leaveSavedMark(); harness().addNodeTag('object', '1', ['late']) })
+      await act(async () => {
+        save.finish()
+        await save.result
+      })
+
+      expect(await save.result).toEqual(stale)
+    })
+
+    it('does not answer ok when the document is replaced before the save returns', async () => {
+      await renderAndLoad()
+      const save = await pendingSave()
+      afterSavedEvent(() => { harness().load([]) })
+      await act(async () => {
+        save.finish()
+        await save.result
+      })
+
+      expect(await save.result).toEqual(staleReplaced)
+    })
+
+    it('answers ok when nothing changed, even as the new document id is reported', async () => {
+      tauriMode.on = true
+      let id: string | undefined
+      m.document_id = () => id
+      m.ensure_document_id = () => (id = '11111111-0000-4000-8000-000000000000')
+      tauriCore.invoke.mockImplementation(async (cmd: string) => {
+        if (cmd === 'set_document_id') await new Promise((r) => setTimeout(r, 20))
+        return undefined
+      })
+      await renderAndLoad()
+      const save = await pendingSave()
+      save.finish()
+
+      expect(await save.result).toEqual({ ok: true })
+      expect(tauriCore.invoke).toHaveBeenCalledWith('set_document_id', { id })
+    })
+
+    it('does not let New continue on a Save As that an edit overtook', async () => {
+      vi.mocked(savePanel.pickSaveTarget).mockResolvedValue({ path: '/tmp/m.hew', format: 'hew', options: {} })
+      await renderAndLoad()
+      leaveSavedMark()
+      edit()
+      afterSavedEvent(() => { leaveSavedMark(); harness().addNodeTag('object', '1', ['late']) })
+      const loads = mockScene.load.mock.calls.length
+      fileMenu('New')
+      const dialog = await screen.findByRole('dialog', { name: /unsaved changes/i })
+      fireEvent.click(within(dialog).getByRole('button', { name: /^save/i }))
+      await waitFor(() => expect(m.note_document_event).toHaveBeenCalledWith('saved', 'm.hew', '/tmp/m.hew', 'hew'))
+      await act(async () => { await new Promise((r) => setTimeout(r, 20)) })
+
+      expect(mockScene.load.mock.calls.length).toBe(loads)
+    })
+
+    /** A dirty document whose autosave is still writing when an undo to the
+     * saved mark starts the clear that waits on it. */
+    async function clearWaitingOnAutosave() {
+      let finishSnapshot!: () => void
+      recoveryState.write.mockImplementationOnce(() => new Promise<void>((resolve) => { finishSnapshot = resolve }))
+      await renderAndLoad()
+      vi.useFakeTimers({ shouldAdvanceTime: true })
+      leaveSavedMark()
+      edit()
+      await tick()
+      expect(recoveryState.write).toHaveBeenCalledOnce()
+      undoToMark()
+      expect(recoveryState.clear).not.toHaveBeenCalled()
+      return () => finishSnapshot()
+    }
+
+    it('clears recovery when a later change leaves the document clean', async () => {
+      const finishSnapshot = await clearWaitingOnAutosave()
+      undoToMark()
+      await act(async () => { finishSnapshot() })
+
+      await waitFor(() => expect(recoveryState.clear).toHaveBeenCalled())
+    })
+
+    it('keeps recovery for an edit React has not rendered yet', async () => {
+      const finishSnapshot = await clearWaitingOnAutosave()
+      await act(async () => {
+        leaveSavedMark()
+        harness().addNodeTag('object', '1', ['unrendered'])
+        finishSnapshot()
+        // The waiting clear runs here, before this scope renders the edit.
+        for (let i = 0; i < 10; i++) await Promise.resolve()
+      })
+      await act(async () => {})
+
+      expect(recoveryState.clear).not.toHaveBeenCalled()
+    })
+
+    /** A saved, then edited, document that revert can read back. */
+    async function revertable() {
+      tauriCore.invoke.mockImplementation(async (cmd: string) => (cmd === 'read_file' ? new ArrayBuffer(1) : undefined))
+      await savedDocument()
+      leaveSavedMark()
+      edit()
+      await waitFor(() => expect(document.title.startsWith('•')).toBe(true))
+    }
+    const reads = () => tauriCore.invoke.mock.calls.filter(([cmd]) => cmd === 'read_file').length
+
+    it('reverts only after a pending save, and then finds nothing to revert', async () => {
+      await revertable()
+      const save = await pendingSave()
+      const loads = mockScene.load.mock.calls.length
+      let reverted!: ReturnType<NonNullable<typeof liveBridge.runOp>>
+      await act(async () => { reverted = liveBridge.runOp!('revert', {}) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 20)) })
+      expect(reads()).toBe(0)
+      // Awaited outside `act`, which would hold back the render it reads.
+      await act(async () => { save.finish() })
+
+      expect(await reverted).toMatchObject({ ok: false, message: 'There is nothing to revert.' })
+      expect(reads()).toBe(0)
+      expect(mockScene.load.mock.calls.length).toBe(loads)
+    })
+
+    it('cancels a revert when a save wrote the file during its read', async () => {
+      await revertable()
+      let finishRead!: (bytes: ArrayBuffer) => void
+      tauriCore.invoke.mockImplementation((cmd: string) =>
+        cmd === 'read_file' ? new Promise<ArrayBuffer>((r) => { finishRead = r }) : Promise.resolve(undefined))
+      const loads = mockScene.load.mock.calls.length
+      let reverted!: ReturnType<NonNullable<typeof liveBridge.runOp>>
+      await act(async () => { reverted = liveBridge.runOp!('revert', {}) })
+      await waitFor(() => expect(reads()).toBe(1))
+      const save = await pendingSave()
+      // Stale, so the document is still dirty and bound to the same file.
+      edit()
+      await act(async () => {
+        finishRead(new ArrayBuffer(1))
+        await new Promise((r) => setTimeout(r, 20))
+        save.finish()
+      })
+
+      expect(await reverted).toMatchObject({
+        ok: false,
+        message: 'Revert canceled: the document changed while the file was being read.',
+      })
+      expect(mockScene.load.mock.calls.length).toBe(loads)
+    })
+
+    it('opens a path only after a pending save', async () => {
+      await revertable()
+      const save = await pendingSave()
+      let opened!: ReturnType<NonNullable<typeof liveBridge.runOp>>
+      await act(async () => { opened = liveBridge.runOp!('open', { path: '/tmp/live.hew' }) })
+      await act(async () => { await new Promise((r) => setTimeout(r, 20)) })
+      expect(reads()).toBe(0)
+      await act(async () => { save.finish() })
+      await act(async () => { await opened })
+
+      expect(reads()).toBe(1)
+    })
   })
 
   it('Export writes the format picked in the panel to the path it picked', async () => {
