@@ -4912,6 +4912,18 @@ msgstr "Guide point"
 msgid "Guides"
 msgstr "Guides"
 
+#: src/tools/FlipTool.ts
+msgid "Guides can't be flipped on their own. Select an object or a drawing with them."
+msgstr "Guides can't be flipped on their own. Select an object or a drawing with them."
+
+#: src/tools/ScaleTool.ts
+msgid "Guides can't be scaled on their own. Select an object or a drawing with them."
+msgstr "Guides can't be scaled on their own. Select an object or a drawing with them."
+
+#: src/tools/MoveTool.ts
+msgid "Guides copy along one direction only — type a single count."
+msgstr "Guides copy along one direction only — type a single count."
+
 #. One-letter label for the height of a part
 #. One-letter label for the height of a part
 #. One-letter label for the height of a part
@@ -6491,6 +6503,10 @@ msgid "Materials"
 msgstr "Materials"
 
 #: src/io/documentSession.ts
+msgid "Materials added"
+msgstr "Materials added"
+
+#: src/io/documentSession.ts
 msgid "Materials added from the Library"
 msgstr "Materials added from the Library"
 
@@ -7282,6 +7298,7 @@ msgstr "Nothing to export — the model has no solids."
 msgid "Nothing to export — the model has nothing visible."
 msgstr "Nothing to export — the model has nothing visible."
 
+#: src/tools/FlipTool.ts
 #: src/viewport/Viewport.tsx
 msgid "Nothing to flip"
 msgstr "Nothing to flip"
@@ -7310,6 +7327,10 @@ msgstr "Nothing to redo."
 #: src/App.tsx
 msgid "Nothing to revert: the document is already at its saved state."
 msgstr "Nothing to revert: the document is already at its saved state."
+
+#: src/tools/ScaleTool.ts
+msgid "Nothing to scale"
+msgstr "Nothing to scale"
 
 #: src/App.tsx
 msgid "Nothing to share yet — the document is empty"
@@ -10681,6 +10702,10 @@ msgstr "Tag: {tagLabel}"
 #: src/panels/ObjectInfoPanel.tsx
 msgid "Tags"
 msgstr "Tags"
+
+#: src/io/documentSession.ts
+msgid "Tags added"
+msgstr "Tags added"
 
 #: src/viewport/InferenceTooltip.tsx
 msgid "Tangent"

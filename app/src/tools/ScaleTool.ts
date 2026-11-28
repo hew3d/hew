@@ -60,6 +60,11 @@
  * line (the hot pair, kept through the drag); off the grips the object a
  * click would select lights instead (types.ts `ClickAcquire`).
  *
+ * Construction guides selected with the nodes (`setSelectedGuides`) preview
+ * and scale with them in the same undo step (`transform_mixed_selection`);
+ * the box and its grips come from the nodes alone. Guides with no node
+ * beside them are refused: there is nothing to size the grips from.
+ *
  * The gizmo box is computed from the selection's rendered mesh positions —
  * TODO: reuse Object Info's world-AABB helper (`panels/objectBounds.ts`)
  * here instead of the local `_selectionBox` walk.
@@ -88,6 +93,7 @@ import { resolveDraft } from './planeUnits'
 import { clearPreview } from './transformPreview'
 import { leaveBehind } from '../lock/lockGate'
 import { commitSelectionTransform, buildSelectionPreview } from './transformSelection'
+import { withGuidePreviews } from './guidePreview'
 import { surfaceSketchTransformReports } from './draftCommit'
 import { editLengthBuffer, isLengthInputKey, parseDistance } from './moveInput'
 import { RetypeWindow, idleRetypeCapturesKey, retypeStaleMessage } from './retypeWindow'
@@ -98,7 +104,9 @@ import { getResolvedTheme } from '../settings/theme'
 import type { NodeRef } from '../panels/treeModel'
 import { collectLeafIds, isDraftKind, nodeRefFromJs } from '../panels/treeModel'
 
-export type OnScaleCommit = (nodes: NodeRef[]) => void
+/** A scale landed on `nodes`, and on `guides` when guides were carried;
+ *  both become the selection. */
+export type OnScaleCommit = (nodes: NodeRef[], guides: readonly bigint[]) => void
 export type OnToast = (message: string, code?: string) => void
 export type OnMeasurement = (text: string) => void
 
@@ -262,6 +270,8 @@ type Stage =
   | {
       kind: 'dragging'
       nodes: NodeRef[]
+      /** The guides carried with `nodes` (`setSelectedGuides`). */
+      guides: bigint[]
       grab: Vec3
       opposite: Vec3
       center: Vec3
@@ -285,6 +295,7 @@ type Stage =
  */
 type RetypeSpec = {
   nodes: NodeRef[]
+  guides: bigint[]
   pivot: Vec3
   factors: Vec3
   axisIndex: 0 | 1 | 2 | null
@@ -314,7 +325,9 @@ export class ScaleTool implements Tool {
       return t`Type an exact factor or dimension to redo the scale you just made — or drag a grip.`
     }
     if (this.selection.length === 0) {
-      return t`Click the object you want to scale.`
+      return this.selectedGuides.length > 0
+        ? t`Guides can't be scaled on their own. Select an object or a drawing with them.`
+        : t`Click the object you want to scale.`
     }
     return t`Drag a grip to scale — a face stretches one axis, an edge two, a corner all three. Ctrl anchors at the center. Click another object to scale it instead.`
   }
@@ -399,6 +412,14 @@ export class ScaleTool implements Tool {
    * setSelection; see MoveTool) — the next gesture starts from live
    * handles after an undo/redo prune, and the gizmo redraws for the new
    * selection while idle. */
+  /** The selected construction guides, pushed by the Viewport like
+   *  `setSelection`: carried with the nodes through the scale. Guides alone
+   *  have no box to size the grips from, so they are refused. */
+  private selectedGuides: bigint[] = []
+  setSelectedGuides(guides: readonly bigint[]): void {
+    this.selectedGuides = [...guides]
+  }
+
   setSelection(nodes: NodeRef[]): void {
     this.selection = nodes
     if (this.stage.kind === 'idle') {
@@ -522,6 +543,11 @@ export class ScaleTool implements Tool {
         }
         return
       }
+      if (nodes.length === 0 && this.selectedGuides.length > 0) {
+        // Guides alone: no box to scale them by.
+        this.onToast(t`Nothing to scale`)
+        return
+      }
       if (nodes.length === 0 && this.acquireSelection !== null) {
         // Empty selection: auto-select whatever the click landed on and
         // reveal its gizmo. This click only selects — it never grabs a grip,
@@ -559,8 +585,9 @@ export class ScaleTool implements Tool {
       const go = leaveBehind(this.wasmScene, nodes, this.onToast, { descendants: true })
       if (go === null) return
       nodes = go
+      const guides = this.selectedGuides
 
-      const previewMesh = this._buildPreview(nodes)
+      const previewMesh = this._buildPreview(nodes, guides)
       if (previewMesh !== null) this.preview.add(previewMesh)
       const center = this._gizmoCenter
       this._hideGizmo()
@@ -568,6 +595,7 @@ export class ScaleTool implements Tool {
       this.stage = {
         kind: 'dragging',
         nodes,
+        guides,
         grab: grip.pos,
         opposite: grip.opposite,
         center,
@@ -588,7 +616,7 @@ export class ScaleTool implements Tool {
       // constraint the drag uses; a parallel-ray null keeps the last cursor.
       const cursor = this._resolveCursor(snap, ray)
       if (cursor !== null) this.stage.lastCursor = cursor
-      const { nodes, axisIndex, axisIndex2, boxExtent } = this.stage
+      const { nodes, guides, axisIndex, axisIndex2, boxExtent } = this.stage
       let factors = this._currentFactors()
       // The cursor sits exactly on the anchor (factor 0): a singular scale
       // must not commit. Ignore the click and keep dragging.
@@ -608,7 +636,7 @@ export class ScaleTool implements Tool {
       this.typed = ''
       clearPreview(this.preview)
       this.onMeasurementCb('')
-      this._commitAndArm({ nodes, pivot, factors, axisIndex, axisIndex2, boxExtent })
+      this._commitAndArm({ nodes, guides, pivot, factors, axisIndex, axisIndex2, boxExtent })
       // The cursor rests where the dragged grip landed — a grip of the new box.
       this._updateHotGrip(ray)
     }
@@ -1361,14 +1389,16 @@ export class ScaleTool implements Tool {
     this._refreshHotMarkers()
   }
 
-  private _buildPreview(nodes: NodeRef[]): THREE.Object3D | null {
-    return buildSelectionPreview(
+  /** The ghost of `nodes`, with a guide ghost for each carried guide. */
+  private _buildPreview(nodes: NodeRef[], guides: readonly bigint[]): THREE.Object3D | null {
+    const mesh = buildSelectionPreview(
       this.wasmScene,
       this.objectsGroup,
       this.instanceGroupGetter,
       nodes,
       this._activeInstance,
     )
+    return withGuidePreviews(this.wasmScene, mesh, guides)
   }
 
   private _applyPreviewScale(mesh: THREE.Object3D, pivot: Vec3, factors: Vec3): void {
@@ -1421,20 +1451,20 @@ export class ScaleTool implements Tool {
     if (this.stage.kind !== 'dragging') return
     const factors = this._parseTypedFactors()
     if (factors === null) return
-    const { nodes, axisIndex, axisIndex2, boxExtent } = this.stage
+    const { nodes, guides, axisIndex, axisIndex2, boxExtent } = this.stage
     const pivot = this._pivot()
 
     this.stage = { kind: 'idle' }
     this.typed = ''
     clearPreview(this.preview)
     this.onMeasurementCb('')
-    this._commitAndArm({ nodes, pivot, factors, axisIndex, axisIndex2, boxExtent })
+    this._commitAndArm({ nodes, guides, pivot, factors, axisIndex, axisIndex2, boxExtent })
   }
 
   /** Commit, then open the retype window on the result (an identity scale
    *  records nothing and opens nothing). */
   private _commitAndArm(spec: RetypeSpec): void {
-    if (this._commit(spec.nodes, spec.pivot, spec.factors)) this.retype.arm(spec)
+    if (this._commit(spec.nodes, spec.guides, spec.pivot, spec.factors)) this.retype.arm(spec)
   }
 
   /**
@@ -1456,14 +1486,14 @@ export class ScaleTool implements Tool {
       const outcome = this.retype.retract()
       if (outcome === 'stale') this.onToast(retypeStaleMessage('scale'))
       if (outcome === 'ok') {
-        this.onCommit(spec.nodes)
+        this.onCommit(spec.nodes, spec.guides)
         if (spec.nodes.length > 0) this._showGizmo(spec.nodes)
       }
       return
     }
     const outcome = this.retype.apply(
-      (hot) => this._commit(hot.nodes, hot.pivot, factors),
-      (hot) => this._commit(hot.nodes, hot.pivot, hot.factors),
+      (hot) => this._commit(hot.nodes, hot.guides, hot.pivot, factors),
+      (hot) => this._commit(hot.nodes, hot.guides, hot.pivot, hot.factors),
       (hot) => ({ ...hot, factors }),
     )
     if (outcome === 'stale') this.onToast(retypeStaleMessage('scale'))
@@ -1488,7 +1518,7 @@ export class ScaleTool implements Tool {
 
   /** True when a non-identity scale reached the kernel (false = identity, or
    *  refused and toasted). */
-  private _commit(nodes: NodeRef[], pivot: Vec3, factors: Vec3): boolean {
+  private _commit(nodes: NodeRef[], guides: bigint[], pivot: Vec3, factors: Vec3): boolean {
     const isIdentity =
       Math.abs(factors[0] - 1) < 1e-9 && Math.abs(factors[1] - 1) < 1e-9 && Math.abs(factors[2] - 1) < 1e-9
     // A drawn shape's commit hands back the selection re-found by geometry;
@@ -1498,7 +1528,14 @@ export class ScaleTool implements Tool {
       try {
         const affine = nonUniformScaleAboutPivot(factors[0], factors[1], factors[2], pivot)
         const affineF64 = affineToFloat64(affine)
-        committed = commitSelectionTransform(this.wasmScene, nodes, affineF64, this._activeInstance, t({ context: 'tool', message: 'Scale' }))
+        committed = commitSelectionTransform(
+          this.wasmScene,
+          nodes,
+          affineF64,
+          this._activeInstance,
+          t({ context: 'tool', message: 'Scale' }),
+          guides,
+        )
       } catch (err) {
         const code = parseKernelErrorCode(err)
         const rawMsg = err instanceof Error ? err.message : String(err)
@@ -1508,7 +1545,7 @@ export class ScaleTool implements Tool {
       }
     }
     this.selection = committed
-    this.onCommit(committed)
+    this.onCommit(committed, guides)
     // An identity scale committed nothing: no held report is its own.
     if (!isIdentity) surfaceSketchTransformReports((m) => this.onToast(m))
     // Redraw the gizmo at the (possibly new) size so a follow-up grip can be

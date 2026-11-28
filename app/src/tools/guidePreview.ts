@@ -1,5 +1,5 @@
 /**
- * guidePreview — the Move tool's ghost of a construction guide, the guide
+ * guidePreview — the transform tools' ghost of a construction guide, the guide
  * counterpart of `buildSelectionPreview`: a solid line (or a point guide's
  * cross) in the selection color, drawn on top like the selected guide's
  * highlight, that the tool slides with the cursor until the commit.
@@ -27,4 +27,22 @@ export function buildGuidePreview(
   // it was built, so culling would hide a ghost dragged out of view.
   line.frustumCulled = false
   return line
+}
+
+/** A transform's ghost of nodes carrying guides: the nodes' `mesh` (null:
+ *  none) with a guide ghost for each of `guides`, in one group the tool
+ *  moves as a whole. Without guides, `mesh` itself. */
+export function withGuidePreviews(
+  scene: Pick<WasmScene, 'guide_kind' | 'guide_geometry'>,
+  mesh: THREE.Object3D | null,
+  guides: readonly bigint[],
+): THREE.Object3D | null {
+  if (guides.length === 0) return mesh
+  const group = new THREE.Group()
+  if (mesh !== null) group.add(mesh)
+  for (const g of guides) {
+    const line = buildGuidePreview(scene, g)
+    if (line !== null) group.add(line)
+  }
+  return group.children.length > 0 ? group : null
 }

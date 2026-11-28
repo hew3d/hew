@@ -4908,6 +4908,18 @@ msgstr ""
 msgid "Guides"
 msgstr ""
 
+#: src/tools/FlipTool.ts
+msgid "Guides can't be flipped on their own. Select an object or a drawing with them."
+msgstr ""
+
+#: src/tools/ScaleTool.ts
+msgid "Guides can't be scaled on their own. Select an object or a drawing with them."
+msgstr ""
+
+#: src/tools/MoveTool.ts
+msgid "Guides copy along one direction only — type a single count."
+msgstr ""
+
 #. One-letter label for the height of a part
 #. One-letter label for the height of a part
 #. One-letter label for the height of a part
@@ -6485,6 +6497,10 @@ msgid "Materials"
 msgstr ""
 
 #: src/io/documentSession.ts
+msgid "Materials added"
+msgstr ""
+
+#: src/io/documentSession.ts
 msgid "Materials added from the Library"
 msgstr ""
 
@@ -7276,6 +7292,7 @@ msgstr ""
 msgid "Nothing to export — the model has nothing visible."
 msgstr ""
 
+#: src/tools/FlipTool.ts
 #: src/viewport/Viewport.tsx
 msgid "Nothing to flip"
 msgstr ""
@@ -7303,6 +7320,10 @@ msgstr ""
 
 #: src/App.tsx
 msgid "Nothing to revert: the document is already at its saved state."
+msgstr ""
+
+#: src/tools/ScaleTool.ts
+msgid "Nothing to scale"
 msgstr ""
 
 #: src/App.tsx
@@ -10674,6 +10695,10 @@ msgstr ""
 #: src/panels/MenuBar.tsx
 #: src/panels/ObjectInfoPanel.tsx
 msgid "Tags"
+msgstr ""
+
+#: src/io/documentSession.ts
+msgid "Tags added"
 msgstr ""
 
 #: src/viewport/InferenceTooltip.tsx

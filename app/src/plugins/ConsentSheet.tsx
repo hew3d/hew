@@ -24,7 +24,7 @@
  * longer asks for, and accepts with "Allow".
  */
 
-import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react'
+import { useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { permissionText } from './permissionCopy'
 import { PathText } from './pathText'
@@ -109,8 +109,13 @@ export function ConsentSheet({ consent, onInstall, onCancel, busy = false, error
   const busyRef = useRef(busy)
   busyRef.current = busy
 
+  // Focus and keys are taken in layout effects, in the same task that puts the
+  // sheet on screen. A passive effect runs later when the render did not come
+  // from user input (the grant sheet's, which follows a kernel call), leaving
+  // the sheet shown with focus still on the page behind and Enter not held.
+
   // Focus starts on Cancel and returns to what had it when the sheet closes.
-  useEffect(() => {
+  useLayoutEffect(() => {
     const before = document.activeElement
     cancel.current?.focus()
     return () => {
@@ -120,7 +125,7 @@ export function ConsentSheet({ consent, onInstall, onCancel, busy = false, error
 
   // Keys are handled in the capture phase so the window behind (the web
   // Settings modal closes on Escape) never sees them.
-  useEffect(() => {
+  useLayoutEffect(() => {
     const onKey = (e: KeyboardEvent): void => {
       const root = sheet.current
       if (root === null) return

@@ -1,5 +1,6 @@
 import { test, expect, type Page } from '@playwright/test'
 import { outlinerEditingChips } from './helpers/outliner'
+import { isMac } from './helpers/platform'
 
 /**
  * Lane C — dirty-state E2E (docs/design/v1.1-cycle.md): the derived
@@ -152,5 +153,136 @@ test('a further edit past the saved mark dirties again, and stays dirty across a
 
   await page.evaluate(() => window.__hew_test!.redo())
   await page.evaluate(() => window.__hew_test!.redo())
+  await expect(page).toHaveTitle(/^• Untitled — Hew$/)
+})
+
+// Registry writes (palette materials, tags, Scenes) push no kernel undo
+// entry, so the kernel's saved mark cannot see them: every path that makes
+// one has to dirty the document itself, or closing it loses the change
+// without a prompt.
+
+async function openSavedDocument(page: Page): Promise<void> {
+  await page.goto('/')
+  await waitForHarness(page)
+  await page.evaluate(() => {
+    window.__hew_test!.drawBox([0, 0, 0], [1, 1, 0], 1)
+    window.__hew_test!.saveWithCameraState()
+  })
+  await expect(page).toHaveTitle(/^Untitled — Hew$/)
+}
+
+async function revealMaterialsTray(page: Page): Promise<void> {
+  const defaultSwatch = page.getByTitle('Default (unpainted)')
+  if (!(await defaultSwatch.isVisible().catch(() => false))) {
+    await page.getByText('Materials', { exact: true }).first().click()
+  }
+  await expect(defaultSwatch).toBeVisible()
+}
+
+async function addColorFromPalette(page: Page, name: string): Promise<void> {
+  await revealMaterialsTray(page)
+  await page.getByRole('button', { name: 'Add color', exact: true }).click()
+  await page.getByPlaceholder('Name…').first().fill(name)
+  await page.locator('input[type="color"]').first().fill('#aa3366')
+  await page.getByRole('button', { name: '+ Add color' }).click()
+}
+
+test('the palette\'s "Add color" dirties a saved document', async ({ page }) => {
+  await openSavedDocument(page)
+  await addColorFromPalette(page, 'Plum')
+  await expect(page).toHaveTitle(/^• Untitled — Hew$/)
+})
+
+test('the palette\'s "Add texture" dirties a saved document', async ({ page }) => {
+  await openSavedDocument(page)
+  await revealMaterialsTray(page)
+  await page.getByRole('button', { name: 'Add texture', exact: true }).click()
+  await page.locator('input[type="file"][accept*="image/png"]').setInputFiles({
+    name: 'tile.png',
+    mimeType: 'image/png',
+    buffer: Buffer.from(
+      'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhWMjWwAAAABJRU5ErkJggg==',
+      'base64',
+    ),
+  })
+  await page.getByRole('button', { name: '+ Add texture' }).click()
+  await expect(page).toHaveTitle(/^• Untitled — Hew$/)
+})
+
+for (const [method, params] of [
+  ['hew.material.create', { name: 'Oak', color: [180, 140, 90] }],
+  ['hew.tag.create', { path: ['Structure'] }],
+  ['hew.tag.set_visible', { path: ['Structure'], visible: false }],
+  ['hew.scenes.add', { name: 'Front', camera: null }],
+] as const) {
+  test(`a live ${method} dirties a saved document`, async ({ page }) => {
+    await openSavedDocument(page)
+    const reply = await page.evaluate(
+      ([m, p]) => window.__hew_test!.apiDispatch({ method: m as string, params: p as Record<string, unknown> }),
+      [method, method === 'hew.scenes.add' ? { name: 'Front', properties: { camera: false } } : params] as const,
+    )
+    expect(reply).not.toHaveProperty('error')
+    await expect(page).toHaveTitle(/^• Untitled — Hew$/)
+  })
+}
+
+test('adding a Library material from the command palette dirties the document, and only when it adds one', async ({ page }) => {
+  await page.goto('/')
+  await waitForHarness(page)
+  await addColorFromPalette(page, 'Heather')
+  await page.getByRole('button', { name: 'Save to Library' }).click()
+  await expect(page.getByText('Saved "Heather" to library.')).toBeVisible()
+
+  const addFromCommandPalette = async (): Promise<void> => {
+    await page.keyboard.press(isMac ? 'Meta+/' : 'Control+k')
+    const commands = page.getByRole('dialog', { name: /command palette/i })
+    await commands.getByPlaceholder(/search/i).fill('Heather')
+    await expect(commands.getByText('Add "Heather" to palette')).toBeVisible()
+    await page.keyboard.press('Enter')
+    await expect(page.getByText('Added "Heather" to palette.').last()).toBeVisible()
+  }
+
+  // A fresh document, which does not hold the material yet.
+  await openSavedDocument(page)
+  await addFromCommandPalette()
+  await expect(page).toHaveTitle(/^• Untitled — Hew$/)
+
+  // Already in the palette: nothing is added, so nothing becomes unsaved.
+  await openSavedDocument(page)
+  await page.evaluate(() => {
+    window.__hew_test!.addMaterial('Heather', 0xaa, 0x33, 0x66, 255)
+    window.__hew_test!.saveWithCameraState()
+  })
+  await expect(page).toHaveTitle(/^Untitled — Hew$/)
+  await addFromCommandPalette()
+  await expect(page).toHaveTitle(/^Untitled — Hew$/)
+})
+
+test('a live Library save that links a part, and a transaction that adds a material, stay unsaved', async ({ page }) => {
+  await openSavedDocument(page)
+  // The transaction's undo entry takes the shape back, not the material.
+  const reply = await page.evaluate(() =>
+    window.__hew_test!.apiDispatch({
+      method: 'hew.doc.transact',
+      params: {
+        commands: [
+          { method: 'hew.sketch.draw_rect', params: { plane: { ground: true }, corner_a: [3, 0, 0], corner_b: [4, 1, 0] } },
+          { method: 'hew.material.create', params: { name: 'Oak', color: [180, 140, 90] } },
+        ],
+      },
+    }),
+  )
+  expect(reply).not.toHaveProperty('error')
+  await page.evaluate(() => window.__hew_test!.undo())
+  await expect(page).toHaveTitle(/^• Untitled — Hew$/)
+
+  await openSavedDocument(page)
+  const saved = await page.evaluate(() => {
+    const h = window.__hew_test!
+    const scene = h.apiDispatch({ method: 'hew.query.scene' })
+    const id = JSON.stringify(scene).match(/obj_[0-9a-z]+/)![0]
+    return h.apiDispatch({ method: 'hew.library.save', params: { name: 'Box', selection: [id] } })
+  })
+  expect(saved).not.toHaveProperty('error')
   await expect(page).toHaveTitle(/^• Untitled — Hew$/)
 })
