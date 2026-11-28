@@ -676,6 +676,14 @@ export default function App() {
   const [inferenceStore] = useState(createInferenceStore)
   const setInferenceInfo = inferenceStore.set
   const [toasts, setToasts] = useState<Toast[]>([])
+  // Pending auto-dismiss timers for toasts. A timer drops itself from the
+  // set when it fires; unmount clears whatever is still pending so no
+  // dismiss runs after the app is gone.
+  const toastTimersRef = useRef(new Set<ReturnType<typeof setTimeout>>())
+  useEffect(() => () => {
+    for (const timer of toastTimersRef.current) clearTimeout(timer)
+    toastTimersRef.current.clear()
+  }, [])
   /** Per-object watertight map (bigint key) */
   const [watertightMap, setWatertightMap] = useState<Map<bigint, boolean>>(new Map())
   /** Tool driven from toolbar clicks */
@@ -2748,9 +2756,11 @@ export default function App() {
       { id, message, code, isError, emphasis, actions, persistent },
     ])
     if (persistent) return
-    setTimeout(() => {
+    const timer = setTimeout(() => {
+      toastTimersRef.current.delete(timer)
       setToasts((prev) => prev.filter((t) => t.id !== id))
     }, actions !== undefined ? ACTION_TOAST_MS : emphasis ? 7000 : 4000)
+    toastTimersRef.current.add(timer)
   }, [])
   const handleToastRef = useRef(handleToast)
   handleToastRef.current = handleToast

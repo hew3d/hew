@@ -22,6 +22,7 @@
 
 import { resetHealthReportCache } from './health/healthReport'
 import { BANNED_RE, readableText } from './health/bannedWords'
+import { StrictMode } from 'react'
 import { render, screen, fireEvent, waitFor, within, act } from '@testing-library/react'
 import { describe, expect, it, vi, beforeAll, afterAll, beforeEach, afterEach } from 'vitest'
 import { requiresPreview } from './test/requiresPreview'
@@ -2946,6 +2947,50 @@ describe('App — toast severity', () => {
     const bubble = screen.getByText(/nothing to undo/).closest('div')!
     expect(bubble.textContent).not.toContain('NothingToUndo')
     expect(bubble.textContent).not.toContain('[')
+  })
+})
+
+describe('App — toast timers', () => {
+  function latestOnToast(): (message: string, code?: string) => void {
+    const calls = vi.mocked(Viewport).mock.calls
+    const props = calls[calls.length - 1][0] as { onToast: (m: string, c?: string) => void }
+    return props.onToast
+  }
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('unmounting clears the pending dismiss timer of a toast still on screen', async () => {
+    const { unmount } = render(<App />)
+    await waitFor(() => screen.getByTitle('Rectangle (R)'), { timeout: 2000 })
+    vi.useFakeTimers()
+    const setSpy = vi.spyOn(globalThis, 'setTimeout')
+    const clearSpy = vi.spyOn(globalThis, 'clearTimeout')
+
+    act(() => latestOnToast()('Nothing to undo', 'NothingToUndo'))
+    const dismissCall = setSpy.mock.calls.findIndex(([, ms]) => ms === 4000)
+    expect(dismissCall).toBeGreaterThanOrEqual(0)
+    const dismissTimer = setSpy.mock.results[dismissCall].value
+
+    unmount()
+    const cleared = clearSpy.mock.calls.some(([timer]) => timer === dismissTimer)
+    setSpy.mockRestore()
+    clearSpy.mockRestore()
+    expect(cleared).toBe(true)
+  })
+
+  it('a toast raised under StrictMode still dismisses after its timeout', async () => {
+    render(<StrictMode><App /></StrictMode>)
+    await waitFor(() => screen.getByTitle('Rectangle (R)'), { timeout: 2000 })
+    vi.useFakeTimers()
+
+    act(() => latestOnToast()('Nothing to undo', 'NothingToUndo'))
+    expect(screen.getByText(/Nothing to undo/)).toBeInTheDocument()
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(4000)
+    })
+    expect(screen.queryByText(/Nothing to undo/)).not.toBeInTheDocument()
   })
 })
 

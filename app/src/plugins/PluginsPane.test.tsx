@@ -1139,6 +1139,14 @@ describe('PluginsPane: the detail page', () => {
       return { ...o, setGrant, grantLines }
     }
 
+    // The grant sheet has a React root of its own, which the cleanup after
+    // each test never unmounts: a test that leaves it open hands it, and the
+    // "a question is already open" state, to the next one.
+    async function closeSheet() {
+      fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+      await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+    }
+
     it('shows the sheet with the kernel\'s lines before anything is written; Cancel has focus and Enter does not accept', async () => {
       const { setGrant, grantLines } = await openWeb()
       fireEvent.click(screen.getByRole('switch', { name: /^Allow: Ask you to pick files/ }))
@@ -1147,9 +1155,32 @@ describe('PluginsPane: the detail page', () => {
       expect(within(dialog).getByText('Ask you to pick files, and save files you choose')).toBeInTheDocument()
       expect(within(dialog).getByRole('group', { name: 'Warnings from Hew' })).toHaveTextContent('Check what it does with files.')
       expect(screen.getByRole('button', { name: 'Cancel' })).toHaveFocus()
-      fireEvent.keyDown(document.activeElement as Element, { key: 'Enter' })
+      // Held, not merely without effect here: `false` is a prevented default.
+      expect(fireEvent.keyDown(document.activeElement as Element, { key: 'Enter' })).toBe(false)
       expect(setGrant).not.toHaveBeenCalled()
       expect(screen.getByRole('dialog')).toBeInTheDocument()
+      await closeSheet()
+    })
+
+    // The sheet mounts outside this page's React tree, so nothing waits for
+    // its effects. A MutationObserver runs before any later task: it sees the
+    // sheet exactly as a keypress arriving right after it appears would.
+    it('has focus on Cancel and holds Enter from the moment the sheet is on screen', async () => {
+      await openWeb()
+      const seen = new Promise<{ focused: string | null; enterHeld: boolean }>((resolve) => {
+        const observer = new MutationObserver(() => {
+          if (document.querySelector('[data-plugin-sheet]') === null) return
+          observer.disconnect()
+          const at = document.activeElement
+          const enter = new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true })
+          ;(at ?? document.body).dispatchEvent(enter)
+          resolve({ focused: at?.textContent ?? null, enterHeld: enter.defaultPrevented })
+        })
+        observer.observe(document.body, { childList: true, subtree: true })
+      })
+      fireEvent.click(screen.getByRole('switch', { name: /^Allow: Ask you to pick files/ }))
+      expect(await seen).toEqual({ focused: 'Cancel', enterHeld: true })
+      await closeSheet()
     })
 
     it('leaves the switch off and writes nothing on Cancel or Escape', async () => {
@@ -1159,8 +1190,7 @@ describe('PluginsPane: the detail page', () => {
       await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
       fireEvent.click(screen.getByRole('switch', { name: /^Allow: Ask you to pick files/ }))
       await screen.findByRole('dialog')
-      // The sheet's focus (and its Escape handling) arrive from a passive effect.
-      await waitFor(() => expect(screen.getByRole('button', { name: 'Cancel' })).toHaveFocus())
+      expect(screen.getByRole('button', { name: 'Cancel' })).toHaveFocus()
       fireEvent.keyDown(document, { key: 'Escape' })
       await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
       expect(setGrant).not.toHaveBeenCalled()
@@ -1174,7 +1204,7 @@ describe('PluginsPane: the detail page', () => {
       // Not asked through the page's own switch, as a running plugin would.
       const asked = requestGrant(inst, 'com.example.one', ['files'])
       await screen.findByRole('dialog')
-      await waitFor(() => expect(screen.getByRole('button', { name: 'Cancel' })).toHaveFocus())
+      expect(screen.getByRole('button', { name: 'Cancel' })).toHaveFocus()
       fireEvent.keyDown(document.activeElement ?? document.body, { key: 'Escape' })
       await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
       await expect(asked).resolves.toBe('declined')
@@ -1189,7 +1219,7 @@ describe('PluginsPane: the detail page', () => {
       const { setGrant } = await openWeb()
       fireEvent.click(screen.getByRole('switch', { name: /^Allow: Ask you to pick files/ }))
       const allow = await screen.findByRole('button', { name: 'Allow' })
-      await waitFor(() => expect(screen.getByRole('button', { name: 'Cancel' })).toHaveFocus())
+      expect(screen.getByRole('button', { name: 'Cancel' })).toHaveFocus()
       fireEvent.click(allow)
       await waitFor(() => expect(setGrant).toHaveBeenCalledWith('com.example.one', ['model.read'], ['files']))
       await waitFor(() => expect(screen.getByRole('switch', { name: /^Allow: Ask you to pick files/ })).toBeChecked())
