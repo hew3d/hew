@@ -534,6 +534,7 @@ export class ScaleTool implements Tool {
         const acquired = this.acquireSelection?.(ray) ?? null
         if (acquired !== null && acquired.length > 0) {
           this.selection = acquired
+          this.selectedGuides = []
           this._showGizmo(acquired)
           this._updateHotGrip(ray)
         } else {
@@ -541,11 +542,6 @@ export class ScaleTool implements Tool {
           this._hideGizmo()
           this.releaseSelection?.()
         }
-        return
-      }
-      if (nodes.length === 0 && this.selectedGuides.length > 0) {
-        // Guides alone: no box to scale them by.
-        this.onToast(t`Nothing to scale`)
         return
       }
       if (nodes.length === 0 && this.acquireSelection !== null) {
@@ -557,13 +553,15 @@ export class ScaleTool implements Tool {
         const acquired = this.acquireSelection(ray)
         if (acquired !== null && acquired.length > 0) {
           this.selection = acquired
+          this.selectedGuides = []
           this._showGizmo(acquired)
           this._updateHotGrip(ray)
           return
         }
       }
       if (nodes.length === 0) {
-        this.onToast(t`Click an object to scale it`)
+        // Guides alone have no box to scale them by.
+        this.onToast(this.selectedGuides.length > 0 ? t`Nothing to scale` : t`Click an object to scale it`)
         return
       }
 
