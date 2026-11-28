@@ -628,10 +628,17 @@ fn out_of_range_index_buffer_does_not_panic() {
 
 /// A per-face-vertex unit cube (36 vertices, deterministic sub-µm x jitter)
 /// under a node `scale` — the shape a model authored in local units and
-/// scaled to meters takes. The weld tolerance must be computed at the
-/// post-bake (world) scale: computed from the raw local positions it is 100×
-/// too tight and every seam stays split.
-fn scaled_perface_cube_gltf(node_scale: f32, jitter: f32) -> Vec<u8> {
+/// scaled to meters takes. The weld tolerance must include the node's linear
+/// scale: computed from raw local positions alone it is 100× too tight and
+/// every seam stays split.
+fn scaled_perface_cube_gltf(
+    node_scale: f32,
+    jitter: f32,
+    translation_x: f32,
+    local_offset_x: f32,
+    unused_vertex_x: Option<f32>,
+    second_cube_offset_x: Option<f32>,
+) -> Vec<u8> {
     let c: [[f32; 3]; 8] = [
         [0.0, 0.0, 0.0],
         [1.0, 0.0, 0.0],
@@ -658,11 +665,20 @@ fn scaled_perface_cube_gltf(node_scale: f32, jitter: f32) -> Vec<u8> {
     ];
 
     let mut verts: Vec<[f32; 3]> = Vec::new();
-    for (ti, t) in tris.iter().enumerate() {
-        for (ci, &corner) in t.iter().enumerate() {
-            let j = (((ti * 3 + ci) % 5) as f32 - 2.0) * jitter; // [-2j, 2j]
-            verts.push([c[corner][0] + j, c[corner][1], c[corner][2]]);
+    for offset_x in [Some(local_offset_x), second_cube_offset_x]
+        .into_iter()
+        .flatten()
+    {
+        for (ti, t) in tris.iter().enumerate() {
+            for (ci, &corner) in t.iter().enumerate() {
+                let j = (((ti * 3 + ci) % 5) as f32 - 2.0) * jitter; // [-2j, 2j]
+                verts.push([c[corner][0] + offset_x + j, c[corner][1], c[corner][2]]);
+            }
         }
+    }
+    let index_count = verts.len();
+    if let Some(x) = unused_vertex_x {
+        verts.push([x, 0.0, 0.0]);
     }
 
     let mut buf = Vec::new();
@@ -672,13 +688,16 @@ fn scaled_perface_cube_gltf(node_scale: f32, jitter: f32) -> Vec<u8> {
         }
     }
     let pos_len = buf.len();
-    for i in 0..verts.len() as u32 {
+    for i in 0..index_count as u32 {
         buf.extend_from_slice(&i.to_le_bytes());
     }
     let idx_len = buf.len() - pos_len;
     let total = buf.len();
     let count = verts.len();
-    let hi = 1.0 + 2.0 * jitter;
+    let hi = (local_offset_x + 1.0 + 2.0 * jitter)
+        .max(second_cube_offset_x.map_or(0.0, |x| x + 1.0 + 2.0 * jitter))
+        .max(unused_vertex_x.unwrap_or(0.0));
+    let lo = local_offset_x - 2.0 * jitter;
 
     let b64 = base64_encode(&buf);
     format!(
@@ -686,11 +705,11 @@ fn scaled_perface_cube_gltf(node_scale: f32, jitter: f32) -> Vec<u8> {
   "asset": {{ "version": "2.0" }},
   "scene": 0,
   "scenes": [{{ "nodes": [0] }}],
-  "nodes": [{{ "mesh": 0, "name": "ScaledCube", "scale": [{node_scale}, {node_scale}, {node_scale}] }}],
+  "nodes": [{{ "mesh": 0, "name": "ScaledCube", "scale": [{node_scale}, {node_scale}, {node_scale}], "translation": [{translation_x}, 0, 0] }}],
   "meshes": [{{ "primitives": [{{ "attributes": {{ "POSITION": 0 }}, "indices": 1, "mode": 4 }}] }}],
   "accessors": [
-    {{ "bufferView": 0, "componentType": 5126, "count": {count}, "type": "VEC3", "min": [-1,0,0], "max": [{hi},1,1] }},
-    {{ "bufferView": 1, "componentType": 5125, "count": {count}, "type": "SCALAR" }}
+    {{ "bufferView": 0, "componentType": 5126, "count": {count}, "type": "VEC3", "min": [{lo},0,0], "max": [{hi},1,1] }},
+    {{ "bufferView": 1, "componentType": 5125, "count": {index_count}, "type": "SCALAR" }}
   ],
   "bufferViews": [
     {{ "buffer": 0, "byteOffset": 0, "byteLength": {pos_len}, "target": 34962 }},
@@ -706,9 +725,9 @@ fn scaled_perface_cube_gltf(node_scale: f32, jitter: f32) -> Vec<u8> {
 fn scaled_node_cube_welds_to_a_watertight_solid() {
     // Local unit cube under node scale=100 with ~0.24 µm local seams
     // (~24 µm world). A weld tolerance computed from the LOCAL positions
-    // (max_abs≈1 → 1 µm) misses every world-scale seam; computed post-bake
-    // (max_abs≈100 → 100 µm) it welds them all.
-    let bytes = scaled_perface_cube_gltf(100.0, 2.4e-7);
+    // (max_abs≈1 → 1 µm) misses every world-scale seam; applying the node's
+    // linear scale (max_abs≈100 → 100 µm) welds them all.
+    let bytes = scaled_perface_cube_gltf(100.0, 2.4e-7, 0.0, 0.0, None, None);
     let GltfScene { scene, missing, .. } = gltf_import::import(&bytes).expect("import scaled cube");
 
     let mut doc = Document::new();
@@ -719,6 +738,90 @@ fn scaled_node_cube_welds_to_a_watertight_solid() {
         "scaled-node cube must weld watertight (tolerance follows the bake)"
     );
     assert_eq!(report.leaky, 0, "no leaky shell");
+}
+
+#[test]
+fn node_translation_does_not_change_welding_or_erase_unit_cube() {
+    for translation_x in [0.0, 1_000_000.0, 10_000_000.0] {
+        let bytes = scaled_perface_cube_gltf(1.0, 2.4e-7, translation_x, 0.0, None, None);
+        let GltfScene {
+            scene,
+            missing,
+            warnings,
+        } = gltf_import::import(&bytes).expect("import translated cube");
+        assert!(
+            warnings.is_empty(),
+            "translation={translation_x}: {warnings:?}"
+        );
+
+        let mut doc = Document::new();
+        let (report, _) = doc.ingest(scene, missing).expect("ingest translated cube");
+        assert_eq!(report.objects_created, 1, "translation={translation_x}");
+        assert_eq!(report.watertight, 1, "translation={translation_x}");
+        assert_eq!(report.leaky, 0, "translation={translation_x}");
+        assert!(report.skipped.is_empty(), "translation={translation_x}");
+    }
+}
+
+#[test]
+fn distant_mesh_local_coordinates_do_not_erase_unit_cube() {
+    let bytes = scaled_perface_cube_gltf(1.0, 0.0, 0.0, 10_000_000.0, None, None);
+    let GltfScene {
+        scene,
+        missing,
+        warnings,
+    } = gltf_import::import(&bytes).expect("import local-offset cube");
+    assert!(warnings.is_empty(), "{warnings:?}");
+
+    let mut doc = Document::new();
+    let (report, _) = doc
+        .ingest(scene, missing)
+        .expect("ingest local-offset cube");
+    assert_eq!(report.objects_created, 1);
+    assert_eq!(report.watertight, 1);
+    assert_eq!(report.leaky, 0);
+    assert!(report.skipped.is_empty());
+}
+
+#[test]
+fn distant_unused_position_does_not_erase_cube() {
+    let bytes = scaled_perface_cube_gltf(1.0, 2.4e-7, 0.0, 0.0, Some(10_000_000.0), None);
+    let GltfScene {
+        scene,
+        missing,
+        warnings,
+    } = gltf_import::import(&bytes).expect("import cube with unused distant position");
+    assert!(warnings.is_empty(), "{warnings:?}");
+
+    let mut doc = Document::new();
+    let (report, _) = doc.ingest(scene, missing).expect("ingest cube");
+    assert_eq!(report.objects_created, 1);
+    assert_eq!(report.watertight, 1);
+    assert_eq!(report.leaky, 0);
+    assert!(report.skipped.is_empty());
+}
+
+#[test]
+fn distant_unused_position_does_not_weld_across_valid_gap() {
+    for unused_vertex_x in [None, Some(10_000_000.0)] {
+        let bytes = scaled_perface_cube_gltf(1.0, 0.0, 0.0, 0.0, unused_vertex_x, Some(1.1));
+        let GltfScene {
+            scene,
+            missing,
+            warnings,
+        } = gltf_import::import(&bytes).expect("import separated cubes");
+        assert!(
+            warnings.is_empty(),
+            "outlier={unused_vertex_x:?}: {warnings:?}"
+        );
+
+        let mut doc = Document::new();
+        let (report, _) = doc.ingest(scene, missing).expect("ingest separated cubes");
+        assert_eq!(report.objects_created, 1, "outlier={unused_vertex_x:?}");
+        assert_eq!(report.watertight, 1, "outlier={unused_vertex_x:?}");
+        assert_eq!(report.leaky, 0, "outlier={unused_vertex_x:?}");
+        assert!(report.skipped.is_empty(), "outlier={unused_vertex_x:?}");
+    }
 }
 
 /// A `.gltf` whose node graph contains a cycle (node 0 → child 1 → child 0).
@@ -801,4 +904,182 @@ fn a_cube_too_large_for_its_face_planes_is_skipped_with_a_reason() {
     assert_eq!(report.watertight, 1);
     assert!(report.skipped.is_empty());
     Document::load(&doc.save()).expect("the document reopens");
+}
+
+// ── Weld tolerance against awkward mesh contents ─────────────────────────────
+
+type Triangle = [[f32; 3]; 3];
+
+/// The 12 triangles of an axis-aligned cube, three vertices of their own each.
+fn cube_soup(origin: [f32; 3], size: f32) -> Vec<Triangle> {
+    box_soup(origin, [size; 3])
+}
+
+/// [`cube_soup`] for a box with sides of different lengths.
+fn box_soup(origin: [f32; 3], size: [f32; 3]) -> Vec<Triangle> {
+    let tris: [[usize; 3]; 12] = [
+        [0, 1, 2],
+        [0, 2, 3],
+        [4, 5, 6],
+        [4, 6, 7],
+        [0, 1, 5],
+        [0, 5, 4],
+        [3, 2, 6],
+        [3, 6, 7],
+        [0, 3, 7],
+        [0, 7, 4],
+        [1, 2, 6],
+        [1, 6, 5],
+    ];
+    tris.map(|t| {
+        t.map(|corner| {
+            let unit = [
+                matches!(corner, 1 | 2 | 5 | 6),
+                matches!(corner, 2 | 3 | 6 | 7),
+                corner >= 4,
+            ];
+            [0, 1, 2].map(|i| origin[i] + if unit[i] { size[i] } else { 0.0 })
+        })
+    })
+    .to_vec()
+}
+
+/// Move every other triangle's x coordinates up by `ulps` float32 steps, so
+/// copies of a shared corner can disagree by that much. The step grows with the
+/// coordinate: at x = 0 it is subnormal, far below any weld tolerance, so a
+/// shape starting there has measurable gaps only on its other X side.
+fn split_seams(tris: &mut [Triangle], ulps: u32) {
+    for tri in tris.iter_mut().step_by(2) {
+        for v in tri {
+            for _ in 0..ulps {
+                v[0] = v[0].next_up();
+            }
+        }
+    }
+}
+
+/// One mesh, one primitive, indexing `tris` in order; `unused` positions are
+/// appended to the vertex array without any index naming them.
+fn soup_gltf(tris: &[Triangle], unused: &[[f32; 3]]) -> Vec<u8> {
+    let verts: Vec<[f32; 3]> = tris.iter().flatten().chain(unused).copied().collect();
+    let index_count = tris.len() * 3;
+    let mut buf = Vec::new();
+    for x in verts.iter().flatten() {
+        buf.extend_from_slice(&x.to_le_bytes());
+    }
+    let pos_len = buf.len();
+    for i in 0..index_count as u32 {
+        buf.extend_from_slice(&i.to_le_bytes());
+    }
+    let idx_len = buf.len() - pos_len;
+    let total = buf.len();
+    let count = verts.len();
+    let bound = |axis: usize, pick: fn(f32, f32) -> f32| {
+        verts
+            .iter()
+            .map(|v| v[axis])
+            .reduce(pick)
+            .expect("vertices")
+    };
+    let (lx, ly, lz) = (bound(0, f32::min), bound(1, f32::min), bound(2, f32::min));
+    let (hx, hy, hz) = (bound(0, f32::max), bound(1, f32::max), bound(2, f32::max));
+
+    let b64 = base64_encode(&buf);
+    format!(
+        r#"{{
+  "asset": {{ "version": "2.0" }},
+  "scene": 0,
+  "scenes": [{{ "nodes": [0] }}],
+  "nodes": [{{ "mesh": 0, "name": "Soup" }}],
+  "meshes": [{{ "primitives": [{{ "attributes": {{ "POSITION": 0 }}, "indices": 1, "mode": 4 }}] }}],
+  "accessors": [
+    {{ "bufferView": 0, "componentType": 5126, "count": {count}, "type": "VEC3", "min": [{lx},{ly},{lz}], "max": [{hx},{hy},{hz}] }},
+    {{ "bufferView": 1, "componentType": 5125, "count": {index_count}, "type": "SCALAR" }}
+  ],
+  "bufferViews": [
+    {{ "buffer": 0, "byteOffset": 0, "byteLength": {pos_len}, "target": 34962 }},
+    {{ "buffer": 0, "byteOffset": {pos_len}, "byteLength": {idx_len}, "target": 34963 }}
+  ],
+  "buffers": [{{ "byteLength": {total}, "uri": "data:application/octet-stream;base64,{b64}" }}]
+}}"#
+    )
+    .into_bytes()
+}
+
+/// Import `bytes` and require one watertight object of `faces` faces.
+fn assert_one_solid(bytes: &[u8], faces: usize) {
+    let GltfScene {
+        scene,
+        missing,
+        warnings,
+    } = gltf_import::import(bytes).expect("import");
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let [kernel::ImportNode::Mesh(recipe)] = scene.roots.as_slice() else {
+        panic!("expected one mesh root, got {}", scene.roots.len());
+    };
+    assert_eq!(recipe.faces.len(), faces, "faces");
+
+    let mut doc = Document::new();
+    let (report, _) = doc.ingest(scene, missing).expect("ingest");
+    assert_eq!(report.objects_created, 1, "one object");
+    assert_eq!(report.watertight, 1, "watertight");
+    assert_eq!(report.leaky, 0, "no leaky shell");
+    assert!(report.skipped.is_empty());
+}
+
+/// A 1 mm part in the same mesh as a 30 m cube must not tighten the weld
+/// below the cube's float32 seams.
+#[test]
+fn small_part_in_a_large_mesh_does_not_open_the_large_seams() {
+    let mut tris = cube_soup([0.0, 0.0, 0.0], 30.0);
+    split_seams(&mut tris, 2);
+    tris.extend(cube_soup([40.0, 0.0, 0.0], 0.001));
+    assert_one_solid(&soup_gltf(&tris, &[]), 12);
+}
+
+/// Float32 steps at 100 m are 7.6 µm, wider than a 1 m span alone suggests.
+#[test]
+fn unit_cube_100m_from_its_mesh_origin_welds_float32_seams() {
+    let mut tris = cube_soup([100.0, 0.0, 0.0], 1.0);
+    split_seams(&mut tris, 1);
+    assert_one_solid(&soup_gltf(&tris, &[]), 6);
+}
+
+/// A triangle with a 50 nm edge collapses in the weld; it must not set the
+/// tolerance for the cube beside it.
+#[test]
+fn sliver_triangle_does_not_open_the_cube_seams() {
+    let mut tris = cube_soup([1.0, 0.0, 0.0], 1.0);
+    split_seams(&mut tris, 2);
+    tris.push([[0.0, 0.0, 0.0], [5e-8, 0.0, 0.0], [0.0, 0.5, 0.0]]);
+    assert_one_solid(&soup_gltf(&tris, &[]), 6);
+}
+
+/// A position no index names changes nothing about the imported geometry.
+#[test]
+fn unused_distant_position_leaves_the_geometry_unchanged() {
+    let mut tris = cube_soup([0.0, 0.0, 0.0], 1.0);
+    split_seams(&mut tris, 2);
+    // A second cube 2 mm away, which an inflated tolerance would weld on.
+    tris.extend(cube_soup([1.002, 0.0, 0.0], 1.0));
+    let far = [1e7, -1e7, 1e7];
+    assert_one_solid(&soup_gltf(&tris, &[]), 12);
+    assert_one_solid(&soup_gltf(&tris, &[far]), 12);
+}
+
+/// A site mesh authored 10 km from its origin and translated back keeps a 5 mm
+/// plate: the weld follows the coordinates it ends up at, not the large ones
+/// it was authored at.
+#[test]
+fn thin_plate_survives_translation_back_from_large_mesh_coordinates() {
+    let mut tris = box_soup([10_000.0, 0.0, 0.0], [1.0, 0.005, 1.0]);
+    // A second part 100 m along, so the mesh is wide.
+    tris.extend(cube_soup([10_099.0, 0.0, 0.0], 1.0));
+    let plain = String::from_utf8(soup_gltf(&tris, &[])).expect("utf-8");
+    let recentred = plain.replace(
+        r#""name": "Soup" }]"#,
+        r#""name": "Soup", "translation": [-10050, 0, 0] }]"#,
+    );
+    assert_ne!(recentred, plain, "the node was translated");
+    assert_one_solid(recentred.as_bytes(), 12);
 }

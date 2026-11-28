@@ -346,13 +346,8 @@ fn build_recipes(
     warnings: &mut SplitWarnings,
 ) -> Vec<MeshRecipe> {
     let no_holes: Vec<Vec<Vec<usize>>> = vec![Vec::new(); raw.faces.len()];
-    // Bake the node/world transform BEFORE choosing the weld tolerance: the
-    // heal pass welds post-bake coordinates, so a tolerance computed from the
-    // raw (mesh-local) positions is wrong by the node's scale factor — a
-    // scale=100 node would weld world-scale f32 gaps with a local-scale
-    // tolerance and leave every seam split. Baking here once (heal then gets
-    // the identity) keeps the tolerance and the welded coordinates in the
-    // same space.
+    // Heal welds the baked coordinates, so the tolerance follows the bake (see
+    // `gltf_weld_tol` for how far its translation counts).
     let baked: Vec<Point3> = raw.positions.iter().map(|&p| bake.apply_point(p)).collect();
     let (positions, faces, face_materials, healed_uvs, face_holes, dropped_degenerate) =
         heal_mesh_with_tol(
@@ -362,7 +357,7 @@ fn build_recipes(
             &raw.face_corner_uvs,
             &no_holes,
             &Transform::IDENTITY,
-            gltf_weld_tol(&baked),
+            gltf_weld_tol(&raw.positions, &raw.faces, bake),
             // Merge coplanar triangles at the kernel's import planarity (1 mm), not
             // the 1 nm native tolerance — f32 flat surfaces sit microns off-plane,
             // so the strict gate would leave every wall/floor as triangle soup
@@ -462,22 +457,71 @@ fn recipe_from_arrays(
 
 /// Choose a weld tolerance for f32-sourced glTF positions.
 ///
-/// glTF `POSITION` is float32, so vertices that were coincident in the authoring
-/// tool land up to ~`magnitude · 2.4e-7` apart after the round-trip. The kernel's
-/// native 1 nm `POINT_MERGE` is far too tight and would leave every shared edge
-/// split (a "leaky" shell), so we scale the tolerance to the mesh's coordinate
-/// magnitude (≈4× the worst-case f32 gap), floored for tiny meshes.
+/// glTF `POSITION` is float32, so separately encoded vertices that were
+/// coincident in the authoring tool can land apart after rounding. The kernel's
+/// native 1 nm `POINT_MERGE` is far too tight and would leave shared edges
+/// split. Only the vertices the faces use are measured (an unused vertex has
+/// no say), and two measures bound the tolerance:
 ///
-/// `positions` must be the POST-BAKE (world-space) coordinates the weld will
-/// actually run on: welding happens after the node transform is applied, so a
-/// tolerance derived from pre-transform locals would be off by the node's
-/// scale factor.
-fn gltf_weld_tol(positions: &[Point3]) -> f64 {
-    let max_abs = positions
-        .iter()
-        .flat_map(|p| [p.x.abs(), p.y.abs(), p.z.abs()])
-        .fold(0.0_f64, f64::max);
-    (max_abs * 1e-6).max(1e-7)
+/// - their coordinate magnitude, times `1e-6`. This is the smaller of the
+///   largest magnitude in the mesh's own frame, where the positions were
+///   rounded to float32 and the rounding gap grows with the magnitude, and
+///   the largest magnitude after the whole bake. So node translation can lower
+///   the tolerance but never raise it above what the mesh's own frame gives:
+///   a mesh placed far from the origin is not welded more coarsely for it,
+///   and one authored at large coordinates and translated back is not welded
+///   at the scale of those coordinates;
+/// - their span, so a small mesh authored far from its own origin is not
+///   welded away by that magnitude: at most `span · 1e-3`.
+///
+/// The result is never below 0.1 µm. The mesh-frame magnitude and the span
+/// pass through the absolute value of the bake's linear part, taking the
+/// largest row of each, so they follow node scale and rotation. Translation
+/// does not enter the span. Non-finite positions are ignored.
+///
+/// Seams that differ only by float32 rounding can still stay open:
+///
+/// - when a mesh sits more than a few thousand times its own size from its
+///   mesh origin, because the rounding gap there can exceed the span limit.
+///   This covers ordinary cases such as small hardware 100 m to 1 km out, not
+///   only extreme distances;
+/// - when a node translation brings a mesh with large mesh-frame coordinates
+///   back near the origin, because the magnitude after the bake then sets a
+///   tolerance below the rounding gap of those coordinates.
+fn gltf_weld_tol(positions: &[Point3], faces: &[Vec<usize>], bake: &Transform) -> f64 {
+    let mut lo = [f64::INFINITY; 3];
+    let mut hi = [f64::NEG_INFINITY; 3];
+    let mut world_magnitude = 0.0_f64;
+    for p in faces.iter().flatten().filter_map(|&i| positions.get(i)) {
+        let c = [p.x, p.y, p.z];
+        if c.iter().all(|v| v.is_finite()) {
+            for axis in 0..3 {
+                lo[axis] = lo[axis].min(c[axis]);
+                hi[axis] = hi[axis].max(c[axis]);
+            }
+            let w = bake.apply_point(*p);
+            world_magnitude = world_magnitude.max(w.x.abs()).max(w.y.abs()).max(w.z.abs());
+        }
+    }
+    // No face uses a finite position: the bounds were never narrowed.
+    if lo[0] > hi[0] {
+        return 1e-7;
+    }
+    let local_magnitude = [0, 1, 2].map(|i| lo[i].abs().max(hi[i].abs()));
+    let local_span = [0, 1, 2].map(|i| hi[i] - lo[i]);
+    let matrix = bake.to_affine();
+    let largest_row = |v: [f64; 3]| {
+        [0, 4, 8]
+            .into_iter()
+            .map(|r| {
+                matrix[r].abs() * v[0] + matrix[r + 1].abs() * v[1] + matrix[r + 2].abs() * v[2]
+            })
+            .fold(0.0_f64, f64::max)
+    };
+    let magnitude = largest_row(local_magnitude).min(world_magnitude);
+    (magnitude * 1e-6)
+        .min(largest_row(local_span) * 1e-3)
+        .max(1e-7)
 }
 
 /// Merge every triangle primitive of a glTF mesh into one raw position/face list.
@@ -597,4 +641,230 @@ fn mesh_name(mesh: &Mesh) -> String {
     mesh.name()
         .map(str::to_string)
         .unwrap_or_else(|| format!("mesh_{}", mesh.index()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A box from `lo` to `hi`, as the positions of two faces that between
+    /// them reference both extremes.
+    fn spanning(lo: [f64; 3], hi: [f64; 3]) -> (Vec<Point3>, Vec<Vec<usize>>) {
+        let positions = vec![
+            Point3::new(lo[0], lo[1], lo[2]),
+            Point3::new(hi[0], lo[1], lo[2]),
+            Point3::new(hi[0], hi[1], lo[2]),
+            Point3::new(hi[0], hi[1], hi[2]),
+        ];
+        (positions, vec![vec![0, 1, 2], vec![0, 2, 3]])
+    }
+
+    fn assert_tol(got: f64, want: f64) {
+        assert!(
+            (got - want).abs() <= want * 1e-9,
+            "got {got:e}, want {want:e}"
+        );
+    }
+
+    #[test]
+    fn weld_tol_takes_magnitude_until_the_span_limits_it() {
+        let (p, f) = spanning([100.0, 0.0, 0.0], [101.0, 1.0, 1.0]);
+        assert_tol(gltf_weld_tol(&p, &f, &Transform::IDENTITY), 101.0e-6);
+        let (p, f) = spanning([-5000.0, 0.0, 0.0], [-4999.0, 1.0, 1.0]);
+        assert_tol(gltf_weld_tol(&p, &f, &Transform::IDENTITY), 1e-3);
+    }
+
+    /// `rows` as the linear part of a bake that also translates every axis by
+    /// `shift`.
+    fn bake(rows: [[f64; 3]; 3], shift: f64) -> Transform {
+        let [x, y, z] = rows;
+        Transform::from_affine(&[
+            x[0], x[1], x[2], shift, //
+            y[0], y[1], y[2], shift, //
+            z[0], z[1], z[2], shift,
+        ])
+    }
+
+    /// Far enough that the magnitude after the bake never decides, which
+    /// leaves the mesh-frame magnitude and the span to be measured.
+    const FAR: f64 = 1e9;
+
+    fn linear_tol(lo: [f64; 3], hi: [f64; 3], rows: [[f64; 3]; 3]) -> f64 {
+        let (p, f) = spanning(lo, hi);
+        gltf_weld_tol(&p, &f, &bake(rows, FAR))
+    }
+
+    const IDENTITY_ROWS: [[f64; 3]; 3] = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+
+    #[test]
+    fn weld_tol_translation_never_raises_it() {
+        let (lo, hi) = ([10.0, 0.0, 0.0], [11.0, 2.0, 3.0]);
+        assert_tol(linear_tol(lo, hi, IDENTITY_ROWS), 11.0e-6);
+        let (p, f) = spanning(lo, hi);
+        assert_tol(gltf_weld_tol(&p, &f, &Transform::IDENTITY), 11.0e-6);
+    }
+
+    #[test]
+    fn weld_tol_translation_toward_the_origin_lowers_it() {
+        let (p, f) = spanning([10000.0, 0.0, 0.0], [10100.0, 1.0, 1.0]);
+        let recentre = |x: f64| {
+            Transform::from_affine(&[
+                1.0, 0.0, 0.0, x, //
+                0.0, 1.0, 0.0, 0.0, //
+                0.0, 0.0, 1.0, 0.0,
+            ])
+        };
+        assert_tol(gltf_weld_tol(&p, &f, &recentre(-10050.0)), 50.0e-6);
+        // The largest magnitude may be on the negative side after the bake.
+        assert_tol(gltf_weld_tol(&p, &f, &recentre(-10150.0)), 150.0e-6);
+        // And it may be on any axis.
+        let (p, f) = spanning([10000.0, 0.0, 70.0], [10100.0, 1.0, 71.0]);
+        assert_tol(gltf_weld_tol(&p, &f, &recentre(-10050.0)), 71.0e-6);
+    }
+
+    #[test]
+    fn weld_tol_uses_matrix_rows() {
+        // The absolute matrix is not symmetric: rows sum 3·10 + 2·1 at most,
+        // columns would give 3·10 + 1·10.
+        let rows = [[3.0, 2.0, 0.0], [0.0, 1.0, 0.0], [1.0, 0.0, 1.0]];
+        let got = linear_tol([9.0, 0.0, 0.0], [10.0, 1.0, 1.0], rows);
+        assert_tol(got, 32.0e-6);
+    }
+
+    #[test]
+    fn weld_tol_takes_every_matrix_entry_as_its_absolute_value() {
+        // One dominant negative entry per column, as an axis mirror has.
+        for axis in 0..3 {
+            let mut rows = IDENTITY_ROWS;
+            rows[axis][axis] = -50.0;
+            let mut lo = [0.0; 3];
+            let mut hi = [1.0; 3];
+            (lo[axis], hi[axis]) = (10.0, 11.0);
+            assert_tol(linear_tol(lo, hi, rows), 550.0e-6);
+        }
+        // A 135 degree turn about Z, X then stretched fivefold: both entries
+        // of the dominant row are negative, so a signed sum would go negative
+        // and lose to a smaller row. By size it is 5·c·(11 + 2).
+        let c = std::f64::consts::FRAC_1_SQRT_2;
+        let rows = [[-5.0 * c, -5.0 * c, 0.0], [c, -c, 0.0], [0.0, 0.0, 1.0]];
+        let got = linear_tol([10.0, 0.0, 0.0], [11.0, 2.0, 3.0], rows);
+        assert_tol(got, 65.0 * c * 1e-6);
+    }
+
+    #[test]
+    fn weld_tol_magnitude_counts_the_negative_side() {
+        let got = linear_tol([-101.0, 0.0, 0.0], [-100.0, 1.0, 1.0], IDENTITY_ROWS);
+        assert_tol(got, 101.0e-6);
+    }
+
+    #[test]
+    fn weld_tol_measures_the_z_axis() {
+        // Magnitude decides.
+        let got = linear_tol([0.0, 0.0, 100.0], [1.0, 1.0, 101.0], IDENTITY_ROWS);
+        assert_tol(got, 101.0e-6);
+        // Span decides: only Z is wide enough to allow 1 mm.
+        let got = linear_tol([0.0, 0.0, -5000.0], [0.1, 0.1, -4999.0], IDENTITY_ROWS);
+        assert_tol(got, 1e-3);
+    }
+
+    #[test]
+    fn weld_tol_span_ignores_translation() {
+        let got = linear_tol([100.0, 0.0, 0.0], [100.01, 0.01, 0.01], IDENTITY_ROWS);
+        assert_tol(got, (100.01 - 100.0) * 1e-3);
+    }
+
+    #[test]
+    fn weld_tol_span_reads_only_finite_positions_that_faces_use() {
+        // A small mesh far from its origin, where the span decides.
+        let (mut p, mut f) = spanning([100.0, 0.0, 0.0], [100.01, 0.01, 0.01]);
+        let want = (100.01 - 100.0) * 1e-3;
+        p.push(Point3::new(1e7, 1e7, 1e7));
+        assert_tol(gltf_weld_tol(&p, &f, &Transform::IDENTITY), want);
+        // A position with any non-finite coordinate is ignored whole.
+        p.push(Point3::new(f64::NAN, 1e9, 0.0));
+        f.push(vec![0, 1, 5]);
+        assert_tol(gltf_weld_tol(&p, &f, &Transform::IDENTITY), want);
+    }
+
+    #[test]
+    fn weld_tol_reads_only_finite_positions_that_faces_use() {
+        let (mut p, mut f) = spanning([100.0, 0.0, 0.0], [101.0, 1.0, 1.0]);
+        // Unused, however distant.
+        p.push(Point3::new(1e30, -1e30, 1e30));
+        assert_tol(gltf_weld_tol(&p, &f, &Transform::IDENTITY), 101.0e-6);
+        // Used but non-finite, and an index past the end.
+        p.push(Point3::new(f64::NAN, 0.0, 0.0));
+        p.push(Point3::new(f64::INFINITY, f64::NEG_INFINITY, f64::NAN));
+        f.push(vec![5, 6, 99]);
+        assert_tol(gltf_weld_tol(&p, &f, &Transform::IDENTITY), 101.0e-6);
+    }
+
+    proptest::proptest! {
+        /// The result is never coarser than a tolerance taken from the
+        /// largest world coordinate of the positions faces use, and so never
+        /// coarser than one taken over every position; and no translation
+        /// makes it coarser than one that leaves the bake term out.
+        #[test]
+        fn weld_tol_never_exceeds_the_world_magnitude_bound(
+            // A cluster of any width around a point that may be far from
+            // the mesh origin.
+            at in proptest::array::uniform3(-1e4..1e4f64),
+            width in 1e-3..1e3f64,
+            cloud in proptest::collection::vec(proptest::array::uniform3(-1.0..1.0f64), 3..12),
+            linear in proptest::array::uniform9(-100.0..100.0f64),
+            shift in proptest::array::uniform3(-1e6..1e6f64),
+            recentre in proptest::bool::ANY,
+            unused in proptest::array::uniform3(-1e8..1e8f64),
+        ) {
+            let mut positions: Vec<Point3> = cloud
+                .iter()
+                .map(|c| {
+                    let [x, y, z] = [0, 1, 2].map(|i| at[i] + width * c[i]);
+                    Point3::new(x, y, z)
+                })
+                .collect();
+            let faces: Vec<Vec<usize>> = vec![(0..positions.len()).collect()];
+            positions.push(Point3::new(unused[0], unused[1], unused[2]));
+            let affine = |t: [f64; 3]| {
+                let m = linear;
+                Transform::from_affine(&[
+                    m[0], m[1], m[2], t[0], //
+                    m[3], m[4], m[5], t[1], //
+                    m[6], m[7], m[8], t[2],
+                ])
+            };
+            // Half the cases move the first position onto the origin, where
+            // the magnitude after the bake decides.
+            let shift = if recentre {
+                let at = affine([0.0; 3]).apply_point(positions[0]);
+                [-at.x, -at.y, -at.z]
+            } else {
+                shift
+            };
+            let bake = affine(shift);
+            let got = gltf_weld_tol(&positions, &faces, &bake);
+
+            // The last position is the unused one.
+            let world = positions[..positions.len() - 1]
+                .iter()
+                .map(|&p| bake.apply_point(p))
+                .flat_map(|p| [p.x.abs(), p.y.abs(), p.z.abs()])
+                .fold(0.0_f64, f64::max);
+            proptest::prop_assert!(got <= (world * 1e-6).max(1e-7), "{got:e} over {world:e}");
+            let far = gltf_weld_tol(&positions, &faces, &affine([1e15; 3]));
+            proptest::prop_assert!(got <= far, "{got:e} over {far:e}");
+        }
+    }
+
+    #[test]
+    fn weld_tol_floors_when_there_is_nothing_to_measure() {
+        let identity = Transform::IDENTITY;
+        assert_eq!(gltf_weld_tol(&[], &[], &identity), 1e-7);
+        let unused = [Point3::new(5.0, 5.0, 5.0)];
+        assert_eq!(gltf_weld_tol(&unused, &[], &identity), 1e-7);
+        let nan = [Point3::new(f64::NAN, f64::NAN, f64::NAN)];
+        assert_eq!(gltf_weld_tol(&nan, &[vec![0, 0, 0]], &identity), 1e-7);
+        // One point: no span.
+        assert_eq!(gltf_weld_tol(&unused, &[vec![0, 0, 0]], &identity), 1e-7);
+    }
 }

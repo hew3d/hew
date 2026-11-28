@@ -108,8 +108,11 @@ const DETAIL_CAP: usize = 8;
 /// Multiplicative factor applied to a mesh's coordinate magnitude to derive
 /// its weld tolerance: STL binary vertices are `f32`, so vertices coincident
 /// in the authoring tool land up to `magnitude · 2.4e-7` apart after loading
-/// — mirrors `gltf_import::convert::gltf_weld_tol`'s reasoning and constant
-/// (glTF `POSITION` is the same `f32` precision).
+/// — the same constant as the magnitude term of
+/// `gltf_import::convert::gltf_weld_tol` (glTF `POSITION` is the same `f32`
+/// precision). Only that is shared: STL takes the magnitude of every scaled
+/// position, while the glTF rule also measures in the mesh's own frame,
+/// considers only the vertices faces use, and limits the result by their span.
 const STL_WELD_TOL_FACTOR: f64 = 1e-6;
 /// Floor on the weld tolerance for small/degenerate meshes (below which the
 /// native `kernel::tol::POINT_MERGE` scale is meaningless for f32 input).
