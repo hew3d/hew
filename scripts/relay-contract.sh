@@ -110,7 +110,7 @@ fi
 
 echo "=== cargo build -p hew-relay ==="
 cargo build -p hew-relay
-RELAY_BIN="target/debug/hew-relay"
+RELAY_BIN="${CARGO_TARGET_DIR:-target}/debug/hew-relay"
 
 echo "=== conformance: hew-relay (defaults) ==="
 "$RELAY_BIN" --listen "127.0.0.1:$RELAY_PORT_PLAIN" --allow-origin https://app.hew3d.com >"${TMPDIR:-/tmp}/hew-relay-plain.log" 2>&1 &

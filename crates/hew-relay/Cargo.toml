@@ -24,11 +24,11 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time",
 tower-http = { version = "0.7", features = ["timeout"] }
 http-body-util = "0.1"
 # The accept loop is hand-rolled over hyper-util (rather than `axum::serve`)
-# so a header-read timeout can be armed on every connection — axum::serve
+# so per-connection limits (src/server.rs) can be set — axum::serve
 # installs no timer, which leaves hyper's slow-loris guard disabled. Both
 # crates are already in the tree through axum; this only names them.
 hyper = { version = "1", features = ["http1", "server"] }
-hyper-util = { version = "0.1", features = ["server-auto", "server-graceful", "tokio", "service"] }
+hyper-util = { version = "0.1", features = ["server-graceful", "tokio", "service"] }
 # Flags with env twins (`--listen` / HEW_RELAY_LISTEN, ...) — the systemd
 # unit carries the env; there is no config file.
 clap = { version = "4", features = ["derive", "env"] }
@@ -43,3 +43,5 @@ tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 [dev-dependencies]
 # `ServiceExt::oneshot` drives the router in-process for the unit tests.
 tower = { version = "0.5", features = ["util"] }
+# Read/write helpers for the tests that talk to a live socket.
+tokio = { version = "1", features = ["io-util"] }

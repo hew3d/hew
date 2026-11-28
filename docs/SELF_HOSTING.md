@@ -870,7 +870,7 @@ don't touch the relay at all.
 | --- | --- | --- | --- |
 | `HEW_RELAY_LISTEN` | `--listen` | `127.0.0.1:8787` | Bind address. Keep it on loopback and let nginx (or Apache/Caddy) proxy `/relay/` to it. |
 | `HEW_RELAY_MAX_BYTES` | `--max-bytes` | `33554432` (32 MiB) | Per-drop size cap; `413` above it. |
-| `HEW_RELAY_MAX_TOTAL_BYTES` | `--max-total-bytes` | `268435456` (256 MiB) | Total memory across all live drops; `503 {"error":"relay full"}` + `Retry-After` above it — fail closed, never swap. |
+| `HEW_RELAY_MAX_TOTAL_BYTES` | `--max-total-bytes` | `268435456` (256 MiB) | Memory budget for uploads in flight, live drops, and responses still being sent; each is charged at least 4 KiB. `503 {"error":"relay full"}` + `Retry-After` above it — fail closed, never swap. |
 | `HEW_RELAY_TTL_SECS` | `--ttl-secs` | `600` | Seconds an unread drop lives before it's forgotten. |
 | `HEW_RELAY_UPLOAD_KEY` | `--upload-key` | unset | When set, `PUT /drop` requires `Authorization: Bearer <key>`. Reads stay keyless — the token is the capability. Set it if the relay is reachable from the internet. |
 | `HEW_RELAY_ALLOW_ORIGINS` | `--allow-origin` (repeatable) | unset | Comma list of browser origins allowed to read cross-origin. Only for a phone served from a *different* origin than the relay — the recommended same-origin layout never needs it. |
@@ -897,6 +897,12 @@ connection* hits, and a reasonable target for an external uptime check.
 **A full relay** answers `PUT /drop` with `503 {"error":"relay full"}` and
 a `Retry-After` header once `HEW_RELAY_MAX_TOTAL_BYTES` would be exceeded;
 the desktop shows this as "the relay is full" rather than a bare failure.
+
+**Timeouts and limits**: the relay closes a connection that is slow to send
+a request or to read a response. It has no per-client limits of its own.
+The [relay README](../crates/hew-relay/README.md#limits) gives the numbers.
+If the relay is reachable from the internet, set an upload key and set
+per-client connection and request limits in your proxy.
 
 ## Validating a deployment
 

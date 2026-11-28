@@ -31,13 +31,56 @@ which is how the shipped `hew-relay.service` unit configures it (through
 - `--upload-key` makes `PUT` require `Authorization: Bearer <key>` (the
   desktop setting sends it); reads stay keyless because the token is the
   capability. Set it if the relay is reachable from the internet.
-- `--max-total-bytes` bounds memory: past it, uploads get
-  `503 {"error":"relay full"}` with `Retry-After` and the desktop says so.
+- `--max-total-bytes` is the memory budget for documents: uploads in
+  flight, stored drops, and responses still being sent. See *Limits*.
 - `--allow-origin` is only for a phone app served from a DIFFERENT origin
   than the relay; same-origin (the recommended layout) never needs it.
 
 Logs one line per request — method, route kind, status, size — never a
 token, a body, or the key. `RUST_LOG` filters as usual.
+
+## Limits
+
+**Byte budget** (`--max-total-bytes`). An upload claims nothing until body
+data arrives, whatever length its headers declare. Each buffer is then
+charged its allocated size, and at least 4 KiB, so the budget also bounds
+the number of drops: 65,536 at the default. There is no separate entry
+limit. An upload with a `Content-Length` never holds more than that length
+(or 4 KiB). One without can hold up to twice what it has sent, capped at
+`--max-bytes`, until it finishes. Past the budget, uploads get
+`503 {"error":"relay full"}` with `Retry-After`.
+
+**Time.** The relay serves HTTP/1.1 only.
+
+- A request head must arrive within 15 seconds of the connection opening,
+  or of the previous response on it.
+- A request, body included, has 60 seconds. After that it gets a `408`.
+- While a response waits for the client to read, the connection must
+  accept another 1 MiB every 2 minutes, or it is closed and its budget
+  released. A client that reads the bare minimum can hold a 32 MiB
+  document for up to 64 minutes, well past the drop's TTL. A download
+  that is cut off cannot be retried, because a drop is gone once read.
+
+  A client reading steadily at 16 KiB/s or faster is not cut off, however
+  large the document, on a host with Linux's default send buffer limit
+  (`net.ipv4.tcp_wmem` maximum of 4 MiB). That was measured over loopback
+  with a copy of this logic. The kernel reports progress in steps that
+  grow with the send buffer, so a host that raises the maximum above
+  roughly 5.5 MiB could cut off a reader at that rate. The 5.5 MiB figure
+  is extrapolated, not measured.
+
+**What the relay does not limit.** It cannot tell clients apart, because
+behind a proxy they all share one address, so it has no per-client limits.
+One client with the bandwidth can fill the budget with real uploads; an
+upload key stops strangers from doing so. The relay has no connection
+limit of its own either. The process's open-file limit is the ceiling,
+typically 1024 under systemd, and a client that reaches it keeps others
+from connecting. Each connection costs memory outside the budget, with its
+read buffer capped at 64 KiB. If the relay is reachable from the internet,
+set per-client connection and request limits in the proxy (nginx
+`limit_conn` and `limit_req`). A proxy that buffers responses, as nginx
+does by default, reads a download from the relay at once and applies its
+own timeouts to the client.
 
 ## Files in this archive
 
