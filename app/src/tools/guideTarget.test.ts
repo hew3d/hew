@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest'
-import { GuideTarget, soleGuideTarget } from './guideTarget'
+import { GuideTarget, carriedGuides, soleGuideTarget } from './guideTarget'
 import type { Ray } from '../viewport/math'
 
 const ray: Ray = { origin: [0, 0, 5], direction: [0, 0, -1] }
@@ -98,5 +98,18 @@ describe('soleGuideTarget', () => {
     expect(soleGuideTarget([7n], 0, 1)).toBeNull()
     expect(soleGuideTarget([7n, 8n], 0, 0)).toBeNull()
     expect(soleGuideTarget([], 0, 0)).toBeNull()
+  })
+})
+
+describe('carriedGuides', () => {
+  it('is every selected guide beside nodes, beside an annotation, or with another guide', () => {
+    expect(carriedGuides([7n], 1, 0)).toEqual([7n])
+    expect(carriedGuides([7n], 0, 1)).toEqual([7n])
+    expect(carriedGuides([7n, 8n], 0, 0)).toEqual([7n, 8n])
+    expect(carriedGuides([7n, 8n], 2, 0)).toEqual([7n, 8n])
+  })
+  it('is empty for a lone guide, which the tool acts on alone, and for no guide', () => {
+    expect(carriedGuides([7n], 0, 0)).toEqual([])
+    expect(carriedGuides([], 3, 0)).toEqual([])
   })
 })

@@ -685,6 +685,15 @@ line for one Hew draws, or a ray or a segment where a `.skp` file holds
 one (SketchUp's Tape Measure makes both), and only that stretch is drawn,
 snapped to, or crossed for an intersection snap.
 
+A transform or copy of a selection carries the guides selected with it in
+the same undo entry. `DocAction::TransformSelection` records each carried
+guide's prior geometry, which undo writes back verbatim, and
+`DocAction::DuplicatedArray` lists the guide copies beside the node copies.
+Every guide is checked before anything mutates, so a stale guide refuses
+the whole batch. A copied guide is always independent, whatever the link
+policy, and a flip measures its mirror plane from the nodes and sketches
+alone: guides never move it.
+
 A Sketch's closed loop normally has a face: the region that is filled,
 picked and extruded. A loop can also be edges alone (`faceless`), which is
 what SketchUp has where a face was erased or edges alone were drawn: a

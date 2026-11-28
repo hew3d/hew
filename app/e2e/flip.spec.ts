@@ -100,6 +100,45 @@ test.describe('flip', () => {
     expect([back[2], back[5]]).toEqual([0, 1])
   })
 
+  test('a_selected_guide_flips_with_the_boards_in_one_undo_step', async ({ page }) => {
+    await setup(page)
+    // The boards span z in [0, 2]: the blue plane through their center is
+    // z = 1, whatever the point guide above them adds.
+    const ids = await page.evaluate(() => {
+      const h = window.__hew_test!
+      return {
+        short: h.drawBox([0, 0, 0], [1, 1, 0], 1),
+        tall: h.drawBox([2, 0, 0], [3, 1, 0], 2),
+        guide: h.addGuidePoint(1.5, 0.5, 4),
+      }
+    })
+    await page.evaluate(
+      (o) =>
+        window.__hew_test!.selectNodes([
+          { kind: 'object', id: o.short },
+          { kind: 'object', id: o.tall },
+          { kind: 'guide', id: o.guide },
+        ]),
+      ids,
+    )
+    await page.waitForFunction(() => window.__hew_test!.getSelectedGuides().length === 1)
+    await pickFlip(page)
+    const hash = await page.evaluate(() => window.__hew_test!.getModelStateHash())
+
+    await hoverAndClick(page, [2.8, 0.1, 1])
+    await expect.poll(async () => (await boundsOf(page, ids.short))[2]).toBeCloseTo(1, 9)
+    const guide = await page.evaluate((id) => window.__hew_test!.getGuideGeometry(id), ids.guide)
+    expect(guide?.[2]).toBeCloseTo(-2, 9)
+    // The boards and the guide stay selected.
+    expect(await page.evaluate(() => window.__hew_test!.getSelection().length)).toBe(2)
+    expect(await page.evaluate(() => window.__hew_test!.getSelectedGuides())).toEqual([ids.guide])
+
+    // One undo restores the boards and the guide.
+    await page.evaluate(() => window.__hew_test!.undo())
+    await page.waitForTimeout(100)
+    expect(await page.evaluate(() => window.__hew_test!.getModelStateHash())).toBe(hash)
+  })
+
   test('a_hot_square_shows_no_snap_chip', async ({ page }, info) => {
     await setup(page)
     const short = await page.evaluate(() => window.__hew_test!.drawBox([0, 0, 0], [1, 1, 0], 1))

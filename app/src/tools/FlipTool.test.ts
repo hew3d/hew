@@ -516,6 +516,6 @@ describe('FlipTool', () => {
     expect(flipAlongAxis(scene, [], 1)).toBeNull()
     expect(scene.state_hash()).toBe(before)
     const b = lBoard(scene)
-    expect(flipAlongAxis(scene, [obj(b)], 1)).toEqual([obj(b)])
+    expect(flipAlongAxis(scene, [obj(b)], 1)).toEqual({ nodes: [obj(b)], guides: [] })
   })
 })

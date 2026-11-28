@@ -1,8 +1,9 @@
 /**
  * guideTarget — the construction guide a transform tool (Move, Rotate) acts
- * on instead of nodes. The app selects a guide OR nodes, never both; the
- * Viewport pushes the selected guide in (`selected`) and injects the click
- * pick and the post-commit refresh (`setHooks`).
+ * on instead of nodes, when it is the whole selection. The Viewport pushes
+ * that guide in (`selected`) and injects the click pick and the post-commit
+ * refresh (`setHooks`). Guides selected with nodes, or several at once, are
+ * carried with the nodes instead (`carriedGuides`).
  *
  * A guide the tool takes by the gesture's first click, rather than one
  * selected beforehand, is selected only for the gesture: a highlight while it
@@ -13,15 +14,28 @@
  */
 import type { Ray } from '../viewport/math'
 
-/** The guide Move and Rotate carry: the selected guide when it is the whole
- *  selection (no node and no annotation beside it), else null. Carrying
- *  guides together with nodes or annotations is not wired yet. */
+/** The guide Move and Rotate act on alone: the selected guide when it is
+ *  the whole selection (no node and no annotation beside it), else null.
+ *  Any other selected guides are carried (`carriedGuides`). */
 export function soleGuideTarget(
   guides: readonly bigint[],
   nodeCount: number,
   annotationCount: number,
 ): bigint | null {
   return guides.length === 1 && nodeCount === 0 && annotationCount === 0 ? guides[0] : null
+}
+
+const NO_GUIDES: readonly bigint[] = []
+
+/** The guides a transform carries with the node selection: every selected
+ *  guide, unless one guide is the whole selection (`soleGuideTarget`), which
+ *  the tool acts on alone. */
+export function carriedGuides(
+  guides: readonly bigint[],
+  nodeCount: number,
+  annotationCount: number,
+): readonly bigint[] {
+  return soleGuideTarget(guides, nodeCount, annotationCount) === null ? guides : NO_GUIDES
 }
 
 /** A guide transform landed, or a gesture on a guide ended: redraw the
