@@ -3974,6 +3974,26 @@ describe('App — welcome screen', () => {
     await screen.findByRole('dialog', { name: /welcome to hew/i })
   })
 
+  it('answers Escape from the moment it appears', async () => {
+    setShowWelcome(true)
+    // Observe the DOM so the key arrives as soon as the dialog does, before
+    // anything a later task would install.
+    const pressed = new Promise<void>((resolve) => {
+      const observer = new MutationObserver(() => {
+        if (document.querySelector('.hw-welcome') === null) return
+        observer.disconnect()
+        fireEvent.keyDown(document, { key: 'Escape' })
+        resolve()
+      })
+      observer.observe(document.body, { childList: true, subtree: true })
+    })
+    await renderAndLoad()
+    await pressed
+    await waitFor(() =>
+      expect(screen.queryByRole('dialog', { name: /welcome to hew/i })).not.toBeInTheDocument(),
+    )
+  })
+
   it('swallows app shortcuts while open — no tool switch, no palette stacked underneath', async () => {
     setShowWelcome(true)
     await renderAndLoad()

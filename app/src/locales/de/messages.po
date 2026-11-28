@@ -559,6 +559,10 @@ msgid "{more, plural, one {and # more} other {and # more}}"
 msgstr "{more, plural, one {und # weitere} other {und # weitere}}"
 
 #: src/i18n/historyLabels.ts
+msgid "{n, plural, one {{verb} # guide} other {{verb} # guides}}"
+msgstr "{n, plural, one {{verb} # Hilfslinie} other {{verb} # Hilfslinien}}"
+
+#: src/i18n/historyLabels.ts
 msgid "{n, plural, one {{verb} # instance} other {{verb} # instances}}"
 msgstr "{n, plural, one {{verb} # Instanz} other {{verb} # Instanzen}}"
 

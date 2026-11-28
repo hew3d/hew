@@ -116,6 +116,29 @@ export function collectSessionGhosts(group: THREE.Object3D): THREE.Object3D[] {
   return out
 }
 
+/** The combined transform of the unmarked groups between `source` (not
+ *  included) and `ghost`, or null when the ghost hangs on `source` itself.
+ *  A tool may drive such a wrapper in place of the ghost: a node ghost
+ *  grouped with guide ghosts (`withGuidePreviews`) moves as one. */
+function wrapperMatrix(ghost: THREE.Object3D, source: THREE.Object3D): THREE.Matrix4 | null {
+  let out: THREE.Matrix4 | null = null
+  for (let node = ghost.parent; node !== null && node !== source; node = node.parent) {
+    if (node.matrixAutoUpdate) node.updateMatrix()
+    out = out === null ? node.matrix.clone() : out.premultiply(node.matrix)
+  }
+  return out
+}
+
+/** Fold a ghost root's wrapper transform into its clone, which hangs on the
+ *  mirror with no wrapper of its own. */
+function applyWrapper(ghost: THREE.Object3D, clone: THREE.Object3D, wrapper: THREE.Matrix4 | null): void {
+  if (wrapper === null) return
+  if (ghost.matrixAutoUpdate) clone.updateMatrix()
+  clone.matrix.premultiply(wrapper)
+  clone.matrixAutoUpdate = false
+  clone.matrixWorldNeedsUpdate = true
+}
+
 /** An object that draws geometry with a material: a Mesh, a Line of any
  *  kind (fat lines included — `LineSegments2` extends Mesh), Points. */
 type Drawable = THREE.Object3D & { geometry: THREE.BufferGeometry; material: THREE.Material | THREE.Material[] }
@@ -262,6 +285,8 @@ export class SiblingPreviewMirror {
       return
     }
     const { stamp, count } = snapshotGhosts(ghosts)
+    const wrappers = ghosts.map((g) => wrapperMatrix(g, this.source))
+    for (const w of wrappers) if (w !== null) stamp.push(...w.elements)
     if (!framesChanged && this.sameGhosts(ghosts) && sameStamp(this.stamp, stamp)) {
       this._lastWork = 'skip'
       return
@@ -272,10 +297,10 @@ export class SiblingPreviewMirror {
       this._lastWork = 'proxy'
     } else {
       const used = Math.min(this.frames.length, perMirror)
-      if (!framesChanged && this.mode === 'clones' && this.mirrors.length === used && this.retarget(ghosts)) {
+      if (!framesChanged && this.mode === 'clones' && this.mirrors.length === used && this.retarget(ghosts, wrappers)) {
         this._lastWork = 'retarget'
       } else {
-        this.rebuildClones(ghosts, used)
+        this.rebuildClones(ghosts, wrappers, used)
         this._lastWork = 'rebuild'
       }
     }
@@ -331,25 +356,28 @@ export class SiblingPreviewMirror {
 
   /** Point every existing clone at the current ghosts. False when a ghost
    *  changed shape, so the caller rebuilds. */
-  private retarget(ghosts: THREE.Object3D[]): boolean {
+  private retarget(ghosts: THREE.Object3D[], wrappers: (THREE.Matrix4 | null)[]): boolean {
     for (const mirror of this.mirrors) {
       if (mirror.children.length !== ghosts.length) return false
       for (let j = 0; j < ghosts.length; j++) {
         if (!retargetTree(ghosts[j], mirror.children[j])) return false
+        applyWrapper(ghosts[j], mirror.children[j], wrappers[j])
       }
     }
     return true
   }
 
-  private rebuildClones(ghosts: THREE.Object3D[], used: number): void {
+  private rebuildClones(ghosts: THREE.Object3D[], wrappers: (THREE.Matrix4 | null)[], used: number): void {
     this.clearMirrors()
     this.mode = 'clones'
     for (const frame of (this.frames ?? []).slice(0, used)) {
       const mirror = this.newMirror(frame)
-      for (const ghost of ghosts) {
+      for (const [j, ghost] of ghosts.entries()) {
         // `clone(true)` shares geometry and materials and copies the
         // transform, render order, and visibility of every node.
-        mirror.add(ghost.clone(true))
+        const clone = ghost.clone(true)
+        applyWrapper(ghost, clone, wrappers[j])
+        mirror.add(clone)
       }
     }
   }
@@ -361,7 +389,8 @@ export class SiblingPreviewMirror {
     this.mode = 'proxy'
     const bounds = new THREE.Box3()
     for (const ghost of ghosts) {
-      ghost.updateMatrixWorld(true)
+      // The wrappers' transforms count too.
+      ghost.updateWorldMatrix(true, true)
       bounds.expandByObject(ghost, true)
     }
     if (bounds.isEmpty()) return

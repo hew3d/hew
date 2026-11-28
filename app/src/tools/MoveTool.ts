@@ -1025,6 +1025,9 @@ export class MoveTool implements Tool {
         const linked = this.retypeLinked ?? linkedFor(this.copyState, getCopiesLinked())
         try {
           const sketchSources = nodes.filter((n) => isSketchScopedKind(n.kind))
+          // A later step of the copy can still refuse and take the guide
+          // copies back, so they count only once the whole copy has landed.
+          let made: bigint[] = []
           committed.push(
             ...copyOwnersAndDrawing(
               this.wasmScene,
@@ -1033,12 +1036,13 @@ export class MoveTool implements Tool {
               [affineF64],
               () => {
                 const copies = this._duplicateArray(copyables, guides, affineF64, 1, linked)
-                guideCopies = copies.guides
+                made = copies.guides
                 return copies.nodes
               },
               guides.length > 0,
             ),
           )
+          guideCopies = made
           // The copy gesture is now "hot" for an ×N / /N array refinement,
           // whichever kinds were copied; the resolve retracts its one step.
           this.arrayHot = {
