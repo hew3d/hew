@@ -43,6 +43,7 @@ import {
   type ReportRowKey,
 } from '../log/reportBundle'
 import { canSend, submitReport, ReportError, type ReportErrorKind } from '../io/reportClient'
+import { unfinishedUploadText } from './unfinishedUploadText'
 import { getDebugMode } from '../settings/debugMode'
 import { isMac, isWindows, isLinux } from '../platform'
 import { isTauri, makeFileHost } from '../io/fileHost'
@@ -391,6 +392,8 @@ function reportErrorMessage(err: unknown): { kind: ReportErrorKind; message: str
         return { kind: err.kind, message: t`This report is too large to send.` }
       case 'rateLimited':
         return { kind: err.kind, message: t`Too many reports sent recently — try again in a few minutes.` }
+      case 'unfinishedUpload':
+        return { kind: err.kind, message: unfinishedUploadText(err.retryAfter) }
       case 'full':
         return { kind: err.kind, message: t`The report service is temporarily full — try again later.` }
       case 'tls':

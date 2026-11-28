@@ -264,6 +264,18 @@ describe('SentReportsDialog — reply, attach, check, forget', () => {
     expect(await screen.findByTestId('sent-report-error')).toHaveTextContent('Try again in 30 seconds.')
   })
 
+  it.each([
+    [60, 'Try again in about 1 minute.'],
+    [600, 'Try again in about 10 minutes.'],
+    [undefined, 'Try again in a few minutes.'],
+  ])('words an unfinished-upload refusal for a wait of %s seconds', async (retryAfter, wait) => {
+    const host = makeHost([base()], { post: vi.fn().mockRejectedValue(new ReportError('unfinishedUpload', 'x', 429, retryAfter)) })
+    render(<SentReportsDialog host={host} onClose={vi.fn()} />)
+    fireEvent.change(await openReplyBox(host), { target: { value: 'hi' } })
+    fireEvent.click(screen.getByTestId('sent-report-send-reply'))
+    expect(await screen.findByTestId('sent-report-error')).toHaveTextContent(`An earlier upload from your network hasn’t finished. ${wait}`)
+  })
+
   it('offers the failed-open file as the preselected attach and sends it with progress', async () => {
     beginOpenAttempt({ name: 'kitchen.skp', label: 'SketchUp model (.skp)', bytes: new Uint8Array([1, 2]) })
     openAttemptFailed('bad')

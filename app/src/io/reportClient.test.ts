@@ -275,6 +275,27 @@ describe('submitReport — web upload', () => {
     await expect(m.submitReport(GZIP_BYTES)).rejects.toMatchObject({ kind })
   })
 
+  it('tells an unfinished-upload refusal apart, keeping its wait', async () => {
+    const m = await loadWebModule()
+    fakeService((call) =>
+      call.url === '/report/'
+        ? new Response(JSON.stringify({ error: 'rate-limited', reason: 'unfinished-upload', message: 'x' }), {
+            status: 429,
+            headers: { 'retry-after': '600' },
+          })
+        : happyPath(call),
+    )
+    await expect(m.submitReport(GZIP_BYTES)).rejects.toMatchObject({ kind: 'unfinishedUpload', retryAfter: 600 })
+  })
+
+  it('keeps the unfinished-upload kind from the desktop command', async () => {
+    const m = await loadWebModule()
+    expect(m.toReportError({ kind: 'unfinishedUpload', message: 'x', retryAfter: 600 })).toMatchObject({
+      kind: 'unfinishedUpload',
+      retryAfter: 600,
+    })
+  })
+
   it('reports offline when the start never reaches the network', async () => {
     const m = await loadWebModule()
     fakeService(() => 'network')

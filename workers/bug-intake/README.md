@@ -366,6 +366,46 @@ call) calls `deleteReport(id)` instead to release the reservation —
 treat a committed row as a real report. `POST /report/` returns `507` once
 a reservation would pass the ceiling.
 
+**Unfinished uploads per client**: `CLIENT_PENDING_BYTES` bounds the sum of
+declared bytes across one client's uncommitted reports to 1 GiB, enough for
+one maximum-size report or several smaller ones. This check is part of the
+same synchronous reservation call as the rate limits and global ceiling;
+concurrent STARTs cannot each claim the same remaining client budget. Other
+clients can continue using the remaining global capacity. Clients sharing a
+public IPv4 address or an IPv6 /64 ("What counts as one client", below)
+also share this budget, just as they share the submission rate limits.
+
+A START that the budget refuses gets `429` with `{"error":"rate-limited",
+"reason":"unfinished-upload","message":"An earlier upload from your network
+has not finished. Try again in about N minutes."}`. `error` is the code the
+submission limits use, so a client that ignores `reason` still handles the
+response. The 5-per-window and 20-per-day limits are checked first and
+answer with their own `Retry-After` and no `reason`.
+
+`Retry-After` on this refusal is the time until enough of the client's
+unfinished uploads expire to make room for the new report, assuming they
+send nothing more. Each one expires `ABANDON_TIMEOUT_MS` (10 minutes) after
+its last piece and never later than `UPLOAD_LIFETIME_MS` after its START.
+They are taken in expiry order until the new report fits. An upload already
+past its expiry, because its alarm did not release it, is counted at the
+idle prune's `IDLE_PRUNE_TIMEOUT_MS` (15 minutes) instead. The wait never
+runs past UTC midnight, when the identity rotates. A commit or delete frees
+the budget sooner; an upload that is still sending pieces frees it later.
+
+The identity rotates at UTC midnight, so one client can briefly hold two daily
+budgets (2 GiB) across that boundary. The absolute eight-hour upload lifetime
+and pruning before each START prevent a third day's budget from overlapping.
+This limits unfinished reservations; completed reports and multiple clients
+can still fill the global ceiling.
+
+Commit releases the temporary client budget while retaining the report's
+bytes against the global ceiling. Deletion and abandonment release both.
+The index records only the daily-salted client hash while an upload is in
+progress and clears it on commit; completed reports do not retain that
+linkage. Existing index databases gain the ownership column automatically.
+Old unfinished rows have no inferable owner, so they keep counting against
+the global ceiling and expire through the existing abandonment backstops.
+
 ## Abandonment
 
 An upload that stops partway — the user closes the dialog, the network
@@ -447,7 +487,7 @@ tier's least generous quota (100k/day account-wide):
   (`bucket = floor(now / RATE_LIMIT_WINDOW_MS)`, not a sliding window —
   so up to 10 can legitimately land across one window boundary, 5 in the
   tail of one bucket and 5 in the head of the next) and 20 per UTC day,
-  keyed on `SHA-256(IP_HASH_SECRET + UTC date + CF-Connecting-IP)`
+  keyed on `SHA-256(IP_HASH_SECRET + UTC date + client network)`
   (`src/clientHash.ts`), checked once at START — a "submission" is a
   whole upload attempt, not a per-piece cost. The raw IP is **never**
   stored anywhere — only this salted, date-scoped hash, which changes
@@ -461,6 +501,17 @@ tier's least generous quota (100k/day account-wide):
   deliberate: if abandonment freed a slot, a client could START-then-
   immediately-abandon in a loop to bypass the per-window/per-day caps
   entirely.
+- **What counts as one client** (`clientNetwork` in `src/clientHash.ts`)
+  for these limits, the thread-route limit, and the unfinished-upload
+  budget: an IPv4 `CF-Connecting-IP` is the address itself, and an IPv6
+  address is its **/64**. A subscriber is usually handed a whole /64 and
+  can send each request from a new address in it. Compressed forms,
+  uppercase, and a zone suffix make no difference. An IPv4-mapped address
+  (`::ffff:a.b.c.d`) counts as that IPv4 address; otherwise all of IPv4
+  would share one /64. A value that does not parse is used as given.
+  Deploying this over the earlier full-address keys resets each IPv6
+  client's counters once: the old rows match nothing and are pruned as
+  usual. IPv4 keys are unchanged.
 - **Email cap**: 50 notifications a day, account-wide (`EMAIL_DAY_MAX`),
   independent of the per-client counters — many distinct-IP spammers each
   submitting once should not multiply into many emails. Thread-event

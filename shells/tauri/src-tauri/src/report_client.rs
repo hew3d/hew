@@ -55,6 +55,9 @@ pub enum ReportErrorKind {
     TooLarge,
     /// 429 — per-client rate limit.
     RateLimited,
+    /// 429 with `"reason": "unfinished-upload"` — an earlier upload from
+    /// this network still holds its budget.
+    UnfinishedUpload,
     /// 507 — stored reports over the ceiling.
     Full,
     /// The request never completed at the transport level: DNS, refused,
@@ -113,11 +116,21 @@ impl ReportError {
         #[derive(serde::Deserialize)]
         struct ErrorBody {
             error: String,
+            #[serde(default)]
+            reason: Option<String>,
         }
-        let code = serde_json::from_str::<ErrorBody>(body)
-            .map(|b| b.error)
+        let (code, reason) = serde_json::from_str::<ErrorBody>(body)
+            .map(|b| (b.error, b.reason))
             .unwrap_or_default();
         match (status, code.as_str()) {
+            (reqwest::StatusCode::TOO_MANY_REQUESTS, "rate-limited")
+                if reason.as_deref() == Some("unfinished-upload") =>
+            {
+                Self::new(
+                    ReportErrorKind::UnfinishedUpload,
+                    "an earlier upload has not finished",
+                )
+            }
             (reqwest::StatusCode::BAD_REQUEST, "invalid") => Self::new(
                 ReportErrorKind::Invalid,
                 "the report was rejected as invalid",
@@ -273,10 +286,25 @@ async fn send_with_retry(
     }
 }
 
+/// A 429's `Retry-After` in whole seconds, when it carries one.
+pub(crate) fn retry_after_seconds(headers: &reqwest::header::HeaderMap) -> Option<u64> {
+    headers
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.trim().parse().ok())
+}
+
 pub(crate) async fn error_from(response: reqwest::Response) -> ReportError {
     let status = response.status();
+    let retry_after = retry_after_seconds(response.headers());
     let text = response.text().await.unwrap_or_default();
-    ReportError::from_status(status, &text)
+    let mut error = ReportError::from_status(status, &text);
+    // Only this refusal's wait is shown to the user. An ordinary upload rate
+    // limit can ask for hours, and is worded without a number.
+    if matches!(error.kind, ReportErrorKind::UnfinishedUpload) {
+        error.retry_after = retry_after;
+    }
+    error
 }
 
 fn emit_progress(app: &tauri::AppHandle, sent: usize, total: usize) {
@@ -465,6 +493,41 @@ mod tests {
                 expected
             );
         }
+    }
+
+    #[test]
+    fn an_unfinished_upload_refusal_keeps_its_kind_and_wait() {
+        let response = tauri::http::Response::builder()
+            .status(429)
+            .header("retry-after", "600")
+            .body(r#"{"error":"rate-limited","reason":"unfinished-upload","message":"x"}"#)
+            .unwrap();
+        let err = tauri::async_runtime::block_on(error_from(reqwest::Response::from(response)));
+        assert!(
+            matches!(err.kind, ReportErrorKind::UnfinishedUpload),
+            "{:?}",
+            err.kind
+        );
+        assert_eq!(err.retry_after, Some(600));
+        let wire = serde_json::to_value(&err).unwrap();
+        assert_eq!(wire["kind"], "unfinishedUpload");
+        assert_eq!(wire["retryAfter"], 600);
+    }
+
+    #[test]
+    fn an_ordinary_upload_rate_limit_carries_no_wait() {
+        let response = tauri::http::Response::builder()
+            .status(429)
+            .header("retry-after", "43200")
+            .body(r#"{"error":"rate-limited"}"#)
+            .unwrap();
+        let err = tauri::async_runtime::block_on(error_from(reqwest::Response::from(response)));
+        assert!(
+            matches!(err.kind, ReportErrorKind::RateLimited),
+            "{:?}",
+            err.kind
+        );
+        assert_eq!(err.retry_after, None);
     }
 
     #[test]

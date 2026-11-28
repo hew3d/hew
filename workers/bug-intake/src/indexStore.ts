@@ -46,6 +46,9 @@ import {
   EMAIL_THREAD_RESERVE,
   STORE_CEILING_BYTES,
   UPLOAD_LIFETIME_MS,
+  CLIENT_PENDING_BYTES,
+  ABANDON_TIMEOUT_MS,
+  IDLE_PRUNE_TIMEOUT_MS,
   THREAD_RATE_WINDOW_MAX,
 } from './constants.ts'
 
@@ -111,11 +114,48 @@ export interface ThreadCachePatch {
 
 export type ReserveResult =
   | { ok: true }
-  | { ok: false; reason: 'rate-limited'; retryAfterMs: number }
+  | { ok: false; reason: 'rate-limited'; retryAfterMs: number; cause?: 'unfinished-upload' }
   | { ok: false; reason: 'full' }
 
 /** See `commitReport`'s doc comment. */
 export type CommitReportOutcome = 'flipped' | 'already-committed' | 'not-found'
+
+/** The columns of an unfinished upload that decide when it lets go of its
+ *  client's budget. */
+interface PendingRow {
+  sizeBytes: number
+  receivedAt: number
+  lastActivity: number
+}
+
+/** When an unfinished upload releases its reservation if nothing more is
+ *  heard from it. Its `ReportDrop`'s abandonment alarm normally does that
+ *  (`ABANDON_TIMEOUT_MS` after the last piece, never past the upload's
+ *  absolute lifetime). A row that has outlived that time is left to the idle
+ *  prune, which runs before a START once `IDLE_PRUNE_TIMEOUT_MS` or the
+ *  lifetime has passed. */
+function releaseAt(row: PendingRow, now: number): number {
+  const lifetimeEnd = row.receivedAt + UPLOAD_LIFETIME_MS
+  const alarm = Math.min(row.lastActivity + ABANDON_TIMEOUT_MS, lifetimeEnd)
+  if (alarm > now) return alarm
+  // The prune's comparisons are strict, hence the extra millisecond.
+  return Math.min(row.lastActivity + IDLE_PRUNE_TIMEOUT_MS, lifetimeEnd) + 1
+}
+
+/** When enough of `pending` has been released to give back `excess` bytes:
+ *  the release time of the last upload that has to go, taking them in the
+ *  order they expire. A commit or delete can free the budget sooner. */
+function budgetReleaseAt(pending: readonly PendingRow[], excess: number, now: number): number {
+  const releases = pending.map((row) => ({ at: releaseAt(row, now), bytes: row.sizeBytes })).sort((a, b) => a.at - b.at)
+  let freed = 0
+  for (const release of releases) {
+    freed += release.bytes
+    if (freed >= excess) return release.at
+  }
+  // Unreachable: a single report never exceeds the budget on its own, so
+  // releasing every pending upload always covers the excess.
+  return now + IDLE_PRUNE_TIMEOUT_MS
+}
 
 function utcDay(now: number): string {
   return new Date(now).toISOString().slice(0, 10)
@@ -177,6 +217,10 @@ const ADDED_REPORT_COLUMNS: ReadonlyArray<[string, string]> = [
   ['parentId', 'TEXT'],
   ['bundleDeleted', 'INTEGER NOT NULL DEFAULT 0'],
   ['threadActivityAt', 'INTEGER'],
+  // The uploader's daily-salted hash, held only while the upload is
+  // unfinished (`commitReport` clears it) so a completed report keeps no
+  // IP-derived identifier.
+  ['clientHash', "TEXT NOT NULL DEFAULT ''"],
 ]
 
 export class IndexStore {
@@ -224,6 +268,11 @@ export class IndexStore {
       for (const [name, def] of ADDED_REPORT_COLUMNS) {
         if (!present.has(name)) this.storage.sql.exec(`ALTER TABLE reports ADD COLUMN ${name} ${def}`)
       }
+      // After the loop: an older table has no `clientHash` to index until
+      // the loop has added it. Rows from before that column carry '', so
+      // they belong to no client; they keep counting against the global
+      // ceiling and expire through the usual abandonment backstops.
+      this.storage.sql.exec('CREATE INDEX IF NOT EXISTS reports_upload_client ON reports (clientHash, committed)')
       this.columnsChecked = true
     }
     this.storage.sql.exec(
@@ -309,6 +358,23 @@ export class IndexStore {
       return { ok: false, reason: 'full' }
     }
 
+    const pending = this.storage.sql
+      .exec<PendingRow>('SELECT sizeBytes, receivedAt, lastActivity FROM reports WHERE clientHash = ? AND committed = 0', clientHash)
+      .toArray()
+    const excess = pending.reduce((sum, row) => sum + row.sizeBytes, entry.sizeBytes) - CLIENT_PENDING_BYTES
+    if (excess > 0) {
+      // The existing rate-limited reason keeps this admission limit in the
+      // same wire contract; `cause` lets the client say what is in the way.
+      const dayEnd = Date.parse(`${day}T00:00:00.000Z`) + 24 * 60 * 60 * 1000
+      return {
+        ok: false,
+        reason: 'rate-limited',
+        cause: 'unfinished-upload',
+        // The client's hash changes at UTC midnight, and the budget with it.
+        retryAfterMs: Math.min(budgetReleaseAt(pending, excess, now), dayEnd) - now,
+      }
+    }
+
     this.storage.sql.exec(
       `INSERT INTO rate_window (clientHash, bucket, count) VALUES (?, ?, 1)
        ON CONFLICT (clientHash, bucket) DO UPDATE SET count = count + 1`,
@@ -322,8 +388,8 @@ export class IndexStore {
       day,
     )
     this.storage.sql.exec(
-      `INSERT INTO reports (id, receivedAt, appVersion, platform, descriptionPreview, sizeBytes, triaged, committed, lastActivity, parentId)
-       VALUES (?, ?, ?, ?, ?, ?, 0, 0, ?, ?)`,
+      `INSERT INTO reports (id, receivedAt, appVersion, platform, descriptionPreview, sizeBytes, triaged, committed, lastActivity, parentId, clientHash)
+       VALUES (?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?)`,
       entry.id,
       entry.receivedAt,
       entry.appVersion,
@@ -332,6 +398,7 @@ export class IndexStore {
       entry.sizeBytes,
       now,
       entry.parentId ?? null,
+      clientHash,
     )
     return { ok: true }
   }
@@ -358,7 +425,7 @@ export class IndexStore {
     // calling this, so a retry after this call failed must still mark it.
     if (following) this.storage.sql.exec('UPDATE reports SET following = 1 WHERE id = ?', id)
     if (row.committed !== 0) return 'already-committed'
-    this.storage.sql.exec('UPDATE reports SET committed = 1 WHERE id = ?', id)
+    this.storage.sql.exec("UPDATE reports SET committed = 1, clientHash = '' WHERE id = ?", id)
     return 'flipped'
   }
 

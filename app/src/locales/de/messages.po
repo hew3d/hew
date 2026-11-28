@@ -542,6 +542,10 @@ msgstr "{mb} MB"
 msgid "{mendable, plural, one {# shape needs} other {# shapes need}}"
 msgstr "{mendable, plural, one {# Form muss} other {# Formen müssen}}"
 
+#: src/panels/unfinishedUploadText.ts
+msgid "{minutes, plural, one {An earlier upload from your network hasn’t finished. Try again in about # minute.} other {An earlier upload from your network hasn’t finished. Try again in about # minutes.}}"
+msgstr ""
+
 #: src/library/sourceModel.ts
 msgid "{minutes, plural, one {Checked # minute ago} other {Checked # minutes ago}}"
 msgstr ""
@@ -1662,6 +1666,10 @@ msgstr "Stärke"
 #: src/tools/ArcTool.ts
 msgid "An arc stays on its drawing plane. Move the cursor along the plane, or press an arrow key to change it, then type the length."
 msgstr "Ein Bogen bleibt auf seiner Zeichenebene. Bewegen Sie den Cursor entlang der Ebene oder drücken Sie eine Pfeiltaste, um sie zu wechseln, und geben Sie dann die Länge ein."
+
+#: src/panels/unfinishedUploadText.ts
+msgid "An earlier upload from your network hasn’t finished. Try again in a few minutes."
+msgstr ""
 
 #: src/library/sourceMessages.ts
 msgid "An item with the same file name is already in your Library."

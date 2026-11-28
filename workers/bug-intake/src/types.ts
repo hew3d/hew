@@ -152,7 +152,11 @@ export interface ReportIndexStub {
     clientHash: string,
     now: number,
     entry: ReportReservation,
-  ): Promise<{ ok: true } | { ok: false; reason: 'rate-limited'; retryAfterMs: number } | { ok: false; reason: 'full' }>
+  ): Promise<
+    | { ok: true }
+    | { ok: false; reason: 'rate-limited'; retryAfterMs: number; cause?: 'unfinished-upload' }
+    | { ok: false; reason: 'full' }
+  >
   /** `following`: COMMIT just created this report's thread. */
   commitReport(id: string, following?: boolean): Promise<CommitReportOutcome>
   touchActivity(id: string, now: number): Promise<void>

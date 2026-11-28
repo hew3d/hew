@@ -37,6 +37,7 @@ export type ReportErrorKind =
   | 'invalid'
   | 'tooLarge'
   | 'rateLimited'
+  | 'unfinishedUpload'
   | 'full'
   | 'unreachable'
   | 'tls'
@@ -63,6 +64,7 @@ const KINDS: ReadonlySet<string> = new Set<ReportErrorKind>([
   'invalid',
   'tooLarge',
   'rateLimited',
+  'unfinishedUpload',
   'full',
   'unreachable',
   'tls',
@@ -152,8 +154,16 @@ const REQUEST_TIMEOUT_MS = 120_000
  *  Falls back to `status` for anything that doesn't match the documented
  *  shape, which includes a piece's 403/404/409. */
 /* oxlint-disable lingui/no-unlocalized-strings -- ReportError.message is developer-facing; ReportBugDialog maps `kind` to its own localized copy */
-function reportErrorFromResponse(status: number, body: unknown): ReportError {
+function reportErrorFromResponse(response: Response, body: unknown): ReportError {
+  const status = response.status
   const error = typeof body === 'object' && body !== null ? (body as { error?: unknown }).error : undefined
+  const reason = typeof body === 'object' && body !== null ? (body as { reason?: unknown }).reason : undefined
+  // A START refused because this client's earlier upload still holds its
+  // budget: the same 429 code as the submission limit, told apart by `reason`.
+  if (status === 429 && error === 'rate-limited' && reason === 'unfinished-upload') {
+    const seconds = Number(response.headers.get('retry-after'))
+    return new ReportError('unfinishedUpload', 'an earlier upload has not finished', status, seconds > 0 ? seconds : undefined)
+  }
   switch (`${status} ${typeof error === 'string' ? error : ''}`) {
     case '400 invalid':
       return new ReportError('invalid', 'the report was rejected as invalid', status)
@@ -287,7 +297,7 @@ async function uploadWeb(
     body: pieceBody(gzipBytes, 0, firstEnd),
   })
   const startJson = await readJson(start)
-  if (start.status !== 201) throw reportErrorFromResponse(start.status, startJson)
+  if (start.status !== 201) throw reportErrorFromResponse(start, startJson)
   const id = typeof startJson === 'object' && startJson !== null ? (startJson as { id?: unknown }).id : undefined
   const token = typeof startJson === 'object' && startJson !== null ? (startJson as { token?: unknown }).token : undefined
   if (typeof id !== 'string' || typeof token !== 'string') {
@@ -305,7 +315,7 @@ async function uploadWeb(
       headers: { 'Content-Type': 'application/gzip', 'Hew-Upload-Token': token },
       body: pieceBody(gzipBytes, offset, end),
     })
-    if (response.status !== 204) throw reportErrorFromResponse(response.status, await readJson(response))
+    if (response.status !== 204) throw reportErrorFromResponse(response, await readJson(response))
     offset = end
     onProgress?.({ sentBytes: offset, totalBytes: total })
   }
@@ -315,7 +325,7 @@ async function uploadWeb(
     headers: { 'Hew-Upload-Token': token },
   })
   if (commit.status === 201) return { id, startJson }
-  throw reportErrorFromResponse(commit.status, await readJson(commit))
+  throw reportErrorFromResponse(commit, await readJson(commit))
 }
 
 /** Web path. Only ever attempted when `canSend()` is true (the caller's

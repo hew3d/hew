@@ -2,13 +2,17 @@ import { test, describe } from 'node:test'
 import assert from 'node:assert/strict'
 
 import { IndexStore, type ReportReservation } from './indexStore.ts'
+import { hashClient } from './clientHash.ts'
 import {
   RATE_LIMIT_WINDOW_MAX,
   RATE_LIMIT_WINDOW_MS,
   RATE_LIMIT_DAY_MAX,
   EMAIL_DAY_MAX,
+  MAX_UPLOAD_BYTES,
   EMAIL_THREAD_RESERVE,
   STORE_CEILING_BYTES,
+  ABANDON_TIMEOUT_MS,
+  CLIENT_PENDING_BYTES,
   IDLE_PRUNE_TIMEOUT_MS, UPLOAD_LIFETIME_MS } from './constants.ts'
 import { FakeDurableObjectStorage } from './testSupport/fakeDurableObject.ts'
 
@@ -33,6 +37,16 @@ function reservation(overrides: Partial<ReportReservation> = {}): ReportReservat
     descriptionPreview: 'it crashed',
     sizeBytes: 1000,
     ...overrides,
+  }
+}
+
+async function storeCompletedBytes(store: IndexStore, total: number): Promise<void> {
+  for (let left = total, i = 0; left > 0; i++) {
+    const sizeBytes = Math.min(left, MAX_UPLOAD_BYTES)
+    const id = `completed-${i}`
+    assert.deepEqual(await store.reserveReport(`completed-client-${i}`, now, reservation({ id, sizeBytes })), { ok: true })
+    await store.commitReport(id)
+    left -= sizeBytes
   }
 }
 
@@ -98,20 +112,190 @@ describe('IndexStore: reserveReport rate limiting', () => {
   })
 })
 
+describe('IndexStore: concurrent upload budget per client', () => {
+  test('midnight permits two daily budgets but absolute eight-hour expiry prevents a third from overlapping', async () => {
+    const store = makeStore()
+    const beforeMidnight = Date.parse('2026-09-13T23:59:00.000Z')
+    const afterMidnight = Date.parse('2026-09-14T00:01:00.000Z')
+    const secret = 'midnight-test-secret'
+    const ip = '203.0.113.4'
+    const beforeHash = await hashClient(secret, ip, beforeMidnight)
+    const afterHash = await hashClient(secret, ip, afterMidnight)
+    assert.notEqual(beforeHash, afterHash)
+    assert.deepEqual(await store.reserveReport(beforeHash, beforeMidnight, reservation({ id: 'before-midnight', receivedAt: beforeMidnight, sizeBytes: MAX_UPLOAD_BYTES })), { ok: true })
+    assert.deepEqual(await store.reserveReport(afterHash, afterMidnight, reservation({ id: 'after-midnight', receivedAt: afterMidnight, sizeBytes: MAX_UPLOAD_BYTES })), { ok: true })
+    const third = await store.reserveReport(afterHash, afterMidnight, reservation({ id: 'third-budget', receivedAt: afterMidnight, sizeBytes: MAX_UPLOAD_BYTES }))
+    assert.ok(!third.ok && third.reason === 'rate-limited')
+    assert.equal(await store.totalStoredBytes(), 2 * MAX_UPLOAD_BYTES)
+
+    const firstExpires = beforeMidnight + 8 * 60 * 60 * 1000 + 1
+    // Fresh activity cannot keep the previous day's reservation alive past
+    // its absolute lifetime, even though it is no longer counted by this
+    // day's per-client hash. ReportIndex runs this same prune before START.
+    await store.touchActivity('before-midnight', firstExpires)
+    await store.touchActivity('after-midnight', firstExpires)
+    assert.deepEqual(await store.findAndDeleteIdleUncommittedIds(firstExpires, IDLE_PRUNE_TIMEOUT_MS), ['before-midnight'])
+    assert.equal(await store.totalStoredBytes(), MAX_UPLOAD_BYTES)
+
+    const nextMidnight = Date.parse('2026-09-15T00:00:00.000Z')
+    const nextHash = await hashClient(secret, ip, nextMidnight)
+    assert.notEqual(nextHash, afterHash)
+    await store.touchActivity('after-midnight', nextMidnight)
+    assert.deepEqual(await store.findAndDeleteIdleUncommittedIds(nextMidnight, IDLE_PRUNE_TIMEOUT_MS), ['after-midnight'])
+    assert.equal(await store.totalStoredBytes(), 0)
+    assert.deepEqual(await store.reserveReport(nextHash, nextMidnight, reservation({ id: 'next-day', receivedAt: nextMidnight, sizeBytes: MAX_UPLOAD_BYTES })), { ok: true })
+  })
+
+  test('one maximum-size upload leaves capacity for other clients but blocks another byte from its owner', async () => {
+    const store = makeStore()
+    assert.deepEqual(await store.reserveReport('large-client', now, reservation({ id: 'large', sizeBytes: MAX_UPLOAD_BYTES })), { ok: true })
+    const blocked = await store.reserveReport('large-client', now, reservation({ id: 'extra', sizeBytes: 1 }))
+    assert.ok(!blocked.ok && blocked.reason === 'rate-limited')
+    if (!blocked.ok && blocked.reason === 'rate-limited') assert.ok(blocked.retryAfterMs > 0)
+    assert.deepEqual(await store.reserveReport('other-client', now, reservation({ id: 'other', sizeBytes: MAX_UPLOAD_BYTES })), { ok: true })
+    assert.equal(await store.totalStoredBytes(), 2 * MAX_UPLOAD_BYTES)
+    assert.equal(await store.getReport('extra'), null)
+  })
+
+  test('concurrent starts by the same client share the byte budget atomically', async () => {
+    const store = makeStore()
+    const sizeBytes = MAX_UPLOAD_BYTES / 2 + 1
+    const results = await Promise.all([
+      store.reserveReport('racing-client', now, reservation({ id: 'race-a', sizeBytes })),
+      store.reserveReport('racing-client', now, reservation({ id: 'race-b', sizeBytes })),
+    ])
+    assert.equal(results.filter((r) => r.ok).length, 1)
+    assert.ok(results.some((r) => !r.ok && r.reason === 'rate-limited'))
+    assert.equal(await store.totalStoredBytes(), sizeBytes)
+  })
+
+  test('completed reports release the client budget while remaining counted against the global ceiling', async () => {
+    const storage = new FakeDurableObjectStorage()
+    const store = new IndexStore(storage)
+    await store.reserveReport('client', now, reservation({ id: 'finished', sizeBytes: MAX_UPLOAD_BYTES }))
+    await store.commitReport('finished')
+    assert.deepEqual(await store.reserveReport('client', now, reservation({ id: 'next', sizeBytes: MAX_UPLOAD_BYTES })), { ok: true })
+    assert.equal(await store.totalStoredBytes(), 2 * MAX_UPLOAD_BYTES)
+    assert.equal(storage.sql.exec<{ clientHash: string }>('SELECT clientHash FROM reports WHERE id = ?', 'finished').toArray()[0]?.clientHash, '', 'a completed report must not retain its client identity')
+  })
+
+  test('deleting or idle-pruning an unfinished upload releases its client budget', async () => {
+    const store = makeStore()
+    await store.reserveReport('client', now, reservation({ id: 'deleted', sizeBytes: MAX_UPLOAD_BYTES }))
+    await store.deleteReport('deleted')
+    assert.deepEqual(await store.reserveReport('client', now, reservation({ id: 'idle', sizeBytes: MAX_UPLOAD_BYTES })), { ok: true })
+    assert.deepEqual(await store.findAndDeleteIdleUncommittedIds(now + IDLE_PRUNE_TIMEOUT_MS + 1, IDLE_PRUNE_TIMEOUT_MS), ['idle'])
+    assert.deepEqual(await store.reserveReport('client', now + IDLE_PRUNE_TIMEOUT_MS + 1, reservation({ id: 'replacement', sizeBytes: MAX_UPLOAD_BYTES })), { ok: true })
+  })
+
+  test('opening an existing database migrates ownership without losing reports', async () => {
+    const storage = new FakeDurableObjectStorage()
+    storage.sql.exec(`CREATE TABLE reports (
+      id TEXT PRIMARY KEY, receivedAt INTEGER NOT NULL, appVersion TEXT NOT NULL,
+      platform TEXT NOT NULL, descriptionPreview TEXT NOT NULL, sizeBytes INTEGER NOT NULL,
+      triaged INTEGER NOT NULL DEFAULT 0, committed INTEGER NOT NULL DEFAULT 0,
+      lastActivity INTEGER NOT NULL DEFAULT 0
+    )`)
+    storage.sql.exec(`INSERT INTO reports VALUES ('legacy', ?, '1.0.0', 'web', 'legacy report', 100, 0, 1, ?)`, now, now)
+    const store = new IndexStore(storage)
+    assert.equal((await store.getReport('legacy'))?.committed, true)
+    assert.deepEqual(await store.reserveReport('new-client', now, reservation({ id: 'new', sizeBytes: MAX_UPLOAD_BYTES })), { ok: true })
+    const blocked = await store.reserveReport('new-client', now, reservation({ id: 'extra', sizeBytes: 1 }))
+    assert.ok(!blocked.ok && blocked.reason === 'rate-limited')
+    assert.equal(await store.totalStoredBytes(), MAX_UPLOAD_BYTES + 100)
+  })
+})
+
+describe('IndexStore: when a blocked client may retry', () => {
+  // The retry time assumes that releasing every unfinished upload always makes
+  // room, which holds only while one report cannot exceed the client budget.
+  test('the client budget holds at least one maximum-size report', () => {
+    assert.ok(CLIENT_PENDING_BYTES >= MAX_UPLOAD_BYTES)
+  })
+
+  const minute = 60 * 1000
+
+  async function blockedFor(store: IndexStore, at: number, sizeBytes: number = MAX_UPLOAD_BYTES): Promise<number> {
+    const result = await store.reserveReport('client', at, reservation({ id: 'retry', receivedAt: at, sizeBytes }))
+    assert.ok(!result.ok && result.reason === 'rate-limited')
+    assert.equal(result.cause, 'unfinished-upload')
+    return result.retryAfterMs
+  }
+
+  test('the wait runs to the abandonment of the unfinished upload, counted from its last piece', async () => {
+    const store = makeStore()
+    await store.reserveReport('client', now, reservation({ id: 'stalled', sizeBytes: MAX_UPLOAD_BYTES }))
+    assert.equal(await blockedFor(store, now + minute), ABANDON_TIMEOUT_MS - minute)
+    await store.touchActivity('stalled', now + 4 * minute)
+    assert.equal(await blockedFor(store, now + 5 * minute), ABANDON_TIMEOUT_MS - minute)
+  })
+
+  test('the wait covers only as many unfinished uploads as must go, in expiry order', async () => {
+    const store = makeStore()
+    const third = Math.floor(MAX_UPLOAD_BYTES / 3)
+    // Inserted newest-expiry first, so row order is not expiry order.
+    for (const [id, activity] of [['c', 2], ['a', 0], ['b', 1]] as const) {
+      await store.reserveReport('client', now, reservation({ id, sizeBytes: third }))
+      await store.touchActivity(id, now + activity * minute)
+    }
+    const at = now + 3 * minute
+    const spare = MAX_UPLOAD_BYTES - 3 * third
+    assert.equal(await blockedFor(store, at, spare + 1), ABANDON_TIMEOUT_MS - 3 * minute, 'one upload is enough')
+    assert.equal(await blockedFor(store, at, spare + third + 1), ABANDON_TIMEOUT_MS - 2 * minute, 'two are needed')
+    assert.equal(await blockedFor(store, at), ABANDON_TIMEOUT_MS - minute, 'all three are needed')
+  })
+
+  test('the wait never runs past the upload lifetime, however recent its activity', async () => {
+    const store = makeStore()
+    await store.reserveReport('client', now, reservation({ id: 'slow', sizeBytes: MAX_UPLOAD_BYTES }))
+    const at = now + UPLOAD_LIFETIME_MS - 2 * minute
+    await store.touchActivity('slow', at)
+    assert.equal(await blockedFor(store, at), 2 * minute)
+  })
+
+  test('a row that outlived its abandonment time waits for the idle prune', async () => {
+    const store = makeStore()
+    await store.reserveReport('client', now, reservation({ id: 'missed', sizeBytes: MAX_UPLOAD_BYTES }))
+    const at = now + ABANDON_TIMEOUT_MS + minute
+    const wait = await blockedFor(store, at)
+    assert.equal(wait, IDLE_PRUNE_TIMEOUT_MS - ABANDON_TIMEOUT_MS - minute + 1)
+    assert.deepEqual(await store.findAndDeleteIdleUncommittedIds(at + wait - 1, IDLE_PRUNE_TIMEOUT_MS), [])
+    assert.deepEqual(await store.findAndDeleteIdleUncommittedIds(at + wait, IDLE_PRUNE_TIMEOUT_MS), ['missed'])
+  })
+
+  test('UTC midnight ends the wait early, because the client identity rotates', async () => {
+    const store = makeStore()
+    const late = Date.parse('2026-09-13T23:58:00.000Z')
+    await store.reserveReport('client', late, reservation({ id: 'late', receivedAt: late, sizeBytes: MAX_UPLOAD_BYTES }))
+    assert.equal(await blockedFor(store, late), 2 * minute)
+  })
+
+  test('the submission limit does not name an unfinished upload as its cause', async () => {
+    const store = makeStore()
+    for (let i = 0; i < RATE_LIMIT_WINDOW_MAX; i++) {
+      await store.reserveReport('client', now, reservation({ id: `w-${i}` }))
+    }
+    const blocked = await store.reserveReport('client', now, reservation({ id: 'over' }))
+    assert.ok(!blocked.ok && blocked.reason === 'rate-limited')
+    assert.equal(blocked.cause, undefined)
+  })
+})
+
 describe('IndexStore: reserveReport storage ceiling', () => {
   test('accepts a reservation up to exactly the ceiling, refuses one byte over', async () => {
     const store = makeStore()
-    const atCeiling = await store.reserveReport('c1', now, reservation({ id: 'HEW-CEIL-0001', sizeBytes: STORE_CEILING_BYTES }))
+    await storeCompletedBytes(store, STORE_CEILING_BYTES - MAX_UPLOAD_BYTES)
+    const atCeiling = await store.reserveReport('c1', now, reservation({ id: 'HEW-CEIL-0001', sizeBytes: MAX_UPLOAD_BYTES }))
     assert.deepEqual(atCeiling, { ok: true })
 
-    const store2 = makeStore()
-    const overCeiling = await store2.reserveReport('c2', now, reservation({ id: 'HEW-CEIL-0002', sizeBytes: STORE_CEILING_BYTES + 1 }))
+    const overCeiling = await store.reserveReport('c2', now, reservation({ id: 'HEW-CEIL-0002', sizeBytes: 1 }))
     assert.deepEqual(overCeiling, { ok: false, reason: 'full' })
   })
 
   test('accounts for already-reserved (not yet committed) bytes, not just committed ones', async () => {
     const store = makeStore()
-    const first = await store.reserveReport('c1', now, reservation({ id: 'HEW-AAAA-0001', sizeBytes: STORE_CEILING_BYTES - 100 }))
+    await storeCompletedBytes(store, STORE_CEILING_BYTES - MAX_UPLOAD_BYTES)
+    const first = await store.reserveReport('c1', now, reservation({ id: 'HEW-AAAA-0001', sizeBytes: MAX_UPLOAD_BYTES - 100 }))
     assert.deepEqual(first, { ok: true })
     const second = await store.reserveReport('c2', now, reservation({ id: 'HEW-BBBB-0002', sizeBytes: 150 }))
     assert.deepEqual(second, { ok: false, reason: 'full' })
@@ -119,7 +303,9 @@ describe('IndexStore: reserveReport storage ceiling', () => {
 
   test('THE RACE: two concurrent reservations near the ceiling — only one may be admitted', async () => {
     const store = makeStore()
-    const half = Math.floor(STORE_CEILING_BYTES / 2)
+    const completed = STORE_CEILING_BYTES - MAX_UPLOAD_BYTES
+    await storeCompletedBytes(store, completed)
+    const half = Math.floor(MAX_UPLOAD_BYTES / 2)
     const almostHalf = half + 100
 
     const [a, b] = await Promise.all([
@@ -131,7 +317,7 @@ describe('IndexStore: reserveReport storage ceiling', () => {
     assert.equal(admitted.length, 1, 'exactly one of the two racing reservations must be admitted')
     const refused = [a, b].find((r) => !r.ok)
     assert.ok(refused && !refused.ok && refused.reason === 'full')
-    assert.equal(await store.totalStoredBytes(), almostHalf)
+    assert.equal(await store.totalStoredBytes(), completed + almostHalf)
   })
 
   test('committing does not change the total (already counted at reservation time)', async () => {
@@ -144,7 +330,8 @@ describe('IndexStore: reserveReport storage ceiling', () => {
 
   test('deleteReport (releasing a reservation, or an admin delete) gives its bytes back', async () => {
     const store = makeStore()
-    await store.reserveReport('c1', now, reservation({ id: 'HEW-0002-0002', sizeBytes: STORE_CEILING_BYTES - 10 }))
+    await storeCompletedBytes(store, STORE_CEILING_BYTES - MAX_UPLOAD_BYTES)
+    await store.reserveReport('c1', now, reservation({ id: 'HEW-0002-0002', sizeBytes: MAX_UPLOAD_BYTES - 10 }))
     const blocked = await store.reserveReport('c2', now, reservation({ id: 'HEW-0003-0003', sizeBytes: 20 }))
     assert.deepEqual(blocked, { ok: false, reason: 'full' })
 

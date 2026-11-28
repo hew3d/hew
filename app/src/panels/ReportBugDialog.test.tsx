@@ -19,11 +19,13 @@ vi.mock('../io/reportClient', () => {
   class MockReportError extends Error {
     readonly kind: string
     readonly status?: number
-    constructor(kind: string, message: string, status?: number) {
+    readonly retryAfter?: number
+    constructor(kind: string, message: string, status?: number, retryAfter?: number) {
       super(message)
       this.name = 'ReportError'
       this.kind = kind
       this.status = status
+      this.retryAfter = retryAfter
     }
   }
   return { canSend: mockCanSend, submitReport: mockSubmitReport, ReportError: MockReportError }
@@ -284,6 +286,18 @@ describe('ReportBugDialog — sending', () => {
     expect(decodeURIComponent(url)).toContain('Version:')
     expect(decodeURIComponent(url)).toContain('Platform:')
     expect(url.length).toBeLessThan(6100)
+  })
+
+  it('says an earlier unfinished upload is what blocks the send, with the wait', async () => {
+    mockSubmitReport.mockRejectedValue(new ReportError('unfinishedUpload', 'x', 429, 541))
+
+    render(<ReportBugDialog scene={fakeScene()} documentName="My Model.hew" crash={null} onClose={vi.fn()} />)
+    await typeValidDescription()
+    fireEvent.click(await readySendButton())
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'An earlier upload from your network hasn’t finished. Try again in about 10 minutes.',
+    )
   })
 
   it('shows a worded failure and keeps Save to file, preserving the typed text', async () => {
